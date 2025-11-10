@@ -3,3 +3,4 @@ tushare
 statsmodels
 ta
 streamlit
+plotly
