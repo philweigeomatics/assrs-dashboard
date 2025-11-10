@@ -1,0 +1,5 @@
+pandas
+tushare
+statsmodels
+ta
+streamlit
