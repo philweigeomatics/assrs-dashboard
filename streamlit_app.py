@@ -53,6 +53,9 @@ def style_action(action):
         return 'color: #a16207; background-color: #fef9c3; font-weight: 600;'
     if 'RED' in action:
         return 'color: #b91c1c; background-color: #fee2e2; font-weight: 600;'
+    # Handle CONSOLIDATION or other states
+    if 'CONSOLIDATION' in action:
+        return 'color: #4b5563; background-color: #f3f4f6; font-weight: 500;'
     return ''
 
 # --- 3. MAIN APP LAYOUT ---
@@ -72,9 +75,14 @@ with col1:
     if v1_latest is not None:
         st.caption(f"Last Updated: {v1_date}")
         
-        # Display the styled table
+        # ---!!!--- FIX: Create and style the DF *before* passing it ---!!!---
+        v1_display_df = v1_latest[['Sector', 'TOTAL_SCORE', 'ACTION']].sort_values(by='TOTAL_SCORE', ascending=False)
+        
+        # Use .map() for modern pandas styling
+        styled_v1_df = v1_display_df.style.map(style_action, subset=['ACTION'])
+        
         st.dataframe(
-            v1_latest[['Sector', 'TOTAL_SCORE', 'ACTION']].sort_values(by='TOTAL_SCORE', ascending=False),
+            styled_v1_df, # Pass the styled object directly
             hide_index=True,
             use_container_width=True,
             column_config={
@@ -82,10 +90,9 @@ with col1:
                 "ACTION": st.column_config.TextColumn(
                     width="medium"
                 )
-            },
-            # Style the 'ACTION' column
-            styler=pd.DataFrame(v1_latest['ACTION']).style.applymap(style_action) 
+            }
         )
+        # ---!!!--- END OF FIX ---!!!---
         
         # Sector selection
         v1_sector_to_chart = st.selectbox("Select V1 Sector to Chart:", v1_hist['Sector'].unique())
@@ -122,12 +129,18 @@ with col2:
     if v2_latest is not None:
         st.caption(f"Last Updated: {v2_date}")
         
-        # Prepare V2 data for display
+        # ---!!!--- FIX: Create and style the DF *before* passing it ---!!!---
         v2_display_df = v2_latest[['Sector', 'TOTAL_SCORE', 'ACTION']].copy()
+        v2_display_df = v2_display_df.sort_values(by='TOTAL_SCORE', ascending=False)
+        
+        # Format the probability
         v2_display_df['TOTAL_SCORE'] = (v2_display_df['TOTAL_SCORE'] * 100).map('{:.0f}%'.format)
         
+        # Style the dataframe
+        styled_v2_df = v2_display_df.style.map(style_action, subset=['ACTION'])
+        
         st.dataframe(
-            v2_display_df.sort_values(by='TOTAL_SCORE', ascending=False),
+            styled_v2_df, # Pass the styled object directly
             hide_index=True,
             use_container_width=True,
             column_config={
@@ -135,9 +148,9 @@ with col2:
                 "ACTION": st.column_config.TextColumn(
                     width="medium"
                 )
-            },
-            styler=pd.DataFrame(v2_latest['ACTION']).style.applymap(style_action)
+            }
         )
+        # ---!!!--- END OF FIX ---!!!---
         
         # Sector selection
         v2_sector_to_chart = st.selectbox("Select V2 Sector to Chart:", v2_hist['Sector'].unique())
