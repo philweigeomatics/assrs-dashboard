@@ -60,20 +60,28 @@ def style_action(action):
         return 'color: #4b5563; background-color: #f3f4f6; font-weight: 500;'
     return ''
 
-# ---!!!--- PLOTLY CHART FUNCTIONS ---!!!---
+# ---!!!--- NEW: UNIFIED PLOTLY CHART FUNCTION ---!!!---
 
-def create_price_chart(chart_data):
-    """Creates an interactive Plotly Candlestick+Volume chart."""
+def create_drilldown_chart(chart_data, model_type):
+    """
+    Creates a single, unified, 3-plot interactive chart:
+    1. Price (Candlestick)
+    2. Volume (Bar)
+    3. Score (Line)
+    """
     
-    # ---!!!--- FIX: Create formatted date strings for the x-axis ---!!!---
-    date_strings = chart_data['Date'].dt.strftime('%Y-%m-%d')
-    
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                       vertical_spacing=0.03, subplot_titles=('Price (PPI)', 'Volume (Z-Score)'), 
-                       row_heights=[0.7, 0.3]) 
+    is_v1 = model_type == 'v1'
+    y_title_score = 'V1 Score (-3 to 8)' if is_v1 else 'V2 Bull Probability (0 to 1)'
+    y_range_score = [-3.1, 8.1] if is_v1 else [-0.1, 1.1]
+
+    # Create figure with 3 rows, sharing the X-axis
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
+                       vertical_spacing=0.03, 
+                       subplot_titles=('Price (PPI)', 'Volume (Z-Score)', 'Signal (Score)'), 
+                       row_heights=[0.5, 0.2, 0.3]) # Give Price the most space
 
     # Plot 1: Candlestick
-    fig.add_trace(go.Candlestick(x=date_strings, # <-- Use formatted strings
+    fig.add_trace(go.Candlestick(x=chart_data['Date'], # <-- Use datetime object
                     open=chart_data['Open'],
                     high=chart_data['High'],
                     low=chart_data['Low'],
@@ -81,78 +89,59 @@ def create_price_chart(chart_data):
                     name='Price'), row=1, col=1)
 
     # Plot 2: Volume
-    fig.add_trace(go.Bar(x=date_strings, y=chart_data['Volume_Metric'], # <-- Use formatted strings
+    fig.add_trace(go.Bar(x=chart_data['Date'], y=chart_data['Volume_Metric'], # <-- Use datetime object
                          name='Volume Metric', marker_color='rgba(107, 114, 128, 0.3)'), row=2, col=1)
 
-    # Update layout
-    fig.update_layout(
-        xaxis_rangeslider_visible=False,
-        showlegend=False,
-        height=400,
-        margin=dict(l=20, r=20, t=40, b=20),
-        yaxis1_title="PPI (Base 100)",
-        yaxis2_title="Volume (Z-Score)",
-        
-        # Use 'category' axis to remove gaps
-        xaxis_type='category',
-        xaxis2_type='category'
-    )
-    fig.update_xaxes(showticklabels=True, row=1, col=1) 
-    fig.update_xaxes(title_text="Date", row=2, col=1) 
-    return fig
-
-def create_score_chart(chart_data, model_type):
-    """Creates an interactive Plotly Score chart."""
-    
-    # ---!!!--- FIX: Create formatted date strings for the x-axis ---!!!---
-    date_strings = chart_data['Date'].dt.strftime('%Y-%m-%d')
-
-    is_v1 = model_type == 'v1'
-    y_title = 'V1 Score (-3 to 8)' if is_v1 else 'V2 Bull Probability (0 to 1)'
-    y_range = [-3.1, 8.1] if is_v1 else [-0.1, 1.1]
-
-    fig = go.Figure()
-
-    # Add Score Line
+    # Plot 3: Score
     fig.add_trace(go.Scatter(
-        x=date_strings, # <-- Use formatted strings
+        x=chart_data['Date'], # <-- Use datetime object
         y=chart_data['TOTAL_SCORE'],
         name='Score',
         line=dict(color='#10b981', width=2),
         fill='tozeroy',
         fillcolor='rgba(16, 185, 129, 0.1)'
-    ))
-    
-    # Add Threshold lines
+    ), row=3, col=1)
+
+    # Add Threshold lines for V1
     if is_v1:
-        buy_line = 2.5
-        green_line = 5.0
-    else:
-        buy_line = 0.8
-        green_line = -99
-        
-    fig.add_hline(y=buy_line, line_dash="dash", line_color="#a16207", 
-                  annotation_text="Buy Threshold" if is_v1 else "Green/Buy Threshold (0.8)")
-    
-    if is_v1:
-         fig.add_hline(y=green_line, line_dash="dash", line_color="#15803d", 
-                       annotation_text="Green Threshold (5.0)")
+        fig.add_hline(y=2.5, line_dash="dash", line_color="#a16207", 
+                      annotation_text="Buy Threshold (2.5)", row=3, col=1)
+        fig.add_hline(y=5.0, line_dash="dash", line_color="#15803d", 
+                      annotation_text="Green Threshold (5.0)", row=3, col=1)
+    else: # Add Threshold lines for V2
+        fig.add_hline(y=0.8, line_dash="dash", line_color="#15803d", 
+                      annotation_text="Green Threshold (0.8)", row=3, col=1)
+        fig.add_hline(y=0.2, line_dash="dash", line_color="#b91c1c", 
+                      annotation_text="Red Threshold (0.2)", row=3, col=1)
 
     # Update layout
     fig.update_layout(
-        title="Signal History",
-        xaxis_title="Date",
-        yaxis_title=y_title,
-        yaxis_range=y_range,
+        height=700, # Taller chart to fit all 3 plots
         showlegend=False,
-        height=350,
-        margin=dict(l=20, r=20, t=40, b=20),
+        margin=dict(l=20, r=20, t=50, b=20),
         
-        # Use 'category' axis to remove gaps
-        xaxis_type='category'
+        # ---!!!--- FIX: Remove weekend/holiday gaps ---!!!---
+        # This tells Plotly to use a 'date' axis but to *only* plot
+        # the dates for which we have data, removing gaps.
+        xaxis_rangeslider_visible=False,
+        xaxis=dict(type='date'),
+        xaxis2=dict(type='date'),
+        xaxis3=dict(type='date', title='Date'),
+        
+        # Remove redundant x-axis labels
+        xaxis_showticklabels=False,
+        xaxis2_showticklabels=False,
+
+        # Set Y-Axis titles
+        yaxis1_title="PPI (Base 100)",
+        yaxis2_title="Volume (Z-Score)",
+        # ---!!!--- FIX: Corrected variable name ---!!!---
+        yaxis3_title=y_title_score,
+        yaxis3_range=y_range_score
     )
+    
     return fig
-# ---!!!--- END OF PLOTLY FUNCTIONS ---!!!---
+# ---!!!--- END OF NEW FUNCTION ---!!!---
 
 
 # --- 3. MAIN APP LAYOUT ---
@@ -191,11 +180,9 @@ with col1:
         if v1_sector_to_chart:
             chart_data = v1_hist[v1_hist['Sector'] == v1_sector_to_chart]
             
-            price_fig = create_price_chart(chart_data)
-            score_fig = create_score_chart(chart_data, model_type='v1')
-            
-            st.plotly_chart(price_fig, use_container_width=True, key="v1_price_chart")
-            st.plotly_chart(score_fig, use_container_width=True, key="v1_score_chart")
+            # ---!!!--- FIX: Call single chart function ---!!!---
+            fig = create_drilldown_chart(chart_data, model_type='v1')
+            st.plotly_chart(fig, use_container_width=True, key="v1_chart")
 
     else:
         st.error(v1_error)
@@ -226,12 +213,10 @@ with col2:
         
         if v2_sector_to_chart:
             chart_data = v2_hist[v2_hist['Sector'] == v2_sector_to_chart]
-            
-            price_fig = create_price_chart(chart_data)
-            score_fig = create_score_chart(chart_data, model_type='v2')
-            
-            st.plotly_chart(price_fig, use_container_width=True, key="v2_price_chart")
-            st.plotly_chart(score_fig, use_container_wide=True, key="v2_score_chart")
+
+            # ---!!!--- FIX: Call single chart function ---!!!---
+            fig = create_drilldown_chart(chart_data, model_type='v2')
+            st.plotly_chart(fig, use_container_width=True, key="v2_chart")
             
     else:
         st.error(v2_error)
