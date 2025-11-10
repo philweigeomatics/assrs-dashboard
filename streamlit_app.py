@@ -121,21 +121,24 @@ def create_drilldown_chart(chart_data, model_type):
         margin=dict(l=20, r=20, t=50, b=20),
         
         # ---!!!--- FIX: Remove weekend/holiday gaps ---!!!---
-        # This tells Plotly to use a 'date' axis but to *only* plot
-        # the dates for which we have data, removing gaps.
         xaxis_rangeslider_visible=False,
-        xaxis=dict(type='date'),
-        xaxis2=dict(type='date'),
-        xaxis3=dict(type='date', title='Date'),
+        # This tells Plotly to hide all Saturdays and Sundays
+        xaxis_rangebreaks=[dict(bounds=["sat", "sun"])],
+        
+        # Apply the same rule to all 3 x-axes
+        xaxis=dict(rangebreaks=[dict(bounds=["sat", "sun"])]),
+        xaxis2=dict(rangebreaks=[dict(bounds=["sat", "sun"])]),
+        xaxis3=dict(rangebreaks=[dict(bounds=["sat", "sun"])]),
+        # ---!!!--- END OF FIX ---!!!---
         
         # Remove redundant x-axis labels
         xaxis_showticklabels=False,
         xaxis2_showticklabels=False,
+        xaxis3_title='Date', # Only show title on the bottom axis
 
         # Set Y-Axis titles
         yaxis1_title="PPI (Base 100)",
         yaxis2_title="Volume (Z-Score)",
-        # ---!!!--- FIX: Corrected variable name ---!!!---
         yaxis3_title=y_title_score,
         yaxis3_range=y_range_score
     )
