@@ -68,7 +68,7 @@ def create_price_chart(chart_data):
     # Create figure with secondary y-axis
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
                        vertical_spacing=0.03, subplot_titles=('Price (PPI)', 'Volume (Z-Score)'), 
-                       row_width=[0.3, 0.7])
+                       row_heights=[0.7, 0.3]) # Give more space to price
 
     # Plot 1: Candlestick
     fig.add_trace(go.Candlestick(x=chart_data['Date'],
@@ -84,13 +84,15 @@ def create_price_chart(chart_data):
 
     # Update layout
     fig.update_layout(
-        xaxis_rangeslider_visible=False,
+        xaxis_rangeslider_visible=False, # Hide the rangeslider
         showlegend=False,
         height=400,
         margin=dict(l=20, r=20, t=40, b=20),
         yaxis1_title="PPI (Base 100)",
         yaxis2_title="Volume (Z-Score)"
     )
+    fig.update_xaxes(showticklabels=True, row=1, col=1) # Ensure x-axis labels are on
+    fig.update_xaxes(title_text="Date", row=2, col=1) # Add title to bottom x-axis
     return fig
 
 def create_score_chart(chart_data, model_type):
@@ -173,7 +175,8 @@ with col1:
         )
         
         # --- V1 Charting ---
-        v1_sector_to_chart = st.selectbox("Select V1 Sector to Chart:", v1_hist['Sector'].unique())
+        # ---!!!--- FIX: Added unique key ---!!!---
+        v1_sector_to_chart = st.selectbox("Select V1 Sector to Chart:", v1_hist['Sector'].unique(), key="v1_selector")
         
         if v1_sector_to_chart:
             chart_data = v1_hist[v1_hist['Sector'] == v1_sector_to_chart]
@@ -182,8 +185,9 @@ with col1:
             price_fig = create_price_chart(chart_data)
             score_fig = create_score_chart(chart_data, model_type='v1')
             
-            st.plotly_chart(price_fig, use_container_width=True)
-            st.plotly_chart(score_fig, use_container_width=True)
+            # ---!!!--- FIX: Added unique key ---!!!---
+            st.plotly_chart(price_fig, use_container_width=True, key="v1_price_chart")
+            st.plotly_chart(score_fig, use_container_width=True, key="v1_score_chart")
 
     else:
         st.error(v1_error)
@@ -210,7 +214,8 @@ with col2:
         )
         
         # --- V2 Charting ---
-        v2_sector_to_chart = st.selectbox("Select V2 Sector to Chart:", v2_hist['Sector'].unique())
+        # ---!!!--- FIX: Added unique key ---!!!---
+        v2_sector_to_chart = st.selectbox("Select V2 Sector to Chart:", v2_hist['Sector'].unique(), key="v2_selector")
         
         if v2_sector_to_chart:
             chart_data = v2_hist[v2_hist['Sector'] == v2_sector_to_chart]
@@ -219,8 +224,9 @@ with col2:
             price_fig = create_price_chart(chart_data)
             score_fig = create_score_chart(chart_data, model_type='v2')
             
-            st.plotly_chart(price_fig, use_container_width=True)
-            st.plotly_chart(score_fig, use_container_width=True)
+            # ---!!!--- FIX: Added unique key ---!!!---
+            st.plotly_chart(price_fig, use_container_width=True, key="v2_price_chart")
+            st.plotly_chart(score_fig, use_container_width=True, key="v2_score_chart")
             
     else:
         st.error(v2_error)
