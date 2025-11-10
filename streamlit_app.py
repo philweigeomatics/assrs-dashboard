@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime
 
 # --- 1. CONFIGURATION ---
@@ -58,6 +60,88 @@ def style_action(action):
         return 'color: #4b5563; background-color: #f3f4f6; font-weight: 500;'
     return ''
 
+# ---!!!--- NEW: PLOTLY CHART FUNCTIONS ---!!!---
+
+def create_price_chart(chart_data):
+    """Creates an interactive Plotly Candlestick+Volume chart."""
+    
+    # Create figure with secondary y-axis
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                       vertical_spacing=0.03, subplot_titles=('Price (PPI)', 'Volume (Z-Score)'), 
+                       row_width=[0.3, 0.7])
+
+    # Plot 1: Candlestick
+    fig.add_trace(go.Candlestick(x=chart_data['Date'],
+                    open=chart_data['Open'],
+                    high=chart_data['High'],
+                    low=chart_data['Low'],
+                    close=chart_data['Close'],
+                    name='Price'), row=1, col=1)
+
+    # Plot 2: Volume
+    fig.add_trace(go.Bar(x=chart_data['Date'], y=chart_data['Volume_Metric'],
+                         name='Volume Metric', marker_color='rgba(107, 114, 128, 0.3)'), row=2, col=1)
+
+    # Update layout
+    fig.update_layout(
+        xaxis_rangeslider_visible=False,
+        showlegend=False,
+        height=400,
+        margin=dict(l=20, r=20, t=40, b=20),
+        yaxis1_title="PPI (Base 100)",
+        yaxis2_title="Volume (Z-Score)"
+    )
+    return fig
+
+def create_score_chart(chart_data, model_type):
+    """Creates an interactive Plotly Score chart."""
+    
+    is_v1 = model_type == 'v1'
+    y_title = 'V1 Score (-3 to 8)' if is_v1 else 'V2 Bull Probability (0 to 1)'
+    y_range = [-3.1, 8.1] if is_v1 else [-0.1, 1.1]
+
+    # Create figure
+    fig = go.Figure()
+
+    # Add Score Line
+    fig.add_trace(go.Scatter(
+        x=chart_data['Date'], 
+        y=chart_data['TOTAL_SCORE'],
+        name='Score',
+        line=dict(color='#10b981', width=2),
+        fill='tozeroy',
+        fillcolor='rgba(16, 185, 129, 0.1)'
+    ))
+    
+    # Add Threshold lines
+    if is_v1:
+        buy_line = 2.5
+        green_line = 5.0
+    else:
+        buy_line = 0.8
+        green_line = -99 # V2 doesn't have a GREEN/YELLOW split
+        
+    fig.add_hline(y=buy_line, line_dash="dash", line_color="#a16207", 
+                  annotation_text="Buy Threshold" if is_v1 else "Green/Buy Threshold (0.8)")
+    
+    if is_v1:
+         fig.add_hline(y=green_line, line_dash="dash", line_color="#15803d", 
+                       annotation_text="Green Threshold (5.0)")
+
+    # Update layout
+    fig.update_layout(
+        title="Signal History",
+        xaxis_title="Date",
+        yaxis_title=y_title,
+        yaxis_range=y_range,
+        showlegend=False,
+        height=350,
+        margin=dict(l=20, r=20, t=40, b=20)
+    )
+    return fig
+# ---!!!--- END OF PLOTLY FUNCTIONS ---!!!---
+
+
 # --- 3. MAIN APP LAYOUT ---
 
 st.title("ASSRS Sector Rotation Scoreboard")
@@ -75,50 +159,31 @@ with col1:
     if v1_latest is not None:
         st.caption(f"Last Updated: {v1_date}")
         
-        # ---!!!--- FIX: Create and style the DF *before* passing it ---!!!---
         v1_display_df = v1_latest[['Sector', 'TOTAL_SCORE', 'ACTION']].sort_values(by='TOTAL_SCORE', ascending=False)
-        
-        # Use .map() for modern pandas styling
         styled_v1_df = v1_display_df.style.map(style_action, subset=['ACTION'])
         
         st.dataframe(
-            styled_v1_df, # Pass the styled object directly
+            styled_v1_df,
             hide_index=True,
             use_container_width=True,
             column_config={
                 "TOTAL_SCORE": st.column_config.NumberColumn(format="%.2f"),
-                "ACTION": st.column_config.TextColumn(
-                    width="medium"
-                )
+                "ACTION": st.column_config.TextColumn(width="medium")
             }
         )
-        # ---!!!--- END OF FIX ---!!!---
         
-        # Sector selection
+        # --- V1 Charting ---
         v1_sector_to_chart = st.selectbox("Select V1 Sector to Chart:", v1_hist['Sector'].unique())
         
         if v1_sector_to_chart:
             chart_data = v1_hist[v1_hist['Sector'] == v1_sector_to_chart]
             
-            # Chart 1: Price + Volume
-            price_chart = alt.Chart(chart_data).mark_line(color="#3b82f6").encode(
-                x=alt.X('Date', axis=alt.Axis(title='Date')),
-                y=alt.Y('Close', axis=alt.Axis(title='PPI (Base 100)', titleColor="#3b82f6")),
-            ).properties(title=f"{v1_sector_to_chart} - PPI Price History")
-
-            volume_chart = alt.Chart(chart_data).mark_bar(color="#9ca3af", opacity=0.3).encode(
-                x=alt.X('Date'),
-                y=alt.Y('Volume_Metric', axis=alt.Axis(title='Volume Metric (Z-Score)', titleColor="#9ca3af")),
-            )
+            # Create the two plotly charts
+            price_fig = create_price_chart(chart_data)
+            score_fig = create_score_chart(chart_data, model_type='v1')
             
-            # Chart 2: Score
-            score_chart = alt.Chart(chart_data).mark_line(color="#10b981").encode(
-                x=alt.X('Date', axis=alt.Axis(title='Date')),
-                y=alt.Y('TOTAL_SCORE', axis=alt.Axis(title='V1 Score (-3 to 8)', titleColor="#10b981")),
-            ).properties(title=f"{v1_sector_to_chart} - V1 Score History")
-            
-            st.altair_chart((price_chart + volume_chart).resolve_scale(y='independent').interactive(), use_container_width=True)
-            st.altair_chart(score_chart.interactive(), use_container_width=True)
+            st.plotly_chart(price_fig, use_container_width=True)
+            st.plotly_chart(score_fig, use_container_width=True)
 
     else:
         st.error(v1_error)
@@ -129,54 +194,33 @@ with col2:
     if v2_latest is not None:
         st.caption(f"Last Updated: {v2_date}")
         
-        # ---!!!--- FIX: Create and style the DF *before* passing it ---!!!---
         v2_display_df = v2_latest[['Sector', 'TOTAL_SCORE', 'ACTION']].copy()
         v2_display_df = v2_display_df.sort_values(by='TOTAL_SCORE', ascending=False)
-        
-        # Format the probability
         v2_display_df['TOTAL_SCORE'] = (v2_display_df['TOTAL_SCORE'] * 100).map('{:.0f}%'.format)
-        
-        # Style the dataframe
         styled_v2_df = v2_display_df.style.map(style_action, subset=['ACTION'])
         
         st.dataframe(
-            styled_v2_df, # Pass the styled object directly
+            styled_v2_df,
             hide_index=True,
             use_container_width=True,
             column_config={
                 "TOTAL_SCORE": "Bull Probability",
-                "ACTION": st.column_config.TextColumn(
-                    width="medium"
-                )
+                "ACTION": st.column_config.TextColumn(width="medium")
             }
         )
-        # ---!!!--- END OF FIX ---!!!---
         
-        # Sector selection
+        # --- V2 Charting ---
         v2_sector_to_chart = st.selectbox("Select V2 Sector to Chart:", v2_hist['Sector'].unique())
         
         if v2_sector_to_chart:
             chart_data = v2_hist[v2_hist['Sector'] == v2_sector_to_chart]
             
-            # Chart 1: Price + Volume
-            price_chart = alt.Chart(chart_data).mark_line(color="#3b82f6").encode(
-                x=alt.X('Date', axis=alt.Axis(title='Date')),
-                y=alt.Y('Close', axis=alt.Axis(title='PPI (Base 100)', titleColor="#3b82f6")),
-            ).properties(title=f"{v2_sector_to_chart} - PPI Price History")
-
-            volume_chart = alt.Chart(chart_data).mark_bar(color="#9ca3af", opacity=0.3).encode(
-                x=alt.X('Date'),
-                y=alt.Y('Volume_Metric', axis=alt.Axis(title='Volume Metric (Z-Score)', titleColor="#9ca3af")),
-            )
+            # Create the two plotly charts
+            price_fig = create_price_chart(chart_data)
+            score_fig = create_score_chart(chart_data, model_type='v2')
             
-            # Chart 2: Score (Probability)
-            score_chart = alt.Chart(chart_data).mark_line(color="#10b981").encode(
-                x=alt.X('Date', axis=alt.Axis(title='Date')),
-                y=alt.Y('TOTAL_SCORE', axis=alt.Axis(title='V2 Bull Probability (0 to 1)', titleColor="#10b981"), scale=alt.Scale(domain=[0, 1])),
-            ).properties(title=f"{v2_sector_to_chart} - V2 Probability History")
-            
-            st.altair_chart((price_chart + volume_chart).resolve_scale(y='independent').interactive(), use_container_width=True)
-            st.altair_chart(score_chart.interactive(), use_container_width=True)
+            st.plotly_chart(price_fig, use_container_width=True)
+            st.plotly_chart(score_fig, use_container_width=True)
             
     else:
         st.error(v2_error)
