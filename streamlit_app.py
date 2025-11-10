@@ -37,7 +37,7 @@ def load_data(filepath, model_name):
         latest_date = df['Date'].max()
         latest_scores_df = df[df['Date'] == latest_date].copy()
         
-        # 2. Get Full History (prepared for Altair charts)
+        # 2. Get Full History
         full_history_df = df.copy()
         
         return latest_scores_df, full_history_df, latest_date.strftime('%Y-%m-%d'), None
@@ -60,18 +60,20 @@ def style_action(action):
         return 'color: #4b5563; background-color: #f3f4f6; font-weight: 500;'
     return ''
 
-# ---!!!--- NEW: PLOTLY CHART FUNCTIONS ---!!!---
+# ---!!!--- PLOTLY CHART FUNCTIONS ---!!!---
 
 def create_price_chart(chart_data):
     """Creates an interactive Plotly Candlestick+Volume chart."""
     
-    # Create figure with secondary y-axis
+    # ---!!!--- FIX: Create formatted date strings for the x-axis ---!!!---
+    date_strings = chart_data['Date'].dt.strftime('%Y-%m-%d')
+    
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
                        vertical_spacing=0.03, subplot_titles=('Price (PPI)', 'Volume (Z-Score)'), 
-                       row_heights=[0.7, 0.3]) # Give more space to price
+                       row_heights=[0.7, 0.3]) 
 
     # Plot 1: Candlestick
-    fig.add_trace(go.Candlestick(x=chart_data['Date'],
+    fig.add_trace(go.Candlestick(x=date_strings, # <-- Use formatted strings
                     open=chart_data['Open'],
                     high=chart_data['High'],
                     low=chart_data['Low'],
@@ -79,19 +81,19 @@ def create_price_chart(chart_data):
                     name='Price'), row=1, col=1)
 
     # Plot 2: Volume
-    fig.add_trace(go.Bar(x=chart_data['Date'], y=chart_data['Volume_Metric'],
+    fig.add_trace(go.Bar(x=date_strings, y=chart_data['Volume_Metric'], # <-- Use formatted strings
                          name='Volume Metric', marker_color='rgba(107, 114, 128, 0.3)'), row=2, col=1)
 
     # Update layout
     fig.update_layout(
-        xaxis_rangeslider_visible=False, # Hide the rangeslider
+        xaxis_rangeslider_visible=False,
         showlegend=False,
         height=400,
         margin=dict(l=20, r=20, t=40, b=20),
         yaxis1_title="PPI (Base 100)",
         yaxis2_title="Volume (Z-Score)",
         
-        # ---!!!--- FIX: Force x-axis to be category to remove gaps ---!!!---
+        # Use 'category' axis to remove gaps
         xaxis_type='category',
         xaxis2_type='category'
     )
@@ -102,16 +104,18 @@ def create_price_chart(chart_data):
 def create_score_chart(chart_data, model_type):
     """Creates an interactive Plotly Score chart."""
     
+    # ---!!!--- FIX: Create formatted date strings for the x-axis ---!!!---
+    date_strings = chart_data['Date'].dt.strftime('%Y-%m-%d')
+
     is_v1 = model_type == 'v1'
     y_title = 'V1 Score (-3 to 8)' if is_v1 else 'V2 Bull Probability (0 to 1)'
     y_range = [-3.1, 8.1] if is_v1 else [-0.1, 1.1]
 
-    # Create figure
     fig = go.Figure()
 
     # Add Score Line
     fig.add_trace(go.Scatter(
-        x=chart_data['Date'], 
+        x=date_strings, # <-- Use formatted strings
         y=chart_data['TOTAL_SCORE'],
         name='Score',
         line=dict(color='#10b981', width=2),
@@ -125,7 +129,7 @@ def create_score_chart(chart_data, model_type):
         green_line = 5.0
     else:
         buy_line = 0.8
-        green_line = -99 # V2 doesn't have a GREEN/YELLOW split
+        green_line = -99
         
     fig.add_hline(y=buy_line, line_dash="dash", line_color="#a16207", 
                   annotation_text="Buy Threshold" if is_v1 else "Green/Buy Threshold (0.8)")
@@ -144,7 +148,7 @@ def create_score_chart(chart_data, model_type):
         height=350,
         margin=dict(l=20, r=20, t=40, b=20),
         
-        # ---!!!--- FIX: Force x-axis to be category to remove gaps ---!!!---
+        # Use 'category' axis to remove gaps
         xaxis_type='category'
     )
     return fig
@@ -187,7 +191,6 @@ with col1:
         if v1_sector_to_chart:
             chart_data = v1_hist[v1_hist['Sector'] == v1_sector_to_chart]
             
-            # Create the two plotly charts
             price_fig = create_price_chart(chart_data)
             score_fig = create_score_chart(chart_data, model_type='v1')
             
@@ -224,12 +227,11 @@ with col2:
         if v2_sector_to_chart:
             chart_data = v2_hist[v2_hist['Sector'] == v2_sector_to_chart]
             
-            # Create the two plotly charts
             price_fig = create_price_chart(chart_data)
             score_fig = create_score_chart(chart_data, model_type='v2')
             
             st.plotly_chart(price_fig, use_container_width=True, key="v2_price_chart")
-            st.plotly_chart(score_fig, use_container_width=True, key="v2_score_chart")
+            st.plotly_chart(score_fig, use_container_wide=True, key="v2_score_chart")
             
     else:
         st.error(v2_error)
