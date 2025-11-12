@@ -75,7 +75,6 @@ def create_drilldown_chart(chart_data, model_type):
     y_range_score = [-3.1, 8.1] if is_v1 else [-0.1, 1.1]
 
     # ---!!!--- FIX: Create formatted date strings for the category axis ---!!!---
-    # This solves both the "gap" problem and the "ugly label" problem.
     date_strings = chart_data['Date'].dt.strftime('%Y-%m-%d')
 
     # Create figure with 3 rows, sharing the X-axis
@@ -90,7 +89,12 @@ def create_drilldown_chart(chart_data, model_type):
                     high=chart_data['High'],
                     low=chart_data['Low'],
                     close=chart_data['Close'],
-                    name='Price'), row=1, col=1)
+                    name='Price',
+                    # ---!!!--- A-SHARE COLOR FIX ---!!!---
+                    increasing=dict(line=dict(color='#b91c1c')), # RED for Up
+                    decreasing=dict(line=dict(color='#15803d'))  # GREEN for Down
+                    # ---!!!--- END OF FIX ---!!!---
+                   ), row=1, col=1)
 
     # Plot 2: Volume
     fig.add_trace(go.Bar(x=date_strings, y=chart_data['Volume_Metric'], # <-- Use formatted strings
@@ -125,11 +129,9 @@ def create_drilldown_chart(chart_data, model_type):
         margin=dict(l=20, r=20, t=50, b=20),
         
         # ---!!!--- FIX: Use 'category' axis type ---!!!---
-        # This forces Plotly to plot only the dates provided, removing all gaps.
         xaxis_type='category',
         xaxis2_type='category',
         xaxis3_type='category',
-        # ---!!!--- END OF FIX ---!!!---
         
         xaxis_rangeslider_visible=False,
         
