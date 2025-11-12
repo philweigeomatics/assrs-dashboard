@@ -7,7 +7,7 @@ import assrs_logic_2    # <-- V2 (Regime-Switching) Logic
 import time
 import sys
 import os 
-import subprocess # <-- NEW: To run Git commands
+# import subprocess # <-- REMOVED: The YAML file will handle commits
 
 # --- 1. CONFIGURATION ---
 TUSHARE_API_TOKEN = '36838688c6455de2e3affca37060648de15b94b9707a43bb05a38312'
@@ -120,34 +120,8 @@ def run_all_sector_backtests():
         
         print(f"\n--- SECTOR V2 Backtest Complete! Results saved to '{output_filename_v2}' ---")
         
-# --- 5. NEW: COMMIT RESULTS TO GITHUB ---
-def commit_results():
-    """Configures Git and commits the new CSV files to the repo."""
-    print("\n--- Committing new data files to GitHub ---")
-    try:
-        # Configure Git
-        subprocess.run(['git', 'config', '--global', 'user.email', 'action@github.com'], check=True)
-        subprocess.run(['git', 'config', '--global', 'user.name', 'GitHub Action'], check=True)
-        
-        # Add files
-        subprocess.run(['git', 'add', 'assrs_backtest_results_SECTORS_V1_Rules.csv'], check=True)
-        subprocess.run(['git', 'add', 'assrs_backtest_results_SECTORS_V2_Regime.csv'], check=True)
-        
-        # Check if there's anything to commit
-        status_result = subprocess.run(['git', 'status', '--porcelain'], capture_output=True, text=True)
-        if not status_result.stdout:
-            print("No changes to data files. Commit skipped.")
-            return
-
-        # Commit and Push
-        commit_message = f"Data: Automated daily update for {TODAY_DATE.strftime('%Y-%m-%d')}"
-        subprocess.run(['git', 'commit', '-m', commit_message], check=True)
-        subprocess.run(['git', 'push'], check=True)
-        print("--- Data commit successful! ---")
-        
-    except Exception as e:
-        print(f"!! ERROR: Failed to commit new data to GitHub. Error: {e}")
-        sys.exit(1)
+# --- 5. REMOVED commit_results() FUNCTION ---
+# This logic is now handled 100% by the .github/workflows/run_daily.yml file
 
 
 if __name__ == "__main__":
@@ -157,8 +131,7 @@ if __name__ == "__main__":
     # 1. Run the data/logic job
     run_all_sector_backtests()
     
-    # 2. Commit the resulting CSVs
-    commit_results()
+    # 2. Commit step removed. The YAML file will do this after this script finishes.
     
     end_time = time.time()
     print(f"\nTotal runtime: {end_time - start_time:.2f} seconds.")
