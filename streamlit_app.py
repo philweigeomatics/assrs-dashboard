@@ -322,7 +322,7 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         showlegend=True,
         margin=dict(l=60, r=20, t=40, b=80),
         shapes=shapes,
-        xaxis=dict(type='category', showticklabels=False),
+        xaxis=dict(type='category', showticklabels=False, rangeslider=dict(visible=False)),
         xaxis2=dict(type='category', showticklabels=False),
         xaxis3=dict(
             type='category',
@@ -492,3 +492,4 @@ with col2:
             
     else:
         st.error(v2_error)
+
