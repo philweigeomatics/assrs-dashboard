@@ -345,12 +345,97 @@ def load_single_stock(ticker: str):
 
 # --- 4. MAIN APP LAYOUT ---
 
-st.title("ASSRS Sector Rotation Scoreboard")
+st.title("ASSRS Sector Rotation & Single Stock Analysis")
 
-# ========= Single Stock Analysis Section =========
-st.markdown("## Single Stock Analysis")
+# Tabs = separate “pages”
+tab_dashboard, tab_single = st.tabs(["Sector Dashboard", "Single Stock Analysis"])
 
-with st.container():
+# ========= TAB 1: Sector Dashboard =========
+with tab_dashboard:
+    # --- Load Sector Data ---
+    v1_latest, v1_hist, v1_date, v1_error = load_data(V1_RULES_FILE, "V1")
+    v2_latest, v2_hist, v2_date, v2_error = load_data(V2_REGIME_FILE, "V2")
+
+    st.markdown("### Sector Rotation Scoreboard")
+
+    # --- Create 2-Column Layout ---
+    col1, col2 = st.columns(2)
+
+    # --- V1 (Rule-Based) Scorecard ---
+    with col1:
+        st.header("V1: Rule-Based Scorecard (8-Point)")
+        if v1_latest is not None:
+            st.caption(f"Last Updated: {v1_date}")
+            
+            v1_display_df = v1_latest[['Sector', 'TOTAL_SCORE', 'ACTION']].sort_values(by='TOTAL_SCORE', ascending=False)
+            styled_v1_df = v1_display_df.style.map(style_action, subset=['ACTION'])
+            
+            st.dataframe(
+                styled_v1_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "TOTAL_SCORE": st.column_config.NumberColumn(format="%.2f"),
+                    "ACTION": st.column_config.TextColumn(width="medium")
+                }
+            )
+            
+            # --- V1 Charting ---
+            v1_sector_to_chart = st.selectbox(
+                "Select V1 Sector to Chart:",
+                v1_hist['Sector'].unique(),
+                key="v1_selector"
+            )
+            
+            if v1_sector_to_chart:
+                chart_data = v1_hist[v1_hist['Sector'] == v1_sector_to_chart]
+                fig = create_drilldown_chart(chart_data, model_type='v1')
+                st.plotly_chart(fig, use_container_width=True, key="v1_chart")
+
+        else:
+            st.error(v1_error)
+
+    # --- V2 (Regime-Switching) Scorecard ---
+    with col2:
+        st.header("V2: Regime-Switching Model")
+        if v2_latest is not None:
+            st.caption(f"Last Updated: {v2_date}")
+            
+            v2_display_df = v2_latest[['Sector', 'TOTAL_SCORE', 'ACTION']].copy()
+            v2_display_df = v2_display_df.sort_values(by='TOTAL_SCORE', ascending=False)
+            v2_display_df['TOTAL_SCORE'] = (v2_display_df['TOTAL_SCORE'] * 100).map('{:.0f}%'.format)
+            styled_v2_df = v2_display_df.style.map(style_action, subset=['ACTION'])
+            
+            st.dataframe(
+                styled_v2_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "TOTAL_SCORE": "Bull Probability",
+                    "ACTION": st.column_config.TextColumn(width="medium")
+                }
+            )
+            
+            # --- V2 Charting ---
+            v2_sector_to_chart = st.selectbox(
+                "Select V2 Sector to Chart:",
+                v2_hist['Sector'].unique(),
+                key="v2_selector"
+            )
+            
+            if v2_sector_to_chart:
+                chart_data = v2_hist[v2_hist['Sector'] == v2_sector_to_chart]
+                fig = create_drilldown_chart(chart_data, model_type='v2')
+                st.plotly_chart(fig, use_container_width=True, key="v2_chart")
+                
+        else:
+            st.error(v2_error)
+
+
+# ========= TAB 2: Single Stock Analysis =========
+with tab_single:
+    st.markdown("### Single Stock Analysis")
+
     c1, c2 = st.columns([3, 1])
     with c1:
         ticker = st.text_input("Enter Stock Code (e.g., 600760)", key="single_ticker")
@@ -390,19 +475,13 @@ with st.container():
 
                 with col_a:
                     st.caption("Uptrend Filter")
-                    st.markdown(
-                        f"**:green[PASS]**" if uptrend_pass else f"**:red[FAIL]**"
-                    )
+                    st.markdown("**:green[PASS]**" if uptrend_pass else "**:red[FAIL]**")
                 with col_b:
                     st.caption("Breakout Signal")
-                    st.markdown(
-                        "**:green[ACTIVE]**" if breakout else ":grey[---]"
-                    )
+                    st.markdown("**:green[ACTIVE]**" if breakout else ":grey[---]")
                 with col_c:
                     st.caption("Pullback Signal")
-                    st.markdown(
-                        "**:blue[ACTIVE]**" if pullback else ":grey[---]"
-                    )
+                    st.markdown("**:blue[ACTIVE]**" if pullback else ":grey[---]")
                 with col_d:
                     st.caption("RSI (14)")
                     st.markdown(f"**{rsi_val:.1f}**")
@@ -418,78 +497,3 @@ with st.container():
                 df_for_table['Date'] = df_for_table['Date'].dt.strftime('%Y-%m-%d')
                 df_for_table = df_for_table.tail(50)
                 st.dataframe(df_for_table, use_container_width=True, hide_index=True)
-
-# ========= Sector Scoreboard (existing) =========
-
-# --- Load Sector Data ---
-v1_latest, v1_hist, v1_date, v1_error = load_data(V1_RULES_FILE, "V1")
-v2_latest, v2_hist, v2_date, v2_error = load_data(V2_REGIME_FILE, "V2")
-
-st.markdown("---")
-st.markdown("## Sector Rotation Scoreboard")
-
-# --- Create 2-Column Layout ---
-col1, col2 = st.columns(2)
-
-# --- V1 (Rule-Based) Scorecard ---
-with col1:
-    st.header("V1: Rule-Based Scorecard (8-Point)")
-    if v1_latest is not None:
-        st.caption(f"Last Updated: {v1_date}")
-        
-        v1_display_df = v1_latest[['Sector', 'TOTAL_SCORE', 'ACTION']].sort_values(by='TOTAL_SCORE', ascending=False)
-        styled_v1_df = v1_display_df.style.map(style_action, subset=['ACTION'])
-        
-        st.dataframe(
-            styled_v1_df,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "TOTAL_SCORE": st.column_config.NumberColumn(format="%.2f"),
-                "ACTION": st.column_config.TextColumn(width="medium")
-            }
-        )
-        
-        # --- V1 Charting ---
-        v1_sector_to_chart = st.selectbox("Select V1 Sector to Chart:", v1_hist['Sector'].unique(), key="v1_selector")
-        
-        if v1_sector_to_chart:
-            chart_data = v1_hist[v1_hist['Sector'] == v1_sector_to_chart]
-            fig = create_drilldown_chart(chart_data, model_type='v1')
-            st.plotly_chart(fig, use_container_width=True, key="v1_chart")
-
-    else:
-        st.error(v1_error)
-
-# --- V2 (Regime-Switching) Scorecard ---
-with col2:
-    st.header("V2: Regime-Switching Model")
-    if v2_latest is not None:
-        st.caption(f"Last Updated: {v2_date}")
-        
-        v2_display_df = v2_latest[['Sector', 'TOTAL_SCORE', 'ACTION']].copy()
-        v2_display_df = v2_display_df.sort_values(by='TOTAL_SCORE', ascending=False)
-        v2_display_df['TOTAL_SCORE'] = (v2_display_df['TOTAL_SCORE'] * 100).map('{:.0f}%'.format)
-        styled_v2_df = v2_display_df.style.map(style_action, subset=['ACTION'])
-        
-        st.dataframe(
-            styled_v2_df,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "TOTAL_SCORE": "Bull Probability",
-                "ACTION": st.column_config.TextColumn(width="medium")
-            }
-        )
-        
-        # --- V2 Charting ---
-        v2_sector_to_chart = st.selectbox("Select V2 Sector to Chart:", v2_hist['Sector'].unique(), key="v2_selector")
-        
-        if v2_sector_to_chart:
-            chart_data = v2_hist[v2_hist['Sector'] == v2_sector_to_chart]
-            fig = create_drilldown_chart(chart_data, model_type='v2')
-            st.plotly_chart(fig, use_container_width=True, key="v2_chart")
-            
-    else:
-        st.error(v2_error)
-
