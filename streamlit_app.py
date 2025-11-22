@@ -1,13 +1,13 @@
 import streamlit as st
 import pandas as pd
-import altair as alt
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
 import numpy as np
 import ta
+import os
 
-import data_manager  # your data access module
+# Assuming data_manager is in the same directory or path
+import data_manager 
 
 # --- 1. CONFIGURATION ---
 V1_RULES_FILE = 'assrs_backtest_results_SECTORS_V1_Rules.csv'
@@ -19,7 +19,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 2. HELPER FUNCTIONS (SECTOR DATA) ---
+# --- 2. HELPER FUNCTIONS (SECTOR DATA - UNCHANGED) ---
 
 @st.cache_data(ttl=600)  # Cache data for 10 minutes
 def load_data(filepath, model_name):
@@ -35,7 +35,7 @@ def load_data(filepath, model_name):
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
         if df.empty:
-            return None, None, f"No data in {model_name} file."
+            return None, None, f"No data in {model_name} file.", None
 
         # 1. Get Latest Scores
         latest_date = df['Date'].max()
@@ -53,23 +53,20 @@ def load_data(filepath, model_name):
 
 def style_action(action):
     """Applies color to the 'ACTION' column for the dataframe."""
+    if not isinstance(action, str): return ''
     if 'GREEN' in action:
         return 'color: #15803d; background-color: #dcfce7; font-weight: 600;'
     if 'YELLOW' in action:
         return 'color: #a16207; background-color: #fef9c3; font-weight: 600;'
     if 'RED' in action:
         return 'color: #b91c1c; background-color: #fee2e2; font-weight: 600;'
-    # Handle CONSOLIDATION or other states
     if 'CONSOLIDATION' in action:
         return 'color: #4b5563; background-color: #f3f4f6; font-weight: 500;'
     return ''
 
 def create_drilldown_chart(chart_data, model_type):
     """
-    Creates a 3-plot interactive chart:
-    1. Price (Candlestick)
-    2. Volume (Bar)
-    3. Score (Line)
+    Creates a 3-plot interactive chart for Sectors.
     """
     is_v1 = model_type == 'v1'
     y_title_score = 'V1 Score (-3 to 8)' if is_v1 else 'V2 Bull Probability (0 to 1)'
@@ -116,41 +113,31 @@ def create_drilldown_chart(chart_data, model_type):
 
     # Thresholds
     if is_v1:
-        fig.add_hline(y=2.5, line_dash="dash", line_color="#a16207",
-                      annotation_text="Buy Threshold (2.5)", row=3, col=1)
-        fig.add_hline(y=5.0, line_dash="dash", line_color="#15803d",
-                      annotation_text="Green Threshold (5.0)", row=3, col=1)
+        fig.add_hline(y=2.5, line_dash="dash", line_color="#a16207", annotation_text="Buy (2.5)", row=3, col=1)
+        fig.add_hline(y=5.0, line_dash="dash", line_color="#15803d", annotation_text="Strong (5.0)", row=3, col=1)
     else:
-        fig.add_hline(y=0.8, line_dash="dash", line_color="#15803d",
-                      annotation_text="Green Threshold (0.8)", row=3, col=1)
-        fig.add_hline(y=0.2, line_dash="dash", line_color="#b91c1c",
-                      annotation_text="Red Threshold (0.2)", row=3, col=1)
+        fig.add_hline(y=0.8, line_dash="dash", line_color="#15803d", annotation_text="High Prob (0.8)", row=3, col=1)
+        fig.add_hline(y=0.2, line_dash="dash", line_color="#b91c1c", annotation_text="Low Prob (0.2)", row=3, col=1)
 
     fig.update_layout(
         height=700,
         showlegend=False,
         margin=dict(l=20, r=20, t=50, b=20),
-        xaxis_type='category',
-        xaxis2_type='category',
-        xaxis3_type='category',
-        xaxis_rangeslider_visible=False,
-        xaxis_showticklabels=False,
-        xaxis2_showticklabels=False,
         xaxis3_title='Date',
-        yaxis1_title="PPI (Base 100)",
-        yaxis2_title="Volume (Z-Score)",
+        yaxis1_title="PPI",
+        yaxis2_title="Vol Z-Score",
         yaxis3_title=y_title_score,
-        yaxis3_range=y_range_score
+        yaxis3_range=y_range_score,
+        xaxis_rangeslider_visible=False
     )
     return fig
 
-# --- 3. SINGLE STOCK ANALYSIS LOGIC (ported from webapp.py) ---
+# --- 3. SINGLE STOCK ANALYSIS LOGIC (NEW 3-PHASE) ---
 
 def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds indicators and signals for a single stock.
-    df is expected to come from data_manager.get_single_stock_data(...)
-    with Date index and columns: Open, High, Low, Close, Volume.
+    Advanced 3-Phase Analysis: Accumulation -> Squeeze -> Trigger
+    Replaces old Breakout/Pullback signals.
     """
     df_analysis = df.copy()
 
@@ -158,59 +145,94 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
         df_analysis.index = pd.to_datetime(df_analysis.index)
     df_analysis = df_analysis.sort_index()
 
-    # Moving averages
+    # =======================
+    # 0. BASIC TREND FILTERS
+    # =======================
     df_analysis['MA20'] = ta.trend.sma_indicator(df_analysis['Close'], window=20)
     df_analysis['MA50'] = ta.trend.sma_indicator(df_analysis['Close'], window=50)
     df_analysis['MA200'] = ta.trend.sma_indicator(df_analysis['Close'], window=200)
+    
+    # =======================
+    # PHASE 1: ACCUMULATION (OBV Divergence)
+    # =======================
+    df_analysis['OBV'] = ta.volume.on_balance_volume(df_analysis['Close'], df_analysis['Volume'])
+    
+    # We check the "Slope" over the last 20 days
+    df_analysis['Price_Chg_20d'] = df_analysis['Close'].pct_change(periods=20)
+    df_analysis['OBV_Chg_20d'] = df_analysis['OBV'].pct_change(periods=20)
 
-    # MA(50) today vs 5 days ago
-    df_analysis['MA50_Slope'] = df_analysis['MA50'] - df_analysis['MA50'].shift(5)
-
-    # Uptrend filter: Close > MA20 > MA50 > MA200 and MA50 rising over last 5 days
-    df_analysis['Uptrend_Filter'] = (
-        (df_analysis['Close'] > df_analysis['MA20']) &
-        (df_analysis['MA20'] > df_analysis['MA50']) &
-        (df_analysis['MA50'] > df_analysis['MA200']) &
-        (df_analysis['MA50_Slope'] > 0)
+    # LOGIC: Price is boring (moved < 3% up or down), but OBV is UP (> 5%)
+    df_analysis['Signal_Accumulation'] = (
+        (df_analysis['Price_Chg_20d'].abs() < 0.03) & 
+        (df_analysis['OBV_Chg_20d'] > 0.05)
     )
 
-    # Breakout logic
-    df_analysis['20d_High'] = df_analysis['High'].rolling(window=20).max().shift(1)
+    # =======================
+    # PHASE 2: THE SQUEEZE (Bollinger Bandwidth)
+    # =======================
+    bb_indicator = ta.volatility.BollingerBands(close=df_analysis['Close'], window=20, window_dev=2)
+    df_analysis['BB_Upper'] = bb_indicator.bollinger_hband()
+    df_analysis['BB_Lower'] = bb_indicator.bollinger_lband()
+    df_analysis['BB_Mid']   = bb_indicator.bollinger_mavg()
+    
+    # Bandwidth % = (Upper - Lower) / Mid
+    df_analysis['BB_Width'] = bb_indicator.bollinger_wband()
+    
+    # Is the current width near a 6-month (120-day) LOW?
+    # We define "Squeeze" as being within 20% of the 120-day minimum width
+    df_analysis['Min_Width_120d'] = df_analysis['BB_Width'].rolling(window=120).min()
+    df_analysis['Signal_Squeeze'] = df_analysis['BB_Width'] <= (df_analysis['Min_Width_120d'] * 1.2)
+
+    # =======================
+    # PHASE 3: THE LAUNCH (Trigger)
+    # =======================
+    # 1. ADX for Trend Strength
+    adx_indicator = ta.trend.ADXIndicator(df_analysis['High'], df_analysis['Low'], df_analysis['Close'], window=14)
+    df_analysis['ADX'] = adx_indicator.adx()
+    
+    # 2. Volume Surge
     df_analysis['20d_Avg_Vol'] = df_analysis['Volume'].rolling(window=20).mean()
+    
+    # 3. The Signal:
+    # Was there a squeeze in the last 10 days?
+    df_analysis['Recent_Squeeze'] = df_analysis['Signal_Squeeze'].rolling(window=10).max() > 0
 
-    df_analysis['Breakout_Signal'] = (
-        df_analysis['Uptrend_Filter'] &
-        (df_analysis['Close'] > df_analysis['20d_High']) &
-        (df_analysis['Volume'] > (df_analysis['20d_Avg_Vol'] * 1.5))
+    df_analysis['Signal_Golden_Launch'] = (
+        df_analysis['Recent_Squeeze'] &                     # Context: Coming out of quiet period
+        (df_analysis['Close'] > df_analysis['BB_Upper']) &  # Breakout
+        (df_analysis['Volume'] > df_analysis['20d_Avg_Vol'] * 1.5) & # Power
+        (df_analysis['ADX'] > 20)                           # Trend Strength
     )
 
-    # Pullback logic
+    # =======================
+    # STANDARD EXITS & INDICATORS
+    # =======================
+    macd_indicator = ta.trend.MACD(close=df_analysis['Close'])
+    df_analysis['MACD'] = macd_indicator.macd()
+    df_analysis['MACD_Signal'] = macd_indicator.macd_signal()
+    df_analysis['MACD_Hist'] = macd_indicator.macd_diff()
+    
+    df_analysis['High_50d'] = df_analysis['Close'].rolling(window=50).max()
+
+    # Exit: MACD Lead
+    df_analysis['Exit_MACD_Lead'] = (
+        (df_analysis['MACD'] < df_analysis['MACD_Signal']) &
+        (df_analysis['MACD'].shift(1) > df_analysis['MACD_Signal'].shift(1)) &
+        (df_analysis['MACD'] > 0)
+    )
+
+    # Keep RSI for plotting
     df_analysis['RSI_14'] = ta.momentum.rsi(df_analysis['Close'], window=14)
-    df_analysis['RSI_Rising'] = df_analysis['RSI_14'].diff() > 0
-    df_analysis['Near_MA20'] = (
-        (df_analysis['Close'] > df_analysis['MA20']) &
-        (df_analysis['Close'] < df_analysis['MA20'] * 1.03)
-    )
-    df_analysis['Near_MA50'] = (
-        (df_analysis['Close'] > df_analysis['MA50']) &
-        (df_analysis['Close'] < df_analysis['MA50'] * 1.03)
-    )
-
-    df_analysis['Pullback_Signal'] = (
-        df_analysis['Uptrend_Filter'] &
-        df_analysis['RSI_14'].between(40, 50) &
-        df_analysis['RSI_Rising'] &
-        (df_analysis['Near_MA20'] | df_analysis['Near_MA50'])
-    )
 
     return df_analysis
 
 def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> go.Figure:
     """
-    Build a 3-panel Plotly chart for single stock:
-    1) Price + MAs + signals
+    Build a 4-panel Plotly chart matching the WebApp:
+    1) Price + Bollinger Bands + MAs + Signals
     2) Volume
-    3) RSI
+    3) MACD
+    4) RSI
     """
     df = analysis_df.tail(window).copy()
     if not isinstance(df.index, pd.DatetimeIndex):
@@ -220,120 +242,130 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
     date_strings = df.index.strftime('%Y-%m-%d')
 
     fig = make_subplots(
-        rows=3, cols=1, shared_xaxes=True,
-        vertical_spacing=0.03,
-        subplot_titles=('Price / Trend / Signals', 'Volume', 'RSI (14)'),
-        row_heights=[0.6, 0.2, 0.2]
+        rows=4, cols=1, shared_xaxes=True,
+        vertical_spacing=0.02,
+        subplot_titles=('Price (Accumulation → Squeeze → Launch)', 'Volume', 'MACD', 'RSI'),
+        row_heights=[0.5, 0.15, 0.15, 0.15]
     )
 
-    # Price candlestick
+    # --- PANEL 1: PRICE, BANDS, SIGNALS ---
+
+    # 1. Bollinger Bands (Background)
+    # Upper Band
+    fig.add_trace(go.Scatter(
+        x=date_strings, y=df['BB_Upper'],
+        mode='lines', name='BB Upper',
+        line=dict(width=1, color='rgba(147, 197, 253, 0.5)'),
+        showlegend=False
+    ), row=1, col=1)
+
+    # Lower Band (Filled)
+    fig.add_trace(go.Scatter(
+        x=date_strings, y=df['BB_Lower'],
+        mode='lines', name='Bollinger Band',
+        line=dict(width=1, color='rgba(147, 197, 253, 0.5)'),
+        fill='tonexty', fillcolor='rgba(59, 130, 246, 0.05)',
+        showlegend=True
+    ), row=1, col=1)
+
+    # 2. Candlesticks
     fig.add_trace(go.Candlestick(
         x=date_strings,
-        open=df['Open'],
-        high=df['High'],
-        low=df['Low'],
-        close=df['Close'],
+        open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
         name='Price',
-        increasing=dict(line=dict(color='#b91c1c')),  # red up
-        decreasing=dict(line=dict(color='#15803d'))   # green down
+        increasing=dict(line=dict(color='#16a34a')),  # Green
+        decreasing=dict(line=dict(color='#dc2626'))   # Red
     ), row=1, col=1)
 
-    # Moving averages
+    # 3. MAs
+    fig.add_trace(go.Scatter(x=date_strings, y=df['MA20'], name='MA20', line=dict(width=1, color='#fbbf24', dash='dot')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=date_strings, y=df['MA50'], name='MA50', line=dict(width=1.5, color='#3b82f6')), row=1, col=1)
+    fig.add_trace(go.Scatter(x=date_strings, y=df['MA200'], name='MA200', line=dict(width=2, color='#374151')), row=1, col=1)
+
+    # 4. Signals (Markers)
+    # Phase 1: Accumulation (Yellow)
+    acc_df = df[df['Signal_Accumulation']]
     fig.add_trace(go.Scatter(
-        x=date_strings, y=df['MA20'], name='MA20',
-        mode='lines', line=dict(width=1, dash='dot')
+        x=acc_df.index.strftime('%Y-%m-%d'), y=acc_df['Low'] * 0.98,
+        mode='markers', name='Accumulation',
+        marker=dict(color='#eab308', size=6, symbol='circle')
     ), row=1, col=1)
 
+    # Phase 2: Squeeze (Grey)
+    sqz_df = df[df['Signal_Squeeze']]
     fig.add_trace(go.Scatter(
-        x=date_strings, y=df['MA50'], name='MA50',
-        mode='lines', line=dict(width=2)
+        x=sqz_df.index.strftime('%Y-%m-%d'), y=sqz_df['High'] * 1.02,
+        mode='markers', name='Squeeze',
+        marker=dict(color='#64748b', size=5, symbol='square-open')
     ), row=1, col=1)
 
+    # Phase 3: Golden Launch (Red Star)
+    launch_df = df[df['Signal_Golden_Launch']]
     fig.add_trace(go.Scatter(
-        x=date_strings, y=df['MA200'], name='MA200',
-        mode='lines', line=dict(width=2)
+        x=launch_df.index.strftime('%Y-%m-%d'), y=launch_df['High'] * 1.05,
+        mode='markers', name='GOLDEN LAUNCH',
+        marker=dict(color='#ef4444', size=14, symbol='star', line=dict(width=1, color='black'))
     ), row=1, col=1)
 
-    # Breakout & Pullback markers
-    breakout_days = df[df['Breakout_Signal']]
-    pullback_days = df[df['Pullback_Signal']]
-
+    # Exit Signals (Red X)
+    exit_df = df[df['Exit_MACD_Lead']]
     fig.add_trace(go.Scatter(
-        x=breakout_days.index.strftime('%Y-%m-%d'),
-        y=breakout_days['High'],
-        mode='markers',
-        name='Breakout (A)',
-        marker=dict(color='green', symbol='triangle-up', size=10)
+        x=exit_df.index.strftime('%Y-%m-%d'), y=exit_df['High'] * 1.01,
+        mode='markers', name='Exit MACD',
+        marker=dict(color='#f87171', size=8, symbol='x')
     ), row=1, col=1)
 
-    fig.add_trace(go.Scatter(
-        x=pullback_days.index.strftime('%Y-%m-%d'),
-        y=pullback_days['Low'] * 0.98,
-        mode='markers',
-        name='Pullback (B)',
-        marker=dict(color='blue', symbol='circle', size=8)
-    ), row=1, col=1)
-
-    # Uptrend shading (top panel)
-    shapes = []
-    if 'Uptrend_Filter' in df.columns:
-        uptrend_idx = df[df['Uptrend_Filter']].index
-        for d in uptrend_idx:
-            ds = d.strftime('%Y-%m-%d')
-            shapes.append(dict(
-                type="rect",
-                xref="x", yref="paper",
-                x0=ds, x1=ds,
-                y0=0.66, y1=1.0,
-                fillcolor="#dcfce7",
-                opacity=0.25,
-                line_width=0
-            ))
-    # Volume panel
+    # --- PANEL 2: VOLUME ---
     fig.add_trace(go.Bar(
-        x=date_strings,
-        y=df['Volume'],
-        name='Volume'
+        x=date_strings, y=df['Volume'], name='Volume',
+        marker=dict(color='#d1d5db')
     ), row=2, col=1)
-
+    
     if '20d_Avg_Vol' in df.columns:
         fig.add_trace(go.Scatter(
-            x=date_strings,
-            y=df['20d_Avg_Vol'],
-            mode='lines',
-            name='20d Avg Vol',
-            line=dict(width=1)
+            x=date_strings, y=df['20d_Avg_Vol'], name='Vol MA20',
+            line=dict(width=1, color='#4b5563')
         ), row=2, col=1)
 
-    # RSI panel
+    # --- PANEL 3: MACD ---
+    # Histogram colors
+    colors = np.where(df['MACD_Hist'] >= 0, '#22c55e', '#ef4444')
+    fig.add_trace(go.Bar(
+        x=date_strings, y=df['MACD_Hist'], name='MACD Hist',
+        marker_color=colors
+    ), row=3, col=1)
+    
     fig.add_trace(go.Scatter(
-        x=date_strings,
-        y=df['RSI_14'],
-        mode='lines',
-        name='RSI (14)',
-        line=dict(width=2)
+        x=date_strings, y=df['MACD'], name='MACD',
+        line=dict(color='#2563eb', width=1.5)
+    ), row=3, col=1)
+    
+    fig.add_trace(go.Scatter(
+        x=date_strings, y=df['MACD_Signal'], name='Signal',
+        line=dict(color='#f97316', width=1.5)
     ), row=3, col=1)
 
-    fig.add_hline(y=40, line_dash="dash", line_color="grey", row=3, col=1)
-    fig.add_hline(y=50, line_dash="dash", line_color="grey", row=3, col=1)
+    # --- PANEL 4: RSI ---
+    fig.add_trace(go.Scatter(
+        x=date_strings, y=df['RSI_14'], name='RSI',
+        line=dict(color='#8b5cf6', width=2)
+    ), row=4, col=1)
 
+    fig.add_hline(y=70, line_dash="dot", line_color="gray", row=4, col=1)
+    fig.add_hline(y=30, line_dash="dot", line_color="gray", row=4, col=1)
+
+    # Layout Updates
     fig.update_layout(
-        height=900,
-        showlegend=True,
-        margin=dict(l=60, r=20, t=40, b=80),
-        shapes=shapes,
-        xaxis=dict(type='category', showticklabels=False, rangeslider=dict(visible=False)),
-        xaxis2=dict(type='category', showticklabels=False),
-        xaxis3=dict(
-            type='category',
-            title='Date',
-            tickmode='auto',
-            nticks=10,
-            tickangle=-45
-        ),
-        yaxis=dict(domain=[0.66, 1.0], title="Price"),
-        yaxis2=dict(domain=[0.33, 0.64], title="Volume"),
-        yaxis3=dict(domain=[0.0, 0.31], title="RSI (14)", range=[0, 100])
+        height=1000,
+        margin=dict(l=50, r=20, t=40, b=50),
+        xaxis_rangeslider_visible=False,
+        xaxis4_title='Date',
+        yaxis1_title="Price",
+        yaxis2_title="Vol",
+        yaxis3_title="MACD",
+        yaxis4_title="RSI",
+        yaxis4_range=[0, 100],
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
 
     return fig
@@ -350,7 +382,7 @@ st.title("ASSRS Sector Rotation & Single Stock Analysis")
 # Tabs = separate “pages”
 tab_dashboard, tab_single = st.tabs(["Sector Dashboard", "Single Stock Analysis"])
 
-# ========= TAB 1: Sector Dashboard =========
+# ========= TAB 1: Sector Dashboard (UNCHANGED) =========
 with tab_dashboard:
     # --- Load Sector Data ---
     v1_latest, v1_hist, v1_date, v1_error = load_data(V1_RULES_FILE, "V1")
@@ -432,9 +464,10 @@ with tab_dashboard:
             st.error(v2_error)
 
 
-# ========= TAB 2: Single Stock Analysis =========
+# ========= TAB 2: Single Stock Analysis (UPDATED) =========
 with tab_single:
-    st.markdown("### Single Stock Analysis")
+    st.markdown("### 3-Phase Single Stock Analysis")
+    st.info("Logic: Phase 1 (Accumulation/OBV) → Phase 2 (Squeeze/Bollinger) → Phase 3 (Launch/ADX)")
 
     c1, c2 = st.columns([3, 1])
     with c1:
@@ -451,49 +484,71 @@ with tab_single:
                 "Check that the ticker is valid and that Tushare is configured correctly."
             )
         else:
+            # Run the NEW 3-Phase Logic
             analysis_df = run_single_stock_analysis(stock_df)
 
-            # latest valid RSI row
-            valid_rows = analysis_df.dropna(subset=['RSI_14'])
-            if valid_rows.empty:
-                st.error("Not enough data to compute RSI / MA signals for this stock.")
+            # Check if we have enough data
+            if analysis_df.empty or len(analysis_df) < 50:
+                st.error("Not enough data to compute 3-Phase signals for this stock.")
             else:
-                latest_row = valid_rows.iloc[-1]
+                latest_row = analysis_df.iloc[-1]
 
-                # Chart
+                # Create the NEW 4-Panel Chart
                 fig_stock = create_single_stock_chart(analysis_df)
                 st.plotly_chart(fig_stock, use_container_width=True)
 
-                # Latest signals summary
-                st.subheader("Latest Day's Signals")
+                # NEW: Latest signals summary (Cards)
+                st.subheader("Latest Status")
                 col_a, col_b, col_c, col_d = st.columns(4)
 
-                uptrend_pass = bool(latest_row.get('Uptrend_Filter', False))
-                breakout = bool(latest_row.get('Breakout_Signal', False))
-                pullback = bool(latest_row.get('Pullback_Signal', False))
-                rsi_val = float(latest_row.get('RSI_14', float('nan')))
+                accum = bool(latest_row.get('Signal_Accumulation', False))
+                squeeze = bool(latest_row.get('Signal_Squeeze', False))
+                launch = bool(latest_row.get('Signal_Golden_Launch', False))
+                adx_val = float(latest_row.get('ADX', 0.0))
 
                 with col_a:
-                    st.caption("Uptrend Filter")
-                    st.markdown("**:green[PASS]**" if uptrend_pass else "**:red[FAIL]**")
+                    st.markdown("**Phase 1: Accumulation**")
+                    st.markdown("**:orange[ACTIVE]**" if accum else ":grey[INACTIVE]")
                 with col_b:
-                    st.caption("Breakout Signal")
-                    st.markdown("**:green[ACTIVE]**" if breakout else ":grey[---]")
+                    st.markdown("**Phase 2: Squeeze**")
+                    st.markdown("**:grey[TIGHT]**" if squeeze else ":grey[LOOSE]")
                 with col_c:
-                    st.caption("Pullback Signal")
-                    st.markdown("**:blue[ACTIVE]**" if pullback else ":grey[---]")
+                    st.markdown("**Phase 3: LAUNCH**")
+                    st.markdown("**:red[TRIGGERED]**" if launch else ":grey[WAITING]")
                 with col_d:
-                    st.caption("RSI (14)")
-                    st.markdown(f"**{rsi_val:.1f}**")
+                    st.markdown("**Trend Strength (ADX)**")
+                    st.markdown(f"**:blue[{adx_val:.1f}]**")
 
-                # Debug table (last 50 rows)
+                # NEW: Debug table (last 50 rows)
                 st.subheader("Recent Data (last 50 days)")
+                
+                # Select relevant columns
                 table_cols = [
                     'Close', 'MA20', 'MA50', 'MA200',
-                    'RSI_14', 'Uptrend_Filter', 'Breakout_Signal', 'Pullback_Signal'
+                    'RSI_14', 'ADX', 
+                    'Signal_Accumulation', 'Signal_Squeeze', 'Signal_Golden_Launch',
+                    'Exit_MACD_Lead'
                 ]
-                df_for_table = analysis_df[table_cols].copy()
+                # Filter in case some cols missing (safety)
+                valid_cols = [c for c in table_cols if c in analysis_df.columns]
+                
+                df_for_table = analysis_df[valid_cols].copy()
                 df_for_table = df_for_table.reset_index()
                 df_for_table['Date'] = df_for_table['Date'].dt.strftime('%Y-%m-%d')
                 df_for_table = df_for_table.tail(50)
-                st.dataframe(df_for_table, use_container_width=True, hide_index=True)
+                
+                st.dataframe(
+                    df_for_table, 
+                    use_container_width=True, 
+                    hide_index=True,
+                    column_config={
+                        "Close": st.column_config.NumberColumn(format="%.2f"),
+                        "MA200": st.column_config.NumberColumn(format="%.2f"),
+                        "RSI_14": st.column_config.NumberColumn(format="%.0f"),
+                        "ADX": st.column_config.NumberColumn(format="%.1f"),
+                        "Signal_Accumulation": st.column_config.CheckboxColumn(label="Accum (P1)"),
+                        "Signal_Squeeze": st.column_config.CheckboxColumn(label="Squeeze (P2)"),
+                        "Signal_Golden_Launch": st.column_config.CheckboxColumn(label="LAUNCH (P3)"),
+                        "Exit_MACD_Lead": st.column_config.CheckboxColumn(label="Exit")
+                    }
+                )
