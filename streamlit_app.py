@@ -128,7 +128,8 @@ def create_drilldown_chart(chart_data, model_type):
         yaxis2_title="Vol Z-Score",
         yaxis3_title=y_title_score,
         yaxis3_range=y_range_score,
-        xaxis_rangeslider_visible=False
+        xaxis_rangeslider_visible=False,
+        template="plotly_white"
     )
     return fig
 
@@ -357,6 +358,7 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
     # Layout Updates
     fig.update_layout(
         height=1000,
+        template="plotly_white", # Fix: Force white background like WebApp
         margin=dict(l=50, r=20, t=40, b=50),
         xaxis_rangeslider_visible=False,
         xaxis4_title='Date',
@@ -365,7 +367,8 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         yaxis3_title="MACD",
         yaxis4_title="RSI",
         yaxis4_range=[0, 100],
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        # Fix: Remove explicit horizontal orientation to default to vertical right
+        legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.01)
     )
 
     return fig
