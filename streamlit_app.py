@@ -257,7 +257,8 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         x=date_strings, y=df['BB_Upper'],
         mode='lines', name='BB Upper',
         line=dict(width=1, color='rgba(147, 197, 253, 0.5)'),
-        showlegend=False
+        showlegend=False,
+        hoverinfo='skip' # FIX: Skip hover so it doesn't block Candle OHLC
     ), row=1, col=1)
 
     # Lower Band (Filled)
@@ -266,7 +267,8 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         mode='lines', name='Bollinger Band',
         line=dict(width=1, color='rgba(147, 197, 253, 0.5)'),
         fill='tonexty', fillcolor='rgba(59, 130, 246, 0.05)',
-        showlegend=True
+        showlegend=True,
+        hoverinfo='skip' # FIX: Skip hover so it doesn't block Candle OHLC
     ), row=1, col=1)
 
     # 2. Candlesticks
@@ -361,13 +363,18 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         template="plotly_white", # Fix: Force white background like WebApp
         margin=dict(l=50, r=20, t=40, b=50),
         xaxis_rangeslider_visible=False,
-        xaxis4_title='Date',
+        
+        # Enable Crosshairs across all subplots (Spikes)
+        xaxis=dict(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, showgrid=True),
+        xaxis2=dict(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, showgrid=True),
+        xaxis3=dict(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, showgrid=True),
+        xaxis4=dict(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, showgrid=True, title='Date'),
+
         yaxis1_title="Price",
         yaxis2_title="Vol",
         yaxis3_title="MACD",
         yaxis4_title="RSI",
         yaxis4_range=[0, 100],
-        # Fix: Remove explicit horizontal orientation to default to vertical right
         legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.01)
     )
 
