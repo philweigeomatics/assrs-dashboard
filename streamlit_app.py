@@ -258,7 +258,7 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         mode='lines', name='BB Upper',
         line=dict(width=1, color='rgba(147, 197, 253, 0.5)'),
         showlegend=False,
-        hoverinfo='skip' # FIX: Skip hover so it doesn't block Candle OHLC
+        hoverinfo='skip' # FIX 1: Skip hover so it doesn't block Candle
     ), row=1, col=1)
 
     # Lower Band (Filled)
@@ -268,7 +268,7 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         line=dict(width=1, color='rgba(147, 197, 253, 0.5)'),
         fill='tonexty', fillcolor='rgba(59, 130, 246, 0.05)',
         showlegend=True,
-        hoverinfo='skip' # FIX: Skip hover so it doesn't block Candle OHLC
+        hoverinfo='skip' # FIX 1: Skip hover so it doesn't block Candle
     ), row=1, col=1)
 
     # 2. Candlesticks
@@ -280,12 +280,15 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         decreasing=dict(line=dict(color='#dc2626'))   # Red
     ), row=1, col=1)
 
-    # 3. MAs
-    fig.add_trace(go.Scatter(x=date_strings, y=df['MA20'], name='MA20', line=dict(width=1, color='#fbbf24', dash='dot')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=date_strings, y=df['MA50'], name='MA50', line=dict(width=1.5, color='#3b82f6')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=date_strings, y=df['MA200'], name='MA200', line=dict(width=2, color='#374151')), row=1, col=1)
+    # 3. MAs - FIX 2: Skip Hover on these lines so they don't steal focus from Candle OHLC
+    fig.add_trace(go.Scatter(x=date_strings, y=df['MA20'], name='MA20', 
+                             line=dict(width=1, color='#fbbf24', dash='dot'), hoverinfo='skip'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=date_strings, y=df['MA50'], name='MA50', 
+                             line=dict(width=1.5, color='#3b82f6'), hoverinfo='skip'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=date_strings, y=df['MA200'], name='MA200', 
+                             line=dict(width=2, color='#374151'), hoverinfo='skip'), row=1, col=1)
 
-    # 4. Signals (Markers)
+    # 4. Signals (Markers) - Keep Hover Info for these!
     # Phase 1: Accumulation (Yellow)
     acc_df = df[df['Signal_Accumulation']]
     fig.add_trace(go.Scatter(
@@ -327,7 +330,7 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
     if '20d_Avg_Vol' in df.columns:
         fig.add_trace(go.Scatter(
             x=date_strings, y=df['20d_Avg_Vol'], name='Vol MA20',
-            line=dict(width=1, color='#4b5563')
+            line=dict(width=1, color='#4b5563'), hoverinfo='skip'
         ), row=2, col=1)
 
     # --- PANEL 3: MACD ---
@@ -360,11 +363,15 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
     # Layout Updates
     fig.update_layout(
         height=1000,
-        template="plotly_white", # Fix: Force white background like WebApp
+        template="plotly_white", # Force standard white theme
         margin=dict(l=50, r=20, t=40, b=50),
         xaxis_rangeslider_visible=False,
         
-        # Enable Crosshairs across all subplots (Spikes)
+        # FIX 3: Use 'x unified' hover mode.
+        # This creates a crosshair and ensures Data is always visible for the Date.
+        hovermode="x unified",
+        
+        # Enable Spikes (Crosshairs)
         xaxis=dict(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, showgrid=True),
         xaxis2=dict(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, showgrid=True),
         xaxis3=dict(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, showgrid=True),
