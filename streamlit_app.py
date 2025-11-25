@@ -276,8 +276,11 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         x=date_strings,
         open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
         name='Price',
-        increasing=dict(line=dict(color='#16a34a')),  # Green
-        decreasing=dict(line=dict(color='#dc2626'))   # Red
+       # increasing=dict(line=dict(color='#16a34a')),  # Green
+       # decreasing=dict(line=dict(color='#dc2626'))   # Red
+
+        increasing=dict(line=dict(color='#ef4444')), # Red
+        decreasing=dict(line=dict(color='#22c55e'))  # Green
     ), row=1, col=1)
 
     # 3. MAs - Removed hoverinfo='skip'
@@ -566,3 +569,4 @@ with tab_single:
                         "Exit_MACD_Lead": st.column_config.CheckboxColumn(label="Exit")
                     }
                 )
+
