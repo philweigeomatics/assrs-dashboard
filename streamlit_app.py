@@ -382,6 +382,82 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
 
     return fig
 
+def calculate_monte_carlo(df, days=30, simulations=100):
+    """
+    Runs a Monte Carlo Simulation to predict future price range (30 days).
+    Based on recent volatility (last 100 days).
+    """
+    # 1. Calculate Log Returns
+    df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
+    
+    # 2. Stats (Mean & Std)
+    # Use last 100 days to capture recent regime
+    recent_df = df.tail(100)
+    mean_ret = recent_df['Log_Ret'].mean()
+    std_ret = recent_df['Log_Ret'].std()
+    
+    # 3. Simulation
+    last_price = df['Close'].iloc[-1]
+    simulation_df = pd.DataFrame()
+    
+    # Generate random paths
+    for i in range(simulations):
+        # Random Z-scores
+        random_volatility = np.random.normal(0, 1, days)
+        
+        # Brownian Motion formula: Price_t = Price_t-1 * exp( (mu - 0.5*sigma^2) + sigma*Z )
+        # (mu - 0.5*sigma^2) is the Drift
+        drift = mean_ret - (0.5 * std_ret ** 2)
+        
+        # Calculate daily percentage changes
+        daily_returns = np.exp(drift + std_ret * random_volatility)
+        
+        # Accumulate
+        price_path = [last_price]
+        for r in daily_returns:
+            price_path.append(price_path[-1] * r)
+            
+        simulation_df[f'Sim_{i}'] = price_path
+
+    return simulation_df
+
+def create_monte_carlo_chart(simulation_df):
+    """Plots the Monte Carlo results."""
+    fig = go.Figure()
+    
+    # Plot all simulation paths (faint lines)
+    for col in simulation_df.columns:
+        fig.add_trace(go.Scatter(
+            y=simulation_df[col],
+            mode='lines',
+            line=dict(color='rgba(100, 100, 100, 0.1)', width=1),
+            showlegend=False,
+            hoverinfo='skip'
+        ))
+        
+    # Plot Mean Path
+    mean_path = simulation_df.mean(axis=1)
+    fig.add_trace(go.Scatter(
+        y=mean_path,
+        mode='lines',
+        name='Mean Projection',
+        line=dict(color='#3b82f6', width=3)
+    ))
+    
+    # Plot Starting Price
+    start_price = simulation_df.iloc[0,0]
+    fig.add_hline(y=start_price, line_dash="dash", line_color="gray", annotation_text="Start")
+
+    fig.update_layout(
+        title="Monte Carlo: 30-Day Price Projection (100 Simulations)",
+        yaxis_title="Projected Price",
+        xaxis_title="Days into Future",
+        template="plotly_white",
+        height=500
+    )
+    
+    return fig
+
 @st.cache_data(ttl=600)
 def load_single_stock(ticker: str):
     """
@@ -587,3 +663,26 @@ with tab_single:
                         "Exit_MACD_Lead": st.column_config.CheckboxColumn(label="Exit")
                     }
                 )
+
+                # --- STATISTICAL PREDICTION SECTION (NEW) ---
+                st.markdown("---")
+                st.subheader("Statistical Prediction (Beta)")
+                st.info("Based on recent volatility, where is the price statistically likely to go?")
+                
+                sim_df = calculate_monte_carlo(analysis_df)
+                fig_mc = create_monte_carlo_chart(sim_df)
+                st.plotly_chart(fig_mc, use_container_width=True)
+                
+                # Calculate Stats from Simulation
+                final_prices = sim_df.iloc[-1, :]
+                mean_price = final_prices.mean()
+                upper_bound = np.percentile(final_prices, 95)
+                lower_bound = np.percentile(final_prices, 5)
+                
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.metric("Projected Mean (30d)", f"{mean_price:.2f}")
+                with c2:
+                    st.metric("95% Upside", f"{upper_bound:.2f}")
+                with c3:
+                    st.metric("5% Downside", f"{lower_bound:.2f}")
