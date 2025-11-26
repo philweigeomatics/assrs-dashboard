@@ -5,7 +5,7 @@ from plotly.subplots import make_subplots
 import numpy as np
 import ta
 import os
-from datetime import datetime, timedelta  # Added for fresh data fetching
+from datetime import datetime, timedelta
 
 # Assuming data_manager is in the same directory or path
 import data_manager 
@@ -486,6 +486,11 @@ def load_single_stock(ticker: str):
     MODIFIED: Fetches single stock data DIRECTLY from Tushare (bypassing the Database).
     This ensures the data is always fresh and not stale from previous DB saves.
     """
+    # Fix for Tushare Fetching Issue: 
+    # Explicitly initialize Tushare if not done already (Streamlit context)
+    if data_manager.TUSHARE_API is None:
+        data_manager.init_tushare()
+
     # 1. Define lookback range (Last 3 years for good technicals)
     end_dt = datetime.now()
     start_dt = end_dt - timedelta(days=365 * 3)
