@@ -5,6 +5,7 @@ from plotly.subplots import make_subplots
 import numpy as np
 import ta
 import os
+from datetime import datetime, timedelta  # Added for fresh data fetching
 
 # Assuming data_manager is in the same directory or path
 import data_manager 
@@ -81,7 +82,7 @@ def create_drilldown_chart(chart_data, model_type):
         row_heights=[0.5, 0.2, 0.3]
     )
 
-    # Price
+    # Price (Chinese Colors: Red Up, Green Down)
     fig.add_trace(go.Candlestick(
         x=date_strings,
         open=chart_data['Open'],
@@ -89,8 +90,8 @@ def create_drilldown_chart(chart_data, model_type):
         low=chart_data['Low'],
         close=chart_data['Close'],
         name='Price',
-        increasing=dict(line=dict(color='#b91c1c')),
-        decreasing=dict(line=dict(color='#15803d'))
+        increasing=dict(line=dict(color='#ef4444')), # Red
+        decreasing=dict(line=dict(color='#22c55e'))  # Green
     ), row=1, col=1)
 
     # Volume
@@ -258,7 +259,6 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         mode='lines', name='BB Upper',
         line=dict(width=1, color='rgba(147, 197, 253, 0.5)'),
         showlegend=False,
-        # REMOVED hoverinfo='skip' so you see the data
     ), row=1, col=1)
 
     # Lower Band (Filled)
@@ -268,22 +268,18 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         line=dict(width=1, color='rgba(147, 197, 253, 0.5)'),
         fill='tonexty', fillcolor='rgba(59, 130, 246, 0.05)',
         showlegend=True,
-        # REMOVED hoverinfo='skip' so you see the data
     ), row=1, col=1)
 
-    # 2. Candlesticks
+    # 2. Candlesticks (Chinese Colors: Red Up, Green Down)
     fig.add_trace(go.Candlestick(
         x=date_strings,
         open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
         name='Price',
-       # increasing=dict(line=dict(color='#16a34a')),  # Green
-       # decreasing=dict(line=dict(color='#dc2626'))   # Red
-
         increasing=dict(line=dict(color='#ef4444')), # Red
         decreasing=dict(line=dict(color='#22c55e'))  # Green
     ), row=1, col=1)
 
-    # 3. MAs - Removed hoverinfo='skip'
+    # 3. MAs
     fig.add_trace(go.Scatter(x=date_strings, y=df['MA20'], name='MA20', line=dict(width=1, color='#fbbf24', dash='dot')), row=1, col=1)
     fig.add_trace(go.Scatter(x=date_strings, y=df['MA50'], name='MA50', line=dict(width=1.5, color='#3b82f6')), row=1, col=1)
     fig.add_trace(go.Scatter(x=date_strings, y=df['MA200'], name='MA200', line=dict(width=2, color='#374151')), row=1, col=1)
@@ -305,7 +301,7 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         marker=dict(color='#64748b', size=5, symbol='square-open')
     ), row=1, col=1)
 
-    # Phase 3: Golden Launch (Red Star)
+    # Phase 3: Golden Launch (Red Star - Matches Up)
     launch_df = df[df['Signal_Golden_Launch']]
     fig.add_trace(go.Scatter(
         x=launch_df.index.strftime('%Y-%m-%d'), y=launch_df['High'] * 1.05,
@@ -313,12 +309,12 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         marker=dict(color='#ef4444', size=14, symbol='star', line=dict(width=1, color='black'))
     ), row=1, col=1)
 
-    # Exit Signals (Red X)
+    # Exit Signals (Green X - Matches Down)
     exit_df = df[df['Exit_MACD_Lead']]
     fig.add_trace(go.Scatter(
         x=exit_df.index.strftime('%Y-%m-%d'), y=exit_df['High'] * 1.01,
         mode='markers', name='Exit MACD',
-        marker=dict(color='#f87171', size=8, symbol='x')
+        marker=dict(color='#22c55e', size=8, symbol='x') # Green X for Exit
     ), row=1, col=1)
 
     # --- PANEL 2: VOLUME ---
@@ -334,8 +330,8 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         ), row=2, col=1)
 
     # --- PANEL 3: MACD ---
-    # Histogram colors
-    colors = np.where(df['MACD_Hist'] >= 0, '#22c55e', '#ef4444')
+    # Histogram colors (Red=Pos/Up, Green=Neg/Down)
+    colors = np.where(df['MACD_Hist'] >= 0, '#ef4444', '#22c55e')
     fig.add_trace(go.Bar(
         x=date_strings, y=df['MACD_Hist'], name='MACD Hist',
         marker_color=colors
@@ -367,11 +363,10 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
         margin=dict(l=50, r=20, t=40, b=50),
         xaxis_rangeslider_visible=False,
         
-        # CRITICAL: Use 'x unified' hover mode.
-        # This puts ALL values (Price, MA, Bollinger, etc.) into ONE box at the top.
+        # Unified Hover (Crosshair)
         hovermode="x unified",
         
-        # Enable Spikes (Crosshairs)
+        # Enable Spikes
         xaxis=dict(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, showgrid=True),
         xaxis2=dict(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, showgrid=True),
         xaxis3=dict(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, showgrid=True),
@@ -389,8 +384,31 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
 
 @st.cache_data(ttl=600)
 def load_single_stock(ticker: str):
-    """Cached wrapper around data_manager.get_single_stock_data."""
-    return data_manager.get_single_stock_data(ticker)
+    """
+    MODIFIED: Fetches single stock data DIRECTLY from Tushare (bypassing the Database).
+    This ensures the data is always fresh and not stale from previous DB saves.
+    """
+    # 1. Define lookback range (Last 3 years for good technicals)
+    end_dt = datetime.now()
+    start_dt = end_dt - timedelta(days=365 * 3)
+    
+    start_str = start_dt.strftime('%Y%m%d')
+    end_str = end_dt.strftime('%Y%m%d')
+    
+    # 2. Fetch directly from data_manager's robust fetcher
+    # NOTE: We do NOT call get_single_stock_data() because that saves to DB.
+    df = data_manager.fetch_stock_data_robust(ticker, start_str, end_str)
+    
+    if df is None or df.empty:
+        return None
+        
+    # 3. Calculate Volume Metrics locally (DB helper usually does this)
+    # Used for Z-Score logic in Sector charts, but good to have here too
+    df['Vol_Mean_100d'] = df['Volume'].rolling(window=100, min_periods=20).mean()
+    df['Vol_Std_100d'] = df['Volume'].rolling(window=100, min_periods=20).std()
+    df['Volume_ZScore'] = (df['Volume'] - df['Vol_Mean_100d']) / df['Vol_Std_100d']
+    
+    return df.sort_index()
 
 # --- 4. MAIN APP LAYOUT ---
 
@@ -569,4 +587,3 @@ with tab_single:
                         "Exit_MACD_Lead": st.column_config.CheckboxColumn(label="Exit")
                     }
                 )
-
