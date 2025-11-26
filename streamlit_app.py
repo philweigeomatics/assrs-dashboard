@@ -382,10 +382,13 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
 
     return fig
 
-def calculate_linear_forecast(df, lookback=60, forecast_days=30):
+def calculate_trend_forecast(df, lookback=60, forecast_days=30, degree=1):
     """
-    Calculates a Linear Regression Forecast (Trend Projection).
-    Includes Standard Deviation Bands (2-Sigma) to create a prediction channel.
+    Calculates a Trend Projection (Linear or Polynomial).
+    Includes Standard Deviation Bands (2-Sigma).
+    
+    Args:
+        degree (int): 1 = Linear, 2 = Quadratic (Polynomial)
     """
     # 1. Prepare Data (Use last N days)
     subset = df.tail(lookback).copy()
@@ -397,11 +400,12 @@ def calculate_linear_forecast(df, lookback=60, forecast_days=30):
     y = subset['Close'].values
     x = np.arange(len(y))
     
-    # 2. Linear Regression (y = mx + c)
-    slope, intercept = np.polyfit(x, y, 1)
+    # 2. Fit Regression (Linear or Quadratic)
+    coeffs = np.polyfit(x, y, degree)
+    poly_eqn = np.poly1d(coeffs)
     
     # 3. Calculate Residuals & Std Dev (Sigma) for Bands
-    line_values = slope * x + intercept
+    line_values = poly_eqn(x)
     residuals = y - line_values
     std_dev = np.std(residuals)
     
@@ -410,7 +414,7 @@ def calculate_linear_forecast(df, lookback=60, forecast_days=30):
     future_x = np.arange(last_x + 1, last_x + 1 + forecast_days)
     
     # 5. Project Future Price
-    future_prices = slope * future_x + intercept
+    future_prices = poly_eqn(future_x)
     
     # 6. Create Bands (Forecast + 2*Sigma)
     upper_band = future_prices + (2 * std_dev)
@@ -418,9 +422,9 @@ def calculate_linear_forecast(df, lookback=60, forecast_days=30):
     
     return future_prices, upper_band, lower_band
 
-def create_forecast_chart(df, future_prices, upper_band, lower_band):
+def create_forecast_chart(df, future_prices, upper_band, lower_band, model_name="Linear"):
     """
-    Plots the Historical Price + Linear Forecast + 2-Sigma Bands.
+    Plots the Historical Price + Linear/Poly Forecast + 2-Sigma Bands.
     """
     fig = go.Figure()
     
@@ -464,12 +468,12 @@ def create_forecast_chart(df, future_prices, upper_band, lower_band):
         x=future_x,
         y=future_prices,
         mode='lines',
-        name='Trend Projection',
+        name=f'{model_name} Projection',
         line=dict(color='#2563eb', width=3, dash='dash')
     ))
 
     fig.update_layout(
-        title="Linear Regression Forecast: 30-Day Trend Projection",
+        title=f"Statistical Prediction: {model_name} Trend (30 Days)",
         yaxis_title="Price",
         xaxis_title="Trading Days (Past & Future)",
         template="plotly_white",
@@ -701,17 +705,25 @@ with tab_single:
 
                 # --- STATISTICAL PREDICTION SECTION (NEW) ---
                 st.markdown("---")
-                st.subheader("Statistical Prediction (Linear Forecast)")
+                st.subheader("Statistical Prediction (Forecast)")
                 
-                # Dropdown for lookback selection
-                lookback_option = st.selectbox("Select Lookback Period (Days)", [10, 20, 30, 60], index=2)
+                c_opts, c_info = st.columns([1, 2])
+                with c_opts:
+                    lookback_option = st.selectbox("Lookback Period (Days)", [10, 20, 30, 60], index=2)
+                    model_option = st.radio("Trend Model", ["Linear (Straight)", "Quadratic (Curved)"], index=0)
                 
-                st.info(f"Projection based on {lookback_option}-day Linear Regression with 2-Sigma volatility bands.")
+                with c_info:
+                    if "Linear" in model_option:
+                        st.info(f"**Linear Regression:** Projects the current trend as a straight line based on the last {lookback_option} days. Good for steady trends.")
+                        degree = 1
+                    else:
+                        st.info(f"**Polynomial Regression (Quadratic):** Fits a curve to detect acceleration or deceleration in the trend. Useful for finding parabolic moves.")
+                        degree = 2
                 
-                forecast, upper, lower = calculate_linear_forecast(analysis_df, lookback=lookback_option)
+                forecast, upper, lower = calculate_trend_forecast(analysis_df, lookback=lookback_option, degree=degree)
                 
                 if forecast is not None:
-                    fig_fc = create_forecast_chart(analysis_df, forecast, upper, lower)
+                    fig_fc = create_forecast_chart(analysis_df, forecast, upper, lower, model_name=model_option.split()[0])
                     st.plotly_chart(fig_fc, use_container_width=True)
                     
                     c1, c2, c3 = st.columns(3)
