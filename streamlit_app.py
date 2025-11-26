@@ -382,78 +382,100 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
 
     return fig
 
-def calculate_monte_carlo(df, days=30, simulations=100):
+def calculate_linear_forecast(df, lookback=60, forecast_days=30):
     """
-    Runs a Monte Carlo Simulation to predict future price range (30 days).
-    Based on recent volatility (last 100 days).
+    Calculates a Linear Regression Forecast (Trend Projection).
+    Includes Standard Deviation Bands (2-Sigma) to create a prediction channel.
     """
-    # 1. Calculate Log Returns
-    df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
-    
-    # 2. Stats (Mean & Std)
-    # Use last 100 days to capture recent regime
-    recent_df = df.tail(100)
-    mean_ret = recent_df['Log_Ret'].mean()
-    std_ret = recent_df['Log_Ret'].std()
-    
-    # 3. Simulation
-    last_price = df['Close'].iloc[-1]
-    simulation_df = pd.DataFrame()
-    
-    # Generate random paths
-    for i in range(simulations):
-        # Random Z-scores
-        random_volatility = np.random.normal(0, 1, days)
+    # 1. Prepare Data (Use last N days)
+    subset = df.tail(lookback).copy()
+    if len(subset) < 10:
+        return None, None, None # Not enough data
         
-        # Brownian Motion formula: Price_t = Price_t-1 * exp( (mu - 0.5*sigma^2) + sigma*Z )
-        # (mu - 0.5*sigma^2) is the Drift
-        drift = mean_ret - (0.5 * std_ret ** 2)
-        
-        # Calculate daily percentage changes
-        daily_returns = np.exp(drift + std_ret * random_volatility)
-        
-        # Accumulate
-        price_path = [last_price]
-        for r in daily_returns:
-            price_path.append(price_path[-1] * r)
-            
-        simulation_df[f'Sim_{i}'] = price_path
+    # X = Days as integers (0, 1, 2...)
+    # Y = Close Price
+    y = subset['Close'].values
+    x = np.arange(len(y))
+    
+    # 2. Linear Regression (y = mx + c)
+    slope, intercept = np.polyfit(x, y, 1)
+    
+    # 3. Calculate Residuals & Std Dev (Sigma) for Bands
+    line_values = slope * x + intercept
+    residuals = y - line_values
+    std_dev = np.std(residuals)
+    
+    # 4. Generate Forecast (Future X values)
+    last_x = x[-1]
+    future_x = np.arange(last_x + 1, last_x + 1 + forecast_days)
+    
+    # 5. Project Future Price
+    future_prices = slope * future_x + intercept
+    
+    # 6. Create Bands (Forecast + 2*Sigma)
+    upper_band = future_prices + (2 * std_dev)
+    lower_band = future_prices - (2 * std_dev)
+    
+    return future_prices, upper_band, lower_band
 
-    return simulation_df
-
-def create_monte_carlo_chart(simulation_df):
-    """Plots the Monte Carlo results."""
+def create_forecast_chart(df, future_prices, upper_band, lower_band):
+    """
+    Plots the Historical Price + Linear Forecast + 2-Sigma Bands.
+    """
     fig = go.Figure()
     
-    # Plot all simulation paths (faint lines)
-    for col in simulation_df.columns:
-        fig.add_trace(go.Scatter(
-            y=simulation_df[col],
-            mode='lines',
-            line=dict(color='rgba(100, 100, 100, 0.1)', width=1),
-            showlegend=False,
-            hoverinfo='skip'
-        ))
-        
-    # Plot Mean Path
-    mean_path = simulation_df.mean(axis=1)
+    # 1. Historical Close (Last 100 days for context)
+    history = df.tail(100)
     fig.add_trace(go.Scatter(
-        y=mean_path,
+        x=np.arange(len(history)), 
+        y=history['Close'],
         mode='lines',
-        name='Mean Projection',
-        line=dict(color='#3b82f6', width=3)
+        name='History',
+        line=dict(color='#374151', width=2)
     ))
     
-    # Plot Starting Price
-    start_price = simulation_df.iloc[0,0]
-    fig.add_hline(y=start_price, line_dash="dash", line_color="gray", annotation_text="Start")
+    # Forecast X-axis starts after history
+    start_idx = len(history)
+    future_x = np.arange(start_idx, start_idx + len(future_prices))
+    
+    # 2. Upper Band
+    fig.add_trace(go.Scatter(
+        x=future_x,
+        y=upper_band,
+        mode='lines',
+        name='Upper Band (2σ)',
+        line=dict(width=0),
+        showlegend=False
+    ))
+    
+    # 3. Lower Band (Fill to Upper)
+    fig.add_trace(go.Scatter(
+        x=future_x,
+        y=lower_band,
+        mode='lines',
+        name='Confidence Channel (95%)',
+        line=dict(width=0),
+        fill='tonexty',
+        fillcolor='rgba(59, 130, 246, 0.2)', # Light Blue
+    ))
+    
+    # 4. Mean Forecast Line
+    fig.add_trace(go.Scatter(
+        x=future_x,
+        y=future_prices,
+        mode='lines',
+        name='Trend Projection',
+        line=dict(color='#2563eb', width=3, dash='dash')
+    ))
 
     fig.update_layout(
-        title="Monte Carlo: 30-Day Price Projection (100 Simulations)",
-        yaxis_title="Projected Price",
-        xaxis_title="Days into Future",
+        title="Linear Regression Forecast: 30-Day Trend Projection",
+        yaxis_title="Price",
+        xaxis_title="Trading Days (Past & Future)",
         template="plotly_white",
-        height=500
+        height=500,
+        xaxis=dict(showgrid=False),
+        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
     )
     
     return fig
@@ -666,23 +688,25 @@ with tab_single:
 
                 # --- STATISTICAL PREDICTION SECTION (NEW) ---
                 st.markdown("---")
-                st.subheader("Statistical Prediction (Beta)")
-                st.info("Based on recent volatility, where is the price statistically likely to go?")
+                st.subheader("Statistical Prediction (Linear Forecast)")
                 
-                sim_df = calculate_monte_carlo(analysis_df)
-                fig_mc = create_monte_carlo_chart(sim_df)
-                st.plotly_chart(fig_mc, use_container_width=True)
+                # Dropdown for lookback selection
+                lookback_option = st.selectbox("Select Lookback Period (Days)", [10, 20, 30, 60], index=2)
                 
-                # Calculate Stats from Simulation
-                final_prices = sim_df.iloc[-1, :]
-                mean_price = final_prices.mean()
-                upper_bound = np.percentile(final_prices, 95)
-                lower_bound = np.percentile(final_prices, 5)
+                st.info(f"Projection based on {lookback_option}-day Linear Regression with 2-Sigma volatility bands.")
                 
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.metric("Projected Mean (30d)", f"{mean_price:.2f}")
-                with c2:
-                    st.metric("95% Upside", f"{upper_bound:.2f}")
-                with c3:
-                    st.metric("5% Downside", f"{lower_bound:.2f}")
+                forecast, upper, lower = calculate_linear_forecast(analysis_df, lookback=lookback_option)
+                
+                if forecast is not None:
+                    fig_fc = create_forecast_chart(analysis_df, forecast, upper, lower)
+                    st.plotly_chart(fig_fc, use_container_width=True)
+                    
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.metric("Projected Target (30d)", f"{forecast[-1]:.2f}")
+                    with c2:
+                        st.metric("Upside Resistance (2σ)", f"{upper[-1]:.2f}")
+                    with c3:
+                        st.metric("Downside Support (2σ)", f"{lower[-1]:.2f}")
+                else:
+                    st.warning("Not enough recent data to generate a reliable forecast.")
