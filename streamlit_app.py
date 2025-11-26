@@ -602,19 +602,27 @@ with tab_single:
     st.markdown("### 3-Phase Single Stock Analysis")
     st.info("Logic: Phase 1 (Accumulation/OBV) → Phase 2 (Squeeze/Bollinger) → Phase 3 (Launch/ADX)")
 
+    # Initialize session state for the active ticker
+    if 'active_ticker' not in st.session_state:
+        st.session_state.active_ticker = None
+
     c1, c2 = st.columns([3, 1])
     with c1:
-        ticker = st.text_input("Enter Stock Code (e.g., 600760)", key="single_ticker")
+        ticker_input = st.text_input("Enter Stock Code (e.g., 600760)", key="ticker_input")
     with c2:
-        analyze_clicked = st.button("Analyze", key="single_analyze")
+        if st.button("Analyze", key="analyze_btn"):
+            st.session_state.active_ticker = ticker_input
 
-    if analyze_clicked and ticker:
-        stock_df = load_single_stock(ticker.strip())
+    if st.session_state.active_ticker:
+        ticker = st.session_state.active_ticker.strip()
+        
+        # Fetch data
+        stock_df = load_single_stock(ticker)
+        
         if stock_df is None or stock_df.empty:
             st.error(
-                "No data found for this ticker in the local database, "
-                "and fetching from Tushare also failed. "
-                "Check that the ticker is valid and that Tushare is configured correctly."
+                f"No data found for {ticker}. "
+                "Check that the ticker is valid and Tushare is configured."
             )
         else:
             # Run the NEW 3-Phase Logic
