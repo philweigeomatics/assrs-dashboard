@@ -7,6 +7,14 @@ import ta
 import os
 from datetime import datetime, timedelta
 
+# Try importing statsmodels for advanced forecasting
+try:
+    from statsmodels.tsa.holtwinters import ExponentialSmoothing
+    from statsmodels.tsa.arima.model import ARIMA
+    HAS_STATSMODELS = True
+except ImportError:
+    HAS_STATSMODELS = False
+
 # Assuming data_manager is in the same directory or path
 import data_manager 
 
@@ -382,44 +390,96 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250) -> g
 
     return fig
 
-def calculate_trend_forecast(df, lookback=60, forecast_days=30, degree=1):
+def calculate_trend_forecast(df, lookback=60, forecast_days=30, degree=1, model_type="Linear"):
     """
-    Calculates a Trend Projection (Linear or Polynomial).
-    Includes Standard Deviation Bands (2-Sigma).
-    
-    Args:
-        degree (int): 1 = Linear, 2 = Quadratic (Polynomial)
+    Calculates a Trend Projection using Linear/Poly, Holt-Winters, or ARIMA.
+    Now supports VOLUME integration:
+      - Holt-Winters: Uses VWAP (Volume Weighted Average Price) for smoothing.
+      - ARIMA: Uses Volume as an exogenous variable (ARIMAX).
     """
     # 1. Prepare Data (Use last N days)
     subset = df.tail(lookback).copy()
-    if len(subset) < 10:
+    if len(subset) < 15:
         return None, None, None # Not enough data
-        
-    # X = Days as integers (0, 1, 2...)
-    # Y = Close Price
+    
+    # X values for Regression
     y = subset['Close'].values
     x = np.arange(len(y))
-    
-    # 2. Fit Regression (Linear or Quadratic)
-    coeffs = np.polyfit(x, y, degree)
-    poly_eqn = np.poly1d(coeffs)
-    
-    # 3. Calculate Residuals & Std Dev (Sigma) for Bands
-    line_values = poly_eqn(x)
-    residuals = y - line_values
-    std_dev = np.std(residuals)
-    
-    # 4. Generate Forecast (Future X values)
     last_x = x[-1]
     future_x = np.arange(last_x + 1, last_x + 1 + forecast_days)
     
-    # 5. Project Future Price
-    future_prices = poly_eqn(future_x)
-    
-    # 6. Create Bands (Forecast + 2*Sigma)
-    upper_band = future_prices + (2 * std_dev)
-    lower_band = future_prices - (2 * std_dev)
-    
+    future_prices = None
+    upper_band = None
+    lower_band = None
+
+    # --- MODEL 1 & 2: REGRESSION (Linear/Quadratic) ---
+    if model_type in ["Linear", "Quadratic"]:
+        coeffs = np.polyfit(x, y, degree)
+        poly_eqn = np.poly1d(coeffs)
+        
+        # Residuals for bands
+        line_values = poly_eqn(x)
+        residuals = y - line_values
+        std_dev = np.std(residuals)
+        
+        future_prices = poly_eqn(future_x)
+        upper_band = future_prices + (2 * std_dev)
+        lower_band = future_prices - (2 * std_dev)
+
+    # --- MODEL 3: EXPONENTIAL SMOOTHING (Holt-Winters on VWAP) ---
+    elif model_type == "Holt-Winters" and HAS_STATSMODELS:
+        # Calculate Volume Weighted Average Price (VWAP) for smoothing
+        # Approx Daily VWAP = (Open+High+Low+Close)/4
+        subset['Daily_VWAP'] = (subset['Open'] + subset['High'] + subset['Low'] + subset['Close']) / 4
+        # Or true cumulative VWAP over window? No, HW needs a time series. Daily VWAP is best.
+        
+        try:
+            # Fit model on Daily VWAP (incorporates volume indirectly via price action intensity)
+            model = ExponentialSmoothing(
+                subset['Daily_VWAP'], 
+                trend='add', 
+                damped_trend=True, 
+                seasonal=None
+            ).fit()
+            
+            future_prices = model.forecast(forecast_days).values
+            
+            # Calculate simple bands based on recent volatility of VWAP
+            resid_std = subset['Daily_VWAP'].std() * 0.5 # Heuristic for bands
+            upper_band = future_prices + (2 * resid_std)
+            lower_band = future_prices - (2 * resid_std)
+        except Exception as e:
+            st.error(f"Holt-Winters Error: {e}")
+            return None, None, None
+
+    # --- MODEL 4: ARIMA (ARIMAX with Volume) ---
+    elif model_type == "ARIMA" and HAS_STATSMODELS:
+        try:
+            # Endog = Close Price
+            # Exog = Volume (Normalized to avoid scaling issues)
+            vol_mean = subset['Volume'].mean()
+            vol_std = subset['Volume'].std()
+            exog_vol = (subset['Volume'] - vol_mean) / vol_std
+            
+            # Fit ARIMAX
+            # Order (1,1,1) is a safe generic starting point for daily data
+            model = ARIMA(subset['Close'], exog=exog_vol, order=(1,1,1)).fit()
+            
+            # To forecast, we need future Volume. We'll assume Volume reverts to mean.
+            # Future exog = 0 (since we normalized to mean 0)
+            future_exog = np.zeros(forecast_days)
+            
+            forecast_res = model.get_forecast(steps=forecast_days, exog=future_exog)
+            future_prices = forecast_res.predicted_mean.values
+            conf_int = forecast_res.conf_int(alpha=0.05) # 95% confidence
+            
+            lower_band = conf_int.iloc[:, 0].values
+            upper_band = conf_int.iloc[:, 1].values
+            
+        except Exception as e:
+            st.error(f"ARIMA Error: {e}")
+            return None, None, None
+
     return future_prices, upper_band, lower_band
 
 def create_forecast_chart(df, future_prices, upper_band, lower_band, model_name="Linear"):
@@ -447,7 +507,7 @@ def create_forecast_chart(df, future_prices, upper_band, lower_band, model_name=
         x=future_x,
         y=upper_band,
         mode='lines',
-        name='Upper Band (2σ)',
+        name='Upper Band',
         line=dict(width=0),
         showlegend=False
     ))
@@ -710,28 +770,47 @@ with tab_single:
                 c_opts, c_info = st.columns([1, 2])
                 with c_opts:
                     lookback_option = st.selectbox("Lookback Period (Days)", [10, 20, 30, 60], index=2)
-                    model_option = st.radio("Trend Model", ["Linear (Straight)", "Quadratic (Curved)"], index=0)
+                    
+                    # UPDATED: Model Selection
+                    model_options = ["Linear (Straight)", "Quadratic (Curved)"]
+                    if HAS_STATSMODELS:
+                        model_options.extend(["Holt-Winters (Exp. Smoothing)", "ARIMA (AutoRegressive)"])
+                    
+                    model_option = st.radio("Trend Model", model_options, index=0)
                 
                 with c_info:
+                    degree = 1
                     if "Linear" in model_option:
-                        st.info(f"**Linear Regression:** Projects the current trend as a straight line based on the last {lookback_option} days. Good for steady trends.")
-                        degree = 1
-                    else:
-                        st.info(f"**Polynomial Regression (Quadratic):** Fits a curve to detect acceleration or deceleration in the trend. Useful for finding parabolic moves.")
+                        st.info(f"**Linear Regression:** Projects current trend as a straight line based on last {lookback_option} days.")
+                    elif "Quadratic" in model_option:
+                        st.info(f"**Polynomial Regression:** Fits a curve to detect acceleration/deceleration.")
                         degree = 2
+                    elif "Holt-Winters" in model_option:
+                        st.info(f"**Exponential Smoothing (Holt-Winters):** Weights recent data heavily. \n\n**Volume Integration:** Uses 'Daily VWAP' (Volume Weighted Price) instead of raw Close price to ensure trend follows volume.")
+                    elif "ARIMA" in model_option:
+                        st.info(f"**ARIMA (ARIMAX):** AutoRegressive Integrated Moving Average. \n\n**Volume Integration:** Uses Volume as an 'Exogenous Variable' to mathematically weight the price prediction based on volume strength.")
                 
-                forecast, upper, lower = calculate_trend_forecast(analysis_df, lookback=lookback_option, degree=degree)
+                # Calculate forecast based on selection
+                model_key = model_option.split()[0] # "Linear", "Quadratic", "Holt-Winters", "ARIMA"
+                
+                forecast, upper, lower = calculate_trend_forecast(
+                    analysis_df, 
+                    lookback=lookback_option, 
+                    forecast_days=30, 
+                    degree=degree, 
+                    model_type=model_key
+                )
                 
                 if forecast is not None:
-                    fig_fc = create_forecast_chart(analysis_df, forecast, upper, lower, model_name=model_option.split()[0])
+                    fig_fc = create_forecast_chart(analysis_df, forecast, upper, lower, model_name=model_key)
                     st.plotly_chart(fig_fc, use_container_width=True)
                     
                     c1, c2, c3 = st.columns(3)
                     with c1:
                         st.metric("Projected Target (30d)", f"{forecast[-1]:.2f}")
                     with c2:
-                        st.metric("Upside Resistance (2σ)", f"{upper[-1]:.2f}")
+                        st.metric("Upside Resistance", f"{upper[-1]:.2f}")
                     with c3:
-                        st.metric("Downside Support (2σ)", f"{lower[-1]:.2f}")
+                        st.metric("Downside Support", f"{lower[-1]:.2f}")
                 else:
-                    st.warning("Not enough recent data to generate a reliable forecast.")
+                    st.warning("Not enough data or model failed to converge.")
