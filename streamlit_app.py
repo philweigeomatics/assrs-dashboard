@@ -840,7 +840,7 @@ with tab_single:
     if 'active_ticker' not in st.session_state:
         st.session_state.active_ticker = None
 
-     c1, c2 = st.columns([3, 1])
+    c1, c2 = st.columns([3, 1])
     with c1:
         ticker_input = st.text_input("Enter Stock Code (e.g., 600760)", key="ticker_input")
     with c2:
@@ -1014,4 +1014,5 @@ with tab_single:
                         st.metric("Downside Support", f"{lower[-1]:.2f}")
                 else:
                     st.warning("Not enough data or model failed to converge.")
+
 
