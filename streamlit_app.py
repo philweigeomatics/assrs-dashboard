@@ -840,25 +840,40 @@ with tab_single:
     if 'active_ticker' not in st.session_state:
         st.session_state.active_ticker = None
 
-    c1, c2 = st.columns([3, 1])
+     c1, c2 = st.columns([3, 1])
     with c1:
         ticker_input = st.text_input("Enter Stock Code (e.g., 600760)", key="ticker_input")
     with c2:
         if st.button("Analyze", key="analyze_btn"):
             st.session_state.active_ticker = ticker_input
 
+    # Search history (clickable)
+    history = data_manager.get_search_history()
+    if history:
+        st.caption("Recent searches (click to load):")
+        hist_cols = st.columns(min(len(history), 5))
+        for idx, item in enumerate(history):
+            col = hist_cols[idx % len(hist_cols)]
+            with col:
+                if st.button(item['ticker'], key=f"history_{idx}"):
+                    st.session_state.active_ticker = item['ticker']
+                    st.session_state.ticker_input = item['ticker']
+
     if st.session_state.active_ticker:
         ticker = st.session_state.active_ticker.strip()
-        
+
         # Fetch data
         stock_df = load_single_stock(ticker)
-        
+
         if stock_df is None or stock_df.empty:
             st.error(
                 f"No data found for {ticker}. "
                 "Check that the ticker is valid and Tushare is configured."
             )
         else:
+            # Update search history only on successful fetch
+            data_manager.update_search_history(ticker)
+
             # Run the NEW 3-Phase Logic
             analysis_df = run_single_stock_analysis(stock_df)
             
@@ -999,3 +1014,4 @@ with tab_single:
                         st.metric("Downside Support", f"{lower[-1]:.2f}")
                 else:
                     st.warning("Not enough data or model failed to converge.")
+
