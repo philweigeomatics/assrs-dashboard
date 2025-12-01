@@ -840,12 +840,21 @@ with tab_single:
     if 'active_ticker' not in st.session_state:
         st.session_state.active_ticker = None
 
+    def set_active_ticker(ticker: str):
+        """Set the selected ticker and sync the input box."""
+        st.session_state.active_ticker = ticker
+        st.session_state.ticker_input = ticker
+
+    def analyze_ticker():
+        ticker_val = st.session_state.get("ticker_input")
+        if ticker_val:
+            st.session_state.active_ticker = ticker_val
+
     c1, c2 = st.columns([3, 1])
     with c1:
         ticker_input = st.text_input("Enter Stock Code (e.g., 600760)", key="ticker_input")
     with c2:
-        if st.button("Analyze", key="analyze_btn"):
-            st.session_state.active_ticker = ticker_input
+        st.button("Analyze", key="analyze_btn", on_click=analyze_ticker)
 
     # Search history (clickable)
     history = data_manager.get_search_history()
@@ -855,9 +864,12 @@ with tab_single:
         for idx, item in enumerate(history):
             col = hist_cols[idx % len(hist_cols)]
             with col:
-                if st.button(item['ticker'], key=f"history_{idx}"):
-                    st.session_state.active_ticker = item['ticker']
-                    st.session_state.ticker_input = item['ticker']
+                st.button(
+                    item['ticker'],
+                    key=f"history_{idx}",
+                    on_click=set_active_ticker,
+                    args=(item['ticker'],),
+                )
 
     if st.session_state.active_ticker:
         ticker = st.session_state.active_ticker.strip()
@@ -1014,5 +1026,6 @@ with tab_single:
                         st.metric("Downside Support", f"{lower[-1]:.2f}")
                 else:
                     st.warning("Not enough data or model failed to converge.")
+
 
 
