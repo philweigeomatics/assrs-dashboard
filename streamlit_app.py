@@ -853,23 +853,25 @@ with tab_single:
     c1, c2 = st.columns([3, 1])
     with c1:
         ticker_input = st.text_input("Enter Stock Code (e.g., 600760)", key="ticker_input")
+
+        # Search history (clickable)
+        history = data_manager.get_search_history()
+        if history:
+            st.caption("Recent searches (click to load):")
+            hist_cols = st.columns(min(len(history), 5), gap="small")
+            for idx, item in enumerate(history):
+                col = hist_cols[idx % len(hist_cols)]
+                with col:
+                    st.button(
+                        item['ticker'],
+                        key=f"history_{idx}",
+                        on_click=set_active_ticker,
+                        args=(item['ticker'],),
+                    )
+
     with c2:
         st.button("Analyze", key="analyze_btn", on_click=analyze_ticker)
 
-    # Search history (clickable)
-    history = data_manager.get_search_history()
-    if history:
-        st.caption("Recent searches (click to load):")
-        hist_cols = st.columns(min(len(history), 5))
-        for idx, item in enumerate(history):
-            col = hist_cols[idx % len(hist_cols)]
-            with col:
-                st.button(
-                    item['ticker'],
-                    key=f"history_{idx}",
-                    on_click=set_active_ticker,
-                    args=(item['ticker'],),
-                )
 
     if st.session_state.active_ticker:
         ticker = st.session_state.active_ticker.strip()
@@ -1026,6 +1028,7 @@ with tab_single:
                         st.metric("Downside Support", f"{lower[-1]:.2f}")
                 else:
                     st.warning("Not enough data or model failed to converge.")
+
 
 
 
