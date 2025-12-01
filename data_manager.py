@@ -470,5 +470,37 @@ def get_single_stock_data(ticker, use_data_start_date: bool = True, lookback_yea
 
     return df_final
 
+# ---  SEARCH HISTORY FUNCTIONS (NEW) ---
+
+def create_history_table(conn):
+    """Creates search history table if not exists. Only stores ticker & timestamp."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS search_history (
+            ticker TEXT PRIMARY KEY,
+            timestamp TEXT
+        );
+    """)
+
+def update_search_history(ticker):
+    """Updates search history table, keeps only last 10."""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    with sqlite3.connect(DB_NAME) as conn:
+        create_history_table(conn)
+        # Insert or update ticker
+        conn.execute("REPLACE INTO search_history (ticker, timestamp) VALUES (?, ?)", (ticker, timestamp))
+        # Prune old entries (Keep top 10 newest)
+        conn.execute("DELETE FROM search_history WHERE ticker NOT IN (SELECT ticker FROM search_history ORDER BY timestamp DESC LIMIT 10)")
+        print(f"[data_manager] History updated: {ticker}")
+
+def get_search_history():
+    """Returns list of last 10 searched stocks."""
+    with sqlite3.connect(DB_NAME) as conn:
+        create_history_table(conn)
+        cursor = conn.execute("SELECT ticker FROM search_history ORDER BY timestamp DESC")
+        # Returns list of dicts for easy jinja usage
+        return [{'ticker': row[0]} for row in cursor.fetchall()]
+
 
 # ---!!!--- END OF NEW FUNCTION ---!!!---
+
