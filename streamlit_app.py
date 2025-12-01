@@ -236,30 +236,56 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
     return df_analysis
 
-def calculate_trading_block(df, lookback=30): # CHANGED: Default lookback 30
+def calculate_trading_block(df, lookback=30):
     """
-    Identifies the current 'Trading Block' (Support/Resistance) using Volume Profile.
-    Returns: block_top, block_bottom, status_string
+    Identifies the 'Trading Block' with DYNAMIC ANCHORING.
+    Logic:
+    1. Look at last N days (lookback).
+    2. Check for a "Regime Shift" (Volume Surge + Price Jump) within this window.
+    3. If a shift occurred, RESET the start date to that breakout day.
+    4. Calculate Volume Profile on the *new* truncated window.
     """
-    subset = df.tail(lookback).copy()
-    if len(subset) < 20:
-        return None, None, "Insufficient Data"
+    if len(df) < 20: return None, None, "Insufficient Data", None
     
-    # 1. Bucket prices into bins
+    # 1. Get initial window
+    subset = df.tail(lookback).copy()
+    
+    # 2. DYNAMIC ANCHOR CHECK
+    # Identify big moves: Close changed > 3% AND Volume > 1.5x Avg
+    subset['Pct_Change'] = subset['Close'].pct_change().abs()
+    subset['Vol_Ratio'] = subset['Volume'] / subset['Volume'].rolling(20).mean().shift(1)
+    
+    # Find indices where a "Jump" occurred
+    breakout_days = subset[
+        (subset['Pct_Change'] > 0.03) & 
+        (subset['Vol_Ratio'] > 1.5)
+    ]
+    
+    # If a breakout happened recently (but not TODAY, we want established blocks),
+    # use that as the new anchor.
+    anchor_date = None
+    if not breakout_days.empty:
+        # Get the most recent breakout
+        last_breakout_idx = breakout_days.index[-1]
+        
+        # Ensure we have at least 3 days of data SINCE the breakout to form a block
+        days_since = len(subset.loc[last_breakout_idx:])
+        if days_since >= 3 and days_since < lookback:
+            # RESET THE SUBSET to start from the breakout
+            subset = subset.loc[last_breakout_idx:]
+            anchor_date = last_breakout_idx.strftime('%Y-%m-%d')
+
+    # 3. Standard Volume Profile Logic (on potentially truncated subset)
     price_min = subset['Low'].min()
     price_max = subset['High'].max()
     bins = np.linspace(price_min, price_max, 21) # 20 bins
     
-    # 2. Assign volume to bins
     indices = np.digitize(subset['Close'], bins)
-    
     bin_volumes = {}
     for i, vol in zip(indices, subset['Volume']):
         bin_volumes[i] = bin_volumes.get(i, 0) + vol
         
-    # 3. Find the "Value Area" (70% of volume)
     sorted_bins = sorted(bin_volumes.items(), key=lambda x: x[1], reverse=True)
-    
     total_volume = sum(bin_volumes.values())
     current_vol = 0
     value_bins = []
@@ -270,11 +296,8 @@ def calculate_trading_block(df, lookback=30): # CHANGED: Default lookback 30
         if current_vol > 0.7 * total_volume:
             break
             
-    # 4. Determine Block Levels
     valid_indices = [i for i in value_bins if 1 <= i < len(bins)]
-    
-    if not valid_indices:
-        return price_max, price_min, "Undefined"
+    if not valid_indices: return price_max, price_min, "Undefined", anchor_date
         
     min_idx = min(valid_indices)
     max_idx = max(valid_indices)
@@ -282,9 +305,8 @@ def calculate_trading_block(df, lookback=30): # CHANGED: Default lookback 30
     block_bottom = bins[min_idx-1]
     block_top = bins[max_idx]
     
-    # 5. Status Check (Breakout detection)
+    # 4. Status Check
     last_close = subset['Close'].iloc[-1]
-    
     if last_close > block_top * 1.01:
         status = "BREAKOUT (Bullish)"
     elif last_close < block_bottom * 0.99:
@@ -292,7 +314,7 @@ def calculate_trading_block(df, lookback=30): # CHANGED: Default lookback 30
     else:
         status = "INSIDE BLOCK"
         
-    return block_top, block_bottom, status
+    return block_top, block_bottom, status, anchor_date
 
 def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250, block_info=None) -> go.Figure:
     """
@@ -338,35 +360,35 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250, bloc
 
     # --- TRADING BLOCK OVERLAY ---
     if block_info and block_info[0] is not None:
-        top, bottom, status = block_info # Unpack status
+        top, bottom, status, anchor = block_info # Unpack status + anchor
         
-        # Determine Color & Label based on Status
+        # Color Logic
         if "BREAKOUT" in status:
-            # Bullish Breakout: Old block is now SUPPORT BASE (Blue/Grey)
-            block_color = "rgba(59, 130, 246, 0.15)" # Blue tint
+            block_color = "rgba(59, 130, 246, 0.15)" # Blue
             line_color = "rgba(59, 130, 246, 0.6)"
             top_label = f"Base Top: {top:.2f}"
             bot_label = f"Base Bot: {bottom:.2f}"
         elif "BREAKDOWN" in status:
-            # Bearish Breakdown: Old block is OVERHEAD RESISTANCE (Red)
-            block_color = "rgba(239, 68, 68, 0.15)" # Red tint
+            block_color = "rgba(239, 68, 68, 0.15)" # Red
             line_color = "rgba(239, 68, 68, 0.6)"
             top_label = f"Res Top: {top:.2f}"
             bot_label = f"Res Bot: {bottom:.2f}"
         else:
-            # Inside: Standard Consolidation (Purple)
-            block_color = "rgba(147, 51, 234, 0.15)" # Purple tint
+            block_color = "rgba(147, 51, 234, 0.15)" # Purple
             line_color = "rgba(147, 51, 234, 0.6)"
             top_label = f"Range Top: {top:.2f}"
             bot_label = f"Range Bot: {bottom:.2f}"
 
-        # Calculate start date for shape (last 30 days default)
-        lookback_len = 30 
-        if len(df) >= lookback_len:
-            start_shape_idx = len(df) - lookback_len
-            start_date_str = date_strings[start_shape_idx]
+        # Logic for Shape Start Date
+        # If we have an anchor (dynamic reset), start the box THERE.
+        # Otherwise start 30 days ago.
+        if anchor:
+            start_date_str = anchor
         else:
-            start_date_str = date_strings[0]
+            if len(df) >= 30:
+                start_date_str = date_strings[len(df) - 30]
+            else:
+                start_date_str = date_strings[0]
             
         end_date_str = date_strings[-1]
         
@@ -379,7 +401,6 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250, bloc
             row=1, col=1,
             layer="below"
         )
-        # Add labels with PRICES
         fig.add_annotation(x=end_date_str, y=top, text=top_label, showarrow=False, yshift=10, font=dict(size=10, color=line_color), row=1, col=1)
         fig.add_annotation(x=end_date_str, y=bottom, text=bot_label, showarrow=False, yshift=-10, font=dict(size=10, color=line_color), row=1, col=1)
 
@@ -805,7 +826,7 @@ with tab_single:
             
             # --- NEW: Trading Block Analysis ---
             # Using 30-day default lookback as requested
-            block_top, block_bot, block_status = calculate_trading_block(analysis_df, lookback=30)
+            block_top, block_bot, block_status, anchor = calculate_trading_block(analysis_df, lookback=30)
 
             # Check if we have enough data
             if analysis_df.empty or len(analysis_df) < 50:
@@ -814,7 +835,7 @@ with tab_single:
                 latest_row = analysis_df.iloc[-1]
 
                 # Create the NEW 4-Panel Chart (Passing block info now)
-                fig_stock = create_single_stock_chart(analysis_df, block_info=(block_top, block_bot, block_status))
+                fig_stock = create_single_stock_chart(analysis_df, block_info=(block_top, block_bot, block_status, anchor))
                 st.plotly_chart(fig_stock, use_container_width=True)
 
                 # NEW: Latest signals summary (Cards)
