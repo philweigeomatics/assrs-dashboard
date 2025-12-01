@@ -236,90 +236,128 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
     return df_analysis
 
-def calculate_trading_block(df, lookback=30):
+def calculate_multiple_blocks(df, lookback=60):
     """
-    Identifies the 'Trading Block' with DYNAMIC ANCHORING.
+    Identifies MULTIPLE trading blocks within the lookback window.
+    Returns a list of block dicts: [{'start':, 'end':, 'top':, 'bot':, 'status':}, ...]
     Logic:
-    1. Look at last N days (lookback).
-    2. Check for a "Regime Shift" (Volume Surge + Price Jump) within this window.
-    3. If a shift occurred, RESET the start date to that breakout day.
-    4. Calculate Volume Profile on the *new* truncated window.
+    1. Iterate through the window.
+    2. Detect 'Breakouts' (Regime Shifts).
+    3. Slice the data between breakouts to form discrete blocks.
     """
-    if len(df) < 20: return None, None, "Insufficient Data", None
+    if len(df) < 20: return []
     
-    # 1. Get initial window
+    # Use the last N days
     subset = df.tail(lookback).copy()
+    all_dates = subset.index.tolist()
     
-    # 2. DYNAMIC ANCHOR CHECK
-    # Identify big moves: Close changed > 3% AND Volume > 1.5x Avg
+    # 1. Detect Breakout Indices
     subset['Pct_Change'] = subset['Close'].pct_change().abs()
     subset['Vol_Ratio'] = subset['Volume'] / subset['Volume'].rolling(20).mean().shift(1)
     
-    # Find indices where a "Jump" occurred
-    breakout_days = subset[
-        (subset['Pct_Change'] > 0.03) & 
-        (subset['Vol_Ratio'] > 1.5)
-    ]
+    # Breakout = High Vol + Price Move
+    breakout_mask = (subset['Pct_Change'] > 0.03) & (subset['Vol_Ratio'] > 1.5)
+    breakout_dates = subset.index[breakout_mask].tolist()
     
-    # If a breakout happened recently (but not TODAY, we want established blocks),
-    # use that as the new anchor.
-    anchor_date = None
-    if not breakout_days.empty:
-        # Get the most recent breakout
-        last_breakout_idx = breakout_days.index[-1]
-        
-        # Ensure we have at least 3 days of data SINCE the breakout to form a block
-        days_since = len(subset.loc[last_breakout_idx:])
-        if days_since >= 3 and days_since < lookback:
-            # RESET THE SUBSET to start from the breakout
-            subset = subset.loc[last_breakout_idx:]
-            anchor_date = last_breakout_idx.strftime('%Y-%m-%d')
-
-    # 3. Standard Volume Profile Logic (on potentially truncated subset)
-    price_min = subset['Low'].min()
-    price_max = subset['High'].max()
-    bins = np.linspace(price_min, price_max, 21) # 20 bins
+    # 2. Define Boundaries (Start, Breakouts, End)
+    # We use indices to slice
+    # 0 is start of lookback
+    # len-1 is today
+    boundary_indices = [0] 
     
-    indices = np.digitize(subset['Close'], bins)
-    bin_volumes = {}
-    for i, vol in zip(indices, subset['Volume']):
-        bin_volumes[i] = bin_volumes.get(i, 0) + vol
-        
-    sorted_bins = sorted(bin_volumes.items(), key=lambda x: x[1], reverse=True)
-    total_volume = sum(bin_volumes.values())
-    current_vol = 0
-    value_bins = []
-    
-    for bin_idx, vol in sorted_bins:
-        current_vol += vol
-        value_bins.append(bin_idx)
-        if current_vol > 0.7 * total_volume:
-            break
+    for d in breakout_dates:
+        if d in all_dates:
+            boundary_indices.append(all_dates.index(d))
             
-    valid_indices = [i for i in value_bins if 1 <= i < len(bins)]
-    if not valid_indices: return price_max, price_min, "Undefined", anchor_date
-        
-    min_idx = min(valid_indices)
-    max_idx = max(valid_indices)
+    boundary_indices.append(len(all_dates))
+    boundary_indices = sorted(list(set(boundary_indices)))
     
-    block_bottom = bins[min_idx-1]
-    block_top = bins[max_idx]
+    blocks = []
     
-    # 4. Status Check
-    last_close = subset['Close'].iloc[-1]
-    if last_close > block_top * 1.01:
-        status = "BREAKOUT (Bullish)"
-    elif last_close < block_bottom * 0.99:
-        status = "BREAKDOWN (Bearish)"
-    else:
-        status = "INSIDE BLOCK"
+    # 3. Iterate through segments
+    for i in range(len(boundary_indices) - 1):
+        idx_start = boundary_indices[i]
+        idx_end = boundary_indices[i+1]
         
-    return block_top, block_bottom, status, anchor_date
+        # Determine Segment
+        # Ideally, a block goes from [Start] to [Breakout-1]
+        # The breakout day itself starts the NEXT block.
+        # Exception: The LAST block goes to the end.
+        
+        if i == len(boundary_indices) - 2:
+            # Last Segment (Active)
+            seg_df = subset.iloc[idx_start:]
+            is_active = True
+        else:
+            # Historic Segment
+            seg_df = subset.iloc[idx_start:idx_end]
+            is_active = False
+            
+        if len(seg_df) < 3: continue # Skip noise
+        
+        # 4. Volume Profile for this Segment
+        price_min = seg_df['Low'].min()
+        price_max = seg_df['High'].max()
+        
+        # If flat line (rare), offset slightly
+        if price_min == price_max: price_max += 0.01
+            
+        bins = np.linspace(price_min, price_max, 21) 
+        indices = np.digitize(seg_df['Close'], bins)
+        
+        bin_volumes = {}
+        for j, vol in zip(indices, seg_df['Volume']):
+            bin_volumes[j] = bin_volumes.get(j, 0) + vol
+            
+        sorted_bins = sorted(bin_volumes.items(), key=lambda x: x[1], reverse=True)
+        total_volume = sum(bin_volumes.values())
+        current_vol = 0
+        value_bins = []
+        
+        for bin_idx, vol in sorted_bins:
+            current_vol += vol
+            value_bins.append(bin_idx)
+            if current_vol > 0.7 * total_volume:
+                break
+                
+        valid_indices = [v for v in value_bins if 1 <= v < len(bins)]
+        if not valid_indices: continue
+            
+        top = bins[max(valid_indices)]
+        bot = bins[min(valid_indices)-1]
+        
+        # 5. Status
+        # For active block, check last price.
+        # For historic, check how it ended (did price go up or down?)
+        last_c = seg_df['Close'].iloc[-1]
+        
+        status = "INSIDE"
+        if is_active:
+            if last_c > top * 1.01: status = "BREAKOUT"
+            elif last_c < bot * 0.99: status = "BREAKDOWN"
+        else:
+            # How did this block end? Look at the NEXT day's open/close?
+            # Or just check the last candle of this block
+            # Usually the "Breakout" day is the start of the NEXT block.
+            # So the last day of THIS block is pre-breakout.
+            # Let's just call it "Historic"
+            status = "HISTORIC"
 
-def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250, block_info=None) -> go.Figure:
+        blocks.append({
+            'start': seg_df.index[0].strftime('%Y-%m-%d'),
+            'end': seg_df.index[-1].strftime('%Y-%m-%d'),
+            'top': top,
+            'bot': bot,
+            'status': status,
+            'is_active': is_active
+        })
+        
+    return blocks
+
+def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250, blocks=None) -> go.Figure:
     """
     Build a 4-panel Plotly chart matching the WebApp:
-    1) Price + Bollinger Bands + MAs + Signals + TRADING BLOCK
+    1) Price + Bollinger Bands + MAs + Signals + TRADING BLOCKS
     2) Volume
     3) MACD
     4) RSI
@@ -358,51 +396,51 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250, bloc
         showlegend=True,
     ), row=1, col=1)
 
-    # --- TRADING BLOCK OVERLAY ---
-    if block_info and block_info[0] is not None:
-        top, bottom, status, anchor = block_info # Unpack status + anchor
-        
-        # Color Logic
-        if "BREAKOUT" in status:
-            block_color = "rgba(59, 130, 246, 0.15)" # Blue
-            line_color = "rgba(59, 130, 246, 0.6)"
-            top_label = f"Base Top: {top:.2f}"
-            bot_label = f"Base Bot: {bottom:.2f}"
-        elif "BREAKDOWN" in status:
-            block_color = "rgba(239, 68, 68, 0.15)" # Red
-            line_color = "rgba(239, 68, 68, 0.6)"
-            top_label = f"Res Top: {top:.2f}"
-            bot_label = f"Res Bot: {bottom:.2f}"
-        else:
-            block_color = "rgba(147, 51, 234, 0.15)" # Purple
-            line_color = "rgba(147, 51, 234, 0.6)"
-            top_label = f"Range Top: {top:.2f}"
-            bot_label = f"Range Bot: {bottom:.2f}"
-
-        # Logic for Shape Start Date
-        # If we have an anchor (dynamic reset), start the box THERE.
-        # Otherwise start 30 days ago.
-        if anchor:
-            start_date_str = anchor
-        else:
-            if len(df) >= 30:
-                start_date_str = date_strings[len(df) - 30]
+    # --- TRADING BLOCKS OVERLAY (MULTIPLE) ---
+    if blocks:
+        for b in blocks:
+            # Color logic
+            if b['is_active']:
+                # Bright colors for current block
+                if "BREAKOUT" in b['status']:
+                    fill = "rgba(59, 130, 246, 0.15)" # Blue
+                    border = "rgba(59, 130, 246, 0.8)"
+                    label = f"Base: {b['bot']:.2f}-{b['top']:.2f}"
+                elif "BREAKDOWN" in b['status']:
+                    fill = "rgba(239, 68, 68, 0.15)" # Red
+                    border = "rgba(239, 68, 68, 0.8)"
+                    label = f"Res: {b['bot']:.2f}-{b['top']:.2f}"
+                else:
+                    fill = "rgba(147, 51, 234, 0.15)" # Purple
+                    border = "rgba(147, 51, 234, 0.8)"
+                    label = f"Block: {b['bot']:.2f}-{b['top']:.2f}"
+                width = 2
+                style = "solid"
             else:
-                start_date_str = date_strings[0]
+                # Faded colors for history
+                fill = "rgba(156, 163, 175, 0.1)" # Grey
+                border = "rgba(156, 163, 175, 0.4)"
+                label = "" # No label for history to reduce clutter
+                width = 1
+                style = "dash"
+
+            fig.add_shape(
+                type="rect",
+                x0=b['start'], y0=b['bot'],
+                x1=b['end'], y1=b['top'],
+                fillcolor=fill, 
+                line=dict(color=border, width=width, dash=style),
+                row=1, col=1,
+                layer="below"
+            )
             
-        end_date_str = date_strings[-1]
-        
-        fig.add_shape(
-            type="rect",
-            x0=start_date_str, y0=bottom,
-            x1=end_date_str, y1=top,
-            fillcolor=block_color, 
-            line=dict(color=line_color, width=1, dash="dash"),
-            row=1, col=1,
-            layer="below"
-        )
-        fig.add_annotation(x=end_date_str, y=top, text=top_label, showarrow=False, yshift=10, font=dict(size=10, color=line_color), row=1, col=1)
-        fig.add_annotation(x=end_date_str, y=bottom, text=bot_label, showarrow=False, yshift=-10, font=dict(size=10, color=line_color), row=1, col=1)
+            if label:
+                fig.add_annotation(
+                    x=b['end'], y=b['top'], text=label, 
+                    showarrow=False, yshift=10, 
+                    font=dict(size=10, color=border), 
+                    row=1, col=1
+                )
 
 
     # 2. Candlesticks (Chinese Colors: Red Up, Green Down)
@@ -824,9 +862,19 @@ with tab_single:
             # Run the NEW 3-Phase Logic
             analysis_df = run_single_stock_analysis(stock_df)
             
-            # --- NEW: Trading Block Analysis ---
-            # Using 30-day default lookback as requested
-            block_top, block_bot, block_status, anchor = calculate_trading_block(analysis_df, lookback=30)
+            # --- NEW: Multiple Trading Block Analysis ---
+            # Using 60-day default lookback to find MULTIPLE blocks
+            blocks = calculate_multiple_blocks(analysis_df, lookback=60)
+            
+            # Get latest block status for cards
+            if blocks:
+                latest_block = blocks[-1]
+                block_status = latest_block['status']
+                block_top = latest_block['top']
+                block_bot = latest_block['bot']
+            else:
+                block_status = "UNKNOWN"
+                block_top, block_bot = 0, 0
 
             # Check if we have enough data
             if analysis_df.empty or len(analysis_df) < 50:
@@ -834,8 +882,8 @@ with tab_single:
             else:
                 latest_row = analysis_df.iloc[-1]
 
-                # Create the NEW 4-Panel Chart (Passing block info now)
-                fig_stock = create_single_stock_chart(analysis_df, block_info=(block_top, block_bot, block_status, anchor))
+                # Create the NEW 4-Panel Chart (Passing blocks list)
+                fig_stock = create_single_stock_chart(analysis_df, blocks=blocks)
                 st.plotly_chart(fig_stock, use_container_width=True)
 
                 # NEW: Latest signals summary (Cards)
@@ -857,7 +905,7 @@ with tab_single:
                     st.markdown("**Phase 3: LAUNCH**")
                     st.markdown("**:red[TRIGGERED]**" if launch else ":grey[WAITING]")
                 with col_d:
-                    st.markdown("**Trading Block (30d)**")
+                    st.markdown("**Trading Block (Latest)**")
                     if "BREAKOUT" in block_status:
                         st.markdown(f"**:red[{block_status}]**")
                     elif "BREAKDOWN" in block_status:
