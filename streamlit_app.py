@@ -236,7 +236,7 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
     return df_analysis
 
-def calculate_trading_block(df, lookback=60):
+def calculate_trading_block(df, lookback=30): # CHANGED: Default lookback 30
     """
     Identifies the current 'Trading Block' (Support/Resistance) using Volume Profile.
     Returns: block_top, block_bottom, status_string
@@ -246,12 +246,11 @@ def calculate_trading_block(df, lookback=60):
         return None, None, "Insufficient Data"
     
     # 1. Bucket prices into bins
-    # Use roughly 20 bins across the price range
     price_min = subset['Low'].min()
     price_max = subset['High'].max()
     bins = np.linspace(price_min, price_max, 21) # 20 bins
     
-    # 2. Assign volume to bins (using Close price as proxy)
+    # 2. Assign volume to bins
     indices = np.digitize(subset['Close'], bins)
     
     bin_volumes = {}
@@ -259,7 +258,6 @@ def calculate_trading_block(df, lookback=60):
         bin_volumes[i] = bin_volumes.get(i, 0) + vol
         
     # 3. Find the "Value Area" (70% of volume)
-    # Sort bins by volume descending
     sorted_bins = sorted(bin_volumes.items(), key=lambda x: x[1], reverse=True)
     
     total_volume = sum(bin_volumes.values())
@@ -273,9 +271,6 @@ def calculate_trading_block(df, lookback=60):
             break
             
     # 4. Determine Block Levels
-    # Indices correspond to bins array. 
-    # bin_idx i corresponds to range bins[i-1] to bins[i] (roughly)
-    # Safe bounds check
     valid_indices = [i for i in value_bins if 1 <= i < len(bins)]
     
     if not valid_indices:
@@ -287,7 +282,7 @@ def calculate_trading_block(df, lookback=60):
     block_bottom = bins[min_idx-1]
     block_top = bins[max_idx]
     
-    # 5. Status Check
+    # 5. Status Check (Breakout detection)
     last_close = subset['Close'].iloc[-1]
     
     if last_close > block_top * 1.01:
@@ -343,14 +338,32 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250, bloc
 
     # --- TRADING BLOCK OVERLAY ---
     if block_info and block_info[0] is not None:
-        top, bottom, _ = block_info
-        # We draw the block across the last 60 days (or however long the lookback was)
-        # For simplicity, we draw it across the visible chart area or just the recent part
-        # Let's draw it as a shape covering the last 60 days
+        top, bottom, status = block_info # Unpack status
         
-        # Calculate start date for shape
-        if len(df) >= 60:
-            start_shape_idx = len(df) - 60
+        # Determine Color & Label based on Status
+        if "BREAKOUT" in status:
+            # Bullish Breakout: Old block is now SUPPORT BASE (Blue/Grey)
+            block_color = "rgba(59, 130, 246, 0.15)" # Blue tint
+            line_color = "rgba(59, 130, 246, 0.6)"
+            top_label = f"Base Top: {top:.2f}"
+            bot_label = f"Base Bot: {bottom:.2f}"
+        elif "BREAKDOWN" in status:
+            # Bearish Breakdown: Old block is OVERHEAD RESISTANCE (Red)
+            block_color = "rgba(239, 68, 68, 0.15)" # Red tint
+            line_color = "rgba(239, 68, 68, 0.6)"
+            top_label = f"Res Top: {top:.2f}"
+            bot_label = f"Res Bot: {bottom:.2f}"
+        else:
+            # Inside: Standard Consolidation (Purple)
+            block_color = "rgba(147, 51, 234, 0.15)" # Purple tint
+            line_color = "rgba(147, 51, 234, 0.6)"
+            top_label = f"Range Top: {top:.2f}"
+            bot_label = f"Range Bot: {bottom:.2f}"
+
+        # Calculate start date for shape (last 30 days default)
+        lookback_len = 30 
+        if len(df) >= lookback_len:
+            start_shape_idx = len(df) - lookback_len
             start_date_str = date_strings[start_shape_idx]
         else:
             start_date_str = date_strings[0]
@@ -361,14 +374,14 @@ def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250, bloc
             type="rect",
             x0=start_date_str, y0=bottom,
             x1=end_date_str, y1=top,
-            fillcolor="rgba(147, 51, 234, 0.15)", # Purple tint
-            line=dict(color="rgba(147, 51, 234, 0.6)", width=1, dash="dash"),
+            fillcolor=block_color, 
+            line=dict(color=line_color, width=1, dash="dash"),
             row=1, col=1,
             layer="below"
         )
-        # Add labels
-        fig.add_annotation(x=end_date_str, y=top, text="Block Res", showarrow=False, yshift=5, font=dict(size=10, color="purple"), row=1, col=1)
-        fig.add_annotation(x=end_date_str, y=bottom, text="Block Sup", showarrow=False, yshift=-5, font=dict(size=10, color="purple"), row=1, col=1)
+        # Add labels with PRICES
+        fig.add_annotation(x=end_date_str, y=top, text=top_label, showarrow=False, yshift=10, font=dict(size=10, color=line_color), row=1, col=1)
+        fig.add_annotation(x=end_date_str, y=bottom, text=bot_label, showarrow=False, yshift=-10, font=dict(size=10, color=line_color), row=1, col=1)
 
 
     # 2. Candlesticks (Chinese Colors: Red Up, Green Down)
@@ -791,7 +804,8 @@ with tab_single:
             analysis_df = run_single_stock_analysis(stock_df)
             
             # --- NEW: Trading Block Analysis ---
-            block_top, block_bot, block_status = calculate_trading_block(analysis_df, lookback=60)
+            # Using 30-day default lookback as requested
+            block_top, block_bot, block_status = calculate_trading_block(analysis_df, lookback=30)
 
             # Check if we have enough data
             if analysis_df.empty or len(analysis_df) < 50:
@@ -822,7 +836,7 @@ with tab_single:
                     st.markdown("**Phase 3: LAUNCH**")
                     st.markdown("**:red[TRIGGERED]**" if launch else ":grey[WAITING]")
                 with col_d:
-                    st.markdown("**Trading Block (60d)**")
+                    st.markdown("**Trading Block (30d)**")
                     if "BREAKOUT" in block_status:
                         st.markdown(f"**:red[{block_status}]**")
                     elif "BREAKDOWN" in block_status:
