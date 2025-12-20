@@ -142,6 +142,288 @@ def create_drilldown_chart(chart_data, model_type):
     )
     return fig
 
+# =========================
+# SECTOR INTERACTION MODULE
+# =========================
+
+def _pivot_sector_series(hist_df: pd.DataFrame, value_col: str) -> pd.DataFrame:
+    """Pivot long sector history into wide Date x Sector."""
+    df = hist_df[['Date', 'Sector', value_col]].dropna().copy()
+    df = df.sort_values('Date')
+    wide = df.pivot_table(index='Date', columns='Sector', values=value_col, aggfunc='last')
+    wide = wide.sort_index()
+    return wide
+
+def build_sector_panels(hist_df: pd.DataFrame, market_sector: str = "MARKET_PROXY"):
+    """
+    Build wide panels:
+      - close_panel: Date x Sector Close
+      - ret_panel:   Date x Sector daily return
+      - vol_panel:   Date x Sector Volume_Metric (your z-score)
+      - exret_panel: Date x Sector excess return vs market proxy
+    """
+    close_panel = _pivot_sector_series(hist_df, 'Close')
+    vol_panel   = _pivot_sector_series(hist_df, 'Volume_Metric')
+
+    # returns
+    ret_panel = close_panel.pct_change()
+
+    # excess returns
+    exret_panel = ret_panel.copy()
+    if market_sector in ret_panel.columns:
+        exret_panel = ret_panel.sub(ret_panel[market_sector], axis=0)
+        exret_panel[market_sector] = 0.0  # define market excess as 0
+    else:
+        # fallback: if market proxy missing, treat excess == raw returns
+        exret_panel = ret_panel
+
+    return close_panel, ret_panel, vol_panel, exret_panel
+
+
+def compute_market_gate(ret_panel: pd.DataFrame,
+                        exret_panel: pd.DataFrame,
+                        market_sector: str = "MARKET_PROXY",
+                        lookback: int = 252,
+                        mkt_down_thresh: float = -0.01):
+    """
+    Compute a simple "rotation confidence" gate using:
+      - market daily return
+      - dispersion of sector excess returns
+      - breadth (% sectors down)
+    """
+    # restrict to recent lookback
+    ret_lb = ret_panel.tail(lookback).copy()
+    ex_lb  = exret_panel.tail(lookback).copy()
+
+    latest_dt = ret_lb.index.max()
+    if latest_dt is None:
+        return None
+
+    # market return
+    mkt_ret = float(ret_lb[market_sector].loc[latest_dt]) if market_sector in ret_lb.columns else float(ret_lb.mean(axis=1).loc[latest_dt])
+
+    # dispersion across sectors (exclude market)
+    cols = [c for c in ex_lb.columns if c != market_sector]
+    latest_disp = float(ex_lb[cols].loc[latest_dt].std()) if cols else float(ex_lb.loc[latest_dt].std())
+
+    # history dispersion percentile for context
+    disp_series = ex_lb[cols].std(axis=1) if cols else ex_lb.std(axis=1)
+    disp_p25 = float(disp_series.quantile(0.25))
+    disp_p75 = float(disp_series.quantile(0.75))
+
+    # breadth: % sectors negative (raw returns)
+    breadth_cols = [c for c in ret_lb.columns if c != market_sector]
+    if breadth_cols:
+        breadth_down = float((ret_lb[breadth_cols].loc[latest_dt] < 0).mean())
+    else:
+        breadth_down = float((ret_lb.loc[latest_dt] < 0).mean())
+
+    # classify
+    correlated_selloff = (mkt_ret <= mkt_down_thresh) and (latest_disp <= disp_p25) and (breadth_down >= 0.80)
+    selective_rotation = (latest_disp >= disp_p75) and (breadth_down <= 0.80)
+
+    if correlated_selloff:
+        regime = "CORRELATED SELLOFF (Low Rotation)"
+        confidence = "LOW"
+    elif selective_rotation:
+        regime = "SELECTIVE ROTATION (High Dispersion)"
+        confidence = "HIGH"
+    else:
+        regime = "NORMAL / MIXED"
+        confidence = "MEDIUM"
+
+    return {
+        "latest_date": latest_dt,
+        "market_return": mkt_ret,
+        "dispersion": latest_disp,
+        "disp_p25": disp_p25,
+        "disp_p75": disp_p75,
+        "breadth_down": breadth_down,
+        "regime": regime,
+        "confidence": confidence,
+        "disp_series": disp_series
+    }
+
+
+def compute_transition_matrix(exret_panel: pd.DataFrame,
+                              lookback: int = 252,
+                              top_k: int = 3,
+                              market_sector: str = "MARKET_PROXY"):
+    """
+    Build Leader->Follower transition probabilities:
+    If sector i is in today's Top-K (excess return), what's the probability sector j is in tomorrow's Top-K?
+    """
+    df = exret_panel.tail(lookback + 1).copy()
+    sectors = [c for c in df.columns if c != market_sector]
+    if len(sectors) < 2:
+        return None, None
+
+    df = df[sectors].dropna(how='all')
+    if len(df) < 10:
+        return None, None
+
+    dates = df.index.tolist()
+    counts = pd.DataFrame(0.0, index=sectors, columns=sectors)
+
+    for t in range(len(dates) - 1):
+        d0 = dates[t]
+        d1 = dates[t + 1]
+        r0 = df.loc[d0].dropna()
+        r1 = df.loc[d1].dropna()
+
+        if len(r0) < top_k or len(r1) < top_k:
+            continue
+
+        leaders = r0.sort_values(ascending=False).head(top_k).index.tolist()
+        followers = r1.sort_values(ascending=False).head(top_k).index.tolist()
+
+        for i in leaders:
+            for j in followers:
+                counts.loc[i, j] += 1.0
+
+    # row-normalize -> probabilities
+    row_sums = counts.sum(axis=1).replace(0, np.nan)
+    probs = counts.div(row_sums, axis=0).fillna(0.0)
+
+    return probs, counts
+
+
+def make_heatmap(df_matrix: pd.DataFrame, title: str):
+    """Plotly heatmap for a square matrix."""
+    if df_matrix is None or df_matrix.empty:
+        return None
+
+    z = df_matrix.values
+    x = df_matrix.columns.tolist()
+    y = df_matrix.index.tolist()
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z, x=x, y=y,
+            colorbar=dict(title="Prob"),
+            zmin=0, zmax=max(0.001, float(np.nanmax(z)))
+        )
+    )
+    fig.update_layout(
+        title=title,
+        height=650,
+        template="plotly_white",
+        xaxis_title="Tomorrow Top-K (Followers)",
+        yaxis_title="Today Top-K (Leaders)",
+        margin=dict(l=80, r=20, t=50, b=80)
+    )
+    return fig
+
+
+def _state_from_z(z: float) -> str:
+    if np.isnan(z):
+        return "NA"
+    if z <= -1.0:
+        return "VERY_DOWN"
+    if z <= -0.5:
+        return "DOWN"
+    if z < 0.5:
+        return "FLAT"
+    if z < 1.0:
+        return "UP"
+    return "VERY_UP"
+
+
+def _vol_state(v: float) -> str:
+    if np.isnan(v):
+        return "NA"
+    if v <= -1.0:
+        return "VOL_LOW"
+    if v >= 1.0:
+        return "VOL_HIGH"
+    return "VOL_NORM"
+
+
+def build_state_stats_for_sector(exret_s: pd.Series,
+                                 vol_s: pd.Series,
+                                 z_window: int = 60):
+    """
+    For one sector:
+      - compute rolling z-score of excess returns
+      - bin into states + vol states
+      - compute next-day win-rate and avg next-day excess return
+    """
+    df = pd.DataFrame({"exret": exret_s, "vol": vol_s}).dropna()
+    if len(df) < z_window + 10:
+        return None, None
+
+    df["z"] = (df["exret"] - df["exret"].rolling(z_window).mean()) / df["exret"].rolling(z_window).std()
+    df["r_state"] = df["z"].apply(_state_from_z)
+    df["v_state"] = df["vol"].apply(_vol_state)
+    df["state"] = df["r_state"] + " | " + df["v_state"]
+
+    df["next_exret"] = df["exret"].shift(-1)
+    df = df.dropna(subset=["state", "next_exret"])
+
+    g = df.groupby("state")["next_exret"]
+    stats = pd.DataFrame({
+        "count": g.size(),
+        "win_rate": g.apply(lambda x: float((x > 0).mean())),
+        "avg_next_exret": g.mean(),
+        "med_next_exret": g.median(),
+    }).sort_values(["win_rate", "avg_next_exret"], ascending=False)
+
+    # latest state
+    latest_state = str(df["state"].iloc[-1])
+
+    return stats, latest_state
+
+
+def build_nextday_predictions(exret_panel: pd.DataFrame,
+                              vol_panel: pd.DataFrame,
+                              z_window: int = 60,
+                              lookback: int = 504,
+                              market_sector: str = "MARKET_PROXY"):
+    """
+    For each sector:
+      - fit state stats on history
+      - read today's state
+      - output predicted next-day win_prob and avg_next_exret
+    """
+    ex_lb = exret_panel.tail(lookback).copy()
+    vol_lb = vol_panel.reindex(ex_lb.index).copy()
+
+    sectors = [c for c in ex_lb.columns if c != market_sector]
+    rows = []
+
+    for s in sectors:
+        stats, latest_state = build_state_stats_for_sector(ex_lb[s], vol_lb[s], z_window=z_window)
+        if stats is None or latest_state is None or latest_state == "NA | NA":
+            continue
+
+        # if today state unseen historically, fall back to overall
+        if latest_state in stats.index:
+            win_prob = float(stats.loc[latest_state, "win_rate"])
+            avg_next = float(stats.loc[latest_state, "avg_next_exret"])
+            sample_n = int(stats.loc[latest_state, "count"])
+        else:
+            # fallback: overall distribution
+            # (mean of next day excess return, win rate across all samples)
+            all_win = float((ex_lb[s].shift(-1) > 0).mean())
+            all_avg = float(ex_lb[s].shift(-1).mean())
+            win_prob, avg_next, sample_n = all_win, all_avg, int(len(ex_lb) - 1)
+
+        rows.append({
+            "Sector": s,
+            "Today_State": latest_state,
+            "P(NextDay Outperform)": win_prob,
+            "E[NextDay ExcessRet]": avg_next,
+            "State_Samples": sample_n
+        })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    out = out.sort_values(["P(NextDay Outperform)", "E[NextDay ExcessRet]"], ascending=False)
+    return out
+
+
 # --- 3. SINGLE STOCK ANALYSIS LOGIC (NEW 3-PHASE) ---
 
 def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
@@ -830,6 +1112,146 @@ with tab_dashboard:
         else:
             st.error(v2_error)
 
+    st.markdown("---")
+    st.subheader("Sector Interaction Lab (Rotation Signals)")
+
+    # Use V1 history as the base panel (it has Close + Volume_Metric)
+    base_hist = v1_hist if v1_hist is not None else v2_hist
+
+    if base_hist is None or base_hist.empty:
+        st.warning("No sector history loaded; cannot build interaction models.")
+    else:
+        close_panel, ret_panel, vol_panel, exret_panel = build_sector_panels(base_hist, market_sector="MARKET_PROXY")
+
+        # ===== Market Gate =====
+        gate = compute_market_gate(ret_panel, exret_panel, market_sector="MARKET_PROXY", lookback=252, mkt_down_thresh=-0.01)
+        if gate:
+            g1, g2, g3, g4 = st.columns(4)
+            with g1:
+                st.metric("Market (Proxy) Return", f"{gate['market_return']*100:.2f}%")
+            with g2:
+                st.metric("Dispersion (ExRet Std)", f"{gate['dispersion']*100:.2f}%")
+            with g3:
+                st.metric("Breadth Down", f"{gate['breadth_down']*100:.0f}%")
+            with g4:
+                st.metric("Rotation Confidence", gate["confidence"])
+
+            if gate["confidence"] == "LOW":
+                st.warning(f"Regime: {gate['regime']} — rotation calls are lower confidence today.")
+            elif gate["confidence"] == "HIGH":
+                st.success(f"Regime: {gate['regime']} — sector dispersion is high; rotation signals are meaningful.")
+            else:
+                st.info(f"Regime: {gate['regime']}")
+
+        # Tabs for interaction modules
+        t1, t2, t3 = st.tabs(["Transition Matrix (Top-K)", "Next-Day Odds (State Model)", "Raw Panels"])
+
+        # ===== 1) Transition Matrix =====
+        with t1:
+            cA, cB, cC = st.columns([1, 1, 2])
+            with cA:
+                top_k = st.selectbox("Top-K leaders", [2, 3, 4, 5], index=1)
+            with cB:
+                lookback_tm = st.selectbox("Lookback (days)", [126, 252, 504, 756], index=1)
+            with cC:
+                st.caption("Heatmap shows: If sector is in today's Top-K (excess return), probability it appears in tomorrow's Top-K.")
+
+            probs, counts = compute_transition_matrix(exret_panel, lookback=lookback_tm, top_k=top_k, market_sector="MARKET_PROXY")
+            if probs is None:
+                st.warning("Not enough data to build transition matrix.")
+            else:
+                fig_hm = make_heatmap(probs, title=f"Leader → Follower Transition Probabilities (Top-{top_k}, {lookback_tm}d)")
+                st.plotly_chart(fig_hm, use_container_width=True)
+
+                with st.expander("Show raw counts"):
+                    st.dataframe(counts.astype(int), use_container_width=True)
+
+        # ===== 2) Next-Day Odds =====
+        with t2:
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                z_window = st.selectbox("Z-score window", [40, 60, 80, 120], index=1)
+                lookback_odds = st.selectbox("Training lookback", [252, 504, 756, 1000], index=1)
+
+            preds = build_nextday_predictions(
+                exret_panel=exret_panel,
+                vol_panel=vol_panel,
+                z_window=z_window,
+                lookback=lookback_odds,
+                market_sector="MARKET_PROXY"
+            )
+
+            if preds is None or preds.empty:
+                st.warning("Not enough data to build next-day odds.")
+            else:
+                # Apply confidence gate note
+                if gate and gate["confidence"] == "LOW":
+                    st.info("Note: Today is a low-rotation regime. Treat these probabilities as weaker signals (more 'pair-trade / relative' than outright).")
+
+                # Show top candidates
+                show_n = min(20, len(preds))
+                st.dataframe(
+                    preds.head(show_n),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "P(NextDay Outperform)": st.column_config.NumberColumn(format="%.2f"),
+                        "E[NextDay ExcessRet]": st.column_config.NumberColumn(format="%.4f"),
+                        "State_Samples": st.column_config.NumberColumn(format="%d"),
+                    }
+                )
+
+                # Pick a sector for deep dive
+                sector_pick = st.selectbox("Deep-dive sector", preds["Sector"].tolist(), index=0)
+                stats, latest_state = build_state_stats_for_sector(exret_panel[sector_pick], vol_panel[sector_pick], z_window=z_window)
+
+                if stats is not None:
+                    st.caption(f"Today's state for **{sector_pick}**: `{latest_state}`")
+
+                    # Bar chart: win rate by state (top 12 states by sample size)
+                    top_states = stats.sort_values("count", ascending=False).head(12).copy()
+                    fig_bar = go.Figure()
+                    fig_bar.add_trace(go.Bar(
+                        x=top_states.index.tolist(),
+                        y=top_states["win_rate"].values,
+                        name="Win Rate"
+                    ))
+                    fig_bar.update_layout(
+                        title=f"Next-Day Outperform Win Rate by State — {sector_pick}",
+                        template="plotly_white",
+                        height=450,
+                        xaxis_title="State (ExRet Z-bin | Vol bin)",
+                        yaxis_title="P(NextDay ExcessRet > 0)",
+                        xaxis_tickangle=30
+                    )
+                    st.plotly_chart(fig_bar, use_container_width=True)
+
+                    st.dataframe(stats, use_container_width=True)
+
+        # ===== 3) Raw Panels =====
+        with t3:
+            st.caption("Raw excess-return / volume panels (debug & intuition).")
+            # show last 200 days for a chosen sector
+            sectors = [c for c in exret_panel.columns if c != "MARKET_PROXY"]
+            pick = st.selectbox("Sector", sectors, index=0)
+            df_view = pd.DataFrame({
+                "ExcessRet": exret_panel[pick],
+                "Volume_Metric": vol_panel[pick],
+                "Close": close_panel[pick],
+            }).dropna().tail(200)
+
+            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03,
+                                subplot_titles=("Close (PPI)", "Excess Return vs Market", "Volume Metric (Z)"),
+                                row_heights=[0.5, 0.25, 0.25])
+
+            fig.add_trace(go.Scatter(x=df_view.index, y=df_view["Close"], name="Close"), row=1, col=1)
+            fig.add_trace(go.Bar(x=df_view.index, y=df_view["ExcessRet"], name="ExcessRet"), row=2, col=1)
+            fig.add_trace(go.Bar(x=df_view.index, y=df_view["Volume_Metric"], name="Volume"), row=3, col=1)
+
+            fig.update_layout(height=700, template="plotly_white", xaxis3_title="Date", showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+
 
 # ========= TAB 2: Single Stock Analysis (UPDATED) =========
 with tab_single:
@@ -1028,6 +1450,7 @@ with tab_single:
                         st.metric("Downside Support", f"{lower[-1]:.2f}")
                 else:
                     st.warning("Not enough data or model failed to converge.")
+
 
 
 
