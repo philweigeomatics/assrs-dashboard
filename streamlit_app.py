@@ -282,9 +282,11 @@ def compute_transition_matrix(exret_panel: pd.DataFrame,
                 counts.loc[i, j] += 1.0
 
     # row-normalize -> probabilities
-    row_sums = counts.sum(axis=1).replace(0, np.nan)
-    probs = counts.div(row_sums, axis=0).fillna(0.0)
-
+    # Laplace smoothing to avoid zero rows when history is short
+    alpha = 1.0
+    smoothed = counts + alpha
+    row_sums = smoothed.sum(axis=1).replace(0, np.nan)
+    probs = smoothed.div(row_sums, axis=0).fillna(0.0)
     return probs, counts
 
 
@@ -349,10 +351,14 @@ def build_state_stats_for_sector(exret_s: pd.Series,
       - compute next-day win-rate and avg next-day excess return
     """
     df = pd.DataFrame({"exret": exret_s, "vol": vol_s}).dropna()
-    if len(df) < z_window + 10:
+    if len(df) < max(25, z_window + 5):
         return None, None
 
-    df["z"] = (df["exret"] - df["exret"].rolling(z_window).mean()) / df["exret"].rolling(z_window).std()
+    mu = df["exret"].ewm(span=z_window, adjust=False).mean()
+    sd = df["exret"].ewm(span=z_window, adjust=False).std()
+    sd = sd.replace(0, np.nan)
+    df["z"] = (df["exret"] - mu) / sd
+
     df["r_state"] = df["z"].apply(_state_from_z)
     df["v_state"] = df["vol"].apply(_vol_state)
     df["state"] = df["r_state"] + " | " + df["v_state"]
@@ -1123,8 +1129,32 @@ with tab_dashboard:
     else:
         close_panel, ret_panel, vol_panel, exret_panel = build_sector_panels(base_hist, market_sector="MARKET_PROXY")
 
+        # ===== Adaptive lookback based on available history =====
+        available_days = int(exret_panel.dropna(how="all").shape[0])
+        if available_days < 30:
+            st.warning(f"Not enough sector history for interaction lab (only {available_days} days).")
+            st.stop()
+
+        max_lb = min(120, available_days)   # cap at 120 days since your history is short
+        default_lb = min(60, max_lb)        # a-share friendly default
+
+        lab_lookback = st.slider(
+            "Interaction Lab lookback (trading days)",
+            min_value=20,
+            max_value=max_lb,
+            value=default_lb,
+            step=5
+        )
+
+
         # ===== Market Gate =====
-        gate = compute_market_gate(ret_panel, exret_panel, market_sector="MARKET_PROXY", lookback=252, mkt_down_thresh=-0.01)
+        gate = compute_market_gate(
+            ret_panel, exret_panel,
+            market_sector="MARKET_PROXY",
+            lookback=lab_lookback,
+            mkt_down_thresh=-0.01
+        )
+
         if gate:
             g1, g2, g3, g4 = st.columns(4)
             with g1:
@@ -1152,7 +1182,9 @@ with tab_dashboard:
             with cA:
                 top_k = st.selectbox("Top-K leaders", [2, 3, 4, 5], index=1)
             with cB:
-                lookback_tm = st.selectbox("Lookback (days)", [126, 252, 504, 756], index=1)
+                tm_choices = [20, 30, 40, 60, 90, 120]
+                tm_choices = [x for x in tm_choices if x <= available_days]
+                lookback_tm = st.selectbox("Lookback (days)", tm_choices, index=min(3, len(tm_choices)-1))
             with cC:
                 st.caption("Heatmap shows: If sector is in today's Top-K (excess return), probability it appears in tomorrow's Top-K.")
 
@@ -1170,8 +1202,13 @@ with tab_dashboard:
         with t2:
             c1, c2 = st.columns([1, 2])
             with c1:
-                z_window = st.selectbox("Z-score window", [40, 60, 80, 120], index=1)
-                lookback_odds = st.selectbox("Training lookback", [252, 504, 756, 1000], index=1)
+                z_choices = [10, 15, 20, 30, 40]
+                z_choices = [x for x in z_choices if x < available_days]
+                z_window = st.selectbox("Z-score speed (days)", z_choices, index=min(2, len(z_choices)-1))
+                lb_choices = [30, 40, 60, 90, 120]
+                lb_choices = [x for x in lb_choices if x <= available_days]
+                lookback_odds = st.selectbox("Training lookback (days)", lb_choices, index=min(2, len(lb_choices)-1))
+
 
             preds = build_nextday_predictions(
                 exret_panel=exret_panel,
