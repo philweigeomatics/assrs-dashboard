@@ -253,7 +253,10 @@ def compute_transition_matrix(exret_panel: pd.DataFrame,
     Build Leader->Follower transition probabilities:
     If sector i is in today's Top-K (excess return), what's the probability sector j is in tomorrow's Top-K?
     """
+    available = exret_panel.dropna(how="all").shape[0]              # <-- NEW line
+    lookback = max(10, min(int(lookback), available - 1))           # <-- NEW line (clamp)
     df = exret_panel.tail(lookback + 1).copy()
+
     sectors = [c for c in df.columns if c != market_sector]
     if len(sectors) < 2:
         return None, None
@@ -427,6 +430,55 @@ def build_nextday_predictions(exret_panel: pd.DataFrame,
         return out
 
     out = out.sort_values(["P(NextDay Outperform)", "E[NextDay ExcessRet]"], ascending=False)
+    return out
+
+def get_today_topk(exret_panel: pd.DataFrame, top_k: int = 3, market_sector: str = "MARKET_PROXY"):
+    latest_dt = exret_panel.index.max()
+    s = exret_panel.loc[latest_dt].dropna()
+    if market_sector in s.index:
+        s = s.drop(index=market_sector)
+    leaders = s.sort_values(ascending=False).head(top_k)
+    return latest_dt, leaders  # leaders is a Series (Sector -> exret)
+
+def predict_tomorrow_from_transition(probs: pd.DataFrame,
+                                     counts: pd.DataFrame,
+                                     today_leaders: pd.Series,
+                                     top_n: int = 5,
+                                     min_leader_samples: int = 3):
+    """
+    today_leaders: Series (Sector -> today's exret)
+    returns: DataFrame with predicted followers.
+    """
+    if probs is None or probs.empty:
+        return pd.DataFrame()
+
+    leaders = [s for s in today_leaders.index if s in probs.index]
+    if not leaders:
+        return pd.DataFrame()
+
+    # optional: filter out leaders with too-few historical samples
+    if counts is not None and not counts.empty:
+        leader_samples = counts.loc[leaders].sum(axis=1)
+        leaders = [s for s in leaders if leader_samples.get(s, 0) >= min_leader_samples]
+        if not leaders:
+            return pd.DataFrame()
+
+    # weights by today's leader strength (excess return)
+    w = today_leaders.loc[leaders].clip(lower=0)  # only reward positive leaders
+    if float(w.sum()) == 0:
+        # fallback to equal weights
+        w = pd.Series(1.0, index=leaders)
+
+    w = w / w.sum()
+
+    # weighted average of leader rows
+    score = (probs.loc[leaders].T * w).T.sum(axis=0)
+
+    # don’t “predict” the same leaders unless you want that behavior
+    score = score.drop(index=[x for x in leaders if x in score.index], errors="ignore")
+
+    out = score.sort_values(ascending=False).head(top_n).reset_index()
+    out.columns = ["Predicted_Follower", "Score"]
     return out
 
 
@@ -1189,6 +1241,27 @@ with tab_dashboard:
                 st.caption("Heatmap shows: If sector is in today's Top-K (excess return), probability it appears in tomorrow's Top-K.")
 
             probs, counts = compute_transition_matrix(exret_panel, lookback=lookback_tm, top_k=top_k, market_sector="MARKET_PROXY")
+
+            # --- TODAY TOP-K (latest date) ---
+            latest_dt, today_leaders = get_today_topk(exret_panel, top_k=top_k, market_sector="MARKET_PROXY")
+
+            st.markdown("#### Today’s Top Leaders (Latest PPI Close)")
+            st.write(f"Latest date: **{latest_dt.strftime('%Y-%m-%d')}**")
+            st.dataframe(
+                today_leaders.reset_index().rename(columns={"index":"Sector", latest_dt:"ExcessRet"}),
+                use_container_width=True,
+                hide_index=True
+            )
+
+            # --- TOMORROW PREDICTION (from transition matrix) ---
+            st.markdown("#### Predicted Tomorrow Followers (from Transition Matrix)")
+            pred = predict_tomorrow_from_transition(probs, counts, today_leaders, top_n=8, min_leader_samples=3)
+
+            if pred.empty:
+                st.warning("Not enough data to produce a follower prediction.")
+            else:
+                st.dataframe(pred, use_container_width=True, hide_index=True)
+
             if probs is None:
                 st.warning("Not enough data to build transition matrix.")
             else:
