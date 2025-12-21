@@ -15,6 +15,16 @@ try:
 except ImportError:
     HAS_STATSMODELS = False
 
+
+# --- Fragment helper (Streamlit >=1.33 has st.fragment; older has st.experimental_fragment) ---
+_fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+
+if _fragment is None:
+    # fallback: no fragment support in this Streamlit version
+    def _fragment(func):
+        return func
+
+
 # Assuming data_manager is in the same directory or path
 import data_manager 
 
@@ -1173,193 +1183,208 @@ with tab_dashboard:
     st.markdown("---")
     st.subheader("Sector Interaction Lab (Rotation Signals)")
 
+    # =========================
+    # SECTOR INTERACTION LAB
+    # =========================
+
     # Use V1 history as the base panel (it has Close + Volume_Metric)
     base_hist = v1_hist if v1_hist is not None else v2_hist
 
     if base_hist is None or base_hist.empty:
         st.warning("No sector history loaded; cannot build interaction models.")
     else:
+        # Build panels OUTSIDE fragment (so they don't re-run unless base_hist changes)
         close_panel, ret_panel, vol_panel, exret_panel = build_sector_panels(base_hist, market_sector="MARKET_PROXY")
 
-        # ===== Adaptive lookback based on available history =====
         available_days = int(exret_panel.dropna(how="all").shape[0])
         if available_days < 30:
             st.warning(f"Not enough sector history for interaction lab (only {available_days} days).")
-            st.stop()
+        else:
+            max_lb = min(120, available_days)
+            default_lb = min(60, max_lb)
 
-        max_lb = min(120, available_days)   # cap at 120 days since your history is short
-        default_lb = min(60, max_lb)        # a-share friendly default
+            @_fragment
+            def render_sector_interaction_lab():
+                st.subheader("Sector Interaction Lab (Rotation Signals)")
 
-        lab_lookback = st.slider(
-            "Interaction Lab lookback (trading days)",
-            min_value=20,
-            max_value=max_lb,
-            value=default_lb,
-            step=5
-        )
-
-
-        # ===== Market Gate =====
-        gate = compute_market_gate(
-            ret_panel, exret_panel,
-            market_sector="MARKET_PROXY",
-            lookback=lab_lookback,
-            mkt_down_thresh=-0.01
-        )
-
-        if gate:
-            g1, g2, g3, g4 = st.columns(4)
-            with g1:
-                st.metric("Market (Proxy) Return", f"{gate['market_return']*100:.2f}%")
-            with g2:
-                st.metric("Dispersion (ExRet Std)", f"{gate['dispersion']*100:.2f}%")
-            with g3:
-                st.metric("Breadth Down", f"{gate['breadth_down']*100:.0f}%")
-            with g4:
-                st.metric("Rotation Confidence", gate["confidence"])
-
-            if gate["confidence"] == "LOW":
-                st.warning(f"Regime: {gate['regime']} — rotation calls are lower confidence today.")
-            elif gate["confidence"] == "HIGH":
-                st.success(f"Regime: {gate['regime']} — sector dispersion is high; rotation signals are meaningful.")
-            else:
-                st.info(f"Regime: {gate['regime']}")
-
-        # Tabs for interaction modules
-        t1, t2, t3 = st.tabs(["Transition Matrix (Top-K)", "Next-Day Odds (State Model)", "Raw Panels"])
-
-        # ===== 1) Transition Matrix =====
-        with t1:
-            cA, cB, cC = st.columns([1, 1, 2])
-            with cA:
-                top_k = st.selectbox("Top-K leaders", [2, 3, 4, 5], index=1)
-            with cB:
-                tm_choices = [20, 30, 40, 60, 90, 120]
-                tm_choices = [x for x in tm_choices if x <= available_days]
-                lookback_tm = st.selectbox("Lookback (days)", tm_choices, index=min(3, len(tm_choices)-1))
-            with cC:
-                st.caption("Heatmap shows: If sector is in today's Top-K (excess return), probability it appears in tomorrow's Top-K.")
-
-            probs, counts = compute_transition_matrix(exret_panel, lookback=lookback_tm, top_k=top_k, market_sector="MARKET_PROXY")
-
-            # --- TODAY TOP-K (latest date) ---
-            latest_dt, today_leaders = get_today_topk(exret_panel, top_k=top_k, market_sector="MARKET_PROXY")
-
-            st.markdown("#### Today’s Top Leaders (Latest PPI Close)")
-            st.write(f"Latest date: **{latest_dt.strftime('%Y-%m-%d')}**")
-            st.dataframe(
-                today_leaders.reset_index().rename(columns={"index":"Sector", latest_dt:"ExcessRet"}),
-                use_container_width=True,
-                hide_index=True
-            )
-
-            # --- TOMORROW PREDICTION (from transition matrix) ---
-            st.markdown("#### Predicted Tomorrow Followers (from Transition Matrix)")
-            pred = predict_tomorrow_from_transition(probs, counts, today_leaders, top_n=8, min_leader_samples=3)
-
-            if pred.empty:
-                st.warning("Not enough data to produce a follower prediction.")
-            else:
-                st.dataframe(pred, use_container_width=True, hide_index=True)
-
-            if probs is None:
-                st.warning("Not enough data to build transition matrix.")
-            else:
-                fig_hm = make_heatmap(probs, title=f"Leader → Follower Transition Probabilities (Top-{top_k}, {lookback_tm}d)")
-                st.plotly_chart(fig_hm, use_container_width=True)
-
-                with st.expander("Show raw counts"):
-                    st.dataframe(counts.astype(int), use_container_width=True)
-
-        # ===== 2) Next-Day Odds =====
-        with t2:
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                z_choices = [10, 15, 20, 30, 40]
-                z_choices = [x for x in z_choices if x < available_days]
-                z_window = st.selectbox("Z-score speed (days)", z_choices, index=min(2, len(z_choices)-1))
-                lb_choices = [30, 40, 60, 90, 120]
-                lb_choices = [x for x in lb_choices if x <= available_days]
-                lookback_odds = st.selectbox("Training lookback (days)", lb_choices, index=min(2, len(lb_choices)-1))
-
-
-            preds = build_nextday_predictions(
-                exret_panel=exret_panel,
-                vol_panel=vol_panel,
-                z_window=z_window,
-                lookback=lookback_odds,
-                market_sector="MARKET_PROXY"
-            )
-
-            if preds is None or preds.empty:
-                st.warning("Not enough data to build next-day odds.")
-            else:
-                # Apply confidence gate note
-                if gate and gate["confidence"] == "LOW":
-                    st.info("Note: Today is a low-rotation regime. Treat these probabilities as weaker signals (more 'pair-trade / relative' than outright).")
-
-                # Show top candidates
-                show_n = min(20, len(preds))
-                st.dataframe(
-                    preds.head(show_n),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "P(NextDay Outperform)": st.column_config.NumberColumn(format="%.2f"),
-                        "E[NextDay ExcessRet]": st.column_config.NumberColumn(format="%.4f"),
-                        "State_Samples": st.column_config.NumberColumn(format="%d"),
-                    }
+                # ===== Adaptive lookback based on available history =====
+                lab_lookback = st.slider(
+                    "Interaction Lab lookback (trading days)",
+                    min_value=20,
+                    max_value=max_lb,
+                    value=default_lb,
+                    step=5,
+                    key="lab_lookback_slider"
                 )
 
-                # Pick a sector for deep dive
-                sector_pick = st.selectbox("Deep-dive sector", preds["Sector"].tolist(), index=0)
-                stats, latest_state = build_state_stats_for_sector(exret_panel[sector_pick], vol_panel[sector_pick], z_window=z_window)
+                # ===== Market Gate =====
+                gate = compute_market_gate(
+                    ret_panel, exret_panel,
+                    market_sector="MARKET_PROXY",
+                    lookback=lab_lookback,
+                    mkt_down_thresh=-0.01
+                )
 
-                if stats is not None:
-                    st.caption(f"Today's state for **{sector_pick}**: `{latest_state}`")
+                if gate:
+                    g1, g2, g3, g4 = st.columns(4)
+                    with g1:
+                        st.metric("Market (Proxy) Return", f"{gate['market_return']*100:.2f}%")
+                    with g2:
+                        st.metric("Dispersion (ExRet Std)", f"{gate['dispersion']*100:.2f}%")
+                    with g3:
+                        st.metric("Breadth Down", f"{gate['breadth_down']*100:.0f}%")
+                    with g4:
+                        st.metric("Rotation Confidence", gate["confidence"])
 
-                    # Bar chart: win rate by state (top 12 states by sample size)
-                    top_states = stats.sort_values("count", ascending=False).head(12).copy()
-                    fig_bar = go.Figure()
-                    fig_bar.add_trace(go.Bar(
-                        x=top_states.index.tolist(),
-                        y=top_states["win_rate"].values,
-                        name="Win Rate"
-                    ))
-                    fig_bar.update_layout(
-                        title=f"Next-Day Outperform Win Rate by State — {sector_pick}",
-                        template="plotly_white",
-                        height=450,
-                        xaxis_title="State (ExRet Z-bin | Vol bin)",
-                        yaxis_title="P(NextDay ExcessRet > 0)",
-                        xaxis_tickangle=30
+                    if gate["confidence"] == "LOW":
+                        st.warning(f"Regime: {gate['regime']} — rotation calls are lower confidence today.")
+                    elif gate["confidence"] == "HIGH":
+                        st.success(f"Regime: {gate['regime']} — sector dispersion is high; rotation signals are meaningful.")
+                    else:
+                        st.info(f"Regime: {gate['regime']}")
+
+                # Tabs for interaction modules
+                t1, t2, t3 = st.tabs(["Transition Matrix (Top-K)", "Next-Day Odds (State Model)", "Raw Panels"])
+
+                # ===== 1) Transition Matrix =====
+                with t1:
+                    cA, cB, cC = st.columns([1, 1, 2])
+                    with cA:
+                        top_k = st.selectbox("Top-K leaders", [2, 3, 4, 5], index=1, key="lab_topk")
+                    with cB:
+                        tm_choices = [20, 30, 40, 60, 90, 120]
+                        tm_choices = [x for x in tm_choices if x <= available_days]
+                        lookback_tm = st.selectbox(
+                            "Lookback (days)",
+                            tm_choices,
+                            index=min(3, len(tm_choices)-1),
+                            key="lab_lookback_tm"
+                        )
+                    with cC:
+                        st.caption("Heatmap shows: If sector is in today's Top-K (excess return), probability it appears in tomorrow's Top-K.")
+
+                    probs, counts = compute_transition_matrix(
+                        exret_panel, lookback=lookback_tm, top_k=top_k, market_sector="MARKET_PROXY"
                     )
-                    st.plotly_chart(fig_bar, use_container_width=True)
 
-                    st.dataframe(stats, use_container_width=True)
+                    latest_dt, today_leaders = get_today_topk(exret_panel, top_k=top_k, market_sector="MARKET_PROXY")
 
-        # ===== 3) Raw Panels =====
-        with t3:
-            st.caption("Raw excess-return / volume panels (debug & intuition).")
-            # show last 200 days for a chosen sector
-            sectors = [c for c in exret_panel.columns if c != "MARKET_PROXY"]
-            pick = st.selectbox("Sector", sectors, index=0)
-            df_view = pd.DataFrame({
-                "ExcessRet": exret_panel[pick],
-                "Volume_Metric": vol_panel[pick],
-                "Close": close_panel[pick],
-            }).dropna().tail(200)
+                    st.markdown("#### Today’s Top Leaders (Latest PPI Close)")
+                    st.write(f"Latest date: **{latest_dt.strftime('%Y-%m-%d')}**")
+                    st.dataframe(
+                        today_leaders.reset_index().rename(columns={"index":"Sector", latest_dt:"ExcessRet"}),
+                        use_container_width=True,
+                        hide_index=True
+                    )
 
-            fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03,
-                                subplot_titles=("Close (PPI)", "Excess Return vs Market", "Volume Metric (Z)"),
-                                row_heights=[0.5, 0.25, 0.25])
+                    st.markdown("#### Predicted Tomorrow Followers (from Transition Matrix)")
+                    pred = predict_tomorrow_from_transition(probs, counts, today_leaders, top_n=8, min_leader_samples=3)
 
-            fig.add_trace(go.Scatter(x=df_view.index, y=df_view["Close"], name="Close"), row=1, col=1)
-            fig.add_trace(go.Bar(x=df_view.index, y=df_view["ExcessRet"], name="ExcessRet"), row=2, col=1)
-            fig.add_trace(go.Bar(x=df_view.index, y=df_view["Volume_Metric"], name="Volume"), row=3, col=1)
+                    if pred.empty:
+                        st.warning("Not enough data to produce a follower prediction.")
+                    else:
+                        st.dataframe(pred, use_container_width=True, hide_index=True)
 
-            fig.update_layout(height=700, template="plotly_white", xaxis3_title="Date", showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
+                    if probs is None:
+                        st.warning("Not enough data to build transition matrix.")
+                    else:
+                        fig_hm = make_heatmap(probs, title=f"Leader → Follower Transition Probabilities (Top-{top_k}, {lookback_tm}d)")
+                        st.plotly_chart(fig_hm, use_container_width=True)
+
+                        with st.expander("Show raw counts"):
+                            st.dataframe(counts.astype(int), use_container_width=True)
+
+                # ===== 2) Next-Day Odds =====
+                with t2:
+                    c1, c2 = st.columns([1, 2])
+                    with c1:
+                        z_choices = [10, 15, 20, 30, 40]
+                        z_choices = [x for x in z_choices if x < available_days]
+                        z_window = st.selectbox("Z-score speed (days)", z_choices, index=min(2, len(z_choices)-1), key="lab_z_window")
+
+                        lb_choices = [30, 40, 60, 90, 120]
+                        lb_choices = [x for x in lb_choices if x <= available_days]
+                        lookback_odds = st.selectbox("Training lookback (days)", lb_choices, index=min(2, len(lb_choices)-1), key="lab_lookback_odds")
+
+                    preds = build_nextday_predictions(
+                        exret_panel=exret_panel,
+                        vol_panel=vol_panel,
+                        z_window=z_window,
+                        lookback=lookback_odds,
+                        market_sector="MARKET_PROXY"
+                    )
+
+                    if preds is None or preds.empty:
+                        st.warning("Not enough data to build next-day odds.")
+                    else:
+                        if gate and gate["confidence"] == "LOW":
+                            st.info("Note: Today is a low-rotation regime. Treat these probabilities as weaker signals.")
+
+                        show_n = min(20, len(preds))
+                        st.dataframe(
+                            preds.head(show_n),
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "P(NextDay Outperform)": st.column_config.NumberColumn(format="%.2f"),
+                                "E[NextDay ExcessRet]": st.column_config.NumberColumn(format="%.4f"),
+                                "State_Samples": st.column_config.NumberColumn(format="%d"),
+                            }
+                        )
+
+                        sector_pick = st.selectbox("Deep-dive sector", preds["Sector"].tolist(), index=0, key="lab_deep_dive_sector")
+                        stats, latest_state = build_state_stats_for_sector(
+                            exret_panel[sector_pick], vol_panel[sector_pick], z_window=z_window
+                        )
+
+                        if stats is not None:
+                            st.caption(f"Today's state for **{sector_pick}**: `{latest_state}`")
+                            top_states = stats.sort_values("count", ascending=False).head(12).copy()
+
+                            fig_bar = go.Figure()
+                            fig_bar.add_trace(go.Bar(
+                                x=top_states.index.tolist(),
+                                y=top_states["win_rate"].values,
+                                name="Win Rate"
+                            ))
+                            fig_bar.update_layout(
+                                title=f"Next-Day Outperform Win Rate by State — {sector_pick}",
+                                template="plotly_white",
+                                height=450,
+                                xaxis_title="State (ExRet Z-bin | Vol bin)",
+                                yaxis_title="P(NextDay ExcessRet > 0)",
+                                xaxis_tickangle=30
+                            )
+                            st.plotly_chart(fig_bar, use_container_width=True)
+                            st.dataframe(stats, use_container_width=True)
+
+                # ===== 3) Raw Panels =====
+                with t3:
+                    st.caption("Raw excess-return / volume panels (debug & intuition).")
+                    sectors = [c for c in exret_panel.columns if c != "MARKET_PROXY"]
+                    pick = st.selectbox("Sector", sectors, index=0, key="lab_raw_sector")
+
+                    df_view = pd.DataFrame({
+                        "ExcessRet": exret_panel[pick],
+                        "Volume_Metric": vol_panel[pick],
+                        "Close": close_panel[pick],
+                    }).dropna().tail(200)
+
+                    fig = make_subplots(
+                        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03,
+                        subplot_titles=("Close (PPI)", "Excess Return vs Market", "Volume Metric (Z)"),
+                        row_heights=[0.5, 0.25, 0.25]
+                    )
+                    fig.add_trace(go.Scatter(x=df_view.index, y=df_view["Close"], name="Close"), row=1, col=1)
+                    fig.add_trace(go.Bar(x=df_view.index, y=df_view["ExcessRet"], name="ExcessRet"), row=2, col=1)
+                    fig.add_trace(go.Bar(x=df_view.index, y=df_view["Volume_Metric"], name="Volume"), row=3, col=1)
+
+                    fig.update_layout(height=700, template="plotly_white", xaxis3_title="Date", showlegend=False)
+                    st.plotly_chart(fig, use_container_width=True)
+
+            # render the lab (only this part re-runs on dropdown changes)
+            render_sector_interaction_lab()
+
 
 
 
