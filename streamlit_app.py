@@ -1180,9 +1180,6 @@ with tab_dashboard:
         else:
             st.error(v2_error)
 
-    st.markdown("---")
-    st.subheader("Sector Interaction Lab (Rotation Signals)")
-
     # =========================
     # SECTOR INTERACTION LAB
     # =========================
@@ -1585,6 +1582,7 @@ with tab_single:
                         st.metric("Downside Support", f"{lower[-1]:.2f}")
                 else:
                     st.warning("Not enough data or model failed to converge.")
+
 
 
 
