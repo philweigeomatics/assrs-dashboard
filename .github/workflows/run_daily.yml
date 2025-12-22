@@ -3,7 +3,7 @@ name: Run Daily ASSRS Data Pipeline
 on:
   # 1. Run on a schedule (01:00 UTC = 9:00 AM Beijing Time)
   schedule:
-    - cron: '0 1 * * *'
+    - cron: '0 13 * * *'
   # 2. Also allow manual runs from the "Actions" tab on GitHub
   workflow_dispatch:
 
