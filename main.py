@@ -2,20 +2,25 @@ import pandas as pd
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo 
 import data_manager
-import assrs_logic      # <-- V1 (Rule-Based) Logic
-import assrs_logic_2    # <-- V2 (Regime-Switching) Logic
+from assrs_logic_V2_enhanced import calculate_regime_scores  # NEW: Only V2.5
 import time
 import sys
 import os 
-# import subprocess # <-- REMOVED: The YAML file will handle commits
+
 
 # --- 1. CONFIGURATION ---
 TUSHARE_API_TOKEN = '36838688c6455de2e3affca37060648de15b94b9707a43bb05a38312'
 
-# ---!!!--- DYNAMIC PRODUCTION PATHS ---!!!---
-# Use the GitHub workspace directory
+# Dynamic production paths for GitHub Actions
 PROJECT_PATH = os.environ.get('GITHUB_WORKSPACE', os.path.dirname(os.path.abspath(__file__)))
-data_manager.DB_NAME = os.path.join(PROJECT_PATH, 'assrs_tushare_local.db')
+
+# NOW set the DB path AFTER import
+DB_PATH = os.path.join(PROJECT_PATH, 'assrs_tushare_local.db')
+data_manager.DB_NAME = DB_PATH  # Override the default from data_manager
+
+print(f"[CONFIG] Using database: {DB_PATH}")
+print(f"[CONFIG] Project path: {PROJECT_PATH}")
+
 
 # --- 2. BACKTEST PARAMETERS ---
 DATA_START_DATE = '20240101'
@@ -23,50 +28,91 @@ DATA_START_DATE = '20240101'
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 TODAY_DATE = datetime.now(CHINA_TZ)
 YESTERDAY_DATE = TODAY_DATE - timedelta(days=1) 
-DATA_END_DATE = YESTERDAY_DATE.strftime('%Ym%d') 
+DATA_END_DATE = YESTERDAY_DATE.strftime('%Y%m%d')  # Fixed typo: was '%Ym%d'
 
 BACKTEST_START_DATE = '2025-07-01'
 BACKTEST_END_DATE = YESTERDAY_DATE.strftime('%Y-%m-%d')
 
-CALENDAR_PROXY_TICKER = '601398' 
+CALENDAR_PROXY_TICKER = '601398'  # ICBC for trading calendar
 
-# (Stock Logic Parameters are not needed for this script)
 
-# --- 4. MAIN EXECUTION ---
-def run_all_sector_backtests():
+# --- 3. MAIN EXECUTION ---
+
+def run_sector_backtest_v2():
     """
-    Orchestrates the entire historical backtest for BOTH
-    V1 (Rule-Based) and V2 (Regime-Switching) sector models.
+    Orchestrates the entire backtest for V2 Enhanced (Regime-Switching)
+    sector model with market context awareness.
+    
+    Drops V1 to simplify dashboard and reduce confusion.
     """
+    
+    # === STEP 1: Initialize Tushare ===
     if not data_manager.init_tushare(TUSHARE_API_TOKEN):
         print("!! ERROR: Tushare token appears to be invalid. Exiting.")
-        sys.exit()
+        sys.exit(1)
 
-    print(f"--- Ensuring local stock database is up-to-date ({DATA_START_DATE} to {DATA_END_DATE})... ---")
+    # === STEP 2: Sync Stock Data ===
+    print(f"\n{'='*60}")
+    print(f"STEP 1: Syncing stock database")
+    print(f"Date range: {DATA_START_DATE} to {DATA_END_DATE}")
+    print(f"{'='*60}")
+    
     data_manager.ensure_data_in_db(DATA_START_DATE, DATA_END_DATE)
-    print("--- Stock database sync complete. ---")
+    print("✅ Stock database sync complete.\n")
 
+    # === STEP 3: Load Stock Data ===
+    print(f"{'='*60}")
+    print(f"STEP 2: Loading stock data from database")
+    print(f"{'='*60}")
+    
     all_stock_data = data_manager.get_all_stock_data_from_db()
     if not all_stock_data:
         print("!! ERROR: No stock data found in database. Exiting.")
-        return
+        sys.exit(1)
+    
+    print(f"✅ Loaded {len(all_stock_data)} stocks from database.\n")
 
+    # === STEP 4: Aggregate PPIs ===
+    print(f"{'='*60}")
+    print(f"STEP 3: Aggregating sector PPIs")
+    print(f"{'='*60}")
+    
     all_ppi_data = data_manager.aggregate_ppi_data(all_stock_data)
     if not all_ppi_data:
         print("!! ERROR: Failed to aggregate PPIs. Exiting.")
-        return
-    else:
-        data_manager.save_ppi_data_to_db(all_ppi_data)
+        sys.exit(1)
+    
+    data_manager.save_ppi_data_to_db(all_ppi_data)
+    print(f"✅ Aggregated and saved {len(all_ppi_data)} sector PPIs.\n")
 
+    # === STEP 5: Load PPIs from DB ===
+    print(f"{'='*60}")
+    print(f"STEP 4: Loading PPIs from database")
+    print(f"{'='*60}")
+    
     all_ppi_data_loaded = data_manager.load_ppi_data_from_db()
     if not all_ppi_data_loaded:
         print("!! ERROR: Failed to load PPIs from database. Exiting.")
-        return
+        sys.exit(1)
+    
+    # Verify MARKET_PROXY exists
+    if 'MARKET_PROXY' not in all_ppi_data_loaded:
+        print("!! WARNING: MARKET_PROXY not found in PPIs. Enhanced V2 needs it as benchmark!")
+        print("!! Please ensure MARKET_PROXY is defined in data_manager.SECTOR_STOCK_MAP")
+    
+    print(f"✅ Loaded {len(all_ppi_data_loaded)} PPIs from database.")
+    print(f"   Sectors: {', '.join(list(all_ppi_data_loaded.keys())[:5])}...")
+    print()
 
+    # === STEP 6: Build Trading Calendar ===
+    print(f"{'='*60}")
+    print(f"STEP 5: Building trading calendar")
+    print(f"{'='*60}")
+    
     if CALENDAR_PROXY_TICKER not in all_stock_data:
-        print(f"!! ERROR: Calendar proxy stock '{CALENDAR_PROXY_TICKER}' not found.")
-        return
-            
+        print(f"!! ERROR: Calendar proxy stock '{CALENDAR_PROXY_TICKER}' not found. Exiting.")
+        sys.exit(1)
+    
     market_calendar = all_stock_data[CALENDAR_PROXY_TICKER].index
     
     backtest_date_range = market_calendar[
@@ -75,64 +121,146 @@ def run_all_sector_backtests():
     ]
     
     if backtest_date_range.empty:
-        print(f"!! ERROR: No valid *trading days* found in the date range.")
-        return
-    print(f"--- Found {len(backtest_date_range)} actual trading days for backtest ---")
-
-    # --- 7. RUN BACKTEST 1: SECTOR-LEVEL (V1 - Rule-Based) ---
-    print(f"\n--- Running Daily Backtest 1: SECTOR-LEVEL (V1) ---")
+        print(f"!! ERROR: No valid trading days found between {BACKTEST_START_DATE} and {BACKTEST_END_DATE}.")
+        sys.exit(1)
     
-    all_sector_scores_v1 = []
-    for date in backtest_date_range:
-        daily_scorecard = assrs_logic.calculate_scorecard(all_ppi_data_loaded, date)
-        if not daily_scorecard.empty:
-            daily_scorecard['Date'] = date.strftime('%Y-%m-%d')
-            all_sector_scores_v1.append(daily_scorecard.reset_index()) 
+    print(f"✅ Found {len(backtest_date_range)} trading days for backtest.")
+    print(f"   Range: {backtest_date_range[0].strftime('%Y-%m-%d')} to {backtest_date_range[-1].strftime('%Y-%m-%d')}")
+    print()
 
-    if not all_sector_scores_v1:
-        print("V1 Sector backtest finished with no results.")
-    else:
-        full_results_v1 = pd.concat(all_sector_scores_v1)
-        output_filename_v1 = os.path.join(PROJECT_PATH, 'assrs_backtest_results_SECTORS_V1_Rules.csv')
-        full_results_v1.to_csv(output_filename_v1, index=False, encoding='utf-8-sig')
-        print(f"\n--- SECTOR V1 Backtest Complete! Results saved to '{output_filename_v1}' ---")
-
-    # --- 8. RUN BACKTEST 2: SECTOR-LEVEL (V2 - Regime Switching) ---
-    print(f"\n--- Running Daily Backtest 2: SECTOR-LEVEL (V2) ---")
+    # === STEP 7: Run V2 Enhanced Backtest ===
+    print(f"{'='*60}")
+    print(f"STEP 6: Running V2 Enhanced (Regime-Switching) Backtest")
+    print(f"{'='*60}")
+    print(f"Features: Market context, volume confirmation, momentum, adaptive thresholds")
+    print()
     
     all_sector_scores_v2 = []
+    historical_scores = None  # For adaptive thresholds (optional)
     
-    for date in backtest_date_range:
-        print(f"  -> V2: Fitting Regime Models for: {date.strftime('%Y-%m-%d')}")
+    total_days = len(backtest_date_range)
+    
+    for idx, date in enumerate(backtest_date_range, 1):
+        # Progress indicator
+        if idx % 10 == 0 or idx == total_days:
+            print(f"  Progress: {idx}/{total_days} ({idx/total_days*100:.1f}%) - {date.strftime('%Y-%m-%d')}")
         
-        daily_scorecard_v2 = assrs_logic_2.calculate_regime_scores(all_ppi_data_loaded, date)
+        try:
+            # Call enhanced V2.5 with optional historical scores
+            daily_scorecard_v2 = calculate_regime_scores(
+                all_ppi_data_loaded,
+                date,
+                historical_scores=historical_scores  # Pass None on first run
+            )
+            
+            if not daily_scorecard_v2.empty:
+                all_sector_scores_v2.append(daily_scorecard_v2.reset_index(drop=True))
+                
+                # Optional: Build historical scores for adaptive thresholds
+                # (Only keep last 120 days to save memory)
+                if historical_scores is None:
+                    historical_scores = daily_scorecard_v2[['Date', 'Sector', 'TOTAL_SCORE']].copy()
+                else:
+                    historical_scores = pd.concat([
+                        historical_scores.tail(120 * len(all_ppi_data_loaded)),  # Keep ~120 days
+                        daily_scorecard_v2[['Date', 'Sector', 'TOTAL_SCORE']]
+                    ], ignore_index=True)
         
-        if not daily_scorecard_v2.empty:
-            all_sector_scores_v2.append(daily_scorecard_v2.reset_index(drop=True)) 
+        except Exception as e:
+            print(f"  !! ERROR processing {date.strftime('%Y-%m-%d')}: {str(e)}")
+            continue
+    
+    print()
 
+    # === STEP 8: Save Results ===
+    print(f"{'='*60}")
+    print(f"STEP 7: Saving backtest results")
+    print(f"{'='*60}")
+    
     if not all_sector_scores_v2:
-        print("V2 Sector backtest finished with no results.")
+        print("!! ERROR: V2 backtest finished with no results. Check logs above.")
+        sys.exit(1)
+    
+    full_results_v2 = pd.concat(all_sector_scores_v2, ignore_index=True)
+    
+    # Output path
+    output_filename_v2 = os.path.join(PROJECT_PATH, 'assrs_backtest_results_SECTORS_V2_Regime.csv')
+    
+    # Save CSV
+    full_results_v2.to_csv(output_filename_v2, index=False, encoding='utf-8-sig')
+    
+    print(f"✅ V2 Enhanced backtest complete!")
+    print(f"   Total rows: {len(full_results_v2):,}")
+    print(f"   Date range: {full_results_v2['Date'].min()} to {full_results_v2['Date'].max()}")
+    print(f"   Sectors: {full_results_v2['Sector'].nunique()}")
+    print(f"   Output file: {output_filename_v2}")
+    print()
+    
+    # === STEP 9: Validation Checks ===
+    print(f"{'='*60}")
+    print(f"STEP 8: Validation checks")
+    print(f"{'='*60}")
+    
+    # Check for MARKET_PROXY
+    market_rows = full_results_v2[full_results_v2['Sector'] == 'MARKET_PROXY']
+    if market_rows.empty:
+        print("⚠️  WARNING: MARKET_PROXY not found in results!")
     else:
-        full_results_v2 = pd.concat(all_sector_scores_v2)
-        
-        output_filename_v2 = os.path.join(PROJECT_PATH, 'assrs_backtest_results_SECTORS_V2_Regime.csv')
-        full_results_v2.to_csv(output_filename_v2, index=False, encoding='utf-8-sig')
-        
-        print(f"\n--- SECTOR V2 Backtest Complete! Results saved to '{output_filename_v2}' ---")
-        
-# --- 5. REMOVED commit_results() FUNCTION ---
-# This logic is now handled 100% by the .github/workflows/run_daily.yml file
+        print(f"✅ MARKET_PROXY: {len(market_rows)} rows")
+    
+    # Check for MARKET_PROXY
+    market_rows = full_results_v2[full_results_v2['Sector'] == 'MARKET_PROXY']
+    if market_rows.empty:
+        print("⚠️  WARNING: MARKET_PROXY not found in results!")
+    else:
+        print(f"✅ MARKET_PROXY: {len(market_rows)} rows")
+    
+    # Check new columns exist
+    expected_cols = ['Market_Score', 'Market_Regime', 'Excess_Prob', 'Position_Size', 'Dispersion']
+    missing_cols = [col for col in expected_cols if col not in full_results_v2.columns]
+    
+    if missing_cols:
+        print(f"⚠️  WARNING: Missing expected columns: {missing_cols}")
+    else:
+        print(f"✅ All enhanced columns present: {', '.join(expected_cols)}")
+    
+    # Show sample stats
+    print(f"\n📊 Sample statistics:")
+    print(f"   Avg TOTAL_SCORE: {full_results_v2['TOTAL_SCORE'].mean():.2f}")
+    print(f"   Score range: {full_results_v2['TOTAL_SCORE'].min():.2f} to {full_results_v2['TOTAL_SCORE'].max():.2f}")
+    
+    if 'Market_Score' in full_results_v2.columns:
+        latest_market = full_results_v2[full_results_v2['Sector'] == 'MARKET_PROXY'].iloc[-1]
+        print(f"   Latest market regime: {latest_market.get('Market_Regime', 'N/A')}")
+        print(f"   Latest market score: {latest_market.get('Market_Score', 0):.2f}")
+    
+    print()
+    print(f"{'='*60}")
+    print(f"✅ ALL STEPS COMPLETE - V2 Enhanced backtest successful!")
+    print(f"{'='*60}\n")
 
+
+# --- 4. ENTRY POINT ---
 
 if __name__ == "__main__":
     start_time = time.time()
-    print(f"--- ASSRS Daily Task Started: {datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M:%S')} (China Time) ---")
     
-    # 1. Run the data/logic job
-    run_all_sector_backtests()
+    print(f"\n{'#'*60}")
+    print(f"# ASSRS Daily Task - V2 Enhanced (V1 Removed)")
+    print(f"# Started: {datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M:%S')} (China Time)")
+    print(f"{'#'*60}\n")
     
-    # 2. Commit step removed. The YAML file will do this after this script finishes.
+    try:
+        run_sector_backtest_v2()
+    except Exception as e:
+        print(f"\n!! FATAL ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
     
     end_time = time.time()
-    print(f"\nTotal runtime: {end_time - start_time:.2f} seconds.")
-    print(f"--- ASSRS Daily Task Finished: {datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M:%S')} (China Time) ---")
+    
+    print(f"\n{'#'*60}")
+    print(f"# Total runtime: {end_time - start_time:.2f} seconds ({(end_time - start_time)/60:.1f} minutes)")
+    print(f"# Finished: {datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M:%S')} (China Time)")
+    print(f"{'#'*60}\n")

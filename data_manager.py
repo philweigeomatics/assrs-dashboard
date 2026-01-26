@@ -23,13 +23,16 @@ SECTOR_STOCK_MAP = {
     '半导体': ['688981','688041','688256','002371','688347'], # 中芯国际, 海光信息, 寒武纪，北方华创，华虹公司
     '软件': ['688111','002230','600588','300033','601360','300339','600570'],   # 金山办公, 科大讯飞, 用友网络, 同花顺，三六零，润和软件，恒生电子
     '光模块中游': ['300308','300394','002281','603083','300620','300548'], # 中际旭创, 天孚通讯, 光迅科技，剑桥科技，光库科技，长兴博创
+    '液冷':['002837','300499','301018','603019','000977'],# 英维克，高澜股份，申菱环境，中科曙光，浪潮信息
     '军工电子': ['600760','002414','600562'],  # 中航沈飞, 高德红外, 国睿科技
+    '风电设备':['002202','002531','002487','300443'], # 金风科技, 天顺风能, 大金重工,金雷股份
     '家用电器': ['000333','600690','000921'], # 美的集团, 海尔智家, 海信家电
     '电力': ['600900','601985','600886'], # 长江电力, 中国核电, 国投电力
     '白酒': ['000568','000596', '600809','600519'],    # 泸州老窖, 古井贡酒, 山西汾酒，贵州茅台
     '电网设备':['600406','002028','600089','601877','300274','600312','601179'], # 国电南瑞, 思源电气, 特变电工，生态电器，阳光电源，平高电气，中国西电
     '电池': ['300014','002074','300750','688778','300450'],   # 亿纬锂能, 国轩高科, 宁德时代，厦钨新能，先导智能
-    '整车':['600104','601633','000625','601238','002594'], # 上汽集团, 长城汽车, 长安汽车，广汽汽车，比亚迪
+    '整车':['600104','601633','000625','601238','002594','600418'], # 上汽集团, 长城汽车, 长安汽车，广汽汽车，比亚迪，江淮汽车
+    '有色金属':['000630','000878','601899','600362','601600','000426'], # 铜陵有色, 云铝股份, 紫金矿业, 江西铜业, 中国铝业，兴业银锡
     '能源':['601800','601857','601225','600028','600938','002353','600188'] # 中国交建, 中国石油, 陕西煤业, 中国石化, 中国海油, 杰瑞股份，兖创能源
 }
 
@@ -63,10 +66,39 @@ def init_tushare(token=None):
 
 
 def get_tushare_ticker(ticker):
-    """Converts 6-digit ticker to Tushare's format (e.g., 601398 -> 601398.SH)"""
-    if ticker.startswith('6') or ticker.startswith('688'): return f"{ticker}.SH"
-    elif ticker.startswith('0') or ticker.startswith('3'): return f"{ticker}.SZ"
+    """
+    Converts 6-digit ticker to Tushare's format.
+    Supports Shanghai (SH), Shenzhen (SZ), and Beijing (BJ) exchanges.
+    
+    Examples:
+        601398 -> 601398.SH (Shanghai)
+        000001 -> 000001.SZ (Shenzhen)
+        430047 -> 430047.BJ (Beijing)
+    """
+    # Remove any existing suffix if present
+    ticker = ticker.split('.')[0]
+    
+    # Beijing Stock Exchange (北交所)
+    # Prefixes: 43xxxx, 83xxxx, 87xxxx
+    if ticker.startswith(('43', '83', '87')):
+        return f"{ticker}.BJ"
+    
+    # Shanghai Stock Exchange (上交所)
+    # Main board: 600xxx, 601xxx, 603xxx, 605xxx
+    # STAR Market (科创板): 688xxx
+    elif ticker.startswith('6') or ticker.startswith('688'):
+        return f"{ticker}.SH"
+    
+    # Shenzhen Stock Exchange (深交所)
+    # Main board: 000xxx, 001xxx
+    # SME board: 002xxx (merged into main)
+    # ChiNext (创业板): 300xxx, 301xxx
+    elif ticker.startswith(('0', '2', '3')):
+        return f"{ticker}.SZ"
+    
+    # Fallback: return as-is if format not recognized
     return ticker
+
 
 def create_history_table(conn):
     """Creates search history table if not exists. Only stores ticker & timestamp."""

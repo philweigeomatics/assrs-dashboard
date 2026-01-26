@@ -1,1590 +1,268 @@
+"""
+ASSRS V2 Enhanced - Advanced Stock Rotation & Selection System
+A-share Market Analysis Platform
+"""
+
 import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import numpy as np
-import ta
-import os
-from datetime import datetime, timedelta
 
-# Try importing statsmodels for advanced forecasting
-try:
-    from statsmodels.tsa.holtwinters import ExponentialSmoothing
-    from statsmodels.tsa.arima.model import ARIMA
-    HAS_STATSMODELS = True
-except ImportError:
-    HAS_STATSMODELS = False
-
-
-# --- Fragment helper (Streamlit >=1.33 has st.fragment; older has st.experimental_fragment) ---
-_fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
-
-if _fragment is None:
-    # fallback: no fragment support in this Streamlit version
-    def _fragment(func):
-        return func
-
-
-# Assuming data_manager is in the same directory or path
-import data_manager 
-
-# --- 1. CONFIGURATION ---
-V1_RULES_FILE = 'assrs_backtest_results_SECTORS_V1_Rules.csv'
-V2_REGIME_FILE = 'assrs_backtest_results_SECTORS_V2_Regime.csv'
-
-# Set page config
 st.set_page_config(
-    page_title="ASSRS Sector Scoreboard",
+    page_title="Home | 主页",
+    page_icon="🏠",
     layout="wide"
 )
 
-# --- 2. HELPER FUNCTIONS (SECTOR DATA - UNCHANGED) ---
 
-@st.cache_data(ttl=600)  # Cache data for 10 minutes
-def load_data(filepath, model_name):
-    """Loads and prepares all data from a CSV file."""
-    try:
-        df = pd.read_csv(filepath)
-        df['Date'] = pd.to_datetime(df['Date'])
-        
-        # Convert all potential numeric columns
-        cols_to_numeric = ['TOTAL_SCORE', 'Open', 'High', 'Low', 'Close', 'Volume_Metric']
-        for col in cols_to_numeric:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
 
-        if df.empty:
-            return None, None, f"No data in {model_name} file.", None
+# ==========================================
+# HEADER
+# ==========================================
 
-        # 1. Get Latest Scores
-        latest_date = df['Date'].max()
-        latest_scores_df = df[df['Date'] == latest_date].copy()
-        
-        # 2. Get Full History
-        full_history_df = df.copy()
-        
-        return latest_scores_df, full_history_df, latest_date.strftime('%Y-%m-%d'), None
-        
-    except FileNotFoundError:
-        return None, None, None, f"ERROR: File not found: {filepath}. The data-update task may not have run yet."
-    except Exception as e:
-        return None, None, None, f"An error occurred: {str(e)}"
+st.markdown("### Advanced Stock Rotation & Selection System | 高级股票轮动与选股系统")
 
-def style_action(action):
-    """Applies color to the 'ACTION' column for the dataframe."""
-    if not isinstance(action, str): return ''
-    if 'GREEN' in action:
-        return 'color: #15803d; background-color: #dcfce7; font-weight: 600;'
-    if 'YELLOW' in action:
-        return 'color: #a16207; background-color: #fef9c3; font-weight: 600;'
-    if 'RED' in action:
-        return 'color: #b91c1c; background-color: #fee2e2; font-weight: 600;'
-    if 'CONSOLIDATION' in action:
-        return 'color: #4b5563; background-color: #f3f4f6; font-weight: 500;'
-    return ''
+st.markdown("---")
 
-def create_drilldown_chart(chart_data, model_type):
-    """
-    Creates a 3-plot interactive chart for Sectors.
-    """
-    is_v1 = model_type == 'v1'
-    y_title_score = 'V1 Score (-3 to 8)' if is_v1 else 'V2 Bull Probability (0 to 1)'
-    y_range_score = [-3.1, 8.1] if is_v1 else [-0.1, 1.1]
+# ==========================================
+# ABOUT / 关于
+# ==========================================
 
-    date_strings = chart_data['Date'].dt.strftime('%Y-%m-%d')
+col_en, col_cn = st.columns(2)
 
-    fig = make_subplots(
-        rows=3, cols=1, shared_xaxes=True,
-        vertical_spacing=0.03,
-        subplot_titles=('Price (PPI)', 'Volume (Z-Score)', 'Signal (Score)'),
-        row_heights=[0.5, 0.2, 0.3]
-    )
+with col_en:
+    st.markdown("## 📖 About")
+    st.markdown("""
+    **ASSRS** is an **analysis platform** designed to assist traders and investors in researching stock sectors, 
+individual equities, and portfolio strategies. This tool provides data visualization and analytical insights 
+to support your investment research process. This platform is designed for quantitative traders and investors who want data-driven insights into 
+    China's stock market dynamics, with a focus on sector momentum and individual stock selection.
+    """)
 
-    # Price (Chinese Colors: Red Up, Green Down)
-    fig.add_trace(go.Candlestick(
-        x=date_strings,
-        open=chart_data['Open'],
-        high=chart_data['High'],
-        low=chart_data['Low'],
-        close=chart_data['Close'],
-        name='Price',
-        increasing=dict(line=dict(color='#ef4444')), # Red
-        decreasing=dict(line=dict(color='#22c55e'))  # Green
-    ), row=1, col=1)
-
-    # Volume
-    fig.add_trace(go.Bar(
-        x=date_strings,
-        y=chart_data['Volume_Metric'],
-        name='Volume Metric',
-        marker_color='rgba(107, 114, 128, 0.3)'
-    ), row=2, col=1)
-
-    # Score
-    fig.add_trace(go.Scatter(
-        x=date_strings,
-        y=chart_data['TOTAL_SCORE'],
-        name='Score',
-        line=dict(color='#10b981', width=2),
-        fill='tozeroy',
-        fillcolor='rgba(16, 185, 129, 0.1)'
-    ), row=3, col=1)
-
-    # Thresholds
-    if is_v1:
-        fig.add_hline(y=2.5, line_dash="dash", line_color="#a16207", annotation_text="Buy (2.5)", row=3, col=1)
-        fig.add_hline(y=5.0, line_dash="dash", line_color="#15803d", annotation_text="Strong (5.0)", row=3, col=1)
-    else:
-        fig.add_hline(y=0.8, line_dash="dash", line_color="#15803d", annotation_text="High Prob (0.8)", row=3, col=1)
-        fig.add_hline(y=0.2, line_dash="dash", line_color="#b91c1c", annotation_text="Low Prob (0.2)", row=3, col=1)
-
-    fig.update_layout(
-        height=700,
-        showlegend=False,
-        margin=dict(l=20, r=20, t=50, b=20),
-        xaxis3_title='Date',
-        yaxis1_title="PPI",
-        yaxis2_title="Vol Z-Score",
-        yaxis3_title=y_title_score,
-        yaxis3_range=y_range_score,
-        xaxis_rangeslider_visible=False,
-        template="plotly_white"
-    )
-    return fig
-
-# =========================
-# SECTOR INTERACTION MODULE
-# =========================
-
-def _pivot_sector_series(hist_df: pd.DataFrame, value_col: str) -> pd.DataFrame:
-    """Pivot long sector history into wide Date x Sector."""
-    df = hist_df[['Date', 'Sector', value_col]].dropna().copy()
-    df = df.sort_values('Date')
-    wide = df.pivot_table(index='Date', columns='Sector', values=value_col, aggfunc='last')
-    wide = wide.sort_index()
-    return wide
-
-def build_sector_panels(hist_df: pd.DataFrame, market_sector: str = "MARKET_PROXY"):
-    """
-    Build wide panels:
-      - close_panel: Date x Sector Close
-      - ret_panel:   Date x Sector daily return
-      - vol_panel:   Date x Sector Volume_Metric (your z-score)
-      - exret_panel: Date x Sector excess return vs market proxy
-    """
-    close_panel = _pivot_sector_series(hist_df, 'Close')
-    vol_panel   = _pivot_sector_series(hist_df, 'Volume_Metric')
-
-    # returns
-    ret_panel = close_panel.pct_change()
-
-    # excess returns
-    exret_panel = ret_panel.copy()
-    if market_sector in ret_panel.columns:
-        exret_panel = ret_panel.sub(ret_panel[market_sector], axis=0)
-        exret_panel[market_sector] = 0.0  # define market excess as 0
-    else:
-        # fallback: if market proxy missing, treat excess == raw returns
-        exret_panel = ret_panel
-
-    return close_panel, ret_panel, vol_panel, exret_panel
-
-
-def compute_market_gate(ret_panel: pd.DataFrame,
-                        exret_panel: pd.DataFrame,
-                        market_sector: str = "MARKET_PROXY",
-                        lookback: int = 252,
-                        mkt_down_thresh: float = -0.01):
-    """
-    Compute a simple "rotation confidence" gate using:
-      - market daily return
-      - dispersion of sector excess returns
-      - breadth (% sectors down)
-    """
-    # restrict to recent lookback
-    ret_lb = ret_panel.tail(lookback).copy()
-    ex_lb  = exret_panel.tail(lookback).copy()
-
-    latest_dt = ret_lb.index.max()
-    if latest_dt is None:
-        return None
-
-    # market return
-    mkt_ret = float(ret_lb[market_sector].loc[latest_dt]) if market_sector in ret_lb.columns else float(ret_lb.mean(axis=1).loc[latest_dt])
-
-    # dispersion across sectors (exclude market)
-    cols = [c for c in ex_lb.columns if c != market_sector]
-    latest_disp = float(ex_lb[cols].loc[latest_dt].std()) if cols else float(ex_lb.loc[latest_dt].std())
-
-    # history dispersion percentile for context
-    disp_series = ex_lb[cols].std(axis=1) if cols else ex_lb.std(axis=1)
-    disp_p25 = float(disp_series.quantile(0.25))
-    disp_p75 = float(disp_series.quantile(0.75))
-
-    # breadth: % sectors negative (raw returns)
-    breadth_cols = [c for c in ret_lb.columns if c != market_sector]
-    if breadth_cols:
-        breadth_down = float((ret_lb[breadth_cols].loc[latest_dt] < 0).mean())
-    else:
-        breadth_down = float((ret_lb.loc[latest_dt] < 0).mean())
-
-    # classify
-    correlated_selloff = (mkt_ret <= mkt_down_thresh) and (latest_disp <= disp_p25) and (breadth_down >= 0.80)
-    selective_rotation = (latest_disp >= disp_p75) and (breadth_down <= 0.80)
-
-    if correlated_selloff:
-        regime = "CORRELATED SELLOFF (Low Rotation)"
-        confidence = "LOW"
-    elif selective_rotation:
-        regime = "SELECTIVE ROTATION (High Dispersion)"
-        confidence = "HIGH"
-    else:
-        regime = "NORMAL / MIXED"
-        confidence = "MEDIUM"
-
-    return {
-        "latest_date": latest_dt,
-        "market_return": mkt_ret,
-        "dispersion": latest_disp,
-        "disp_p25": disp_p25,
-        "disp_p75": disp_p75,
-        "breadth_down": breadth_down,
-        "regime": regime,
-        "confidence": confidence,
-        "disp_series": disp_series
-    }
-
-
-def compute_transition_matrix(exret_panel: pd.DataFrame,
-                              lookback: int = 252,
-                              top_k: int = 3,
-                              market_sector: str = "MARKET_PROXY"):
-    """
-    Build Leader->Follower transition probabilities:
-    If sector i is in today's Top-K (excess return), what's the probability sector j is in tomorrow's Top-K?
-    """
-    available = exret_panel.dropna(how="all").shape[0]              # <-- NEW line
-    lookback = max(10, min(int(lookback), available - 1))           # <-- NEW line (clamp)
-    df = exret_panel.tail(lookback + 1).copy()
-
-    sectors = [c for c in df.columns if c != market_sector]
-    if len(sectors) < 2:
-        return None, None
-
-    df = df[sectors].dropna(how='all')
-    if len(df) < 10:
-        return None, None
-
-    dates = df.index.tolist()
-    counts = pd.DataFrame(0.0, index=sectors, columns=sectors)
-
-    for t in range(len(dates) - 1):
-        d0 = dates[t]
-        d1 = dates[t + 1]
-        r0 = df.loc[d0].dropna()
-        r1 = df.loc[d1].dropna()
-
-        if len(r0) < top_k or len(r1) < top_k:
-            continue
-
-        leaders = r0.sort_values(ascending=False).head(top_k).index.tolist()
-        followers = r1.sort_values(ascending=False).head(top_k).index.tolist()
-
-        for i in leaders:
-            for j in followers:
-                counts.loc[i, j] += 1.0
-
-    # row-normalize -> probabilities
-    # Laplace smoothing to avoid zero rows when history is short
-    alpha = 1.0
-    smoothed = counts + alpha
-    row_sums = smoothed.sum(axis=1).replace(0, np.nan)
-    probs = smoothed.div(row_sums, axis=0).fillna(0.0)
-    return probs, counts
-
-
-def make_heatmap(df_matrix: pd.DataFrame, title: str):
-    """Plotly heatmap for a square matrix."""
-    if df_matrix is None or df_matrix.empty:
-        return None
-
-    z = df_matrix.values
-    x = df_matrix.columns.tolist()
-    y = df_matrix.index.tolist()
-
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=z, x=x, y=y,
-            colorbar=dict(title="Prob"),
-            zmin=0, zmax=max(0.001, float(np.nanmax(z)))
-        )
-    )
-    fig.update_layout(
-        title=title,
-        height=650,
-        template="plotly_white",
-        xaxis_title="Tomorrow Top-K (Followers)",
-        yaxis_title="Today Top-K (Leaders)",
-        margin=dict(l=80, r=20, t=50, b=80)
-    )
-    return fig
-
-
-def _state_from_z(z: float) -> str:
-    if np.isnan(z):
-        return "NA"
-    if z <= -1.0:
-        return "VERY_DOWN"
-    if z <= -0.5:
-        return "DOWN"
-    if z < 0.5:
-        return "FLAT"
-    if z < 1.0:
-        return "UP"
-    return "VERY_UP"
-
-
-def _vol_state(v: float) -> str:
-    if np.isnan(v):
-        return "NA"
-    if v <= -1.0:
-        return "VOL_LOW"
-    if v >= 1.0:
-        return "VOL_HIGH"
-    return "VOL_NORM"
-
-
-def build_state_stats_for_sector(exret_s: pd.Series,
-                                 vol_s: pd.Series,
-                                 z_window: int = 60):
-    """
-    For one sector:
-      - compute rolling z-score of excess returns
-      - bin into states + vol states
-      - compute next-day win-rate and avg next-day excess return
-    """
-    df = pd.DataFrame({"exret": exret_s, "vol": vol_s}).dropna()
-    if len(df) < max(25, z_window + 5):
-        return None, None
-
-    mu = df["exret"].ewm(span=z_window, adjust=False).mean()
-    sd = df["exret"].ewm(span=z_window, adjust=False).std()
-    sd = sd.replace(0, np.nan)
-    df["z"] = (df["exret"] - mu) / sd
-
-    df["r_state"] = df["z"].apply(_state_from_z)
-    df["v_state"] = df["vol"].apply(_vol_state)
-    df["state"] = df["r_state"] + " | " + df["v_state"]
-
-    df["next_exret"] = df["exret"].shift(-1)
-    df = df.dropna(subset=["state", "next_exret"])
-
-    g = df.groupby("state")["next_exret"]
-    stats = pd.DataFrame({
-        "count": g.size(),
-        "win_rate": g.apply(lambda x: float((x > 0).mean())),
-        "avg_next_exret": g.mean(),
-        "med_next_exret": g.median(),
-    }).sort_values(["win_rate", "avg_next_exret"], ascending=False)
-
-    # latest state
-    latest_state = str(df["state"].iloc[-1])
-
-    return stats, latest_state
-
-
-def build_nextday_predictions(exret_panel: pd.DataFrame,
-                              vol_panel: pd.DataFrame,
-                              z_window: int = 60,
-                              lookback: int = 504,
-                              market_sector: str = "MARKET_PROXY"):
-    """
-    For each sector:
-      - fit state stats on history
-      - read today's state
-      - output predicted next-day win_prob and avg_next_exret
-    """
-    ex_lb = exret_panel.tail(lookback).copy()
-    vol_lb = vol_panel.reindex(ex_lb.index).copy()
-
-    sectors = [c for c in ex_lb.columns if c != market_sector]
-    rows = []
-
-    for s in sectors:
-        stats, latest_state = build_state_stats_for_sector(ex_lb[s], vol_lb[s], z_window=z_window)
-        if stats is None or latest_state is None or latest_state == "NA | NA":
-            continue
-
-        # if today state unseen historically, fall back to overall
-        if latest_state in stats.index:
-            win_prob = float(stats.loc[latest_state, "win_rate"])
-            avg_next = float(stats.loc[latest_state, "avg_next_exret"])
-            sample_n = int(stats.loc[latest_state, "count"])
-        else:
-            # fallback: overall distribution
-            # (mean of next day excess return, win rate across all samples)
-            all_win = float((ex_lb[s].shift(-1) > 0).mean())
-            all_avg = float(ex_lb[s].shift(-1).mean())
-            win_prob, avg_next, sample_n = all_win, all_avg, int(len(ex_lb) - 1)
-
-        rows.append({
-            "Sector": s,
-            "Today_State": latest_state,
-            "P(NextDay Outperform)": win_prob,
-            "E[NextDay ExcessRet]": avg_next,
-            "State_Samples": sample_n
-        })
-
-    out = pd.DataFrame(rows)
-    if out.empty:
-        return out
-
-    out = out.sort_values(["P(NextDay Outperform)", "E[NextDay ExcessRet]"], ascending=False)
-    return out
-
-def get_today_topk(exret_panel: pd.DataFrame, top_k: int = 3, market_sector: str = "MARKET_PROXY"):
-    latest_dt = exret_panel.index.max()
-    s = exret_panel.loc[latest_dt].dropna()
-    if market_sector in s.index:
-        s = s.drop(index=market_sector)
-    leaders = s.sort_values(ascending=False).head(top_k)
-    return latest_dt, leaders  # leaders is a Series (Sector -> exret)
-
-def predict_tomorrow_from_transition(probs: pd.DataFrame,
-                                     counts: pd.DataFrame,
-                                     today_leaders: pd.Series,
-                                     top_n: int = 5,
-                                     min_leader_samples: int = 3):
-    """
-    today_leaders: Series (Sector -> today's exret)
-    returns: DataFrame with predicted followers.
-    """
-    if probs is None or probs.empty:
-        return pd.DataFrame()
-
-    leaders = [s for s in today_leaders.index if s in probs.index]
-    if not leaders:
-        return pd.DataFrame()
-
-    # optional: filter out leaders with too-few historical samples
-    if counts is not None and not counts.empty:
-        leader_samples = counts.loc[leaders].sum(axis=1)
-        leaders = [s for s in leaders if leader_samples.get(s, 0) >= min_leader_samples]
-        if not leaders:
-            return pd.DataFrame()
-
-    # weights by today's leader strength (excess return)
-    w = today_leaders.loc[leaders].clip(lower=0)  # only reward positive leaders
-    if float(w.sum()) == 0:
-        # fallback to equal weights
-        w = pd.Series(1.0, index=leaders)
-
-    w = w / w.sum()
-
-    # weighted average of leader rows
-    score = (probs.loc[leaders].T * w).T.sum(axis=0)
-
-    # don’t “predict” the same leaders unless you want that behavior
-    score = score.drop(index=[x for x in leaders if x in score.index], errors="ignore")
-
-    out = score.sort_values(ascending=False).head(top_n).reset_index()
-    out.columns = ["Predicted_Follower", "Score"]
-    return out
-
-
-# --- 3. SINGLE STOCK ANALYSIS LOGIC (NEW 3-PHASE) ---
-
-def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Advanced 3-Phase Analysis: Accumulation -> Squeeze -> Trigger
-    Replaces old Breakout/Pullback signals.
-    """
-    df_analysis = df.copy()
-
-    if not isinstance(df_analysis.index, pd.DatetimeIndex):
-        df_analysis.index = pd.to_datetime(df_analysis.index)
-    df_analysis = df_analysis.sort_index()
-
-    # =======================
-    # 0. BASIC TREND FILTERS
-    # =======================
-    df_analysis['MA20'] = ta.trend.sma_indicator(df_analysis['Close'], window=20)
-    df_analysis['MA50'] = ta.trend.sma_indicator(df_analysis['Close'], window=50)
-    df_analysis['MA200'] = ta.trend.sma_indicator(df_analysis['Close'], window=200)
+with col_cn:
+    st.markdown("## 📖 关于")
+    st.markdown("""
+    **ASSRS**是一个A股市场股票和板块的分析平台。
+    该系统结合板块轮动信号、技术分析和投资组合优化，识别高概率交易机会。
     
-    # =======================
-    # PHASE 1: ACCUMULATION (OBV Divergence)
-    # =======================
-    df_analysis['OBV'] = ta.volume.on_balance_volume(df_analysis['Close'], df_analysis['Volume'])
+    本平台专为量化交易者和投资者设计，提供数据驱动的中国股市洞察，
+    重点关注板块动量和个股选择。
+    """)
+
+st.markdown("---")
+
+# ==========================================
+# FEATURES / 功能特性
+# ==========================================
+
+st.markdown("## ✨ Key Features | 核心功能")
+
+# Feature 1: Sector Analysis
+st.markdown("### 1️⃣ Sector Rotation Analysis | 板块轮动分析")
+
+col1_en, col1_cn = st.columns(2)
+
+with col1_en:
+    st.markdown("""
+    **📊 Real-time sector scoring and signals**
+    - Machine learning regime detection
+    - Market breadth analysis
+    - Sector correlation and rotation metrics
+    - Interactive drill-down charts
+    - Actionable BUY/SELL/HOLD signals with position sizing
     
-    # We check the "Slope" over the last 20 days
-    df_analysis['Price_Chg_20d'] = df_analysis['Close'].pct_change(periods=20)
-    df_analysis['OBV_Chg_20d'] = df_analysis['OBV'].pct_change(periods=20)
+    **Use Case:** Identify which sectors are leading or lagging the market, 
+    and allocate capital accordingly.
+    """)
 
-    # LOGIC: Price is boring (moved < 3% up or down), but OBV is UP (> 5%)
-    df_analysis['Signal_Accumulation'] = (
-        (df_analysis['Price_Chg_20d'].abs() < 0.03) & 
-        (df_analysis['OBV_Chg_20d'] > 0.05)
-    )
-
-    # =======================
-    # PHASE 2: THE SQUEEZE (Bollinger Bandwidth)
-    # =======================
-    bb_indicator = ta.volatility.BollingerBands(close=df_analysis['Close'], window=20, window_dev=2)
-    df_analysis['BB_Upper'] = bb_indicator.bollinger_hband()
-    df_analysis['BB_Lower'] = bb_indicator.bollinger_lband()
-    df_analysis['BB_Mid']   = bb_indicator.bollinger_mavg()
+with col1_cn:
+    st.markdown("""
+    **📊 实时板块评分与信号**
+    - 机器学习市场状态检测
+    - 市场广度分析
+    - 板块相关性与轮动指标
+    - 交互式下钻图表
+    - 可操作的买入/卖出/持有信号及仓位建议
     
-    # Bandwidth % = (Upper - Lower) / Mid
-    df_analysis['BB_Width'] = bb_indicator.bollinger_wband()
+    **应用场景：** 识别领涨或落后板块，
+    相应配置资金。
+    """)
+
+st.markdown("---")
+
+# Feature 2: Single Stock Analysis
+st.markdown("### 2️⃣ Single Stock Analysis | 个股分析")
+
+col2_en, col2_cn = st.columns(2)
+
+with col2_en:
+    st.markdown("""
+    **📈 Advanced technical analysis with 3-phase trading system**
+    - **Phase 1 - Accumulation:** OBV divergence detection
+    - **Phase 2 - Squeeze:** Bollinger Band contraction
+    - **Phase 3 - Golden Launch:** Breakout confirmation with ADX
+    - **Trading Block Theory:** Volume-based support/resistance zones
+    - Statistical forecasting (Linear, ARIMA, Holt-Winters)
+    - Multi-panel charts with MACD, RSI, ADX, OBV
     
-    # Is the current width near a 6-month (120-day) LOW?
-    # We define "Squeeze" as being within 20% of the 120-day minimum width
-    df_analysis['Min_Width_120d'] = df_analysis['BB_Width'].rolling(window=120).min()
-    df_analysis['Signal_Squeeze'] = df_analysis['BB_Width'] <= (df_analysis['Min_Width_120d'] * 1.2)
+    **Use Case:** Deep-dive into individual stocks to time entries and exits 
+    based on volume accumulation and price action.
+    """)
 
-    # =======================
-    # PHASE 3: THE LAUNCH (Trigger)
-    # =======================
-    # 1. ADX for Trend Strength
-    adx_indicator = ta.trend.ADXIndicator(df_analysis['High'], df_analysis['Low'], df_analysis['Close'], window=14)
-    df_analysis['ADX'] = adx_indicator.adx()
+with col2_cn:
+    st.markdown("""
+    **📈 三阶段交易系统的高级技术分析**
+    - **阶段1 - 吸筹：** OBV背离检测
+    - **阶段2 - 收窄：** 布林带收缩
+    - **阶段3 - 黄金启动：** ADX确认突破
+    - **交易箱体理论：** 基于成交量的支撑/阻力区域
+    - 统计预测（线性、ARIMA、Holt-Winters）
+    - 多面板图表（MACD、RSI、ADX、OBV）
     
-    # 2. Volume Surge
-    df_analysis['20d_Avg_Vol'] = df_analysis['Volume'].rolling(window=20).mean()
+    **应用场景：** 深入分析个股，基于成交量吸筹和价格走势
+    把握买卖时机。
+    """)
+
+st.markdown("---")
+
+# Feature 3: Portfolio Optimization
+st.markdown("### 3️⃣ Portfolio Optimization | 投资组合优化")
+
+col3_en, col3_cn = st.columns(2)
+
+with col3_en:
+    st.markdown("""
+    **💼 Modern Portfolio Theory (MPT) implementation**
+    - Mean-variance optimization
+    - Efficient frontier calculation
+    - Maximum Sharpe ratio portfolio
+    - Customizable constraints (max allocation per stock)
+    - Risk-return analysis
+    - Correlation heatmap
+    - Support for all A-share exchanges (SH/SZ/BJ)
     
-    # 3. The Signal:
-    # Was there a squeeze in the last 10 days?
-    df_analysis['Recent_Squeeze'] = df_analysis['Signal_Squeeze'].rolling(window=10).max() > 0
+    **Use Case:** Build diversified portfolios that maximize risk-adjusted returns 
+    based on historical data and your risk preferences.
+    """)
 
-    df_analysis['Signal_Golden_Launch'] = (
-        df_analysis['Recent_Squeeze'] &                     # Context: Coming out of quiet period
-        (df_analysis['Close'] > df_analysis['BB_Upper']) &  # Breakout
-        (df_analysis['Volume'] > df_analysis['20d_Avg_Vol'] * 1.5) & # Power
-        (df_analysis['ADX'] > 20)                           # Trend Strength
-    )
-
-    # =======================
-    # STANDARD EXITS & INDICATORS
-    # =======================
-    macd_indicator = ta.trend.MACD(close=df_analysis['Close'])
-    df_analysis['MACD'] = macd_indicator.macd()
-    df_analysis['MACD_Signal'] = macd_indicator.macd_signal()
-    df_analysis['MACD_Hist'] = macd_indicator.macd_diff()
+with col3_cn:
+    st.markdown("""
+    **💼 现代投资组合理论（MPT）实现**
+    - 均值-方差优化
+    - 有效前沿计算
+    - 最大夏普比率组合
+    - 可定制约束（单股最大配置比例）
+    - 风险收益分析
+    - 相关性热力图
+    - 支持所有A股交易所（沪/深/北）
     
-    df_analysis['High_50d'] = df_analysis['Close'].rolling(window=50).max()
+    **应用场景：** 构建多元化投资组合，基于历史数据和风险偏好
+    最大化风险调整收益。
+    """)
 
-    # Exit: MACD Lead
-    df_analysis['Exit_MACD_Lead'] = (
-        (df_analysis['MACD'] < df_analysis['MACD_Signal']) &
-        (df_analysis['MACD'].shift(1) > df_analysis['MACD_Signal'].shift(1)) &
-        (df_analysis['MACD'] > 0)
-    )
+st.markdown("---")
 
-    # Keep RSI for plotting
-    df_analysis['RSI_14'] = ta.momentum.rsi(df_analysis['Close'], window=14)
+# ==========================================
+# DISCLAIMER / 免责声明
+# ==========================================
 
-    return df_analysis
+st.markdown("## ⚠️ Disclaimer | 免责声明")
 
-def calculate_multiple_blocks(df, lookback=60):
-    """
-    Identifies MULTIPLE trading blocks within the lookback window.
-    Returns a list of block dicts: [{'start':, 'end':, 'top':, 'bot':, 'status':}, ...]
-    Logic:
-    1. Iterate through the window.
-    2. Detect 'Breakouts' (Regime Shifts).
-    3. Slice the data between breakouts to form discrete blocks.
-    """
-    if len(df) < 20: return []
+col_dis_en, col_dis_cn = st.columns(2)
+
+with col_dis_en:
+    st.warning("""
+    **IMPORTANT LEGAL NOTICE**
     
-    # Use the last N days
-    subset = df.tail(lookback).copy()
-    all_dates = subset.index.tolist()
+    This software is provided for **informational and educational purposes only**. 
+    It is NOT financial advice, and should NOT be considered as a recommendation to buy, 
+    sell, or hold any securities.
     
-    # 1. Detect Breakout Indices
-    subset['Pct_Change'] = subset['Close'].pct_change().abs()
-    subset['Vol_Ratio'] = subset['Volume'] / subset['Volume'].rolling(20).mean().shift(1)
+    - **No Warranty:** The information is provided "as is" without warranty of any kind.
+    - **Risk Warning:** Trading stocks involves substantial risk of loss. Past performance 
+      does not guarantee future results.
+    - **Your Responsibility:** You are solely responsible for your investment decisions. 
+      Always conduct your own research and consult with qualified financial advisors.
+    - **No Liability:** The creator accepts no liability for any financial losses incurred 
+      from using this software.
     
-    # Breakout = High Vol + Price Move
-    breakout_mask = (subset['Pct_Change'] > 0.03) & (subset['Vol_Ratio'] > 1.5)
-    breakout_dates = subset.index[breakout_mask].tolist()
+    By using this platform, you acknowledge and accept these terms.
+    """)
+
+with col_dis_cn:
+    st.warning("""
+    **重要法律声明**
     
-    # 2. Define Boundaries (Start, Breakouts, End)
-    # We use indices to slice
-    # 0 is start of lookback
-    # len-1 is today
-    boundary_indices = [0] 
+    本软件仅用于**信息和教育目的**。
+    它不是财务建议，不应被视为买入、卖出或持有任何证券的推荐。
     
-    for d in breakout_dates:
-        if d in all_dates:
-            boundary_indices.append(all_dates.index(d))
-            
-    boundary_indices.append(len(all_dates))
-    boundary_indices = sorted(list(set(boundary_indices)))
+    - **无担保：** 信息按"原样"提供，不提供任何形式的担保。
+    - **风险警示：** 股票交易涉及重大损失风险。过往表现不代表未来结果。
+    - **您的责任：** 您对自己的投资决策负全部责任。
+      请务必进行独立研究并咨询合格的财务顾问。
+    - **免责：** 创建者对使用本软件造成的任何财务损失不承担责任。
     
-    blocks = []
-    
-    # 3. Iterate through segments
-    for i in range(len(boundary_indices) - 1):
-        idx_start = boundary_indices[i]
-        idx_end = boundary_indices[i+1]
-        
-        # Determine Segment
-        # Ideally, a block goes from [Start] to [Breakout-1]
-        # The breakout day itself starts the NEXT block.
-        # Exception: The LAST block goes to the end.
-        
-        if i == len(boundary_indices) - 2:
-            # Last Segment (Active)
-            seg_df = subset.iloc[idx_start:]
-            is_active = True
-        else:
-            # Historic Segment
-            seg_df = subset.iloc[idx_start:idx_end]
-            is_active = False
-            
-        if len(seg_df) < 3: continue # Skip noise
-        
-        # 4. Volume Profile for this Segment
-        price_min = seg_df['Low'].min()
-        price_max = seg_df['High'].max()
-        
-        # If flat line (rare), offset slightly
-        if price_min == price_max: price_max += 0.01
-            
-        bins = np.linspace(price_min, price_max, 21) 
-        indices = np.digitize(seg_df['Close'], bins)
-        
-        bin_volumes = {}
-        for j, vol in zip(indices, seg_df['Volume']):
-            bin_volumes[j] = bin_volumes.get(j, 0) + vol
-            
-        sorted_bins = sorted(bin_volumes.items(), key=lambda x: x[1], reverse=True)
-        total_volume = sum(bin_volumes.values())
-        current_vol = 0
-        value_bins = []
-        
-        for bin_idx, vol in sorted_bins:
-            current_vol += vol
-            value_bins.append(bin_idx)
-            if current_vol > 0.7 * total_volume:
-                break
-                
-        valid_indices = [v for v in value_bins if 1 <= v < len(bins)]
-        if not valid_indices: continue
-            
-        top = bins[max(valid_indices)]
-        bot = bins[min(valid_indices)-1]
-        
-        # 5. Status
-        # For active block, check last price.
-        # For historic, check how it ended (did price go up or down?)
-        last_c = seg_df['Close'].iloc[-1]
-        
-        status = "INSIDE"
-        if is_active:
-            if last_c > top * 1.01: status = "BREAKOUT"
-            elif last_c < bot * 0.99: status = "BREAKDOWN"
-        else:
-            # How did this block end? Look at the NEXT day's open/close?
-            # Or just check the last candle of this block
-            # Usually the "Breakout" day is the start of the NEXT block.
-            # So the last day of THIS block is pre-breakout.
-            # Let's just call it "Historic"
-            status = "HISTORIC"
-
-        blocks.append({
-            'start': seg_df.index[0].strftime('%Y-%m-%d'),
-            'end': seg_df.index[-1].strftime('%Y-%m-%d'),
-            'top': top,
-            'bot': bot,
-            'status': status,
-            'is_active': is_active
-        })
-        
-    return blocks
-
-def create_single_stock_chart(analysis_df: pd.DataFrame, window: int = 250, blocks=None) -> go.Figure:
-    """
-    Build a 4-panel Plotly chart matching the WebApp:
-    1) Price + Bollinger Bands + MAs + Signals + TRADING BLOCKS
-    2) Volume
-    3) MACD
-    4) RSI
-    """
-    df = analysis_df.tail(window).copy()
-    if not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.index)
-    df = df.sort_index()
-
-    date_strings = df.index.strftime('%Y-%m-%d')
-
-    fig = make_subplots(
-        rows=4, cols=1, shared_xaxes=True,
-        vertical_spacing=0.02,
-        subplot_titles=('Price (Accumulation → Squeeze → Launch)', 'Volume', 'MACD', 'RSI'),
-        row_heights=[0.5, 0.15, 0.15, 0.15]
-    )
-
-    # --- PANEL 1: PRICE, BANDS, SIGNALS ---
-
-    # 1. Bollinger Bands (Background)
-    # Upper Band
-    fig.add_trace(go.Scatter(
-        x=date_strings, y=df['BB_Upper'],
-        mode='lines', name='BB Upper',
-        line=dict(width=1, color='rgba(147, 197, 253, 0.5)'),
-        showlegend=False,
-    ), row=1, col=1)
-
-    # Lower Band (Filled)
-    fig.add_trace(go.Scatter(
-        x=date_strings, y=df['BB_Lower'],
-        mode='lines', name='Bollinger Band',
-        line=dict(width=1, color='rgba(147, 197, 253, 0.5)'),
-        fill='tonexty', fillcolor='rgba(59, 130, 246, 0.05)',
-        showlegend=True,
-    ), row=1, col=1)
-
-    # --- TRADING BLOCKS OVERLAY (MULTIPLE) ---
-    if blocks:
-        for b in blocks:
-            # Color logic
-            if b['is_active']:
-                # Bright colors for current block
-                if "BREAKOUT" in b['status']:
-                    fill = "rgba(59, 130, 246, 0.15)" # Blue
-                    border = "rgba(59, 130, 246, 0.8)"
-                    label = f"Base: {b['bot']:.2f}-{b['top']:.2f}"
-                elif "BREAKDOWN" in b['status']:
-                    fill = "rgba(239, 68, 68, 0.15)" # Red
-                    border = "rgba(239, 68, 68, 0.8)"
-                    label = f"Res: {b['bot']:.2f}-{b['top']:.2f}"
-                else:
-                    fill = "rgba(147, 51, 234, 0.15)" # Purple
-                    border = "rgba(147, 51, 234, 0.8)"
-                    label = f"Block: {b['bot']:.2f}-{b['top']:.2f}"
-                width = 2
-                style = "solid"
-            else:
-                # Faded colors for history
-                fill = "rgba(156, 163, 175, 0.1)" # Grey
-                border = "rgba(156, 163, 175, 0.4)"
-                label = "" # No label for history to reduce clutter
-                width = 1
-                style = "dash"
-
-            fig.add_shape(
-                type="rect",
-                x0=b['start'], y0=b['bot'],
-                x1=b['end'], y1=b['top'],
-                fillcolor=fill, 
-                line=dict(color=border, width=width, dash=style),
-                row=1, col=1,
-                layer="below"
-            )
-            
-            if label:
-                fig.add_annotation(
-                    x=b['end'], y=b['top'], text=label, 
-                    showarrow=False, yshift=10, 
-                    font=dict(size=10, color=border), 
-                    row=1, col=1
-                )
-
-
-    # 2. Candlesticks (Chinese Colors: Red Up, Green Down)
-    fig.add_trace(go.Candlestick(
-        x=date_strings,
-        open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-        name='Price',
-        increasing=dict(line=dict(color='#ef4444')), # Red
-        decreasing=dict(line=dict(color='#22c55e'))  # Green
-    ), row=1, col=1)
-
-    # 3. MAs
-    fig.add_trace(go.Scatter(x=date_strings, y=df['MA20'], name='MA20', line=dict(width=1, color='#fbbf24', dash='dot')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=date_strings, y=df['MA50'], name='MA50', line=dict(width=1.5, color='#3b82f6')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=date_strings, y=df['MA200'], name='MA200', line=dict(width=2, color='#374151')), row=1, col=1)
-
-    # 4. Signals (Markers)
-    # Phase 1: Accumulation (Yellow)
-    acc_df = df[df['Signal_Accumulation']]
-    fig.add_trace(go.Scatter(
-        x=acc_df.index.strftime('%Y-%m-%d'), y=acc_df['Low'] * 0.98,
-        mode='markers', name='Accumulation',
-        marker=dict(color='#eab308', size=6, symbol='circle')
-    ), row=1, col=1)
-
-    # Phase 2: Squeeze (Grey)
-    sqz_df = df[df['Signal_Squeeze']]
-    fig.add_trace(go.Scatter(
-        x=sqz_df.index.strftime('%Y-%m-%d'), y=sqz_df['High'] * 1.02,
-        mode='markers', name='Squeeze',
-        marker=dict(color='#64748b', size=5, symbol='square-open')
-    ), row=1, col=1)
-
-    # Phase 3: Golden Launch (Red Star - Matches Up)
-    launch_df = df[df['Signal_Golden_Launch']]
-    fig.add_trace(go.Scatter(
-        x=launch_df.index.strftime('%Y-%m-%d'), y=launch_df['High'] * 1.05,
-        mode='markers', name='GOLDEN LAUNCH',
-        marker=dict(color='#ef4444', size=14, symbol='star', line=dict(width=1, color='black'))
-    ), row=1, col=1)
-
-    # Exit Signals (Green X - Matches Down)
-    exit_df = df[df['Exit_MACD_Lead']]
-    fig.add_trace(go.Scatter(
-        x=exit_df.index.strftime('%Y-%m-%d'), y=exit_df['High'] * 1.01,
-        mode='markers', name='Exit MACD',
-        marker=dict(color='#22c55e', size=8, symbol='x') # Green X for Exit
-    ), row=1, col=1)
-
-    # --- PANEL 2: VOLUME ---
-    fig.add_trace(go.Bar(
-        x=date_strings, y=df['Volume'], name='Volume',
-        marker=dict(color='#d1d5db')
-    ), row=2, col=1)
-    
-    if '20d_Avg_Vol' in df.columns:
-        fig.add_trace(go.Scatter(
-            x=date_strings, y=df['20d_Avg_Vol'], name='Vol MA20',
-            line=dict(width=1, color='#4b5563')
-        ), row=2, col=1)
-
-    # --- PANEL 3: MACD ---
-    # Histogram colors (Red=Pos/Up, Green=Neg/Down)
-    colors = np.where(df['MACD_Hist'] >= 0, '#ef4444', '#22c55e')
-    fig.add_trace(go.Bar(
-        x=date_strings, y=df['MACD_Hist'], name='MACD Hist',
-        marker_color=colors
-    ), row=3, col=1)
-    
-    fig.add_trace(go.Scatter(
-        x=date_strings, y=df['MACD'], name='MACD',
-        line=dict(color='#2563eb', width=1.5)
-    ), row=3, col=1)
-    
-    fig.add_trace(go.Scatter(
-        x=date_strings, y=df['MACD_Signal'], name='Signal',
-        line=dict(color='#f97316', width=1.5)
-    ), row=3, col=1)
-
-    # --- PANEL 4: RSI ---
-    fig.add_trace(go.Scatter(
-        x=date_strings, y=df['RSI_14'], name='RSI',
-        line=dict(color='#8b5cf6', width=2)
-    ), row=4, col=1)
-
-    fig.add_hline(y=70, line_dash="dot", line_color="gray", row=4, col=1)
-    fig.add_hline(y=30, line_dash="dot", line_color="gray", row=4, col=1)
-
-    # Layout Updates
-    fig.update_layout(
-        height=1000,
-        template="plotly_white", 
-        margin=dict(l=50, r=20, t=40, b=50),
-        xaxis_rangeslider_visible=False,
-        
-        # Unified Hover (Crosshair)
-        hovermode="x unified",
-        
-        # Enable Spikes
-        xaxis=dict(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, showgrid=True),
-        xaxis2=dict(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, showgrid=True),
-        xaxis3=dict(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, showgrid=True),
-        xaxis4=dict(showspikes=True, spikemode='across', spikesnap='cursor', showline=True, showgrid=True, title='Date'),
-
-        yaxis1_title="Price",
-        yaxis2_title="Vol",
-        yaxis3_title="MACD",
-        yaxis4_title="RSI",
-        yaxis4_range=[0, 100],
-        legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.01)
-    )
-
-    return fig
-
-def calculate_trend_forecast(df, lookback=60, forecast_days=30, degree=1, model_type="Linear"):
-    """
-    Calculates a Trend Projection using Linear/Poly, Holt-Winters, or ARIMA.
-    Now supports VOLUME integration:
-      - Holt-Winters: Uses VWAP (Volume Weighted Average Price) for smoothing.
-      - ARIMA: Uses Volume as an exogenous variable (ARIMAX).
-    """
-    # 1. Prepare Data (Use last N days)
-    subset = df.tail(lookback).copy()
-    if len(subset) < 15:
-        return None, None, None # Not enough data
-    
-    # X values for Regression
-    y = subset['Close'].values
-    x = np.arange(len(y))
-    last_x = x[-1]
-    future_x = np.arange(last_x + 1, last_x + 1 + forecast_days)
-    
-    future_prices = None
-    upper_band = None
-    lower_band = None
-
-    # --- MODEL 1 & 2: REGRESSION (Linear/Quadratic) ---
-    if model_type in ["Linear", "Quadratic"]:
-        coeffs = np.polyfit(x, y, degree)
-        poly_eqn = np.poly1d(coeffs)
-        
-        # Residuals for bands
-        line_values = poly_eqn(x)
-        residuals = y - line_values
-        std_dev = np.std(residuals)
-        
-        future_prices = poly_eqn(future_x)
-        upper_band = future_prices + (2 * std_dev)
-        lower_band = future_prices - (2 * std_dev)
-
-    # --- MODEL 3: EXPONENTIAL SMOOTHING (Holt-Winters on VWAP) ---
-    elif model_type == "Holt-Winters" and HAS_STATSMODELS:
-        # Calculate Volume Weighted Average Price (VWAP) for smoothing
-        # Approx Daily VWAP = (Open+High+Low+Close)/4
-        subset['Daily_VWAP'] = (subset['Open'] + subset['High'] + subset['Low'] + subset['Close']) / 4
-        # Or true cumulative VWAP over window? No, HW needs a time series. Daily VWAP is best.
-        
-        try:
-            # Fit model on Daily VWAP (incorporates volume indirectly via price action intensity)
-            model = ExponentialSmoothing(
-                subset['Daily_VWAP'], 
-                trend='add', 
-                damped_trend=True, 
-                seasonal=None
-            ).fit()
-            
-            future_prices = model.forecast(forecast_days).values
-            
-            # Calculate simple bands based on recent volatility of VWAP
-            resid_std = subset['Daily_VWAP'].std() * 0.5 # Heuristic for bands
-            upper_band = future_prices + (2 * resid_std)
-            lower_band = future_prices - (2 * resid_std)
-        except Exception as e:
-            st.error(f"Holt-Winters Error: {e}")
-            return None, None, None
-
-    # --- MODEL 4: ARIMA (ARIMAX with Volume) ---
-    elif model_type == "ARIMA" and HAS_STATSMODELS:
-        try:
-            # Endog = Close Price
-            # Exog = Volume (Normalized to avoid scaling issues)
-            vol_mean = subset['Volume'].mean()
-            vol_std = subset['Volume'].std()
-            exog_vol = (subset['Volume'] - vol_mean) / vol_std
-            
-            # Fit ARIMAX
-            # Order (1,1,1) is a safe generic starting point for daily data
-            model = ARIMA(subset['Close'], exog=exog_vol, order=(1,1,1)).fit()
-            
-            # To forecast, we need future Volume. We'll assume Volume reverts to mean.
-            # Future exog = 0 (since we normalized to mean 0)
-            future_exog = np.zeros(forecast_days)
-            
-            forecast_res = model.get_forecast(steps=forecast_days, exog=future_exog)
-            future_prices = forecast_res.predicted_mean.values
-            conf_int = forecast_res.conf_int(alpha=0.05) # 95% confidence
-            
-            lower_band = conf_int.iloc[:, 0].values
-            upper_band = conf_int.iloc[:, 1].values
-            
-        except Exception as e:
-            st.error(f"ARIMA Error: {e}")
-            return None, None, None
-
-    return future_prices, upper_band, lower_band
-
-def create_forecast_chart(df, future_prices, upper_band, lower_band, model_name="Linear"):
-    """
-    Plots the Historical Price + Linear/Poly Forecast + 2-Sigma Bands.
-    """
-    fig = go.Figure()
-    
-    # 1. Historical Close (Last 100 days for context)
-    history = df.tail(100)
-    fig.add_trace(go.Scatter(
-        x=np.arange(len(history)), 
-        y=history['Close'],
-        mode='lines',
-        name='History',
-        line=dict(color='#374151', width=2)
-    ))
-    
-    # Forecast X-axis starts after history
-    start_idx = len(history)
-    future_x = np.arange(start_idx, start_idx + len(future_prices))
-    
-    # 2. Upper Band
-    fig.add_trace(go.Scatter(
-        x=future_x,
-        y=upper_band,
-        mode='lines',
-        name='Upper Band',
-        line=dict(width=0),
-        showlegend=False
-    ))
-    
-    # 3. Lower Band (Fill to Upper)
-    fig.add_trace(go.Scatter(
-        x=future_x,
-        y=lower_band,
-        mode='lines',
-        name='Confidence Channel (95%)',
-        line=dict(width=0),
-        fill='tonexty',
-        fillcolor='rgba(59, 130, 246, 0.2)', # Light Blue
-    ))
-    
-    # 4. Mean Forecast Line
-    fig.add_trace(go.Scatter(
-        x=future_x,
-        y=future_prices,
-        mode='lines',
-        name=f'{model_name} Projection',
-        line=dict(color='#2563eb', width=3, dash='dash')
-    ))
-
-    fig.update_layout(
-        title=f"Statistical Prediction: {model_name} Trend (30 Days)",
-        yaxis_title="Price",
-        xaxis_title="Trading Days (Past & Future)",
-        template="plotly_white",
-        height=500,
-        xaxis=dict(showgrid=False),
-        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
-    )
-    
-    return fig
-
-@st.cache_data(ttl=600)
-def load_single_stock(ticker: str):
-    """
-    MODIFIED: Fetches single stock data DIRECTLY from Tushare (bypassing the Database).
-    This ensures the data is always fresh and not stale from previous DB saves.
-    """
-    # Fix for Tushare Fetching Issue: 
-    # Explicitly initialize Tushare if not done already (Streamlit context)
-    if data_manager.TUSHARE_API is None:
-        data_manager.init_tushare()
-
-    # 1. Define lookback range (Last 3 years for good technicals)
-    end_dt = datetime.now()
-    start_dt = end_dt - timedelta(days=365 * 3)
-    
-    start_str = start_dt.strftime('%Y%m%d')
-    end_str = end_dt.strftime('%Y%m%d')
-    
-    # 2. Fetch directly from data_manager's robust fetcher
-    # NOTE: We do NOT call get_single_stock_data() because that saves to DB.
-    df = data_manager.fetch_stock_data_robust(ticker, start_str, end_str)
-    
-    if df is None or df.empty:
-        return None
-        
-    # 3. Calculate Volume Metrics locally (DB helper usually does this)
-    # Used for Z-Score logic in Sector charts, but good to have here too
-    df['Vol_Mean_100d'] = df['Volume'].rolling(window=100, min_periods=20).mean()
-    df['Vol_Std_100d'] = df['Volume'].rolling(window=100, min_periods=20).std()
-    df['Volume_ZScore'] = (df['Volume'] - df['Vol_Mean_100d']) / df['Vol_Std_100d']
-    
-    return df.sort_index()
-
-# --- 4. MAIN APP LAYOUT ---
-
-st.title("ASSRS Sector Rotation & Single Stock Analysis")
-
-# Tabs = separate “pages”
-tab_dashboard, tab_single = st.tabs(["Sector Dashboard", "Single Stock Analysis"])
-
-# ========= TAB 1: Sector Dashboard (UNCHANGED) =========
-with tab_dashboard:
-    # --- Load Sector Data ---
-    v1_latest, v1_hist, v1_date, v1_error = load_data(V1_RULES_FILE, "V1")
-    v2_latest, v2_hist, v2_date, v2_error = load_data(V2_REGIME_FILE, "V2")
-
-    st.markdown("### Sector Rotation Scoreboard")
-
-    # --- Create 2-Column Layout ---
-    col1, col2 = st.columns(2)
-
-    # --- V1 (Rule-Based) Scorecard ---
-    with col1:
-        st.header("V1: Rule-Based Scorecard (8-Point)")
-        if v1_latest is not None:
-            st.caption(f"Last Updated: {v1_date}")
-            
-            v1_display_df = v1_latest[['Sector', 'TOTAL_SCORE', 'ACTION']].sort_values(by='TOTAL_SCORE', ascending=False)
-            styled_v1_df = v1_display_df.style.map(style_action, subset=['ACTION'])
-            
-            st.dataframe(
-                styled_v1_df,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "TOTAL_SCORE": st.column_config.NumberColumn(format="%.2f"),
-                    "ACTION": st.column_config.TextColumn(width="medium")
-                }
-            )
-            
-            # --- V1 Charting ---
-            v1_sector_to_chart = st.selectbox(
-                "Select V1 Sector to Chart:",
-                v1_hist['Sector'].unique(),
-                key="v1_selector"
-            )
-            
-            if v1_sector_to_chart:
-                chart_data = v1_hist[v1_hist['Sector'] == v1_sector_to_chart]
-                fig = create_drilldown_chart(chart_data, model_type='v1')
-                st.plotly_chart(fig, use_container_width=True, key="v1_chart")
-
-        else:
-            st.error(v1_error)
-
-    # --- V2 (Regime-Switching) Scorecard ---
-    with col2:
-        st.header("V2: Regime-Switching Model")
-        if v2_latest is not None:
-            st.caption(f"Last Updated: {v2_date}")
-            
-            v2_display_df = v2_latest[['Sector', 'TOTAL_SCORE', 'ACTION']].copy()
-            v2_display_df = v2_display_df.sort_values(by='TOTAL_SCORE', ascending=False)
-            v2_display_df['TOTAL_SCORE'] = (v2_display_df['TOTAL_SCORE'] * 100).map('{:.0f}%'.format)
-            styled_v2_df = v2_display_df.style.map(style_action, subset=['ACTION'])
-            
-            st.dataframe(
-                styled_v2_df,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "TOTAL_SCORE": "Bull Probability",
-                    "ACTION": st.column_config.TextColumn(width="medium")
-                }
-            )
-            
-            # --- V2 Charting ---
-            v2_sector_to_chart = st.selectbox(
-                "Select V2 Sector to Chart:",
-                v2_hist['Sector'].unique(),
-                key="v2_selector"
-            )
-            
-            if v2_sector_to_chart:
-                chart_data = v2_hist[v2_hist['Sector'] == v2_sector_to_chart]
-                fig = create_drilldown_chart(chart_data, model_type='v2')
-                st.plotly_chart(fig, use_container_width=True, key="v2_chart")
-                
-        else:
-            st.error(v2_error)
-
-    # =========================
-    # SECTOR INTERACTION LAB
-    # =========================
-
-    # Use V1 history as the base panel (it has Close + Volume_Metric)
-    base_hist = v1_hist if v1_hist is not None else v2_hist
-
-    if base_hist is None or base_hist.empty:
-        st.warning("No sector history loaded; cannot build interaction models.")
-    else:
-        # Build panels OUTSIDE fragment (so they don't re-run unless base_hist changes)
-        close_panel, ret_panel, vol_panel, exret_panel = build_sector_panels(base_hist, market_sector="MARKET_PROXY")
-
-        available_days = int(exret_panel.dropna(how="all").shape[0])
-        if available_days < 30:
-            st.warning(f"Not enough sector history for interaction lab (only {available_days} days).")
-        else:
-            max_lb = min(120, available_days)
-            default_lb = min(60, max_lb)
-
-            @_fragment
-            def render_sector_interaction_lab():
-                st.subheader("Sector Interaction Lab (Rotation Signals)")
-
-                # ===== Adaptive lookback based on available history =====
-                lab_lookback = st.slider(
-                    "Interaction Lab lookback (trading days)",
-                    min_value=20,
-                    max_value=max_lb,
-                    value=default_lb,
-                    step=5,
-                    key="lab_lookback_slider"
-                )
-
-                # ===== Market Gate =====
-                gate = compute_market_gate(
-                    ret_panel, exret_panel,
-                    market_sector="MARKET_PROXY",
-                    lookback=lab_lookback,
-                    mkt_down_thresh=-0.01
-                )
-
-                if gate:
-                    g1, g2, g3, g4 = st.columns(4)
-                    with g1:
-                        st.metric("Market (Proxy) Return", f"{gate['market_return']*100:.2f}%")
-                    with g2:
-                        st.metric("Dispersion (ExRet Std)", f"{gate['dispersion']*100:.2f}%")
-                    with g3:
-                        st.metric("Breadth Down", f"{gate['breadth_down']*100:.0f}%")
-                    with g4:
-                        st.metric("Rotation Confidence", gate["confidence"])
-
-                    if gate["confidence"] == "LOW":
-                        st.warning(f"Regime: {gate['regime']} — rotation calls are lower confidence today.")
-                    elif gate["confidence"] == "HIGH":
-                        st.success(f"Regime: {gate['regime']} — sector dispersion is high; rotation signals are meaningful.")
-                    else:
-                        st.info(f"Regime: {gate['regime']}")
-
-                # Tabs for interaction modules
-                t1, t2, t3 = st.tabs(["Transition Matrix (Top-K)", "Next-Day Odds (State Model)", "Raw Panels"])
-
-                # ===== 1) Transition Matrix =====
-                with t1:
-                    cA, cB, cC = st.columns([1, 1, 2])
-                    with cA:
-                        top_k = st.selectbox("Top-K leaders", [2, 3, 4, 5], index=1, key="lab_topk")
-                    with cB:
-                        tm_choices = [20, 30, 40, 60, 90, 120]
-                        tm_choices = [x for x in tm_choices if x <= available_days]
-                        lookback_tm = st.selectbox(
-                            "Lookback (days)",
-                            tm_choices,
-                            index=min(3, len(tm_choices)-1),
-                            key="lab_lookback_tm"
-                        )
-                    with cC:
-                        st.caption("Heatmap shows: If sector is in today's Top-K (excess return), probability it appears in tomorrow's Top-K.")
-
-                    probs, counts = compute_transition_matrix(
-                        exret_panel, lookback=lookback_tm, top_k=top_k, market_sector="MARKET_PROXY"
-                    )
-
-                    latest_dt, today_leaders = get_today_topk(exret_panel, top_k=top_k, market_sector="MARKET_PROXY")
-
-                    st.markdown("#### Today’s Top Leaders (Latest PPI Close)")
-                    st.write(f"Latest date: **{latest_dt.strftime('%Y-%m-%d')}**")
-                    st.dataframe(
-                        today_leaders.reset_index().rename(columns={"index":"Sector", latest_dt:"ExcessRet"}),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-                    st.markdown("#### Predicted Tomorrow Followers (from Transition Matrix)")
-                    pred = predict_tomorrow_from_transition(probs, counts, today_leaders, top_n=8, min_leader_samples=3)
-
-                    if pred.empty:
-                        st.warning("Not enough data to produce a follower prediction.")
-                    else:
-                        st.dataframe(pred, use_container_width=True, hide_index=True)
-
-                    if probs is None:
-                        st.warning("Not enough data to build transition matrix.")
-                    else:
-                        fig_hm = make_heatmap(probs, title=f"Leader → Follower Transition Probabilities (Top-{top_k}, {lookback_tm}d)")
-                        st.plotly_chart(fig_hm, use_container_width=True)
-
-                        with st.expander("Show raw counts"):
-                            st.dataframe(counts.astype(int), use_container_width=True)
-
-                # ===== 2) Next-Day Odds =====
-                with t2:
-                    c1, c2 = st.columns([1, 2])
-                    with c1:
-                        z_choices = [10, 15, 20, 30, 40]
-                        z_choices = [x for x in z_choices if x < available_days]
-                        z_window = st.selectbox("Z-score speed (days)", z_choices, index=min(2, len(z_choices)-1), key="lab_z_window")
-
-                        lb_choices = [30, 40, 60, 90, 120]
-                        lb_choices = [x for x in lb_choices if x <= available_days]
-                        lookback_odds = st.selectbox("Training lookback (days)", lb_choices, index=min(2, len(lb_choices)-1), key="lab_lookback_odds")
-
-                    preds = build_nextday_predictions(
-                        exret_panel=exret_panel,
-                        vol_panel=vol_panel,
-                        z_window=z_window,
-                        lookback=lookback_odds,
-                        market_sector="MARKET_PROXY"
-                    )
-
-                    if preds is None or preds.empty:
-                        st.warning("Not enough data to build next-day odds.")
-                    else:
-                        if gate and gate["confidence"] == "LOW":
-                            st.info("Note: Today is a low-rotation regime. Treat these probabilities as weaker signals.")
-
-                        show_n = min(20, len(preds))
-                        st.dataframe(
-                            preds.head(show_n),
-                            use_container_width=True,
-                            hide_index=True,
-                            column_config={
-                                "P(NextDay Outperform)": st.column_config.NumberColumn(format="%.2f"),
-                                "E[NextDay ExcessRet]": st.column_config.NumberColumn(format="%.4f"),
-                                "State_Samples": st.column_config.NumberColumn(format="%d"),
-                            }
-                        )
-
-                        sector_pick = st.selectbox("Deep-dive sector", preds["Sector"].tolist(), index=0, key="lab_deep_dive_sector")
-                        stats, latest_state = build_state_stats_for_sector(
-                            exret_panel[sector_pick], vol_panel[sector_pick], z_window=z_window
-                        )
-
-                        if stats is not None:
-                            st.caption(f"Today's state for **{sector_pick}**: `{latest_state}`")
-                            top_states = stats.sort_values("count", ascending=False).head(12).copy()
-
-                            fig_bar = go.Figure()
-                            fig_bar.add_trace(go.Bar(
-                                x=top_states.index.tolist(),
-                                y=top_states["win_rate"].values,
-                                name="Win Rate"
-                            ))
-                            fig_bar.update_layout(
-                                title=f"Next-Day Outperform Win Rate by State — {sector_pick}",
-                                template="plotly_white",
-                                height=450,
-                                xaxis_title="State (ExRet Z-bin | Vol bin)",
-                                yaxis_title="P(NextDay ExcessRet > 0)",
-                                xaxis_tickangle=30
-                            )
-                            st.plotly_chart(fig_bar, use_container_width=True)
-                            st.dataframe(stats, use_container_width=True)
-
-                # ===== 3) Raw Panels =====
-                with t3:
-                    st.caption("Raw excess-return / volume panels (debug & intuition).")
-                    sectors = [c for c in exret_panel.columns if c != "MARKET_PROXY"]
-                    pick = st.selectbox("Sector", sectors, index=0, key="lab_raw_sector")
-
-                    df_view = pd.DataFrame({
-                        "ExcessRet": exret_panel[pick],
-                        "Volume_Metric": vol_panel[pick],
-                        "Close": close_panel[pick],
-                    }).dropna().tail(200)
-
-                    fig = make_subplots(
-                        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03,
-                        subplot_titles=("Close (PPI)", "Excess Return vs Market", "Volume Metric (Z)"),
-                        row_heights=[0.5, 0.25, 0.25]
-                    )
-                    fig.add_trace(go.Scatter(x=df_view.index, y=df_view["Close"], name="Close"), row=1, col=1)
-                    fig.add_trace(go.Bar(x=df_view.index, y=df_view["ExcessRet"], name="ExcessRet"), row=2, col=1)
-                    fig.add_trace(go.Bar(x=df_view.index, y=df_view["Volume_Metric"], name="Volume"), row=3, col=1)
-
-                    fig.update_layout(height=700, template="plotly_white", xaxis3_title="Date", showlegend=False)
-                    st.plotly_chart(fig, use_container_width=True)
-
-            # render the lab (only this part re-runs on dropdown changes)
-            render_sector_interaction_lab()
-
-
-
-
-# ========= TAB 2: Single Stock Analysis (UPDATED) =========
-with tab_single:
-    st.markdown("### 3-Phase Single Stock Analysis")
-    st.info("Logic: Phase 1 (Accumulation/OBV) → Phase 2 (Squeeze/Bollinger) → Phase 3 (Launch/ADX)")
-
-    # Initialize session state for the active ticker
-    if 'active_ticker' not in st.session_state:
-        st.session_state.active_ticker = None
-
-    def set_active_ticker(ticker: str):
-        """Set the selected ticker and sync the input box."""
-        st.session_state.active_ticker = ticker
-        st.session_state.ticker_input = ticker
-
-    def analyze_ticker():
-        ticker_val = st.session_state.get("ticker_input")
-        if ticker_val:
-            st.session_state.active_ticker = ticker_val
-
-    c1, c2 = st.columns([3, 1])
-    with c1:
-        ticker_input = st.text_input("Enter Stock Code (e.g., 600760)", key="ticker_input")
-
-        # Search history (clickable)
-        history = data_manager.get_search_history()
-        if history:
-            st.caption("Recent searches (click to load):")
-            hist_cols = st.columns(min(len(history), 5), gap="small")
-            for idx, item in enumerate(history):
-                col = hist_cols[idx % len(hist_cols)]
-                with col:
-                    st.button(
-                        item['ticker'],
-                        key=f"history_{idx}",
-                        on_click=set_active_ticker,
-                        args=(item['ticker'],),
-                    )
-
-    with c2:
-        st.button("Analyze", key="analyze_btn", on_click=analyze_ticker)
-
-
-    if st.session_state.active_ticker:
-        ticker = st.session_state.active_ticker.strip()
-
-        # Fetch data
-        stock_df = load_single_stock(ticker)
-
-        if stock_df is None or stock_df.empty:
-            st.error(
-                f"No data found for {ticker}. "
-                "Check that the ticker is valid and Tushare is configured."
-            )
-        else:
-            # Update search history only on successful fetch
-            data_manager.update_search_history(ticker)
-
-            # Run the NEW 3-Phase Logic
-            analysis_df = run_single_stock_analysis(stock_df)
-            
-            # --- NEW: Multiple Trading Block Analysis ---
-            # Using 60-day default lookback to find MULTIPLE blocks
-            blocks = calculate_multiple_blocks(analysis_df, lookback=60)
-            
-            # Get latest block status for cards
-            if blocks:
-                latest_block = blocks[-1]
-                block_status = latest_block['status']
-                block_top = latest_block['top']
-                block_bot = latest_block['bot']
-            else:
-                block_status = "UNKNOWN"
-                block_top, block_bot = 0, 0
-
-            # Check if we have enough data
-            if analysis_df.empty or len(analysis_df) < 50:
-                st.error("Not enough data to compute 3-Phase signals for this stock.")
-            else:
-                latest_row = analysis_df.iloc[-1]
-
-                # Create the NEW 4-Panel Chart (Passing blocks list)
-                fig_stock = create_single_stock_chart(analysis_df, blocks=blocks)
-                st.plotly_chart(fig_stock, use_container_width=True)
-
-                # NEW: Latest signals summary (Cards)
-                st.subheader("Latest Status")
-                col_a, col_b, col_c, col_d = st.columns(4)
-
-                accum = bool(latest_row.get('Signal_Accumulation', False))
-                squeeze = bool(latest_row.get('Signal_Squeeze', False))
-                launch = bool(latest_row.get('Signal_Golden_Launch', False))
-                adx_val = float(latest_row.get('ADX', 0.0))
-
-                with col_a:
-                    st.markdown("**Phase 1: Accumulation**")
-                    st.markdown("**:orange[ACTIVE]**" if accum else ":grey[INACTIVE]")
-                with col_b:
-                    st.markdown("**Phase 2: Squeeze**")
-                    st.markdown("**:grey[TIGHT]**" if squeeze else ":grey[LOOSE]")
-                with col_c:
-                    st.markdown("**Phase 3: LAUNCH**")
-                    st.markdown("**:red[TRIGGERED]**" if launch else ":grey[WAITING]")
-                with col_d:
-                    st.markdown("**Trading Block (Latest)**")
-                    if "BREAKOUT" in block_status:
-                        st.markdown(f"**:red[{block_status}]**")
-                    elif "BREAKDOWN" in block_status:
-                        st.markdown(f"**:green[{block_status}]**")
-                    else:
-                        st.markdown(f"**:grey[{block_status}]**")
-                    st.caption(f"Range: {block_bot:.2f} - {block_top:.2f}")
-
-                # NEW: Debug table (last 50 rows)
-                st.subheader("Recent Data (last 50 days)")
-                
-                # Select relevant columns
-                table_cols = [
-                    'Close', 'MA20', 'MA50', 'MA200',
-                    'RSI_14', 'ADX', 
-                    'Signal_Accumulation', 'Signal_Squeeze', 'Signal_Golden_Launch',
-                    'Exit_MACD_Lead'
-                ]
-                # Filter in case some cols missing (safety)
-                valid_cols = [c for c in table_cols if c in analysis_df.columns]
-                
-                df_for_table = analysis_df[valid_cols].copy()
-                df_for_table = df_for_table.reset_index()
-                df_for_table['Date'] = df_for_table['Date'].dt.strftime('%Y-%m-%d')
-                df_for_table = df_for_table.tail(50)
-                
-                st.dataframe(
-                    df_for_table, 
-                    use_container_width=True, 
-                    hide_index=True,
-                    column_config={
-                        "Close": st.column_config.NumberColumn(format="%.2f"),
-                        "MA200": st.column_config.NumberColumn(format="%.2f"),
-                        "RSI_14": st.column_config.NumberColumn(format="%.0f"),
-                        "ADX": st.column_config.NumberColumn(format="%.1f"),
-                        "Signal_Accumulation": st.column_config.CheckboxColumn(label="Accum (P1)"),
-                        "Signal_Squeeze": st.column_config.CheckboxColumn(label="Squeeze (P2)"),
-                        "Signal_Golden_Launch": st.column_config.CheckboxColumn(label="LAUNCH (P3)"),
-                        "Exit_MACD_Lead": st.column_config.CheckboxColumn(label="Exit")
-                    }
-                )
-
-                # --- STATISTICAL PREDICTION SECTION (NEW) ---
-                st.markdown("---")
-                st.subheader("Statistical Prediction (Forecast)")
-                
-                c_opts, c_info = st.columns([1, 2])
-                with c_opts:
-                    lookback_option = st.selectbox("Lookback Period (Days)", [10, 20, 30, 60], index=2)
-                    
-                    # UPDATED: Model Selection
-                    model_options = ["Linear (Straight)", "Quadratic (Curved)"]
-                    if HAS_STATSMODELS:
-                        model_options.extend(["Holt-Winters (Exp. Smoothing)", "ARIMA (AutoRegressive)"])
-                    
-                    model_option = st.radio("Trend Model", model_options, index=0)
-                
-                with c_info:
-                    degree = 1
-                    if "Linear" in model_option:
-                        st.info(f"**Linear Regression:** Projects current trend as a straight line based on last {lookback_option} days.")
-                    elif "Quadratic" in model_option:
-                        st.info(f"**Polynomial Regression:** Fits a curve to detect acceleration/deceleration.")
-                        degree = 2
-                    elif "Holt-Winters" in model_option:
-                        st.info(f"**Exponential Smoothing (Holt-Winters):** Weights recent data heavily. \n\n**Volume Integration:** Uses 'Daily VWAP' (Volume Weighted Price) instead of raw Close price to ensure trend follows volume.")
-                    elif "ARIMA" in model_option:
-                        st.info(f"**ARIMA (ARIMAX):** AutoRegressive Integrated Moving Average. \n\n**Volume Integration:** Uses Volume as an 'Exogenous Variable' to mathematically weight the price prediction based on volume strength.")
-                
-                # Calculate forecast based on selection
-                model_key = model_option.split()[0] # "Linear", "Quadratic", "Holt-Winters", "ARIMA"
-                
-                forecast, upper, lower = calculate_trend_forecast(
-                    analysis_df, 
-                    lookback=lookback_option, 
-                    forecast_days=30, 
-                    degree=degree, 
-                    model_type=model_key
-                )
-                
-                if forecast is not None:
-                    fig_fc = create_forecast_chart(analysis_df, forecast, upper, lower, model_name=model_key)
-                    st.plotly_chart(fig_fc, use_container_width=True)
-                    
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        st.metric("Projected Target (30d)", f"{forecast[-1]:.2f}")
-                    with c2:
-                        st.metric("Upside Resistance", f"{upper[-1]:.2f}")
-                    with c3:
-                        st.metric("Downside Support", f"{lower[-1]:.2f}")
-                else:
-                    st.warning("Not enough data or model failed to converge.")
-
-
-
-
-
-
+    使用本平台即表示您承认并接受这些条款。
+    """)
+
+st.markdown("---")
+
+# ==========================================
+# NAVIGATION / 导航
+# ==========================================
+
+st.markdown("## 🚀 Get Started | 开始使用")
+
+st.info("""
+👈 **Use the sidebar to navigate between pages**  
+请使用左侧边栏在不同页面间导航
+
+- **📊 Sector Analysis** - View sector rotation signals and market overview  
+  **板块分析** - 查看板块轮动信号和市场概览
+
+- **📈 Single Stock Analysis** - Analyze individual stocks with technical indicators  
+  **个股分析** - 使用技术指标分析个股
+
+- **💼 Portfolio Optimization** - Build optimized portfolios using MPT  
+  **投资组合优化** - 使用现代投资组合理论构建优化组合
+""")
+
+st.markdown("---")
+
+# ==========================================
+# CREDITS / 作者信息
+# ==========================================
+
+st.markdown("## 👨‍💻 About the Author | 关于作者")
+
+col_credit1, col_credit2, col_credit3 = st.columns([1, 2, 1])
+
+with col_credit2:
+    st.markdown("""
+    <div style="text-align: center; padding: 20px; background-color: #f8f9fa; border-radius: 10px;">
+        <h3>Phil Wei | 魏先生</h3>
+        <p style="font-size: 18px;">
+            📧 <a href="mailto:phil.wei@outlook.com">phil.wei@outlook.com</a>
+        </p>
+        <p style="color: #6c757d;">
+            Quantitative Trader & Developer<br>
+            量化交易者与开发者
+        </p>
+        <p style="font-size: 14px; color: #6c757d; margin-top: 20px;">
+            Built with ❤️ using Python, Streamlit, and Tushare<br>
+            使用 Python、Streamlit 和 Tushare 构建
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+st.markdown("---")
+
+# ==========================================
+# FOOTER
+# ==========================================
+
+st.markdown("""
+<div style="text-align: center; color: #6c757d; padding: 20px; font-size: 12px;">
+    ASSRS V2 Enhanced © 2026 Phil Wei. All rights reserved.<br>
+    For educational and research purposes only. Not financial advice.<br><br>
+    高级股票轮动与选股系统增强版 © 2026 魏先生。保留所有权利。<br>
+    仅供教育和研究目的。不构成财务建议。
+</div>
+""", unsafe_allow_html=True)
