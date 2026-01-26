@@ -1,6 +1,9 @@
+streamlit>=1.30.0
 pandas
-tushare
-statsmodels
-ta
-streamlit
+numpy
 plotly
+ta
+tushare
+scipy
+statsmodels
+altair==4.2.2
