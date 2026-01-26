@@ -134,30 +134,32 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     
     # Exit Signal: Multiple conditions (any one triggers)
 
-    # Condition 1: MACD crosses down from bullish zone
+    # ==========================================
+    # EXIT SIGNAL (Improved - Less Noise)
+    # ==========================================
+
+    # Condition 1: MACD crosses down from bullish zone WITH confirmation
     macd_bearish_cross = (
-        (df_analysis['MACD'].shift(1) > df_analysis['MACD_Signal'].shift(1)) &
-        (df_analysis['MACD'] < df_analysis['MACD_Signal']) &
-        (df_analysis['MACD'] > 0)  # Only in bullish territory
+        (df_analysis['MACD'].shift(1) > df_analysis['MACD_Signal'].shift(1)) &  # Was above
+        (df_analysis['MACD'] < df_analysis['MACD_Signal']) &  # Crossed down
+        (df_analysis['MACD'].shift(1) > 0) &  # Was in bullish territory
+        (df_analysis['MACD_Hist'] < df_analysis['MACD_Hist'].shift(1))  # Histogram weakening
     )
 
-    # Condition 2: MA20 crosses below MA50 (trend reversal)
+    # Condition 2: MA20 crosses below MA50 (major trend reversal)
     ma_cross_down = (
         (df_analysis['MA20'].shift(1) > df_analysis['MA50'].shift(1)) &
-        (df_analysis['MA20'] < df_analysis['MA50'])
+        (df_analysis['MA20'] < df_analysis['MA50']) &
+        (df_analysis['ADX'] > 20)  # ← ADD: Only in trending conditions (not noise)
     )
 
-    # Condition 3: RSI overbought + momentum loss
-    rsi_exhaustion = (
-        (df_analysis['RSI_14'] > 70) &  # Overbought
-        (df_analysis['RSI_14'] < df_analysis['RSI_14'].shift(1))  # Starting to fall
-    )
+    # Condition 3: RSI extreme exhaustion (remove this - too frequent)
+    # rsi_exhaustion causes too many false exits - REMOVED
 
-    # Combine (any condition = exit warning)
-    exit_signal = macd_bearish_cross | ma_cross_down | rsi_exhaustion
+    # Combine conditions (both must be stronger signals now)
+    exit_signal = macd_bearish_cross | ma_cross_down
 
     df_analysis.loc[exit_signal, 'Exit_MACDLead'] = True
-
     
     return df_analysis
 
