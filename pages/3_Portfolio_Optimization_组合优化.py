@@ -954,7 +954,7 @@ if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True
         y=[stock_names[t] for t in corr_matrix.index],
         colorscale='RdBu', zmid=0,
         text=corr_matrix.values, texttemplate='%{text:.2f}',
-        textfont={"size": 8},
+        textfont={"size": 12},
         colorbar=dict(title="Correlation")
     ))
     
