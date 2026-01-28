@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import ta
 import data_manager
+from datetime import date
 
 st.set_page_config(
     page_title="📈 Single Stock | 个股分析",
@@ -29,8 +30,8 @@ except ImportError:
 # HELPER FUNCTIONS
 # ==========================================
 
-@st.cache_data(ttl=600)
-def load_single_stock(ticker):
+@st.cache_data(ttl=60)
+def load_single_stock(ticker, cache_date):
     """Load stock data using data_manager."""
     return data_manager.get_single_stock_data(ticker, use_data_start_date=True)
 
@@ -744,7 +745,7 @@ if st.session_state.active_ticker:
     ticker = st.session_state.active_ticker.strip()
     
     with st.spinner(f"Loading {ticker}..."):
-        stock_df = load_single_stock(ticker)
+        stock_df = load_single_stock(ticker,date.today())
     
     if stock_df is None or stock_df.empty:
         st.error(f"No data found for {ticker}. Check ticker is valid.")
