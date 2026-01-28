@@ -35,14 +35,13 @@ jobs:
         run: |
           python main.py
       
-      # 5. Commit DB + CSV files back to repo
-      - name: Commit updated data files
+      # 5. Commit ONLY CSV files (database stays local to GitHub Actions)
+      - name: Commit updated CSV results
         run: |
           git config --global user.name 'GitHub Action Bot'
           git config --global user.email 'action@github.com'
           
-          # Add database and CSV files
-          git add assrs_tushare_local.db
+          # Only add CSV files - database is in .gitignore
           git add assrs_backtest_results_SECTORS_V2_Regime.csv
           git add assrs_backtest_results_SECTORS_V1_Rules.csv || true
           
