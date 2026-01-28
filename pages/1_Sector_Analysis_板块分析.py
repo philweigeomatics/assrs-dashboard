@@ -352,11 +352,15 @@ def make_heatmap(probs, title="Transition Probabilities"):
     fig = go.Figure(data=go.Heatmap(
         z=probs.values, x=probs.columns.tolist(), y=probs.index.tolist(),
         colorscale='Blues', text=probs.values.round(2), texttemplate='%{text}',
-        colorbar=dict(title="Probability")
+        textfont=dict(size=14), colorbar=dict(title="Probability")
     ))
     fig.update_layout(
         title=title, xaxis_title="Tomorrow", yaxis_title="Today",
-        height=600, template='plotly_white'
+        height=600, template='plotly_white',
+        # ← ADD THESE LINES
+        xaxis=dict(tickfont=dict(size=13)),  # x-axis labels
+        yaxis=dict(tickfont=dict(size=13)),  # y-axis labels
+        font=dict(size=14)  # title and other text
     )
     return fig
 
