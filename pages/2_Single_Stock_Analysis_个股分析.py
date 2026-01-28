@@ -1121,12 +1121,13 @@ if st.session_state.active_ticker:
             metrics_df = analysis_df[table_cols].tail(5)
             st.dataframe(metrics_df, use_container_width=True)
 
+
+            # T+1 Return Risk Analysis Section
             st.markdown("---")
             st.subheader("📊 T+1 Return Risk Analysis | T+1交易风险分析")
 
             # Generate analysis
-            # Generate analysis
-            fig_dist, metrics_df = analyze_return_distribution(df, ticker_name=ticker)
+            fig_dist, metrics_df = analyze_return_distribution(stock_df, ticker_name=ticker)
 
             if fig_dist is not None:
                 # Display metrics table and chart
@@ -1148,7 +1149,7 @@ if st.session_state.active_ticker:
                 # Trading insights
                 st.markdown("### 💡 Key Insights | 关键洞察")
 
-                returns = df['Close'].pct_change().dropna()
+                returns = stock_df['Close'].pct_change().dropna()  # ← CORRECT
                 var_95 = returns.quantile(0.05)
                 cvar_95 = returns[returns <= var_95].mean()
                 win_rate = (returns > 0).sum() / len(returns)
