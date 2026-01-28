@@ -468,20 +468,46 @@ def get_single_stock_data(ticker, use_data_start_date: bool = True, lookback_yea
     """
     Unified accessor for the webapp's single-stock analysis.
 
-    Logic:
-    1) Try to load from local SQLite via get_single_stock_data_from_db.
-    2) If not found or empty, fetch from Tushare using fetch_stock_data_robust.
-       - Uses DATA_START_DATE if use_data_start_date=True,
-         otherwise uses last N years via lookback_years.
-    3) Save the fetched data into SQLite for future use.
-    4) Return a DataFrame indexed by Date with at least:
-       Open, High, Low, Close, Volume (+ Volume_ZScore when coming from DB).
-    """
 
-    # --- Step 1: Try DB first ---
+    Logic (FIXED - Simple and Strict):
+    1) Get today's date in Beijing time
+    2) Check if database has today's date
+    3) If NOT, fetch from Tushare (let Tushare decide what's available)
+    4) If YES, use database
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    # --- Step 1: Get today's date in Beijing time ---
+    china_tz = ZoneInfo("Asia/Shanghai")
+    today_beijing = datetime.now(china_tz).date()
+
+    print(f"[data_manager] Today (Beijing time): {today_beijing}")
+
+    # --- Step 2: Try DB first ---
     df_db = get_single_stock_data_from_db(ticker)
-    if df_db is not None and not df_db.empty:
-        print(f"[data_manager] Loaded {ticker} from DB")
+
+    # --- Step 3: Simple validation - does DB have today's date? ---
+    needs_update = False
+
+    if df_db is None or df_db.empty:
+        print(f"[data_manager] {ticker} not in database - fetching from Tushare")
+        needs_update = True
+    else:
+        latest_db_date = df_db.index.max().date()
+        print(f"[data_manager] DB has {ticker} up to: {latest_db_date}")
+
+        # Simple check: if database doesn't have today's date, fetch from Tushare
+        if latest_db_date < today_beijing:
+            print(f"[data_manager] ⚠️ DATABASE MISSING TODAY - Latest: {latest_db_date}, Today: {today_beijing}")
+            print(f"[data_manager] Fetching from Tushare (will get whatever is available)...")
+            needs_update = True
+        else:
+            print(f"[data_manager] ✅ Database has today's data - using cached data")
+            return df_db
+
+    # --- Step 4: Fetch from Tushare if needed ---
+    if not needs_update:
         return df_db
 
     # --- Step 2: Need to fetch from Tushare ---
