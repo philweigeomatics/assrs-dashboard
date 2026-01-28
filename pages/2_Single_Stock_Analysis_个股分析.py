@@ -11,6 +11,7 @@ from plotly.subplots import make_subplots
 import ta
 import data_manager
 from datetime import date
+from scipy import stats
 
 st.set_page_config(
     page_title="📈 Single Stock | 个股分析",
@@ -709,6 +710,319 @@ def analyze_ticker():
         st.session_state.active_ticker = ticker_val
 
 
+def analyze_return_distribution(df, ticker_name="Stock"):
+    """
+    Analyze return distribution for T+1 trading (buy today, sell tomorrow).
+
+    Returns comprehensive risk metrics and visualizations including:
+    - Return distribution histogram with normal curve overlay
+    - Q-Q plot to assess normality
+    - VaR and CVaR at 95% and 99% confidence levels
+    - Distribution statistics (skewness, kurtosis, fat tail analysis)
+
+    Args:
+        df: DataFrame with 'Close' column and DatetimeIndex
+        ticker_name: Name of the stock for display
+
+    Returns:
+        fig: Plotly figure with visualizations
+        metrics_df: DataFrame with risk metrics
+    """
+
+    # Calculate daily returns
+    returns = df['Close'].pct_change().dropna()
+
+    if len(returns) < 30:
+        return None, None
+
+    # ========================================
+    # RISK METRICS CALCULATION
+    # ========================================
+
+    # Basic statistics
+    mean_return = returns.mean()
+    std_return = returns.std()
+    median_return = returns.median()
+
+    # Distribution shape
+    skewness = returns.skew()
+    kurtosis = returns.kurtosis()  # Excess kurtosis (normal = 0)
+
+    # VaR (Value at Risk) - Loss threshold at confidence level
+    var_95 = returns.quantile(0.05)  # 5th percentile (95% confident loss won't exceed this)
+    var_99 = returns.quantile(0.01)  # 1st percentile (99% confident)
+
+    # CVaR (Conditional VaR / Expected Shortfall) - Average loss beyond VaR
+    cvar_95 = returns[returns <= var_95].mean()
+    cvar_99 = returns[returns <= var_99].mean()
+
+    # Upside potential
+    upside_95 = returns.quantile(0.95)  # 95th percentile gain
+    upside_99 = returns.quantile(0.99)  # 99th percentile gain
+
+    # Win rate
+    win_rate = (returns > 0).sum() / len(returns)
+
+    # Jarque-Bera test for normality (p < 0.05 means NOT normal)
+    jb_stat, jb_pvalue = stats.jarque_bera(returns)
+    is_normal = jb_pvalue > 0.05
+
+    # Fat tail indicator (kurtosis > 3 indicates fat tails)
+    is_fat_tail = kurtosis > 3
+
+    # Sharpe ratio (annualized, assuming 252 trading days)
+    sharpe = (mean_return / std_return) * np.sqrt(252) if std_return > 0 else 0
+
+    # Max single-day gain/loss
+    max_gain = returns.max()
+    max_loss = returns.min()
+
+    # ========================================
+    # CREATE METRICS DATAFRAME
+    # ========================================
+
+    metrics = {
+        'Metric': [
+            'Mean Daily Return',
+            'Median Daily Return',
+            'Std Dev (Daily)',
+            'Annualized Volatility',
+            'Sharpe Ratio (Annual)',
+            '',  # Separator
+            'Win Rate',
+            'Max Single-Day Gain',
+            'Max Single-Day Loss',
+            '',  # Separator
+            'VaR 95% (Daily)',
+            'VaR 99% (Daily)',
+            'CVaR 95% (Daily)',
+            'CVaR 99% (Daily)',
+            '',  # Separator
+            'Upside 95th %tile',
+            'Upside 99th %tile',
+            '',  # Separator
+            'Skewness',
+            'Kurtosis (Excess)',
+            'Distribution Type',
+            'Fat Tail?',
+            'Jarque-Bera p-value'
+        ],
+        'Value': [
+            f"{mean_return*100:.3f}%",
+            f"{median_return*100:.3f}%",
+            f"{std_return*100:.3f}%",
+            f"{std_return*np.sqrt(252)*100:.2f}%",
+            f"{sharpe:.2f}",
+            '',
+            f"{win_rate*100:.1f}%",
+            f"{max_gain*100:.2f}%",
+            f"{max_loss*100:.2f}%",
+            '',
+            f"{var_95*100:.2f}%",
+            f"{var_99*100:.2f}%",
+            f"{cvar_95*100:.2f}%",
+            f"{cvar_99*100:.2f}%",
+            '',
+            f"{upside_95*100:.2f}%",
+            f"{upside_99*100:.2f}%",
+            '',
+            f"{skewness:.2f}",
+            f"{kurtosis:.2f}",
+            'Normal' if is_normal else 'Non-Normal',
+            'Yes' if is_fat_tail else 'No',
+            f"{jb_pvalue:.4f}"
+        ],
+        'Interpretation': [
+            'Average T+1 return',
+            '50th percentile return',
+            'Daily volatility',
+            'Annual volatility',
+            'Risk-adjusted return',
+            '',
+            'Probability of profit',
+            'Best case (historical)',
+            'Worst case (historical)',
+            '',
+            '95% confidence max loss',
+            '99% confidence max loss',
+            'Avg loss when VaR95 breached',
+            'Avg loss when VaR99 breached',
+            '',
+            'Top 5% gain threshold',
+            'Top 1% gain threshold',
+            '',
+            'Neg=left skew, Pos=right skew',
+            '>3 = fat tails, <0 = thin tails',
+            'Based on Jarque-Bera test',
+            'Extreme events more likely',
+            'p<0.05 = Non-normal'
+        ]
+    }
+
+    metrics_df = pd.DataFrame(metrics)
+
+    # ========================================
+    # CREATE VISUALIZATIONS
+    # ========================================
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=(
+            'Return Distribution & Normal Curve',
+            'Q-Q Plot (Normality Check)',
+            'Return Time Series',
+            'Risk Metrics Visualization'
+        ),
+        specs=[[{"secondary_y": False}, {"secondary_y": False}],
+               [{"secondary_y": False}, {"secondary_y": False}]],
+        vertical_spacing=0.12,
+        horizontal_spacing=0.10
+    )
+
+    # --- PLOT 1: Histogram with Normal Curve ---
+    hist_counts, bin_edges = np.histogram(returns, bins=50, density=True)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+    # Actual distribution
+    fig.add_trace(
+        go.Bar(
+            x=bin_centers,
+            y=hist_counts,
+            name='Actual',
+            marker=dict(color='rgba(59, 130, 246, 0.6)', line=dict(width=0)),
+            showlegend=True
+        ),
+        row=1, col=1
+    )
+
+    # Fitted normal distribution
+    x_range = np.linspace(returns.min(), returns.max(), 100)
+    normal_curve = stats.norm.pdf(x_range, mean_return, std_return)
+    fig.add_trace(
+        go.Scatter(
+            x=x_range,
+            y=normal_curve,
+            name='Normal Fit',
+            line=dict(color='red', width=2, dash='dash'),
+            showlegend=True
+        ),
+        row=1, col=1
+    )
+
+    # Add VaR lines
+    fig.add_vline(x=var_95, line_dash="dash", line_color="orange", 
+                  annotation_text="VaR 95%", row=1, col=1)
+    fig.add_vline(x=var_99, line_dash="dash", line_color="red", 
+                  annotation_text="VaR 99%", row=1, col=1)
+
+    # --- PLOT 2: Q-Q Plot ---
+    qq = stats.probplot(returns, dist="norm")
+
+    fig.add_trace(
+        go.Scatter(
+            x=qq[0][0],
+            y=qq[0][1],
+            mode='markers',
+            name='Q-Q',
+            marker=dict(color='rgba(59, 130, 246, 0.6)', size=4),
+            showlegend=False
+        ),
+        row=1, col=2
+    )
+
+    # Reference line
+    fig.add_trace(
+        go.Scatter(
+            x=qq[0][0],
+            y=qq[1][1] + qq[1][0] * qq[0][0],
+            mode='lines',
+            name='Normal Line',
+            line=dict(color='red', dash='dash'),
+            showlegend=False
+        ),
+        row=1, col=2
+    )
+
+    # --- PLOT 3: Return Time Series ---
+    fig.add_trace(
+        go.Scatter(
+            x=returns.index,
+            y=returns * 100,
+            mode='lines',
+            name='Daily Return',
+            line=dict(color='rgba(59, 130, 246, 0.8)', width=1),
+            showlegend=False
+        ),
+        row=2, col=1
+    )
+
+    # Add zero line
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", 
+                  opacity=0.5, row=2, col=1)
+
+    # Highlight extreme losses
+    extreme_losses = returns[returns <= var_99]
+    fig.add_trace(
+        go.Scatter(
+            x=extreme_losses.index,
+            y=extreme_losses * 100,
+            mode='markers',
+            name='Extreme Loss (>VaR99)',
+            marker=dict(color='red', size=6),
+            showlegend=True
+        ),
+        row=2, col=1
+    )
+
+    # --- PLOT 4: Risk Metrics Bar Chart ---
+    risk_metrics_labels = ['VaR 95%', 'VaR 99%', 'CVaR 95%', 'CVaR 99%', 
+                           'Max Loss', 'Mean', 'Upside 95%', 'Upside 99%', 'Max Gain']
+    risk_metrics_values = [var_95*100, var_99*100, cvar_95*100, cvar_99*100,
+                          max_loss*100, mean_return*100, upside_95*100, upside_99*100, max_gain*100]
+    risk_colors = ['orange', 'red', 'darkred', 'darkred', 
+                   'crimson', 'blue', 'green', 'darkgreen', 'limegreen']
+
+    fig.add_trace(
+        go.Bar(
+            x=risk_metrics_labels,
+            y=risk_metrics_values,
+            marker=dict(color=risk_colors),
+            showlegend=False,
+            text=[f"{v:.2f}%" for v in risk_metrics_values],
+            textposition='outside'
+        ),
+        row=2, col=2
+    )
+
+    # Update layout
+    fig.update_xaxes(title_text="Daily Return", row=1, col=1)
+    fig.update_yaxes(title_text="Density", row=1, col=1)
+
+    fig.update_xaxes(title_text="Theoretical Quantiles", row=1, col=2)
+    fig.update_yaxes(title_text="Sample Quantiles", row=1, col=2)
+
+    fig.update_xaxes(title_text="Date", row=2, col=1)
+    fig.update_yaxes(title_text="Return (%)", row=2, col=1)
+
+    fig.update_xaxes(title_text="Metric", tickangle=-45, row=2, col=2)
+    fig.update_yaxes(title_text="Return (%)", row=2, col=2)
+
+    fig.update_layout(
+        height=800,
+        showlegend=True,
+        template='plotly_white',
+        title=dict(
+            text=f"{ticker_name} - T+1 Return Distribution & Risk Analysis<br><sub>Data: {len(returns)} trading days</sub>",
+            x=0.5,
+            xanchor='center',
+            font=dict(size=18)
+        )
+    )
+
+    return fig, metrics_df
+
+
+
 # ==========================================
 # MAIN APP
 # ==========================================
@@ -806,6 +1120,84 @@ if st.session_state.active_ticker:
             
             metrics_df = analysis_df[table_cols].tail(5)
             st.dataframe(metrics_df, use_container_width=True)
+
+            st.markdown("---")
+            st.subheader("📊 T+1 Return Risk Analysis | T+1交易风险分析")
+
+            # Generate analysis
+            # Generate analysis
+            fig_dist, metrics_df = analyze_return_distribution(df, ticker_name=ticker)
+
+            if fig_dist is not None:
+                # Display metrics table and chart
+                col1, col2 = st.columns([1, 2])
+
+                with col1:
+                    st.markdown("#### Risk Metrics | 风险指标")
+                    st.dataframe(
+                        metrics_df,
+                        hide_index=True,
+                        height=700,
+                        use_container_width=True
+                    )
+
+                with col2:
+                    st.markdown("#### Visual Analysis | 可视化分析")
+                    st.plotly_chart(fig_dist, use_container_width=True)
+
+                # Trading insights
+                st.markdown("### 💡 Key Insights | 关键洞察")
+
+                returns = df['Close'].pct_change().dropna()
+                var_95 = returns.quantile(0.05)
+                cvar_95 = returns[returns <= var_95].mean()
+                win_rate = (returns > 0).sum() / len(returns)
+                kurtosis = returns.kurtosis()
+                mean_return = returns.mean()
+
+                col_a, col_b, col_c = st.columns(3)
+
+                with col_a:
+                    st.metric("Win Rate | 胜率", f"{win_rate*100:.1f}%")
+                    if win_rate > 0.55:
+                        st.success("✅ Positive edge | 正向优势")
+                    elif win_rate > 0.45:
+                        st.info("⚖️ Neutral | 中性")
+                    else:
+                        st.warning("⚠️ Negative edge | 负向优势")
+
+                with col_b:
+                    st.metric("Distribution | 分布类型", 
+                            "Fat Tail" if kurtosis > 3 else "Normal-like")
+                    if kurtosis > 3:
+                        st.warning(f"⚠️ Kurtosis = {kurtosis:.1f}")
+                        st.caption("Extreme events more likely | 极端事件更可能")
+                    else:
+                        st.success("✅ Normal distribution | 正态分布")
+
+                with col_c:
+                    st.metric("CVaR 95% (Daily) | 条件风险", f"{cvar_95*100:.2f}%")
+                    st.caption("Avg loss beyond VaR | 超VaR平均损失")
+                    if cvar_95 < -0.05:
+                        st.error("⚠️ High tail risk | 高尾部风险")
+
+                # Recommendation box
+                st.info(f"""
+                **💼 T+1 Trading Recommendation | T+1交易建议:**
+
+                - **Expected Return | 预期收益:** {mean_return*100:.3f}% per trade
+                - **Maximum Risk (95% confidence) | 最大风险 (95%置信度):** {cvar_95*100:.2f}%
+                - **Suggested Position Size | 建议仓位:** {min(100, max(10, int(50 * (1 - abs(cvar_95)*10))))}% of capital
+
+                {'⚠️ **High volatility - use smaller position sizes** | **高波动 - 使用较小仓位**' if abs(cvar_95) > 0.03 else ''}
+                {'⚠️ **Fat tails detected - widen stop loss** | **检测到肥尾 - 放宽止损**' if kurtosis > 3 else ''}
+                """)
+
+            else:
+                st.warning("Not enough data for distribution analysis (need 30+ days) | 数据不足（需要30天以上）")
+
+            st.markdown("---")
+
             
             # Trend Forecast Section
             st.markdown("---")
