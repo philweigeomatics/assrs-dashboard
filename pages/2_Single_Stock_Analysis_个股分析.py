@@ -1023,6 +1023,911 @@ def analyze_return_distribution(df, ticker_name="Stock"):
 
 
 
+def analyze_conditional_entry_signals(df, ticker_name="Stock"):
+    """
+    Analyze T+1 entry signals based on today's drop.
+
+    Answers: "If stock drops X% today, what's the probability and expected return
+    if I buy at close today and sell at close tomorrow?"
+
+    Args:
+        df: DataFrame with 'Close' column and DatetimeIndex
+        ticker_name: Name of the stock for display
+
+    Returns:
+        fig: Plotly figure with analysis
+        entry_df: DataFrame with entry signal recommendations
+        summary_stats: Dict with key insights
+    """
+
+    # Calculate daily returns
+    df_analysis = df.copy()
+    df_analysis['Return'] = df_analysis['Close'].pct_change()
+    df_analysis['Next_Return'] = df_analysis['Return'].shift(-1)  # Tomorrow's return
+
+    # Drop last row (no next day data) and NaNs
+    df_analysis = df_analysis[['Close', 'Return', 'Next_Return']].dropna()
+
+    if len(df_analysis) < 50:
+        return None, None, None
+
+    # ========================================
+    # CATEGORIZE TODAY'S DROPS INTO BUCKETS
+    # ========================================
+
+    # Define drop thresholds
+    drop_buckets = [
+        (-0.01, 0.00, "0% to -1%"),      # Tiny dip
+        (-0.02, -0.01, "-1% to -2%"),    # Small dip
+        (-0.03, -0.02, "-2% to -3%"),    # Medium dip
+        (-0.04, -0.03, "-3% to -4%"),    # Large dip
+        (-0.05, -0.04, "-4% to -5%"),    # Very large dip
+        (-1.00, -0.05, "< -5%"),         # Extreme drop
+    ]
+
+    results = []
+
+    for lower, upper, label in drop_buckets:
+        # Filter days where today's return is in this bucket
+        mask = (df_analysis['Return'] >= lower) & (df_analysis['Return'] < upper)
+        bucket_data = df_analysis[mask]
+
+        if len(bucket_data) < 3:  # Not enough samples
+            continue
+
+        # Tomorrow's return statistics
+        next_returns = bucket_data['Next_Return']
+
+        win_rate = (next_returns > 0).sum() / len(next_returns)
+        avg_return = next_returns.mean()
+        median_return = next_returns.median()
+        best_return = next_returns.max()
+        worst_return = next_returns.min()
+
+        # Risk metrics
+        losing_trades = next_returns[next_returns < 0]
+        avg_loss = losing_trades.mean() if len(losing_trades) > 0 else 0
+
+        # Expected value per trade
+        expected_value = avg_return
+
+        # Risk-reward ratio (avg win / avg loss)
+        winning_trades = next_returns[next_returns > 0]
+        avg_win = winning_trades.mean() if len(winning_trades) > 0 else 0
+        risk_reward = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+
+        # Recommendation score (higher is better)
+        # Score = Win Rate * Avg Return * Sample Size factor
+        confidence_factor = min(1.0, len(bucket_data) / 20)  # Penalize small samples
+        score = win_rate * avg_return * 100 * confidence_factor
+
+        results.append({
+            'Entry Signal': label,
+            'Sample Size': len(bucket_data),
+            'Win Rate': win_rate,
+            'Avg T+1 Return': avg_return,
+            'Median T+1 Return': median_return,
+            'Best Case': best_return,
+            'Worst Case': worst_return,
+            'Avg Win': avg_win,
+            'Avg Loss': avg_loss,
+            'Risk/Reward': risk_reward,
+            'Expected Value': expected_value,
+            'Score': score
+        })
+
+    if not results:
+        return None, None, None
+
+    # Create DataFrame
+    entry_df = pd.DataFrame(results)
+    entry_df = entry_df.sort_values('Score', ascending=False)
+
+    # ========================================
+    # IDENTIFY BEST ENTRY POINTS
+    # ========================================
+
+    # Best entry = highest score with reasonable sample size
+    best_entries = entry_df[
+        (entry_df['Sample Size'] >= 5) &  # At least 5 historical examples
+        (entry_df['Win Rate'] > 0.5) &    # Positive win rate
+        (entry_df['Expected Value'] > 0)  # Positive expected value
+    ]
+
+    # Summary statistics
+    summary_stats = {
+        'total_samples': len(df_analysis),
+        'best_entry': best_entries.iloc[0]['Entry Signal'] if len(best_entries) > 0 else 'None',
+        'best_win_rate': best_entries.iloc[0]['Win Rate'] if len(best_entries) > 0 else 0,
+        'best_avg_return': best_entries.iloc[0]['Avg T+1 Return'] if len(best_entries) > 0 else 0,
+        'profitable_entries': len(best_entries)
+    }
+
+    # ========================================
+    # CREATE VISUALIZATIONS
+    # ========================================
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=(
+            'Win Rate by Entry Signal',
+            'Average T+1 Return by Entry Signal',
+            'Risk/Reward Ratio by Entry Signal',
+            'Sample Distribution'
+        ),
+        specs=[[{"type": "bar"}, {"type": "bar"}],
+               [{"type": "bar"}, {"type": "bar"}]],
+        vertical_spacing=0.15,
+        horizontal_spacing=0.12
+    )
+
+    # Color code: green if profitable, red if not
+    colors_win = ['green' if w > 0.5 else 'red' for w in entry_df['Win Rate']]
+    colors_return = ['green' if r > 0 else 'red' for r in entry_df['Avg T+1 Return']]
+    colors_rr = ['green' if rr > 1 else 'red' for rr in entry_df['Risk/Reward']]
+
+    # Plot 1: Win Rate
+    fig.add_trace(
+        go.Bar(
+            x=entry_df['Entry Signal'],
+            y=entry_df['Win Rate'] * 100,
+            text=[f"{v:.1f}%" for v in entry_df['Win Rate'] * 100],
+            textposition='outside',
+            marker=dict(color=colors_win),
+            showlegend=False
+        ),
+        row=1, col=1
+    )
+    fig.add_hline(y=50, line_dash="dash", line_color="gray", 
+                  annotation_text="50% (Random)", row=1, col=1)
+
+    # Plot 2: Average Return
+    fig.add_trace(
+        go.Bar(
+            x=entry_df['Entry Signal'],
+            y=entry_df['Avg T+1 Return'] * 100,
+            text=[f"{v:.2f}%" for v in entry_df['Avg T+1 Return'] * 100],
+            textposition='outside',
+            marker=dict(color=colors_return),
+            showlegend=False
+        ),
+        row=1, col=2
+    )
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", row=1, col=2)
+
+    # Plot 3: Risk/Reward Ratio
+    fig.add_trace(
+        go.Bar(
+            x=entry_df['Entry Signal'],
+            y=entry_df['Risk/Reward'],
+            text=[f"{v:.2f}" for v in entry_df['Risk/Reward']],
+            textposition='outside',
+            marker=dict(color=colors_rr),
+            showlegend=False
+        ),
+        row=2, col=1
+    )
+    fig.add_hline(y=1, line_dash="dash", line_color="gray",
+                  annotation_text="1:1 (Break-even)", row=2, col=1)
+
+    # Plot 4: Sample Size
+    fig.add_trace(
+        go.Bar(
+            x=entry_df['Entry Signal'],
+            y=entry_df['Sample Size'],
+            text=entry_df['Sample Size'],
+            textposition='outside',
+            marker=dict(color='rgba(59, 130, 246, 0.6)'),
+            showlegend=False
+        ),
+        row=2, col=2
+    )
+
+    # Update axes
+    fig.update_xaxes(title_text="Today's Drop", tickangle=-45, row=1, col=1)
+    fig.update_yaxes(title_text="Win Rate (%)", row=1, col=1)
+
+    fig.update_xaxes(title_text="Today's Drop", tickangle=-45, row=1, col=2)
+    fig.update_yaxes(title_text="Avg T+1 Return (%)", row=1, col=2)
+
+    fig.update_xaxes(title_text="Today's Drop", tickangle=-45, row=2, col=1)
+    fig.update_yaxes(title_text="Risk/Reward Ratio", row=2, col=1)
+
+    fig.update_xaxes(title_text="Today's Drop", tickangle=-45, row=2, col=2)
+    fig.update_yaxes(title_text="Number of Occurrences", row=2, col=2)
+
+    fig.update_layout(
+        height=800,
+        showlegend=False,
+        template='plotly_white',
+        title=dict(
+            text=f"{ticker_name} - Conditional T+1 Entry Analysis<br><sub>Historical Performance by Entry Signal</sub>",
+            x=0.5,
+            xanchor='center',
+            font=dict(size=18)
+        )
+    )
+
+    return fig, entry_df, summary_stats
+
+
+def analyze_realistic_t1_trading(df, ticker_name="Stock"):
+    """
+    Realistic T+1 trading analysis considering intraday prices.
+
+    Scenarios analyzed:
+    1. Buy at today's close, sell at tomorrow's HIGH (best case)
+    2. Buy at today's close, sell at tomorrow's close (baseline)
+    3. Buy at today's LOW (if you can catch dip), sell at tomorrow's HIGH (optimal)
+    4. Buy at today's LOW, sell at tomorrow's close (realistic best)
+
+    Args:
+        df: DataFrame with OHLC data
+        ticker_name: Stock name
+
+    Returns:
+        fig: Plotly figure
+        scenarios_df: DataFrame with scenario analysis
+        entry_signals_df: Conditional entry signals with realistic returns
+    """
+
+    # Calculate returns for different scenarios
+    df_analysis = df.copy()
+
+    # Scenario 1: Close-to-Close (traditional)
+    df_analysis['T0_Close'] = df_analysis['Close']
+    df_analysis['T1_Close'] = df_analysis['Close'].shift(-1)
+    df_analysis['Return_Close_Close'] = (df_analysis['T1_Close'] / df_analysis['T0_Close']) - 1
+
+    # Scenario 2: Close-to-High (sell at best intraday price tomorrow)
+    df_analysis['T1_High'] = df_analysis['High'].shift(-1)
+    df_analysis['Return_Close_High'] = (df_analysis['T1_High'] / df_analysis['T0_Close']) - 1
+
+    # Scenario 3: Low-to-High (optimal - catch today's dip, sell tomorrow's peak)
+    df_analysis['T0_Low'] = df_analysis['Low']
+    df_analysis['Return_Low_High'] = (df_analysis['T1_High'] / df_analysis['T0_Low']) - 1
+
+    # Scenario 4: Low-to-Close (realistic best - catch dip, sell tomorrow close)
+    df_analysis['Return_Low_Close'] = (df_analysis['T1_Close'] / df_analysis['T0_Low']) - 1
+
+    # Today's intraday opportunity (how much cheaper can you buy vs close?)
+    df_analysis['T0_Discount'] = (df_analysis['T0_Close'] / df_analysis['T0_Low']) - 1
+
+    # Tomorrow's intraday opportunity (how much higher vs close?)
+    df_analysis['T1_Premium'] = (df_analysis['T1_High'] / df_analysis['T1_Close']) - 1
+
+    # Today's return (for conditional analysis)
+    df_analysis['Today_Return'] = df_analysis['Close'].pct_change()
+
+    # Drop rows with missing data
+    df_analysis = df_analysis.dropna()
+
+    if len(df_analysis) < 50:
+        return None, None, None
+
+    # ========================================
+    # SCENARIO COMPARISON
+    # ========================================
+
+    scenarios = {
+        'Scenario': [
+            'Close → Close',
+            'Close → High (T+1)',
+            'Low (T+0) → High (T+1)',
+            'Low (T+0) → Close (T+1)'
+        ],
+        'Description': [
+            'Traditional (close to close)',
+            'Exit at best intraday price',
+            'Perfect timing (buy dip, sell peak)',
+            'Realistic best (buy dip, exit normal)'
+        ],
+        'Win Rate': [
+            (df_analysis['Return_Close_Close'] > 0).mean(),
+            (df_analysis['Return_Close_High'] > 0).mean(),
+            (df_analysis['Return_Low_High'] > 0).mean(),
+            (df_analysis['Return_Low_Close'] > 0).mean()
+        ],
+        'Avg Return': [
+            df_analysis['Return_Close_Close'].mean(),
+            df_analysis['Return_Close_High'].mean(),
+            df_analysis['Return_Low_High'].mean(),
+            df_analysis['Return_Low_Close'].mean()
+        ],
+        'Median Return': [
+            df_analysis['Return_Close_Close'].median(),
+            df_analysis['Return_Close_High'].median(),
+            df_analysis['Return_Low_High'].median(),
+            df_analysis['Return_Low_Close'].median()
+        ],
+        'Best Case': [
+            df_analysis['Return_Close_Close'].max(),
+            df_analysis['Return_Close_High'].max(),
+            df_analysis['Return_Low_High'].max(),
+            df_analysis['Return_Low_Close'].max()
+        ],
+        'Worst Case': [
+            df_analysis['Return_Close_Close'].min(),
+            df_analysis['Return_Close_High'].min(),
+            df_analysis['Return_Low_High'].min(),
+            df_analysis['Return_Low_Close'].min()
+        ]
+    }
+
+    scenarios_df = pd.DataFrame(scenarios)
+
+    # Calculate improvement vs baseline
+    baseline_avg = scenarios_df.iloc[0]['Avg Return']
+    scenarios_df['Improvement vs Baseline'] = scenarios_df['Avg Return'] - baseline_avg
+
+    # ========================================
+    # CONDITIONAL ENTRY WITH INTRADAY PRICES
+    # ========================================
+
+    drop_buckets = [
+        (-0.01, 0.00, "0% to -1%"),
+        (-0.02, -0.01, "-1% to -2%"),
+        (-0.03, -0.02, "-2% to -3%"),
+        (-0.04, -0.03, "-3% to -4%"),
+        (-0.05, -0.04, "-4% to -5%"),
+        (-1.00, -0.05, "< -5%"),
+    ]
+
+    entry_results = []
+
+    for lower, upper, label in drop_buckets:
+        mask = (df_analysis['Today_Return'] >= lower) & (df_analysis['Today_Return'] < upper)
+        bucket_data = df_analysis[mask]
+
+        if len(bucket_data) < 3:
+            continue
+
+        # Calculate returns for each scenario
+        close_close = bucket_data['Return_Close_Close']
+        close_high = bucket_data['Return_Close_High']
+        low_high = bucket_data['Return_Low_High']
+        low_close = bucket_data['Return_Low_Close']
+
+        # Average intraday opportunities
+        avg_t0_discount = bucket_data['T0_Discount'].mean()  # How much cheaper vs close
+        avg_t1_premium = bucket_data['T1_Premium'].mean()    # How much higher vs close
+
+        entry_results.append({
+            'Entry Signal': label,
+            'Sample Size': len(bucket_data),
+            'Avg T0 Discount': avg_t0_discount,
+            'Avg T1 Premium': avg_t1_premium,
+            'Close→Close Return': close_close.mean(),
+            'Close→High Return': close_high.mean(),
+            'Low→High Return': low_high.mean(),
+            'Low→Close Return': low_close.mean(),
+            'Close→Close Win%': (close_close > 0).mean(),
+            'Close→High Win%': (close_high > 0).mean(),
+            'Low→High Win%': (low_high > 0).mean(),
+            'Low→Close Win%': (low_close > 0).mean()
+        })
+
+    entry_signals_df = pd.DataFrame(entry_results)
+
+    # ========================================
+    # VISUALIZATIONS
+    # ========================================
+
+    fig = make_subplots(
+        rows=3, cols=2,
+        subplot_titles=(
+            'Scenario Comparison: Average Returns',
+            'Scenario Comparison: Win Rates',
+            'Intraday Opportunity: T+0 Entry Discount',
+            'Intraday Opportunity: T+1 Exit Premium',
+            'Conditional Entry: Close→High Returns',
+            'Conditional Entry: Low→Close Returns'
+        ),
+        specs=[
+            [{"type": "bar"}, {"type": "bar"}],
+            [{"type": "box"}, {"type": "box"}],
+            [{"type": "bar"}, {"type": "bar"}]
+        ],
+        vertical_spacing=0.12,
+        horizontal_spacing=0.12
+    )
+
+    # Plot 1: Average Returns by Scenario
+    colors_scenarios = ['blue', 'green', 'orange', 'purple']
+    fig.add_trace(
+        go.Bar(
+            x=scenarios_df['Scenario'],
+            y=scenarios_df['Avg Return'] * 100,
+            marker=dict(color=colors_scenarios),
+            text=[f"{v:.2f}%" for v in scenarios_df['Avg Return'] * 100],
+            textposition='outside',
+            showlegend=False
+        ),
+        row=1, col=1
+    )
+
+    # Plot 2: Win Rates by Scenario
+    fig.add_trace(
+        go.Bar(
+            x=scenarios_df['Scenario'],
+            y=scenarios_df['Win Rate'] * 100,
+            marker=dict(color=colors_scenarios),
+            text=[f"{v:.1f}%" for v in scenarios_df['Win Rate'] * 100],
+            textposition='outside',
+            showlegend=False
+        ),
+        row=1, col=2
+    )
+    fig.add_hline(y=50, line_dash="dash", line_color="gray", row=1, col=2)
+
+    # Plot 3: T+0 Discount Distribution
+    fig.add_trace(
+        go.Box(
+            y=df_analysis['T0_Discount'] * 100,
+            name='T+0 Discount',
+            marker=dict(color='rgba(59, 130, 246, 0.6)'),
+            showlegend=False
+        ),
+        row=2, col=1
+    )
+
+    # Plot 4: T+1 Premium Distribution
+    fig.add_trace(
+        go.Box(
+            y=df_analysis['T1_Premium'] * 100,
+            name='T+1 Premium',
+            marker=dict(color='rgba(34, 197, 94, 0.6)'),
+            showlegend=False
+        ),
+        row=2, col=2
+    )
+
+    # Plot 5: Conditional Entry - Close to High
+    if not entry_signals_df.empty:
+        fig.add_trace(
+            go.Bar(
+                x=entry_signals_df['Entry Signal'],
+                y=entry_signals_df['Close→High Return'] * 100,
+                marker=dict(color='green'),
+                text=[f"{v:.2f}%" for v in entry_signals_df['Close→High Return'] * 100],
+                textposition='outside',
+                showlegend=False
+            ),
+            row=3, col=1
+        )
+
+        # Plot 6: Conditional Entry - Low to Close
+        fig.add_trace(
+            go.Bar(
+                x=entry_signals_df['Entry Signal'],
+                y=entry_signals_df['Low→Close Return'] * 100,
+                marker=dict(color='purple'),
+                text=[f"{v:.2f}%" for v in entry_signals_df['Low→Close Return'] * 100],
+                textposition='outside',
+                showlegend=False
+            ),
+            row=3, col=2
+        )
+
+    # Update axes
+    fig.update_yaxes(title_text="Avg Return (%)", row=1, col=1)
+    fig.update_yaxes(title_text="Win Rate (%)", row=1, col=2)
+    fig.update_yaxes(title_text="Discount (%)", row=2, col=1)
+    fig.update_yaxes(title_text="Premium (%)", row=2, col=2)
+    fig.update_yaxes(title_text="Return (%)", row=3, col=1)
+    fig.update_yaxes(title_text="Return (%)", row=3, col=2)
+
+    fig.update_xaxes(tickangle=-45, row=1, col=1)
+    fig.update_xaxes(tickangle=-45, row=1, col=2)
+    fig.update_xaxes(tickangle=-45, row=3, col=1)
+    fig.update_xaxes(tickangle=-45, row=3, col=2)
+
+    fig.update_layout(
+        height=1000,
+        showlegend=False,
+        template='plotly_white',
+        title=dict(
+            text=f"{ticker_name} - Realistic T+1 Trading Analysis (Intraday Prices)<br><sub>Close vs Intraday Entry/Exit Comparison</sub>",
+            x=0.5,
+            xanchor='center',
+            font=dict(size=18)
+        )
+    )
+
+    return fig, scenarios_df, entry_signals_df
+
+
+def calculate_intraday_stats(df):
+    """Calculate summary statistics for intraday opportunities."""
+
+    # T+0 opportunities (today's low vs close)
+    t0_discount = (df['Close'] / df['Low']) - 1
+
+    # T+1 opportunities (tomorrow's high vs close)
+    t1_premium = (df['High'].shift(-1) / df['Close'].shift(-1)) - 1
+
+    stats = {
+        'T0_Avg_Discount': t0_discount.mean(),
+        'T0_Median_Discount': t0_discount.median(),
+        'T0_Max_Discount': t0_discount.max(),
+        'T0_Days_Discount_1pct': (t0_discount > 0.01).sum(),
+        'T0_Days_Discount_2pct': (t0_discount > 0.02).sum(),
+        'T1_Avg_Premium': t1_premium.mean(),
+        'T1_Median_Premium': t1_premium.median(),
+        'T1_Max_Premium': t1_premium.max(),
+        'T1_Days_Premium_1pct': (t1_premium > 0.01).sum(),
+        'T1_Days_Premium_2pct': (t1_premium > 0.02).sum(),
+        'Total_Days': len(df)
+    }
+
+    return stats
+
+
+
+def analyze_down_day_bounce_probability(df, ticker_name="Stock"):
+    """
+    The missing piece: Analyze bounce probability and magnitude after down days.
+
+    Answers:
+    1. Given today is down X%, what's the probability tomorrow is UP?
+    2. What's the expected magnitude of tomorrow's move?
+    3. Does bigger drop = bigger bounce? (Mean reversion analysis)
+    4. Risk/Reward: Is the expected gain worth the downside risk?
+
+    Args:
+        df: DataFrame with OHLC data
+        ticker_name: Stock name
+
+    Returns:
+        fig: Plotly figure
+        analysis_df: Detailed analysis by drop magnitude
+        recommendation: Trading recommendation dict
+    """
+
+    # Calculate returns
+    df_analysis = df.copy()
+    df_analysis['Today_Return'] = df_analysis['Close'].pct_change()
+    df_analysis['Tomorrow_Return'] = df_analysis['Today_Return'].shift(-1)
+
+    # Also calculate realistic returns (considering intraday)
+    df_analysis['Tomorrow_Close'] = df_analysis['Close'].shift(-1)
+    df_analysis['Tomorrow_High'] = df_analysis['High'].shift(-1)
+    df_analysis['Today_Low'] = df_analysis['Low']
+
+    # Best case tomorrow return (if you sell at high)
+    df_analysis['Tomorrow_Return_to_High'] = (df_analysis['Tomorrow_High'] / df_analysis['Close']) - 1
+
+    # Best entry today (if you buy at low)
+    df_analysis['Tomorrow_Return_from_Low'] = (df_analysis['Tomorrow_Close'] / df_analysis['Today_Low']) - 1
+
+    df_analysis = df_analysis.dropna()
+
+    if len(df_analysis) < 50:
+        return None, None, None
+
+    # ========================================
+    # ANALYZE DOWN DAYS ONLY
+    # ========================================
+
+    # Filter only down days
+    down_days = df_analysis[df_analysis['Today_Return'] < 0].copy()
+
+    if len(down_days) < 20:
+        return None, None, None
+
+    # Categorize down days by magnitude
+    down_buckets = [
+        (0.00, -0.01, "0% to -1%"),
+        (-0.01, -0.02, "-1% to -2%"),
+        (-0.02, -0.03, "-2% to -3%"),
+        (-0.03, -0.04, "-3% to -4%"),
+        (-0.04, -0.05, "-4% to -5%"),
+        (-0.05, -1.00, "< -5%"),
+    ]
+
+    results = []
+
+    for upper, lower, label in down_buckets:  # Note: reversed order for down days
+        mask = (down_days['Today_Return'] <= upper) & (down_days['Today_Return'] > lower)
+        bucket_data = down_days[mask]
+
+        if len(bucket_data) < 3:
+            continue
+
+        # Tomorrow's returns
+        tmr_returns = bucket_data['Tomorrow_Return']
+        tmr_returns_high = bucket_data['Tomorrow_Return_to_High']
+        tmr_returns_low = bucket_data['Tomorrow_Return_from_Low']
+
+        # Key metrics
+        bounce_probability = (tmr_returns > 0).mean()  # Prob tomorrow is UP
+        continuation_probability = (tmr_returns < 0).mean()  # Prob tomorrow is also DOWN
+
+        # Expected returns
+        avg_tmr_return = tmr_returns.mean()
+        median_tmr_return = tmr_returns.median()
+
+        # Conditional expected returns
+        avg_if_bounce = tmr_returns[tmr_returns > 0].mean() if (tmr_returns > 0).any() else 0
+        avg_if_continue = tmr_returns[tmr_returns < 0].mean() if (tmr_returns < 0).any() else 0
+
+        # Realistic returns (with intraday)
+        avg_tmr_return_high = tmr_returns_high.mean()
+        avg_tmr_return_low = tmr_returns_low.mean()
+
+        # Risk metrics
+        worst_case = tmr_returns.min()
+        best_case = tmr_returns.max()
+
+        # Expected value calculation
+        expected_value = avg_tmr_return
+
+        # Risk/Reward ratio
+        # If EV is positive: reward = avg_if_bounce, risk = abs(avg_if_continue)
+        # Risk/Reward > 1 means good opportunity
+        if avg_if_continue != 0:
+            risk_reward = abs(avg_if_bounce / avg_if_continue)
+        else:
+            risk_reward = 0
+
+        # Sharpe-like score (return / volatility)
+        sharpe = avg_tmr_return / tmr_returns.std() if tmr_returns.std() > 0 else 0
+
+        # Kelly Criterion (optimal position size)
+        # Kelly = (p * b - q) / b, where p=win_prob, q=lose_prob, b=win/loss ratio
+        if continuation_probability > 0 and avg_if_continue != 0:
+            kelly_pct = (bounce_probability * abs(avg_if_bounce/avg_if_continue) - continuation_probability) / abs(avg_if_bounce/avg_if_continue)
+            kelly_pct = max(0, min(kelly_pct, 1))  # Clamp between 0-100%
+        else:
+            kelly_pct = 0
+
+        results.append({
+            'Drop Magnitude': label,
+            'Sample Size': len(bucket_data),
+            'Bounce Probability': bounce_probability,
+            'Continue Down Probability': continuation_probability,
+            'Avg Tomorrow Return': avg_tmr_return,
+            'Median Tomorrow Return': median_tmr_return,
+            'Avg If Bounce': avg_if_bounce,
+            'Avg If Continue': avg_if_continue,
+            'Best Case Tomorrow': best_case,
+            'Worst Case Tomorrow': worst_case,
+            'Risk/Reward Ratio': risk_reward,
+            'Sharpe-like Score': sharpe,
+            'Expected Value': expected_value,
+            'Kelly % (Position Size)': kelly_pct,
+            'Avg Return (Close→High)': avg_tmr_return_high,
+            'Avg Return (Low→Close)': avg_tmr_return_low
+        })
+
+    if not results:
+        return None, None, None
+
+    analysis_df = pd.DataFrame(results)
+
+    # ========================================
+    # MEAN REVERSION ANALYSIS
+    # ========================================
+
+    # Test: Does bigger drop lead to bigger bounce?
+    correlation = down_days['Today_Return'].corr(down_days['Tomorrow_Return'])
+
+    # Negative correlation = mean reversion (big drop → big bounce)
+    # Positive correlation = momentum (big drop → continue down)
+
+    mean_reversion_strength = abs(correlation) if correlation < 0 else 0
+    momentum_strength = correlation if correlation > 0 else 0
+
+    # ========================================
+    # GENERATE RECOMMENDATION
+    # ========================================
+
+    # Find best opportunity (highest expected value with reasonable sample size)
+    valid_entries = analysis_df[
+        (analysis_df['Sample Size'] >= 5) &
+        (analysis_df['Bounce Probability'] > 0.5) &
+        (analysis_df['Expected Value'] > 0)
+    ]
+
+    if len(valid_entries) > 0:
+        best_entry = valid_entries.loc[valid_entries['Expected Value'].idxmax()]
+
+        recommendation = {
+            'has_opportunity': True,
+            'best_drop_range': best_entry['Drop Magnitude'],
+            'bounce_prob': best_entry['Bounce Probability'],
+            'expected_return': best_entry['Avg Tomorrow Return'],
+            'risk_reward': best_entry['Risk/Reward Ratio'],
+            'position_size': best_entry['Kelly % (Position Size)'],
+            'avg_if_win': best_entry['Avg If Bounce'],
+            'avg_if_lose': best_entry['Avg If Continue'],
+            'sample_size': best_entry['Sample Size'],
+            'mean_reversion': mean_reversion_strength,
+            'momentum': momentum_strength
+        }
+    else:
+        recommendation = {
+            'has_opportunity': False,
+            'mean_reversion': mean_reversion_strength,
+            'momentum': momentum_strength
+        }
+
+    # ========================================
+    # VISUALIZATIONS
+    # ========================================
+
+    fig = make_subplots(
+        rows=3, cols=2,
+        subplot_titles=(
+            'Bounce Probability After Down Days',
+            'Expected Tomorrow Return',
+            'Risk/Reward Ratio by Drop Size',
+            'Mean Reversion Analysis',
+            'Kelly % Position Size',
+            'Avg Bounce vs Avg Continue'
+        ),
+        specs=[
+            [{"type": "bar"}, {"type": "bar"}],
+            [{"type": "bar"}, {"type": "scatter"}],
+            [{"type": "bar"}, {"type": "bar"}]
+        ],
+        vertical_spacing=0.12,
+        horizontal_spacing=0.12
+    )
+
+    # Plot 1: Bounce Probability
+    colors_bounce = ['green' if p > 0.5 else 'red' for p in analysis_df['Bounce Probability']]
+    fig.add_trace(
+        go.Bar(
+            x=analysis_df['Drop Magnitude'],
+            y=analysis_df['Bounce Probability'] * 100,
+            marker=dict(color=colors_bounce),
+            text=[f"{v:.1f}%" for v in analysis_df['Bounce Probability'] * 100],
+            textposition='outside',
+            showlegend=False
+        ),
+        row=1, col=1
+    )
+    fig.add_hline(y=50, line_dash="dash", line_color="gray", 
+                  annotation_text="50% (Random)", row=1, col=1)
+
+    # Plot 2: Expected Return
+    colors_return = ['green' if r > 0 else 'red' for r in analysis_df['Avg Tomorrow Return']]
+    fig.add_trace(
+        go.Bar(
+            x=analysis_df['Drop Magnitude'],
+            y=analysis_df['Avg Tomorrow Return'] * 100,
+            marker=dict(color=colors_return),
+            text=[f"{v:.2f}%" for v in analysis_df['Avg Tomorrow Return'] * 100],
+            textposition='outside',
+            showlegend=False
+        ),
+        row=1, col=2
+    )
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", row=1, col=2)
+
+    # Plot 3: Risk/Reward
+    colors_rr = ['green' if rr > 1 else 'orange' if rr > 0.7 else 'red' 
+                 for rr in analysis_df['Risk/Reward Ratio']]
+    fig.add_trace(
+        go.Bar(
+            x=analysis_df['Drop Magnitude'],
+            y=analysis_df['Risk/Reward Ratio'],
+            marker=dict(color=colors_rr),
+            text=[f"{v:.2f}" for v in analysis_df['Risk/Reward Ratio']],
+            textposition='outside',
+            showlegend=False
+        ),
+        row=2, col=1
+    )
+    fig.add_hline(y=1, line_dash="dash", line_color="gray",
+                  annotation_text="1:1 Break-even", row=2, col=1)
+
+    # Plot 4: Mean Reversion Scatter
+    fig.add_trace(
+        go.Scatter(
+            x=down_days['Today_Return'] * 100,
+            y=down_days['Tomorrow_Return'] * 100,
+            mode='markers',
+            marker=dict(
+                color='rgba(59, 130, 246, 0.4)',
+                size=5
+            ),
+            name='Data Points',
+            showlegend=False
+        ),
+        row=2, col=2
+    )
+
+    # Add trend line
+    z = np.polyfit(down_days['Today_Return'], down_days['Tomorrow_Return'], 1)
+    p = np.poly1d(z)
+    x_line = np.linspace(down_days['Today_Return'].min(), down_days['Today_Return'].max(), 100)
+    fig.add_trace(
+        go.Scatter(
+            x=x_line * 100,
+            y=p(x_line) * 100,
+            mode='lines',
+            line=dict(color='red', width=2),
+            name=f'Trend (ρ={correlation:.2f})',
+            showlegend=True
+        ),
+        row=2, col=2
+    )
+    fig.add_hline(y=0, line_dash="dot", line_color="gray", row=2, col=2)
+    fig.add_vline(x=0, line_dash="dot", line_color="gray", row=2, col=2)
+
+    # Plot 5: Kelly Position Size
+    fig.add_trace(
+        go.Bar(
+            x=analysis_df['Drop Magnitude'],
+            y=analysis_df['Kelly % (Position Size)'] * 100,
+            marker=dict(color='rgba(16, 185, 129, 0.7)'),
+            text=[f"{v:.1f}%" for v in analysis_df['Kelly % (Position Size)'] * 100],
+            textposition='outside',
+            showlegend=False
+        ),
+        row=3, col=1
+    )
+
+    # Plot 6: Bounce vs Continue magnitudes
+    x_labels = analysis_df['Drop Magnitude']
+
+    fig.add_trace(
+        go.Bar(
+            x=x_labels,
+            y=analysis_df['Avg If Bounce'] * 100,
+            name='Avg Bounce',
+            marker=dict(color='green'),
+            text=[f"+{v:.2f}%" for v in analysis_df['Avg If Bounce'] * 100],
+            textposition='outside'
+        ),
+        row=3, col=2
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=x_labels,
+            y=analysis_df['Avg If Continue'] * 100,
+            name='Avg Continue',
+            marker=dict(color='red'),
+            text=[f"{v:.2f}%" for v in analysis_df['Avg If Continue'] * 100],
+            textposition='outside'
+        ),
+        row=3, col=2
+    )
+
+    # Update axes
+    fig.update_yaxes(title_text="Probability (%)", row=1, col=1)
+    fig.update_yaxes(title_text="Avg Return (%)", row=1, col=2)
+    fig.update_yaxes(title_text="Ratio", row=2, col=1)
+    fig.update_xaxes(title_text="Today's Drop (%)", row=2, col=2)
+    fig.update_yaxes(title_text="Tomorrow's Return (%)", row=2, col=2)
+    fig.update_yaxes(title_text="Position Size (%)", row=3, col=1)
+    fig.update_yaxes(title_text="Return (%)", row=3, col=2)
+
+    for i in range(1, 4):
+        for j in range(1, 3):
+            if not (i == 2 and j == 2):  # Skip scatter plot
+                fig.update_xaxes(tickangle=-45, row=i, col=j)
+
+    fig.update_layout(
+        height=1100,
+        showlegend=True,
+        template='plotly_white',
+        title=dict(
+            text=f"{ticker_name} - Down Day Bounce Analysis<br><sub>Mean Reversion vs Momentum | Sample: {len(down_days)} down days</sub>",
+            x=0.5,
+            xanchor='center',
+            font=dict(size=18)
+        )
+    )
+
+    return fig, analysis_df, recommendation
+
+
+
+
 # ==========================================
 # MAIN APP
 # ==========================================
@@ -1197,7 +2102,394 @@ if st.session_state.active_ticker:
             else:
                 st.warning("Not enough data for distribution analysis (need 30+ days) | 数据不足（需要30天以上）")
 
+            
+            
+            # ========================================
+            # REPLACE THE PREVIOUS CONDITIONAL ENTRY SECTION WITH THIS
+            # ========================================
+
             st.markdown("---")
+            st.subheader("🎯 Realistic T+1 Trading Analysis | 真实T+1交易分析")
+
+            col_en, col_cn = st.columns(2)
+            with col_en:
+                st.markdown("""
+                **Real Trading Scenarios:**
+
+                Most analyses only look at close-to-close, but in reality:
+                - **T+0 (Today):** Stock may dip below close → You can buy cheaper
+                - **T+1 (Tomorrow):** Stock may spike above close → You can sell higher
+
+                This analysis compares 4 realistic scenarios.
+                """)
+
+            with col_cn:
+                st.markdown("""
+                **真实交易场景：**
+
+                大多数分析只看收盘到收盘，但实际上：
+                - **T+0 (今天)：** 股价可能低于收盘价 → 可以更便宜买入
+                - **T+1 (明天)：** 股价可能高于收盘价 → 可以更高卖出
+
+                此分析比较4种真实场景。
+                """)
+
+            # Generate analysis
+            fig_realistic, scenarios_df, entry_df = analyze_realistic_t1_trading(stock_df, ticker_name=ticker)
+
+            if fig_realistic is not None:
+                # Show visualizations
+                st.plotly_chart(fig_realistic, use_container_width=True)
+
+                # Scenario comparison table
+                st.markdown("#### 📊 Scenario Comparison | 场景对比")
+
+                display_scenarios = scenarios_df.copy()
+                display_scenarios['Win Rate'] = (display_scenarios['Win Rate'] * 100).map('{:.1f}%'.format)
+                display_scenarios['Avg Return'] = (display_scenarios['Avg Return'] * 100).map('{:.2f}%'.format)
+                display_scenarios['Median Return'] = (display_scenarios['Median Return'] * 100).map('{:.2f}%'.format)
+                display_scenarios['Best Case'] = (display_scenarios['Best Case'] * 100).map('{:.2f}%'.format)
+                display_scenarios['Worst Case'] = (display_scenarios['Worst Case'] * 100).map('{:.2f}%'.format)
+                display_scenarios['Improvement vs Baseline'] = (display_scenarios['Improvement vs Baseline'] * 100).map('{:.2f}%'.format)
+
+                st.dataframe(display_scenarios, use_container_width=True, hide_index=True)
+
+                # Intraday statistics
+                intraday_stats = calculate_intraday_stats(stock_df)
+
+                st.markdown("#### 📈 Intraday Opportunities | 盘中机会")
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric(
+                        "Avg T+0 Discount | 今日折扣",
+                        f"{intraday_stats['T0_Avg_Discount']*100:.2f}%"
+                    )
+                    st.caption(f"Low vs Close | 最低价 vs 收盘")
+                    st.caption(f">{1}% discount on {intraday_stats['T0_Days_Discount_1pct']} days")
+
+                with col2:
+                    st.metric(
+                        "Avg T+1 Premium | 明日溢价",
+                        f"{intraday_stats['T1_Avg_Premium']*100:.2f}%"
+                    )
+                    st.caption(f"High vs Close | 最高价 vs 收盘")
+                    st.caption(f">{1}% premium on {intraday_stats['T1_Days_Premium_1pct']} days")
+
+                with col3:
+                    improvement = (scenarios_df.iloc[3]['Avg Return'] - scenarios_df.iloc[0]['Avg Return']) * 100
+                    st.metric(
+                        "Potential Improvement | 潜在提升",
+                        f"{improvement:.2f}%"
+                    )
+                    st.caption("Low→Close vs Close→Close")
+
+                # Conditional entry with realistic scenarios
+                st.markdown("#### 🎯 Entry Signals with Realistic Returns | 入场信号与真实收益")
+
+                if not entry_df.empty:
+                    display_entry = entry_df.copy()
+
+                    # Format percentages
+                    pct_cols = ['Avg T0 Discount', 'Avg T1 Premium', 
+                                'Close→Close Return', 'Close→High Return', 
+                                'Low→High Return', 'Low→Close Return',
+                                'Close→Close Win%', 'Close→High Win%',
+                                'Low→High Win%', 'Low→Close Win%']
+
+                    for col in pct_cols:
+                        if col in display_entry.columns:
+                            display_entry[col] = (display_entry[col] * 100).map('{:.2f}%'.format)
+
+                    st.dataframe(display_entry, use_container_width=True, hide_index=True)
+
+                    # Best entry recommendation
+                    # Find entry with best Low→Close return (realistic best scenario)
+                    best_idx = entry_df['Low→Close Return'].idxmax()
+                    best_entry = entry_df.loc[best_idx]
+
+                    st.markdown("### 💡 Recommended Strategy | 推荐策略")
+
+                    col_a, col_b, col_c, col_d = st.columns(4)
+
+                    with col_a:
+                        st.success(f"**Best Entry Signal**")
+                        st.metric("Drop Range", best_entry['Entry Signal'])
+
+                    with col_b:
+                        st.metric("Realistic Return", 
+                                f"{best_entry['Low→Close Return']*100:.2f}%")
+                        st.caption("Buy at LOW, sell at close")
+
+                    with col_c:
+                        st.metric("Win Rate",
+                                f"{best_entry['Low→Close Win%']*100:.1f}%")
+                        st.caption("Historical success rate")
+
+                    with col_d:
+                        st.metric("Avg Entry Discount",
+                                f"{best_entry['Avg T0 Discount']*100:.2f}%")
+                        st.caption("Low vs close today")
+
+                    # Trading guide
+                    st.info(f"""
+                    📋 **Practical Trading Guide:**
+
+                    **Scenario 1: Conservative (Close → Close)**
+                    - Entry: Buy at close today
+                    - Exit: Sell at close tomorrow
+                    - Expected: {scenarios_df.iloc[0]['Avg Return']*100:.2f}% avg return
+                    - Best for: Automated trading, can't watch intraday
+
+                    **Scenario 2: Improved Exit (Close → High)**
+                    - Entry: Buy at close today
+                    - Exit: Set limit order at +{intraday_stats['T1_Avg_Premium']*100:.1f}% above close
+                    - Expected: {scenarios_df.iloc[1]['Avg Return']*100:.2f}% avg return
+                    - Best for: Can monitor T+1 day, capture intraday spike
+
+                    **Scenario 3: Realistic Best (Low → Close)**
+                    - Entry: Set limit order at -{intraday_stats['T0_Avg_Discount']*100:.1f}% below close today
+                    - Exit: Sell at close tomorrow
+                    - Expected: {scenarios_df.iloc[3]['Avg Return']*100:.2f}% avg return
+                    - Best for: Patient, can wait for dip today
+
+                    **Scenario 4: Optimal (Low → High)** ⚠️ *Unrealistic*
+                    - Perfect timing on both entry and exit
+                    - Expected: {scenarios_df.iloc[2]['Avg Return']*100:.2f}% avg return
+                    - Reference only - shows maximum potential
+
+                    ---
+
+                    **💰 Expected Improvement:**
+                    If you can catch today's dip (buy at LOW instead of CLOSE), you improve returns by approximately **{improvement:.2f}%** per trade.
+
+                    **On {intraday_stats['T0_Days_Discount_1pct']} out of {intraday_stats['Total_Days']} days** ({intraday_stats['T0_Days_Discount_1pct']/intraday_stats['Total_Days']*100:.1f}%), the stock dipped >1% below close, giving you a better entry.
+                    """)
+
+            else:
+                st.warning("Not enough data for realistic T+1 analysis (need 50+ days)")
+
+            st.markdown("---")
+
+
+
+            # ========================================
+            # ADD THIS AFTER YOUR REALISTIC T+1 TRADING SECTION
+            # THIS IS THE MISSING PIECE
+            # ========================================
+
+            st.markdown("---")
+            st.subheader("📉➡️📈 Down Day Bounce Analysis | 下跌反弹分析")
+
+            col_en, col_cn = st.columns(2)
+            with col_en:
+                st.markdown("""
+                **The Missing Link:** Given today IS a down day, what happens tomorrow?
+
+                This answers:
+                - Probability tomorrow bounces vs continues down
+                - Expected magnitude of bounce/continuation
+                - Mean reversion vs momentum behavior
+                - Optimal position sizing (Kelly Criterion)
+                """)
+
+            with col_cn:
+                st.markdown("""
+                **缺失的环节：** 既然今天是下跌日，明天会怎样？
+
+                此分析回答：
+                - 明天反弹vs继续下跌的概率
+                - 反弹/下跌的预期幅度
+                - 均值回归vs动量行为
+                - 最优仓位大小（凯利公式）
+                """)
+
+            # Generate bounce analysis
+            fig_bounce, bounce_df, recommendation = analyze_down_day_bounce_probability(stock_df, ticker_name=ticker)
+
+            if fig_bounce is not None:
+                # Show visualizations
+                st.plotly_chart(fig_bounce, use_container_width=True)
+
+                # Display analysis table
+                st.markdown("#### 📊 Detailed Bounce Analysis | 详细反弹分析")
+
+                display_bounce = bounce_df.copy()
+
+                # Format columns
+                pct_cols = ['Bounce Probability', 'Continue Down Probability', 
+                            'Avg Tomorrow Return', 'Median Tomorrow Return',
+                            'Avg If Bounce', 'Avg If Continue', 
+                            'Best Case Tomorrow', 'Worst Case Tomorrow',
+                            'Expected Value', 'Kelly % (Position Size)',
+                            'Avg Return (Close→High)', 'Avg Return (Low→Close)']
+
+                for col in pct_cols:
+                    if col in display_bounce.columns:
+                        display_bounce[col] = (display_bounce[col] * 100).map('{:.2f}%'.format)
+
+                if 'Risk/Reward Ratio' in display_bounce.columns:
+                    display_bounce['Risk/Reward Ratio'] = display_bounce['Risk/Reward Ratio'].map('{:.2f}'.format)
+
+                if 'Sharpe-like Score' in display_bounce.columns:
+                    display_bounce['Sharpe-like Score'] = display_bounce['Sharpe-like Score'].map('{:.2f}'.format)
+
+                st.dataframe(display_bounce, use_container_width=True, hide_index=True)
+
+                # Trading recommendation
+                st.markdown("### 💡 Complete Trading Strategy | 完整交易策略")
+
+                if recommendation['has_opportunity']:
+                    st.success("✅ Profitable Bounce Opportunity Detected | 检测到盈利反弹机会")
+
+                    # Key metrics
+                    col1, col2, col3, col4 = st.columns(4)
+
+                    with col1:
+                        st.metric(
+                            "Best Entry Signal",
+                            recommendation['best_drop_range']
+                        )
+                        st.caption(f"Sample: {recommendation['sample_size']} occurrences")
+
+                    with col2:
+                        st.metric(
+                            "Bounce Probability",
+                            f"{recommendation['bounce_prob']*100:.1f}%"
+                        )
+                        if recommendation['bounce_prob'] > 0.6:
+                            st.success("High confidence ✓")
+                        else:
+                            st.info("Moderate confidence")
+
+                    with col3:
+                        st.metric(
+                            "Expected Return",
+                            f"{recommendation['expected_return']*100:.2f}%"
+                        )
+                        st.caption("Average outcome tomorrow")
+
+                    with col4:
+                        st.metric(
+                            "Risk/Reward",
+                            f"{recommendation['risk_reward']:.2f}"
+                        )
+                        if recommendation['risk_reward'] > 1.5:
+                            st.success("Excellent R/R ✓")
+                        elif recommendation['risk_reward'] > 1:
+                            st.info("Acceptable R/R")
+                        else:
+                            st.warning("Poor R/R")
+
+                    # Market behavior analysis
+                    st.markdown("#### 📈 Market Behavior | 市场行为")
+
+                    col_a, col_b = st.columns(2)
+
+                    with col_a:
+                        if recommendation['mean_reversion'] > 0.3:
+                            st.success(f"**Mean Reversion Detected** | **均值回归**")
+                            st.markdown(f"""
+                            **Correlation: {-recommendation['mean_reversion']:.2f}**
+
+                            ✅ This stock exhibits **mean reversion** behavior:
+                            - Bigger drops tend to lead to bigger bounces
+                            - "Buy the dip" strategy works well
+                            - Oversold conditions typically reverse
+                            """)
+                        elif recommendation['momentum'] > 0.3:
+                            st.warning(f"**Momentum Detected** | **动量效应**")
+                            st.markdown(f"""
+                            **Correlation: {recommendation['momentum']:.2f}**
+
+                            ⚠️ This stock exhibits **momentum** behavior:
+                            - Bigger drops tend to continue falling
+                            - "Catch falling knife" is dangerous
+                            - Wait for trend reversal confirmation
+                            """)
+                        else:
+                            st.info("**Random Walk** | **随机游走**")
+                            st.markdown("""
+                            Correlation near zero - no clear pattern.
+                            Tomorrow's direction is largely unpredictable.
+                            """)
+
+                    with col_b:
+                        st.markdown("**Win/Loss Breakdown | 盈亏分解**")
+                        st.markdown(f"""
+                        - **If tomorrow bounces ({recommendation['bounce_prob']*100:.0f}% chance):**
+                        - Average gain: **{recommendation['avg_if_win']*100:.2f}%**
+
+                        - **If tomorrow continues down ({(1-recommendation['bounce_prob'])*100:.0f}% chance):**
+                        - Average loss: **{recommendation['avg_if_lose']*100:.2f}%**
+
+                        **Expected Value:** {recommendation['expected_return']*100:.2f}%
+                        """)
+
+                    # Complete trading plan
+                    st.markdown("#### 🎯 Complete Trading Plan | 完整交易计划")
+
+                    kelly_pct = recommendation['position_size']
+                    half_kelly = kelly_pct / 2
+
+                    st.info(f"""
+                    **📋 Step-by-Step Trading Plan:**
+
+                    **1. WAIT FOR ENTRY SIGNAL**
+                    - Watch for drop in range: **{recommendation['best_drop_range']}**
+                    - Historical occurrence: {recommendation['sample_size']} times in dataset
+
+                    **2. POSITION SIZING**
+                    - Kelly Optimal: **{kelly_pct*100:.1f}%** of capital
+                    - Conservative (Half-Kelly): **{half_kelly*100:.1f}%** of capital
+                    - Max risk per trade: **1-2%** of portfolio (recommended)
+
+                    **3. ENTRY EXECUTION**
+                    - **Option A (Conservative):** Buy at close today
+                    - **Option B (Better):** Set limit order at today's low (typically {bounce_df[bounce_df['Drop Magnitude']==recommendation['best_drop_range']]['Avg Return (Low→Close)'].values[0] if len(bounce_df[bounce_df['Drop Magnitude']==recommendation['best_drop_range']]) > 0 else 'N/A'} better return)
+
+                    **4. EXIT STRATEGY**
+                    - **Target:** +{recommendation['avg_if_win']*100:.2f}% (sell at close tomorrow)
+                    - **Aggressive:** Set limit at tomorrow's expected high for extra {bounce_df[bounce_df['Drop Magnitude']==recommendation['best_drop_range']]['Avg Return (Close→High)'].values[0] if len(bounce_df[bounce_df['Drop Magnitude']==recommendation['best_drop_range']]) > 0 else 'N/A'}
+                    - **Stop Loss:** {recommendation['avg_if_lose']*100:.2f}% (if tomorrow continues down)
+
+                    **5. EXPECTED OUTCOME**
+                    - Win rate: {recommendation['bounce_prob']*100:.0f}%
+                    - Avg profit per trade: {recommendation['expected_return']*100:.2f}%
+                    - Risk/Reward ratio: {recommendation['risk_reward']:.2f}:1
+
+                    ---
+
+                    **⚠️ Risk Management:**
+                    - Never risk more than 2% of portfolio on single trade
+                    - Use stop loss religiously
+                    - Past performance doesn't guarantee future results
+                    - Consider overall market conditions
+                    """)
+
+                else:
+                    st.warning("⚠️ No Clear Bounce Opportunity Detected | 未检测到明确反弹机会")
+
+                    st.markdown(f"""
+                    Based on historical data:
+                    - Most down days do NOT lead to profitable bounces
+                    - Mean reversion strength: {recommendation['mean_reversion']:.2f}
+                    - Momentum strength: {recommendation['momentum']:.2f}
+
+                    **Recommendation:** Avoid "buy the dip" strategy for this stock.
+                    Consider:
+                    - Trend-following strategies instead
+                    - Longer time horizons (T+5, T+10)
+                    - Only trade with strong overall market confirmation
+                    """)
+
+            else:
+                st.warning("Not enough data for down day bounce analysis (need 50+ days with 20+ down days)")
+
+            st.markdown("---")
+
+
 
             
             # Trend Forecast Section
