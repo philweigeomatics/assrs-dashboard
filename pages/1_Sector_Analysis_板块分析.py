@@ -31,7 +31,7 @@ def load_v2_data():
         
         numeric_cols = ['TOTAL_SCORE', 'Open', 'High', 'Low', 'Close', 
                        'Volume_Metric', 'Market_Score', 'Excess_Prob', 
-                       'Position_Size', 'Dispersion']
+                       'Position_Size', 'Dispersion','Market_Breadth']
         
         for col in numeric_cols:
             if col in df.columns:
