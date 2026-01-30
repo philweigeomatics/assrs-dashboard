@@ -422,12 +422,24 @@ with tab1:
     sectors_df = v2_latest[v2_latest['Sector'] != 'MARKET_PROXY'].copy()
     sectors_df = sectors_df.sort_values('TOTAL_SCORE', ascending=False)
     
-    display_df = sectors_df[['Sector', 'TOTAL_SCORE', 'ACTION', 'Excess_Prob', 'Position_Size']].copy()
+    display_df = sectors_df[['Sector', 'TOTAL_SCORE', 'ACTION', 'Market_Breadth''Excess_Prob', 'Position_Size']].copy()
     display_df['TOTAL_SCORE'] = (display_df['TOTAL_SCORE'] * 100).map('{:.0f}%'.format)
     display_df['Excess_Prob'] = display_df['Excess_Prob'].map(lambda x: f"{x:+.2f}")
     display_df['Position_Size'] = (display_df['Position_Size'] * 100).map('{:.0f}%'.format)
+    display_df['Market_Breadth'] = (display_df['Market_Breadth'] * 100).map('{:.0f}%'.format)
     
-    styled = display_df.style.map(style_action, subset=['ACTION'])
+    def style_breadth(val):
+        """Style breadth: <50% green (opportunity), >=50% red (overextended)"""
+        if isinstance(val, str) and '%' in val:
+            pct = float(val.replace('%', ''))
+            if pct < 50:
+                return 'color: #15803d; background-color: #dcfce7; font-weight: 600'
+            else:
+                return 'color: #b91c1c; background-color: #fee2e2; font-weight: 600'
+        return ''
+    
+    styled = display_df.style.map(style_action, subset=['ACTION']).map(style_breadth, subset=['Market_Breadth'])    
+
     st.dataframe(styled, hide_index=True, use_container_width=True)
     
     # Summary

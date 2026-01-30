@@ -36,6 +36,46 @@ BACKTEST_END_DATE = YESTERDAY_DATE.strftime('%Y-%m-%d')
 CALENDAR_PROXY_TICKER = '601398'  # ICBC for trading calendar
 
 
+def calculate_sector_breadth(all_stock_data, sector_stocks, ma_period=20):
+    """
+    Calculate market breadth: % of stocks in sector trading above MA20
+    
+    Args:
+        all_stock_data: Dict of DataFrames (from data_manager.get_all_stock_data_from_db())
+        sector_stocks: List of ticker strings for the sector
+        ma_period: Moving average period (default 20)
+    
+    Returns:
+        float: Percentage (0-1) of stocks above their MA20
+    """
+    above_ma = 0
+    total = 0
+    
+    for ticker in sector_stocks:
+        if ticker not in all_stock_data:
+            continue
+            
+        df = all_stock_data[ticker]
+        if df is None or len(df) < ma_period:
+            continue
+        
+        # Calculate MA20
+        ma = df['Close'].rolling(window=ma_period).mean()
+        
+        # Check latest data point
+        if len(df) > 0 and len(ma) > 0:
+            latest_close = df['Close'].iloc[-1]
+            latest_ma = ma.iloc[-1]
+            
+            if pd.notna(latest_close) and pd.notna(latest_ma):
+                total += 1
+                if latest_close > latest_ma:
+                    above_ma += 1
+    
+    return above_ma / total if total > 0 else 0.0
+
+
+
 # --- 3. MAIN EXECUTION ---
 
 def run_sector_backtest_v2():
@@ -154,6 +194,18 @@ def run_sector_backtest_v2():
             )
             
             if not daily_scorecard_v2.empty:
+                # Calculate breadth for each sector
+                breadth_values = []
+                for _, row in daily_scorecard_v2.iterrows():
+                    sector = row['Sector']
+                    if sector in data_manager.SECTOR_STOCK_MAP:
+                        sector_stocks = data_manager.SECTOR_STOCK_MAP[sector]
+                        breadth = calculate_sector_breadth(all_stock_data, sector_stocks)
+                        breadth_values.append(breadth)
+                    else:
+                        breadth_values.append(0.0)
+                
+                daily_scorecard_v2['Market_Breadth'] = breadth_values
                 all_sector_scores_v2.append(daily_scorecard_v2.reset_index(drop=True))
                 
                 # Optional: Build historical scores for adaptive thresholds
