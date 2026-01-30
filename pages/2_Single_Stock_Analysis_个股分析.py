@@ -77,10 +77,10 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     # OBV (On-Balance Volume)
     df_analysis['OBV'] = ta.volume.on_balance_volume(df_analysis['Close'], df_analysis['Volume'])
     
-    # Price & OBV changes (20-day)
-    df_analysis['PriceChg_20d'] = df_analysis['Close'].pct_change(periods=20)
-    df_analysis['OBVChg_20d'] = df_analysis['OBV'].pct_change(periods=20)
-    
+    # Price & OBV changes (Adaptive, previously we used 20 days fixed  )
+    params = calculate_adaptive_parameters_percentile(df, lookback_days=30)
+    lookback = params['obv_lookback']  # Could be 5, 7, 10, 12, or 15!
+
     # Volume Stats
     df_analysis['VolMean_100d'] = df_analysis['Volume'].rolling(window=100, min_periods=20).mean()
     df_analysis['VolStd_100d'] = df_analysis['Volume'].rolling(window=100, min_periods=20).std()
@@ -95,24 +95,73 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     # Phase 1: Accumulation (OPTIMAL)
     # OBV rising while price is relatively flat (classic smart money accumulation)
 
-    df_analysis['PriceChg_20d'] = df_analysis['Close'].pct_change(periods=20)
-    df_analysis['OBVChg_20d'] = df_analysis['OBV'].pct_change(periods=20)
+    df_analysis['PriceChg'] = df_analysis['Close'].pct_change(periods=lookback)
+    df_analysis[f'OBVChg{lookback}d'] = df_analysis['OBV'].pct_change(periods=lookback)
 
     accumulation = (
-        (df_analysis['OBVChg_20d'] > 0.05) &  # OBV up 5% (volume accumulating)
-        (df_analysis['PriceChg_20d'].abs() < 0.05) &  # Price relatively flat (5% not 10%)
+        (df_analysis[f'OBVChg{lookback}d'] > params['obv_threshold']) &  # OBV up an adaptive % (volume accumulating)
+        (df_analysis['PriceChg'].abs() < params['price_flat_threshold']) &  # Price relatively flat
         (df_analysis['RSI_14'] < 60)  # Not overbought (60 not 50 - allows early stage)
     )
     df_analysis.loc[accumulation, 'Signal_Accumulation'] = True
 
     
+    # ============================================
+    # IMPROVED Phase 2: Squeeze Detection
+    # Fixes: Adaptive lookback, percentile threshold, duration filter, age tracking
+    # ============================================
     # Phase 2: Squeeze
-    # BB width contraction
-    df_analysis['Min_Width_120d'] = df_analysis['BB_Width'].rolling(window=120, min_periods=20).min()
-    # Squeeze = BB width is near its 120-day low (within 25%)
-    squeeze = df_analysis['BB_Width'] <= (df_analysis['Min_Width_120d'] * 1.20)
 
-    df_analysis.loc[squeeze, 'Signal_Squeeze'] = True
+    # Helper function for adaptive lookback
+    def get_adaptive_lookback(df_length, min_days=60, max_days=250):
+        """Scales lookback based on available data"""
+        if df_length < 120:
+            return max(min_days, int(df_length * 0.5))  # Use 50% of available data
+        elif df_length < 250:
+            return 120
+        else:
+            return max_days  # For long histories, use ~1 year
+        
+    # FIX 1: Adaptive lookback instead of fixed 120 days
+    lookback_period = get_adaptive_lookback(len(df_analysis))
+
+    # FIX 2: Percentile-based threshold instead of 1.20 multiplier
+    # Calculate rolling percentile rank for BB_Width
+    df_analysis['BB_Width_Percentile'] = df_analysis['BB_Width'].rolling(
+        window=lookback_period, 
+        min_periods=20
+    ).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan)
+
+    # Squeeze = BB width in bottom 10% of historical range
+    df_analysis['Squeeze_Raw'] = df_analysis['BB_Width_Percentile'] <= 0.10
+
+    # FIX 4: Minimum duration filter - require 3 consecutive days
+    def consecutive_days_filter(series, min_days=3):
+        """Require condition to persist for min_days consecutive periods"""
+        if series.sum() == 0:  # No True values
+            return pd.Series(False, index=series.index)
+        groups = (series != series.shift()).cumsum()
+        count = series.groupby(groups).transform('size')
+        return (series) & (count >= min_days)
+
+    df_analysis['Signal_Squeeze'] = consecutive_days_filter(df_analysis['Squeeze_Raw'], min_days=3)
+
+    # FIX 5: Squeeze age tracking - count days in squeeze
+    squeeze_groups = (df_analysis['Signal_Squeeze'] != df_analysis['Signal_Squeeze'].shift()).cumsum()
+    df_analysis['Squeeze_Age'] = df_analysis.groupby(squeeze_groups)['Signal_Squeeze'].cumsum()
+
+    # Flag mature squeezes (5+ days active)
+    df_analysis['Squeeze_Mature'] = (df_analysis['Signal_Squeeze']) & (df_analysis['Squeeze_Age'] >= 5)
+
+    # Keep legacy column for backward compatibility
+    df_analysis['Min_Width_120d'] = df_analysis['BB_Width'].rolling(window=120, min_periods=20).min()
+
+    # # BB width contraction
+    # df_analysis['Min_Width_120d'] = df_analysis['BB_Width'].rolling(window=120, min_periods=20).min()
+    # # Squeeze = BB width is near its 120-day low (within 25%)
+    # squeeze = df_analysis['BB_Width'] <= (df_analysis['Min_Width_120d'] * 1.20)
+
+    # df_analysis.loc[squeeze, 'Signal_Squeeze'] = True
     
     # Phase 3: Golden Launch
     # Strong trend + MACD CROSSOVER (not just above)
@@ -164,6 +213,57 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     df_analysis.loc[exit_signal, 'Exit_MACDLead'] = True
     
     return df_analysis
+
+def calculate_adaptive_parameters_percentile(df, lookback_days=30):
+    df_temp = df.copy()
+    df_temp['vol_10d'] = df_temp['Close'].pct_change().rolling(10).std()
+    df_temp['vol_20d'] = df_temp['Close'].pct_change().rolling(20).std()
+    df_temp['vol_30d'] = df_temp['Close'].pct_change().rolling(30).std()
+    
+    current_vol_10d = df_temp['vol_10d'].iloc[-1]
+    vol_5days_ago = df_temp['vol_10d'].iloc[-5] if len(df_temp) >= 5 else current_vol_10d
+    
+    # Determine the volatility trend
+    vol_trend = 'rising' if current_vol_10d > vol_5days_ago * 1.2 else \
+                'falling' if current_vol_10d < vol_5days_ago * 0.8 else 'stable'
+    
+    recent_vol = df_temp['vol_10d'].iloc[-lookback_days:].dropna()
+    
+    if len(recent_vol) < 10:
+        return {'vol_window': 20, 'obv_lookback': 10, 'obv_threshold': 0.025,
+                'current_vol': current_vol_10d, 'vol_regime': 'insufficient_data'}
+    
+    p25, p50, p75, p90 = recent_vol.quantile([0.25, 0.50, 0.75, 0.90])
+    
+    # Determine regime based on percentile
+    if current_vol_10d >= p90:
+        vol_regime, percentile, vol_window, obv_lookback = 'very_high', 90, 10, 5
+    elif current_vol_10d >= p75:
+        vol_regime, percentile, vol_window, obv_lookback = 'high', 75, 15, 7
+    elif current_vol_10d >= p50:
+        vol_regime, percentile, vol_window, obv_lookback = 'medium_high', 60, 20, 10
+    elif current_vol_10d >= p25:
+        vol_regime, percentile, vol_window, obv_lookback = 'medium_low', 40, 25, 12
+    else:
+        vol_regime, percentile, vol_window, obv_lookback = 'low', 20, 30, 15
+    
+    # Adjust for trend
+    if vol_trend == 'rising' and vol_regime in ['high', 'very_high']:
+        vol_window = max(10, vol_window - 5)
+        obv_lookback = max(5, obv_lookback - 2)
+    
+    current_vol = df_temp[f'vol_{min(vol_window, 30)}d'].iloc[-1]
+    obv_threshold = max(0.008, min(0.08, current_vol * obv_lookback * 0.35))
+    price_flat_threshold = max(0.03, min(0.08, current_vol * obv_lookback * 0.5))
+    
+    return {
+        'vol_window': vol_window, 'current_vol': current_vol,
+        'vol_percentile': percentile, 'vol_regime': vol_regime,
+        'vol_trend': vol_trend, 'p25': p25, 'p50': p50, 'p75': p75, 'p90': p90,
+        'obv_lookback': obv_lookback, 'obv_threshold': obv_threshold,
+        'price_flat_threshold': price_flat_threshold,
+        'cycle_estimate': obv_lookback * 2
+    }
 
 
 def calculate_multiple_blocks(df, lookback=60):
@@ -451,20 +551,23 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
                 row=1, col=1
             )
             
-            # Add label
+            #Add label
             fig.add_annotation(
                 x=end_date,
-                y=(block['top'] + block['bot']) / 2,
+                y=block['top'] * 1.02,
                 text=f"Box {idx+1}<br>¥{block['bot']:.2f}-¥{block['top']:.2f}<br>{block['status']}",
-                showarrow=False,
+                showarrow=True,
+                arrowhead=2,
+                arrowsize=1,
+                ay=-30,
                 font=dict(size=9, color='black'),
-                bgcolor='rgba(255,255,255,0.8)',
+                bgcolor='rgba(255,255,255,0.85)',
                 bordercolor='gray',
                 borderwidth=1,
                 borderpad=3,
                 row=1, col=1
             )
-    
+  
     # ==========================================
     # PHASE SIGNALS
     # ==========================================
@@ -490,6 +593,7 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
             marker=dict(color='#64748b', size=8, symbol='square'),
             showlegend=True
         ), row=1, col=1)
+
     
     launch = df[df['Signal_GoldenLaunch']]
     if not launch.empty:
