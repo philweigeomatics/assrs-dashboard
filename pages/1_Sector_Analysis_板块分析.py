@@ -422,7 +422,7 @@ with tab1:
     sectors_df = v2_latest[v2_latest['Sector'] != 'MARKET_PROXY'].copy()
     sectors_df = sectors_df.sort_values('TOTAL_SCORE', ascending=False)
     
-    display_df = sectors_df[['Sector', 'TOTAL_SCORE', 'ACTION', 'Market_Breadth''Excess_Prob', 'Position_Size']].copy()
+    display_df = sectors_df[['Sector', 'TOTAL_SCORE', 'ACTION', 'Market_Breadth','Excess_Prob', 'Position_Size']].copy()
     display_df['TOTAL_SCORE'] = (display_df['TOTAL_SCORE'] * 100).map('{:.0f}%'.format)
     display_df['Excess_Prob'] = display_df['Excess_Prob'].map(lambda x: f"{x:+.2f}")
     display_df['Position_Size'] = (display_df['Position_Size'] * 100).map('{:.0f}%'.format)
