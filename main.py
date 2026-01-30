@@ -16,7 +16,17 @@ PROJECT_PATH = os.environ.get('GITHUB_WORKSPACE', os.path.dirname(os.path.abspat
 
 # NOW set the DB path AFTER import
 DB_PATH = os.path.join(PROJECT_PATH, 'assrs_tushare_local.db')
-data_manager.DB_NAME = DB_PATH  # Override the default from data_manager
+
+# Check if running in GitHub Actions
+IS_GITHUB_ACTIONS = os.environ.get('GITHUB_ACTIONS') == 'true'
+
+# Use different DB names
+if IS_GITHUB_ACTIONS:
+    DB_PATH = os.path.join(PROJECT_PATH, 'assrs_tushare_local.db')  # Production
+else:
+    DB_PATH = os.path.join(PROJECT_PATH, 'assrs_tushare_local_dev.db')  # Local dev
+    
+data_manager.DB_NAME = DB_PATH
 
 print(f"[CONFIG] Using database: {DB_PATH}")
 print(f"[CONFIG] Project path: {PROJECT_PATH}")

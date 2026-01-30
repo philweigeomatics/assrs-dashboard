@@ -9,11 +9,7 @@ venv/
 ENV/
 
 # Database files - DO NOT TRACK (prevents merge conflicts)
-*.db
-*.db-journal
-*.sqlite
-*.sqlite3
-assrs_tushare_local.db
+assrs_tushare_local_dev.db
 
 # IDE
 .vscode/
