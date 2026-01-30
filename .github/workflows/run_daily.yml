@@ -36,20 +36,24 @@ jobs:
           python main.py
       
       # 5. Commit ONLY CSV files (database stays local to GitHub Actions)
-      - name: Commit updated CSV results
+      - name: Commit updated results and database
         run: |
           git config --global user.name 'GitHub Action Bot'
           git config --global user.email 'action@github.com'
           
-          # Only add CSV files - database is in .gitignore
+          # Add CSV files
           git add assrs_backtest_results_SECTORS_V2_Regime.csv
           git add assrs_backtest_results_SECTORS_V1_Rules.csv || true
+          
+          # Add database (force add even if in .gitignore)
+          git add -f assrs_tushare_local.db
           
           # Commit and push if there are changes
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Daily data update: $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git commit -m "🤖 Daily update: $(date -u +'%Y-%m-%d %H:%M UTC')"
             git push
             echo "Changes pushed successfully"
           fi
+
