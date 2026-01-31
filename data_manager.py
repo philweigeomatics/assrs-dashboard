@@ -8,8 +8,24 @@ import sys
 import numpy as np # Added for NaN handling
 
 # --- 1. CONFIGURATION ---
-DB_NAME = 'assrs_tushare_local.db'
+# Check if running in GitHub Actions
+IS_GITHUB_ACTIONS = os.environ.get('GITHUB_ACTIONS') == 'true'
+
+# Check if running on your local machine (replace with YOUR username)
+YOUR_LOCAL_USERNAME = 'your-username-here'  # ← CHANGE THIS
+IS_LOCAL = os.environ.get('USER') == "phil-" or os.environ.get('USERNAME') == "phil-"
+
+# Use different DB names
+if IS_GITHUB_ACTIONS:
+    DB_NAME = 'assrs_tushare_local.db'  # GitHub Actions
+elif IS_LOCAL:
+    DB_NAME = 'assrs_tushare_local_dev.db'  # Your local machine
+else:
+    DB_NAME = 'assrs_tushare_local.db'  # Production Streamlit
+
+
 TUSHARE_API = None
+
 
 # If you prefer, move this from main.py so it's defined only once
 TUSHARE_API_TOKEN = '36838688c6455de2e3affca37060648de15b94b9707a43bb05a38312'

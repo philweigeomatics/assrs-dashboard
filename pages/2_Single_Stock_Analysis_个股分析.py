@@ -216,9 +216,10 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
 def calculate_adaptive_parameters_percentile(df, lookback_days=30):
     df_temp = df.copy()
-    df_temp['vol_10d'] = df_temp['Close'].pct_change().rolling(10).std()
-    df_temp['vol_20d'] = df_temp['Close'].pct_change().rolling(20).std()
-    df_temp['vol_30d'] = df_temp['Close'].pct_change().rolling(30).std()
+    # Calculate volatility windows
+    for window in [10, 15, 20, 25, 30]:
+        df_temp[f'vol_{window}d'] = df_temp['Close'].pct_change().rolling(window).std()
+
     
     current_vol_10d = df_temp['vol_10d'].iloc[-1]
     vol_5days_ago = df_temp['vol_10d'].iloc[-5] if len(df_temp) >= 5 else current_vol_10d
