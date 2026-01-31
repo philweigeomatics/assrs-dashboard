@@ -46,17 +46,10 @@ BACKTEST_END_DATE = YESTERDAY_DATE.strftime('%Y-%m-%d')
 CALENDAR_PROXY_TICKER = '601398'  # ICBC for trading calendar
 
 
-def calculate_sector_breadth(all_stock_data, sector_stocks, ma_period=20):
+def calculate_sector_breadth(all_stock_data, sector_stocks, current_date, ma_period=20):
     """
-    Calculate market breadth: % of stocks in sector trading above MA20
-    
-    Args:
-        all_stock_data: Dict of DataFrames (from data_manager.get_all_stock_data_from_db())
-        sector_stocks: List of ticker strings for the sector
-        ma_period: Moving average period (default 20)
-    
-    Returns:
-        float: Percentage (0-1) of stocks above their MA20
+    Calculate market breadth: % of stocks where close > MA20
+    MA20 includes the current day (standard TA convention)
     """
     above_ma = 0
     total = 0
@@ -64,25 +57,35 @@ def calculate_sector_breadth(all_stock_data, sector_stocks, ma_period=20):
     for ticker in sector_stocks:
         if ticker not in all_stock_data:
             continue
-            
+        
         df = all_stock_data[ticker]
         if df is None or len(df) < ma_period:
             continue
         
-        # Calculate MA20
-        ma = df['Close'].rolling(window=ma_period).mean()
+        # Get data up to current_date
+        df_up_to_date = df[df.index <= current_date].copy()
         
-        # Check latest data point
-        if len(df) > 0 and len(ma) > 0:
-            latest_close = df['Close'].iloc[-1]
-            latest_ma = ma.iloc[-1]
-            
-            if pd.notna(latest_close) and pd.notna(latest_ma):
-                total += 1
-                if latest_close > latest_ma:
-                    above_ma += 1
+        if len(df_up_to_date) < ma_period:
+            continue
+        
+        # Calculate rolling MA20 (INCLUDES current day)
+        df_up_to_date['MA20'] = df_up_to_date['Close'].rolling(window=ma_period).mean()
+        
+        # Get values on current_date
+        if current_date not in df_up_to_date.index:
+            continue
+        
+        current_close = df_up_to_date.loc[current_date, 'Close']
+        current_ma20 = df_up_to_date.loc[current_date, 'MA20']
+        
+        if pd.notna(current_close) and pd.notna(current_ma20):
+            total += 1
+            if current_close > current_ma20:
+                above_ma += 1
     
     return above_ma / total if total > 0 else 0.0
+
+
 
 
 
@@ -210,7 +213,7 @@ def run_sector_backtest_v2():
                     sector = row['Sector']
                     if sector in data_manager.SECTOR_STOCK_MAP:
                         sector_stocks = data_manager.SECTOR_STOCK_MAP[sector]
-                        breadth = calculate_sector_breadth(all_stock_data, sector_stocks)
+                        breadth = calculate_sector_breadth(all_stock_data, sector_stocks, date)
                         breadth_values.append(breadth)
                     else:
                         breadth_values.append(0.0)

@@ -458,6 +458,108 @@ with tab1:
     if not avoid.empty:
         s3.caption(", ".join(avoid['Sector'].head(3).tolist()))
     
+
+    # Add after the Summary section (around line 460)
+    st.markdown("---")
+    st.subheader("📊 Market Breadth History 市场宽度 - 超过20天均线")
+
+    # Filter last 60 days of data
+    breadth_history = v2_hist[v2_hist['Sector'] != 'MARKET_PROXY'].copy()
+    breadth_history = breadth_history.sort_values('Date', ascending=False)
+
+    # Get unique dates (most recent first)
+    unique_dates = breadth_history['Date'].dt.date.unique()[:60]  # Last 60 days
+
+    if len(unique_dates) == 0:
+        st.warning("No historical breadth data available")
+    else:
+        # Pagination setup
+        DAYS_PER_PAGE = 10
+        total_pages = (len(unique_dates) + DAYS_PER_PAGE - 1) // DAYS_PER_PAGE
+        
+        # Initialize page state
+        if 'breadth_page' not in st.session_state:
+            st.session_state.breadth_page = 0
+        
+        # Page navigation buttons
+        col1, col2, col3 = st.columns([1, 3, 1])
+        
+        with col1:
+            if st.button("◀ Previous 10 Days", disabled=(st.session_state.breadth_page >= total_pages - 1)):
+                st.session_state.breadth_page += 1
+                st.rerun()
+        
+        with col2:
+            start_idx = st.session_state.breadth_page * DAYS_PER_PAGE
+            page_end = min(start_idx + DAYS_PER_PAGE, len(unique_dates))
+            date_range = f"{unique_dates[page_end-1]} to {unique_dates[start_idx]}"
+            st.markdown(f"<center><b>Page {st.session_state.breadth_page + 1} of {total_pages}</b><br>{date_range}</center>", 
+                    unsafe_allow_html=True)
+        
+        with col3:
+            if st.button("Next 10 Days ▶", disabled=(st.session_state.breadth_page == 0)):
+                st.session_state.breadth_page -= 1
+                st.rerun()
+        
+        # Get dates for current page
+        end_idx = start_idx + DAYS_PER_PAGE
+        page_dates = unique_dates[start_idx:end_idx]
+        
+        # REVERSE dates so newest is on the right
+        page_dates = page_dates[::-1]
+        
+        # Build the breadth table
+        breadth_data = []
+        
+        for sector in sorted(breadth_history['Sector'].unique()):
+            row = {'Sector': sector}
+            for date in page_dates:
+                # Get breadth value for this sector on this date
+                sector_date_data = breadth_history[
+                    (breadth_history['Sector'] == sector) & 
+                    (breadth_history['Date'].dt.date == date)
+                ]
+                
+                if not sector_date_data.empty:
+                    breadth_val = sector_date_data.iloc[0]['Market_Breadth']
+                    row[date.strftime('%m/%d')] = breadth_val  # Keep as number
+                else:
+                    row[date.strftime('%m/%d')] = None
+            
+            breadth_data.append(row)
+        
+        breadth_df = pd.DataFrame(breadth_data)
+        
+        # Style function for breadth values
+        def style_breadth_cell(val):
+            """Style breadth: <50% green (opportunity), >=50% red (overextended)"""
+            if pd.isna(val):
+                return ''
+            pct = val * 100
+            if pct < 50:
+                return 'background-color: #dcfce7; color: #15803d; font-weight: 600'
+            else:
+                return 'background-color: #fee2e2; color: #b91c1c; font-weight: 600'
+        
+        # Format function for display (separate from styling)
+        def format_breadth(val):
+            """Format as percentage"""
+            if pd.isna(val):
+                return "—"
+            return f"{val*100:.0f}%"
+        
+        # Apply styling FIRST (on numeric values)
+        date_cols = [col for col in breadth_df.columns if col != 'Sector']
+        styled = breadth_df.style.map(style_breadth_cell, subset=date_cols)
+        
+        # THEN format for display
+        styled = styled.format(format_breadth, subset=date_cols)
+        
+        st.dataframe(styled, hide_index=True, use_container_width=True, height=500)
+        
+        st.caption("💡 Green (<50%): Most stocks below MA20 (opportunity). Red (≥50%): Most stocks above MA20 (extended).")
+
+
     # Chart
     st.markdown("---")
     st.subheader("🔍 Sector Deep Dive")
