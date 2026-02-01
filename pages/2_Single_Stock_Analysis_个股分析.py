@@ -45,6 +45,24 @@ def load_single_stock(ticker, cache_date):
     return data_manager.get_single_stock_data(ticker, use_data_start_date=True)
 
 
+# ==================== PRICE STRUCTURE TREND DETECTION ====================
+def detect_price_trend(df, window=10):
+    """Detect trend based on price structure (Higher Highs/Higher Lows)"""
+    df = df.copy()
+    
+    # Higher highs and higher lows = uptrend
+    df['HH'] = df['High'] > df['High'].shift(window)  # New high
+    df['HL'] = df['Low'] > df['Low'].shift(window)    # Higher low
+    df['Price_Uptrend'] = df['HH'] & df['HL']
+    
+    # Lower highs and lower lows = downtrend
+    df['LH'] = df['High'] < df['High'].shift(window)  # Lower high
+    df['LL'] = df['Low'] < df['Low'].shift(window)    # New low
+    df['Price_Downtrend'] = df['LH'] & df['LL']
+    
+    return df
+
+
 def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     """
     Advanced 3-Phase Analysis:
@@ -284,6 +302,8 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     # ==================== MACD SCENARIOS ====================
     df_analysis['MACD_Gap'] = df_analysis['MACD'] - df_analysis['MACD_Signal']
     df_analysis['MACD_Momentum'] = df_analysis['MACD'] - df_analysis['MACD'].shift(1)
+    df_analysis['MACD_Momentum_Pct'] = df_analysis['MACD'].pct_change()
+    df_analysis['MACD_Acceleration'] = df_analysis['MACD_Momentum_Pct'] - df_analysis['MACD_Momentum_Pct'].shift(1)
 
     # Scenario 1: Classic crossover
     classic_crossover = (
@@ -293,34 +313,82 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
     # Scenario 2: Approaching from below
     approaching_from_below = (
-        (df_analysis['MACD_Gap'] < 0)
-        & (df_analysis['MACD_Gap'] > -0.5)
-        & (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1))
-        & (df_analysis['MACD_Gap'].shift(1) > df_analysis['MACD_Gap'].shift(2))
-        & (df_analysis['MACD_Momentum'] > 0)
+        # Part 1: MACD below Signal but close
+        (df_analysis['MACD_Gap'] < 0)  # Still in bearish territory
+        & (df_analysis['MACD_Gap'] > -0.5 * df_analysis['MACD_Signal'].abs())  # Within 50% of Signal
+        
+        # Part 2: Gap consistently narrowing
+        & (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1))  # Gap narrowing today
+        & (df_analysis['MACD_Gap'].shift(1) > df_analysis['MACD_Gap'].shift(2))  # Was narrowing yesterday
+        
+        # Part 3: MACD rising
+        & (df_analysis['MACD_Momentum_Pct'] > 0)  # Positive momentum
+        
+        # Part 4: Downtrend slowing down significantly (KEY CRITERIA)
+        & (
+            # Either: Strong positive acceleration (deceleration of fall)
+            (df_analysis['MACD_Acceleration'] > 0.03)  # Fall slowed by 3+ percentage points
+            
+            # Or: Was falling significantly, now barely falling or rising
+            | (
+                (df_analysis['MACD_Momentum_Pct'].shift(2) < -0.05)  # Was falling >5% two days ago
+                & (df_analysis['MACD_Momentum_Pct'] > -0.02)  # Now falling <2% or rising
+            )
+        )
     )
 
-    # Scenario 3: Higher low bounce
-    higher_low_bounce = (
-        (df_analysis['MACD_Gap'] > 0)
-        & (df_analysis['MACD_Gap'] < df_analysis['MACD_Gap'].shift(1))
-        & (df_analysis['MACD_Momentum'] > 0)
-        & (df_analysis['MACD_Momentum'] > df_analysis['MACD_Momentum'].shift(1))
-        & (df_analysis['MACD_Gap'] > 0.1)
+    # Scenario 3: Bottoming
+    # Scenario 3: Bottoming - MACD below Signal, making a low, about to reverse
+    # Scenario 3: Bottoming - MACD falling is slowing down, Signal catching up
+    bottoming = (
+        # Part 1: In BEARISH territory (MACD below Signal)
+        (df_analysis['MACD_Gap'] < 0)                              # MACD below Signal
+        
+        # Part 2: Gap was widening (MACD falling away from Signal)
+        & (df_analysis['MACD_Gap'].shift(1) < df_analysis['MACD_Gap'].shift(2))  # Gap more negative yesterday
+
+         # Part 3: MACD was falling, now rising (BOTTOM DETECTED!)
+        & (df_analysis['MACD'].shift(1) < df_analysis['MACD'].shift(2))  # Was falling yesterday
+        & (df_analysis['MACD'] > df_analysis['MACD'].shift(1))            # Now rising (Yesterday = BOTTOM!)
+        
+        # Part 4: Gap is narrowing (Signal catching up)
+        & (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1))  # Gap less negative today
+    
     )
+
+
+
 
     # Scenario 4: Momentum building
     momentum_building = (
         (df_analysis['MACD_Gap'] > 0)
         & (df_analysis['MACD_Gap'].shift(1) > 0)
         & (df_analysis['MACD_Gap'].shift(2) > 0)
-        & (df_analysis['MACD_Momentum'] > 0)
-        & (df_analysis['MACD_Momentum'].shift(1) <= 0.05)
+        & (df_analysis['MACD_Momentum_Pct'] > 0.8)           # MACD rising (any positive %)
+        & (df_analysis['MACD_Momentum_Pct'].shift(1) < 0.40)  # Was growing <2% yesterday
         & (df_analysis['MACD_Hist'] > df_analysis['MACD_Hist'].shift(1))
     )
 
     macd_trigger = (classic_crossover | approaching_from_below | 
-                    higher_low_bounce | momentum_building)
+                    bottoming | momentum_building)
+
+    # ==================== STORE SCENARIO COLUMNS (NEW) ====================
+    df_analysis['MACD_ClassicCrossover'] = classic_crossover
+    df_analysis['MACD_Approaching'] = approaching_from_below
+    df_analysis['MACD_Bottoming'] = bottoming
+    df_analysis['MACD_MomentumBuilding'] = momentum_building
+    df_analysis['MACD_Trigger'] = macd_trigger
+
+    # ==================== SIMPLE TREND DETECTION: SMOOTHED MACD ====================
+    # Smooth MACD line to detect large trends
+    df_analysis['MACD_Smooth'] = df_analysis['MACD'].rolling(window=4, center=False).mean()
+
+    # Large trend based on smoothed MACD slope
+    df_analysis['MACD_Smooth_Slope'] = df_analysis['MACD_Smooth'] - df_analysis['MACD_Smooth'].shift(5)
+
+    # Define large trends
+    df_analysis['Large_Uptrend'] = df_analysis['MACD_Smooth_Slope'] > 0
+    df_analysis['Large_Downtrend'] = df_analysis['MACD_Smooth_Slope'] < 0
 
     # ==================== FINAL GOLDEN LAUNCH ====================
     launch = (
@@ -628,7 +696,7 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
             'RSI',  # No ADX here anymore
             'ADX Trend Analysis'  # New panel
         ),
-        row_heights=[0.45, 0.12, 0.12, 0.12, 0.22]  # Adjusted heights
+        row_heights=[0.45, 0.12, 0.22, 0.08, 0.22]  # Adjusted heights
     )
     
     # ==================== ROW 1: Price Chart (no changes) ====================
@@ -774,27 +842,127 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
         ), row=2, col=1)
 
 
-    
-    # ==================== ROW 3: MACD (no changes) ====================
+
+    # ==================== ROW 3: MACD WITH SCENARIO MARKERS ====================
+    # MACD Histogram (Chinese colors: red=positive, green=negative)
     colors = ['#ef4444' if val > 0 else '#22c55e' for val in df['MACD_Hist']]
+
     fig.add_trace(go.Bar(
-        x=dates, y=df['MACD_Hist']*2.5, name='MACD Histogram (2.5)',
+        x=dates, 
+        y=df['MACD_Hist'] * 2.5,  # Scale up for visibility
+        name='MACD Histogram (2.5x)',
         marker=dict(color=colors),
         showlegend=True
     ), row=3, col=1)
-    
+
+    # MACD Line
     fig.add_trace(go.Scatter(
         x=dates, y=df['MACD'], name='MACD',
         line=dict(color='#2563eb', width=2),
         showlegend=True
     ), row=3, col=1)
-    
+
+    # Signal Line
     fig.add_trace(go.Scatter(
         x=dates, y=df['MACD_Signal'], name='MACD Signal',
         line=dict(color='#f97316', width=2),
         showlegend=True
     ), row=3, col=1)
-    
+
+    # Zero line
+    fig.add_hline(y=0, line_dash='solid', line_color='gray', line_width=1, row=3, col=1)
+
+    # ==================== MACD SCENARIO MARKERS (NEW) ====================
+    # We'll add markers for ALL MACD triggers, labeled with the scenario
+
+    # Create a combined scenario label
+    def get_macd_scenario_label(row):
+        """Returns the scenario name for labeling"""
+        if row.get('MACD_ClassicCrossover', False):
+            return 'Crossover'
+        elif row.get('MACD_Approaching', False):
+            return 'Approaching'
+        elif row.get('MACD_Bottoming', False):
+            return 'Bottoming'
+        elif row.get('MACD_MomentumBuilding', False):
+            return 'Momentum'
+        else:
+            return None
+
+    # Apply labels
+    if 'MACD_Trigger' in df.columns:
+        df['MACD_Scenario_Label'] = df.apply(get_macd_scenario_label, axis=1)
+        
+        # Filter to only MACD triggers
+        macd_signals = df[df['MACD_Trigger'] == True].copy()
+        
+        if not macd_signals.empty:
+            # Color coding by scenario
+            colors_map = {
+                'Crossover': '#10b981',      # Green
+                'Approaching': '#3b82f6',    # Blue
+                'Bottoming': '#f59e0b',     # Orange
+                'Momentum': '#ef4444'        # Red
+            }
+            
+            marker_colors = [colors_map.get(label, '#6b7280') for label in macd_signals['MACD_Scenario_Label']]
+            
+            fig.add_trace(go.Scatter(
+                x=macd_signals.index.strftime('%Y-%m-%d'),
+                y=macd_signals['MACD'] * 1.12,  # Position above MACD line
+                mode='markers+text',
+                name='MACD Triggers',
+                marker=dict(
+                    color=marker_colors,
+                    size=12,
+                    symbol='circle',
+                    line=dict(width=2, color='white')
+                ),
+                text=macd_signals['MACD_Scenario_Label'],
+                textposition='top center',
+                textfont=dict(size=9, color='black'),
+                showlegend=True,
+                hovertemplate='%{text}<br>MACD: %{y:.4f}<extra></extra>'
+            ), row=3, col=1)
+
+    # ==================== BACKGROUND SHADING: LARGE TRENDS ONLY ====================
+    if 'Large_Uptrend' in df.columns:
+        # Group consecutive uptrend days
+        uptrend_groups = (df['Large_Uptrend'] != df['Large_Uptrend'].shift()).cumsum()
+        uptrend_df = df[df['Large_Uptrend']].copy()
+        
+        if not uptrend_df.empty:
+            for group_id, group_data in uptrend_df.groupby(uptrend_groups[df['Large_Uptrend']]):
+                if len(group_data) >= 5:  # Only shade sustained trends (5+ days)
+                    start_date = group_data.index[0].strftime('%Y-%m-%d')
+                    end_date = group_data.index[-1].strftime('%Y-%m-%d')
+                    fig.add_vrect(
+                        x0=start_date, x1=end_date,
+                        fillcolor="rgba(239, 68, 68, 0.08)",  # RED for uptrend
+                        layer="below",
+                        line_width=0,
+                        row=3, col=1
+                    )
+
+    if 'Large_Downtrend' in df.columns:
+        # Group consecutive downtrend days
+        downtrend_groups = (df['Large_Downtrend'] != df['Large_Downtrend'].shift()).cumsum()
+        downtrend_df = df[df['Large_Downtrend']].copy()
+        
+        if not downtrend_df.empty:
+            for group_id, group_data in downtrend_df.groupby(downtrend_groups[df['Large_Downtrend']]):
+                if len(group_data) >= 5:  # Only shade sustained trends (5+ days)
+                    start_date = group_data.index[0].strftime('%Y-%m-%d')
+                    end_date = group_data.index[-1].strftime('%Y-%m-%d')
+                    fig.add_vrect(
+                        x0=start_date, x1=end_date,
+                        fillcolor="rgba(34, 197, 94, 0.08)",  # GREEN for downtrend
+                        layer="below",
+                        line_width=0,
+                        row=3, col=1
+                    )
+
+
     # ==================== ROW 4: RSI ONLY (REMOVED ADX) ====================
     fig.add_trace(go.Scatter(
         x=dates, y=df['RSI_14'], name='RSI (14)',
