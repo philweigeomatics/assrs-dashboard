@@ -116,34 +116,269 @@ def get_tushare_ticker(ticker):
     return ticker
 
 
+def create_stock_basic_table(conn):
+    """Creates stock_basic table to store all stock names."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS stock_basic (
+            ts_code TEXT PRIMARY KEY,
+            symbol TEXT,
+            name TEXT,
+            area TEXT,
+            industry TEXT,
+            market TEXT,
+            list_date TEXT,
+            last_updated TEXT
+        )
+    """)
+
+def update_stock_basic_table():
+    """
+    Fetch all stock basic info from Tushare and update local DB.
+    This should only run once per day.
+    Returns True if updated, False if skipped.
+    """
+    global TUSHARE_API
+    
+    if TUSHARE_API is None:
+        init_tushare()
+    
+    if TUSHARE_API is None:
+        print("[data_manager] ❌ Cannot update stock_basic - Tushare not initialized")
+        return False
+    
+    with sqlite3.connect(DB_NAME) as conn:
+        create_stock_basic_table(conn)
+        
+        # Check last update time
+        try:
+            cursor = conn.execute("SELECT MAX(last_updated) FROM stock_basic")
+            last_update = cursor.fetchone()[0]
+            
+            if last_update:
+                last_update_date = datetime.strptime(last_update, '%Y-%m-%d').date()
+                today = datetime.now().date()
+                
+                if last_update_date == today:
+                    print(f"[data_manager] ℹ️ stock_basic already updated today ({last_update})")
+                    return False
+        except:
+            pass  # First time, no data yet
+        
+        # Fetch from Tushare (this uses 1 point per call, limit: 1/hour)
+        print("[data_manager] 🔄 Fetching stock_basic from Tushare (this may take a moment)...")
+        
+        try:
+            # Fetch all stocks - no ts_code filter means get all
+            df = TUSHARE_API.stock_basic(
+                fields='ts_code,symbol,name,area,industry,market,list_date'
+            )
+            
+            if df.empty:
+                print("[data_manager] ⚠️ No data returned from stock_basic API")
+                return False
+            
+            # Add last_updated timestamp
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            df['last_updated'] = today_str
+            
+            # Clear old data and insert new
+            conn.execute("DELETE FROM stock_basic")
+            df.to_sql('stock_basic', conn, if_exists='append', index=False)
+            
+            print(f"[data_manager] ✅ Updated stock_basic table with {len(df)} stocks")
+            return True
+            
+        except Exception as e:
+            print(f"[data_manager] ❌ Failed to fetch stock_basic: {e}")
+            return False
+
+def get_company_name_from_api(ticker):
+    """
+    Fallback: Fetch company name from Tushare stock_company API.
+    Only called when stock_basic table doesn't have the data..
+    """
+    global TUSHARE_API
+    
+    if TUSHARE_API is None:
+        init_tushare()
+    
+    if TUSHARE_API is None:
+        print(f"[data_manager] ❌ Cannot fetch from API - Tushare not initialized")
+        return None
+    
+    try:
+        ts_code = get_tushare_ticker(ticker)
+        
+        # Rate limit: 200 calls/minute
+        time.sleep(0.31)
+        
+        # Use stock_company API - field is 'com_name'
+        df = TUSHARE_API.stock_company(
+            ts_code=ts_code,
+            fields='ts_code,com_name'
+        )
+        
+        if not df.empty:
+            name = df.iloc[0]['com_name']
+            print(f"[data_manager] ✅ Fetched from API: {ticker} -> {name}")
+            return name
+        else:
+            print(f"[data_manager] ⚠️ No company info found for {ticker}")
+            return None
+            
+    except Exception as e:
+        print(f"[data_manager] ❌ Failed to fetch from API for {ticker}: {e}")
+        return None
+
+
+def get_stock_name_from_db(ticker):
+    """
+    Get stock name from local stock_basic table.
+    Returns company name or ticker if not found.
+    """
+    ts_code = get_tushare_ticker(ticker)
+    
+    with sqlite3.connect(DB_NAME) as conn:
+        create_stock_basic_table(conn)
+        
+        cursor = conn.execute(
+            "SELECT name FROM stock_basic WHERE ts_code = ?",
+            (ts_code,)
+        )
+        
+        result = cursor.fetchone()
+        
+        if result:
+            return result[0]
+        else:
+            print(f"[data_manager] ⚠️ Stock {ticker} not found in stock_basic table")
+            return None
+
+def ensure_stock_basic_updated():
+    """
+    Ensures stock_basic table is updated (max once per day).
+    Call this at app startup.
+    """
+    try:
+        update_stock_basic_table()
+    except Exception as e:
+        print(f"[data_manager] ⚠️ Could not update stock_basic: {e}")
+
+
+# Add new function to get company name
+def get_company_name(ticker):
+    """Get company name from Tushare stock_company API"""
+    global TUSHARE_API
+    
+    if TUSHARE_API is None:
+        init_tushare()  # Try to initialize if not already done
+    
+    if TUSHARE_API is None:
+        return None
+    
+    try:
+        ts_code = get_tushare_ticker(ticker)
+        df = TUSHARE_API.stock_company(ts_code=ts_code, fields='ts_code,name')
+        
+        if not df.empty:
+            return df.iloc[0]['name']
+        return None
+    except Exception as e:
+        print(f"[data_manager] Failed to get company name for {ticker}: {e}")
+        return None
+
+
+
 def create_history_table(conn):
-    """Creates search history table if not exists. Only stores ticker & timestamp."""
+    """Creates search history table with company name field."""
     conn.execute("""
         CREATE TABLE IF NOT EXISTS search_history (
             ticker TEXT PRIMARY KEY,
-            timestamp TEXT
+            timestamp TEXT,
+            company_name TEXT
         );
     """)
 
+    # Add company_name column if it doesn't exist (for existing tables)
+    try:
+        conn.execute("ALTER TABLE search_history ADD COLUMN company_name TEXT")
+        print("[data_manager] Added company_name column to search_history table")
+    except sqlite3.OperationalError:
+        # Column already exists, ignore
+        pass
+
+# Add this import at the top
+from stock_name_cache import get_stock_name
+
 def update_search_history(ticker):
-    """Updates search history table, keeps only last 10."""
+    """Updates search history table with company name, keeps only last 10."""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    print(f"[data_manager] 🔍 Updating search history for {ticker}...")
+    
+    # Try database first
+    company_name = get_stock_name_from_db(ticker)
+    
+    if company_name is not None:
+        print(f"[data_manager] 📦 Found in stock_basic DB: {company_name}")
+    else:
+        # Fallback to API if not in database
+        print(f"[data_manager] ⚠️ Not in stock_basic DB, calling stock_company API...")
+        company_name = get_company_name_from_api(ticker)
+        
+        if not company_name:
+            # Ultimate fallback: use ticker itself
+            company_name = ticker
+            print(f"[data_manager] ⚠️ API also failed, using ticker: {ticker}")
     
     with sqlite3.connect(DB_NAME) as conn:
         create_history_table(conn)
-        # Insert or update ticker
-        conn.execute("REPLACE INTO search_history (ticker, timestamp) VALUES (?, ?)", (ticker, timestamp))
-        # Prune old entries (Keep top 10 newest)
-        conn.execute("DELETE FROM search_history WHERE ticker NOT IN (SELECT ticker FROM search_history ORDER BY timestamp DESC LIMIT 10)")
-        print(f"[data_manager] History updated: {ticker}")
+        
+        # Insert or update ticker with company name
+        conn.execute(
+            "REPLACE INTO search_history (ticker, timestamp, company_name) VALUES (?, ?, ?)", 
+            (ticker, timestamp, company_name)
+        )
+        
+        # Prune old entries
+        conn.execute("""
+            DELETE FROM search_history 
+            WHERE ticker NOT IN (
+                SELECT ticker FROM search_history 
+                ORDER BY timestamp DESC 
+                LIMIT 10
+            )
+        """)
+        
+        conn.commit()
+        
+        print(f"[data_manager] ✅ History saved: {ticker} - {company_name}")
+
+    return company_name
+
+
 
 def get_search_history():
-    """Returns list of last 10 searched stocks."""
+    """Returns list of last 10 searched stocks with display names."""
     with sqlite3.connect(DB_NAME) as conn:
         create_history_table(conn)
-        cursor = conn.execute("SELECT ticker FROM search_history ORDER BY timestamp DESC")
-        # Returns list of dicts for easy jinja usage
-        return [{'ticker': row[0]} for row in cursor.fetchall()]
+        
+        cursor = conn.execute(
+            "SELECT ticker, company_name FROM search_history ORDER BY timestamp DESC LIMIT 10"
+        )
+        
+        results = []
+        for row in cursor.fetchall():
+            ticker = row[0]
+            company_name = row[1] if row[1] else ticker
+            
+            results.append({
+                'ticker': ticker,
+                'display': f"{company_name} ({ticker})"
+            })
+        
+        return results
+
 
 
 def create_table(conn, ticker):

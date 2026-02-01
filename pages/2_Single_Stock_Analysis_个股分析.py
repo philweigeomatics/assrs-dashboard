@@ -13,11 +13,19 @@ import data_manager
 from datetime import date
 from scipy import stats
 
+
+
 st.set_page_config(
     page_title="📈 Single Stock | 个股分析",
     page_icon="📈",
     layout="wide"
 )
+
+# # ensure the stock basic is updated daily.
+# try:
+#     data_manager.ensure_stock_basic_updated()
+# except Exception as e:
+#     pass
 
 # Check if statsmodels available
 try:
@@ -73,9 +81,29 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     # ADX
     adx = ta.trend.ADXIndicator(df_analysis['High'], df_analysis['Low'], df_analysis['Close'], window=14)
     df_analysis['ADX'] = adx.adx()
+
+    # ==================== ADD ADX SMOOTHING (NEW) ====================
+    try:
+        from scipy.signal import savgol_filter
+        # LOWESS smoothing
+        df_analysis['ADX_LOWESS'] = savgol_filter(
+            df_analysis['ADX'].fillna(method='ffill'),
+            window_length=11,
+            polyorder=3
+        )
+    except:
+        # Fallback to EMA if scipy not available
+        df_analysis['ADX_LOWESS'] = df_analysis['ADX'].ewm(span=9, adjust=False).mean()
+
+    # Bollinger Bands for ADX
+    df_analysis['ADX_BB_Middle'] = df_analysis['ADX'].rolling(window=20).mean()
+    df_analysis['ADX_BB_Std'] = df_analysis['ADX'].rolling(window=20).std()
+    df_analysis['ADX_BB_Upper'] = df_analysis['ADX_BB_Middle'] + (2 * df_analysis['ADX_BB_Std'])
+    df_analysis['ADX_BB_Lower'] = df_analysis['ADX_BB_Middle'] - (2 * df_analysis['ADX_BB_Std'])
     
     # OBV (On-Balance Volume)
     df_analysis['OBV'] = ta.volume.on_balance_volume(df_analysis['Close'], df_analysis['Volume'])
+    df_analysis['Volume_Scaled_OBV'] = (df_analysis['OBV'] / df_analysis['Volume'].rolling(window=20).mean())
     
     # Price & OBV changes (Adaptive, previously we used 20 days fixed  )
     params = calculate_adaptive_parameters_percentile(df, lookback_days=30)
@@ -163,24 +191,149 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
     # df_analysis.loc[squeeze, 'Signal_Squeeze'] = True
     
-    # Phase 3: Golden Launch
-    # Strong trend + MACD CROSSOVER (not just above)
+    # # Phase 3: Golden Launch
+    # # Strong trend + MACD CROSSOVER (not just above)
 
-    # Detect MACD crossover (just happened)
-    macd_cross_up = (
-        (df_analysis['MACD'].shift(1) <= df_analysis['MACD_Signal'].shift(1)) &  # Was below/at yesterday
-        (df_analysis['MACD'] > df_analysis['MACD_Signal'])  # Is above today
+    # # Detect MACD crossover (just happened)
+    # macd_cross_up = (
+    #     (df_analysis['MACD'].shift(1) <= df_analysis['MACD_Signal'].shift(1)) &  # Was below/at yesterday
+    #     (df_analysis['MACD'] > df_analysis['MACD_Signal'])  # Is above today
+    # )
+
+    # # Golden Launch = Fresh MACD cross + confirming conditions
+    # launch = (
+    #     macd_cross_up &  # ← KEY: Only on the crossover day itself
+    #     (df_analysis['MA20'] > df_analysis['MA50']) &  # Bullish MA alignment
+    #     (df_analysis['ADX'] > 25) &  # Strong trend
+    #     (df_analysis['RSI_14'] > 50) &  # Momentum
+    #     (df_analysis['RSI_14'] < 70)  # Not overextended
+    # )
+    # df_analysis.loc[launch, 'Signal_GoldenLaunch'] = True
+
+    # Phase 3: Golden Launch - ADX REVERSAL & BREAKOUT DETECTION
+
+    import numpy as np
+    from scipy import stats
+
+    # ==================== ADX TREND & ACCELERATION ====================
+    def calculate_adx_trend(series, window=5):
+        """Calculate ADX slope using linear regression"""
+        def get_slope(y):
+            if len(y) < 3 or y.isna().any():
+                return 0
+            x = np.arange(len(y))
+            slope, _, _, _, _ = stats.linregress(x, y)
+            return slope
+        return series.rolling(window=window, min_periods=3).apply(get_slope, raw=False)
+
+    # Calculate ADX trend (5-day slope)
+    df_analysis['ADX_Slope'] = calculate_adx_trend(df_analysis['ADX'], window=5)
+
+    # Calculate ADX acceleration (change in slope = 2nd derivative)
+    df_analysis['ADX_Acceleration'] = df_analysis['ADX_Slope'] - df_analysis['ADX_Slope'].shift(1)
+
+    # ==================== PATTERN 1: ADX BOTTOMING (Reversal Coming) ====================
+    adx_bottoming = (
+        (df_analysis['ADX'] < 25)  # ADX is low (weak trend)
+        & (df_analysis['ADX_Slope'] < 0)  # Still falling (but...)
+        & (df_analysis['ADX_Acceleration'] > 0.1)  # Deceleration slowing (getting less negative)
+        & (df_analysis['ADX_Slope'] > df_analysis['ADX_Slope'].shift(1))  # Slope improving
     )
 
-    # Golden Launch = Fresh MACD cross + confirming conditions
+    # ==================== PATTERN 2: ADX ACCELERATING (Breakout Coming) ====================
+    adx_accelerating = (
+        (df_analysis['ADX_Slope'] > 0.3)  # Positive slope (trending up)
+        & (df_analysis['ADX_Acceleration'] > 0.1)  # Accelerating (getting steeper)
+    )
+    
+    # ==================== PATTERN 3: ADX STRONG & STABLE ====================
+    adx_strong_stable = (
+        (df_analysis['ADX'] >= 30)  # Already strong
+        & (df_analysis['ADX_Slope'] >= -0.3)  # Not falling fast
+        & (df_analysis['ADX_Slope'] <= 0.3)  # Relatively stable
+    )
+
+    # Pattern 4: ADX Peaking (NEW - Exhaustion/Reversal Warning)
+    adx_peaking = (
+        (df_analysis['ADX'] >= 30)  # ADX is high (strong trend)
+        & (df_analysis['ADX_Slope'] > 0)  # Still rising BUT...
+        & (df_analysis['ADX_Acceleration'] < -0.1)  # Decelerating (slowing down)
+        & (df_analysis['ADX_Slope'] < df_analysis['ADX_Slope'].shift(1))  # Slope weakening
+    )
+
+    # Pattern 5: ADX Reversing Down (Trend Breaking)
+    adx_reversing_down = (
+        (df_analysis['ADX'] >= 25)  # Was in a trend
+        & (df_analysis['ADX_Slope'] < 0)  # Now falling
+        & (df_analysis['ADX_Slope'].shift(1) > 0)  # Was rising yesterday (just turned)
+    )
+
+
+    # Combine ADX conditions
+    adx_healthy = adx_bottoming | adx_accelerating | adx_strong_stable
+    adx_warning = adx_peaking | adx_reversing_down
+
+    df_analysis['ADX_Pattern'] = 'Neutral'
+    df_analysis.loc[adx_bottoming, 'ADX_Pattern'] = 'Reversal Setup'
+    df_analysis.loc[adx_accelerating, 'ADX_Pattern'] = 'Breakout Mode'
+    df_analysis.loc[adx_strong_stable, 'ADX_Pattern'] = 'Strong Trend'
+    df_analysis.loc[adx_peaking, 'ADX_Pattern'] = 'Peaking (Warning)'  # NEW
+    df_analysis.loc[adx_reversing_down, 'ADX_Pattern'] = 'Reversing Down'  # NEW
+
+    
+    # ==================== MACD SCENARIOS ====================
+    df_analysis['MACD_Gap'] = df_analysis['MACD'] - df_analysis['MACD_Signal']
+    df_analysis['MACD_Momentum'] = df_analysis['MACD'] - df_analysis['MACD'].shift(1)
+
+    # Scenario 1: Classic crossover
+    classic_crossover = (
+        (df_analysis['MACD_Gap'].shift(1) <= 0)
+        & (df_analysis['MACD_Gap'] > 0)
+    )
+
+    # Scenario 2: Approaching from below
+    approaching_from_below = (
+        (df_analysis['MACD_Gap'] < 0)
+        & (df_analysis['MACD_Gap'] > -0.5)
+        & (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1))
+        & (df_analysis['MACD_Gap'].shift(1) > df_analysis['MACD_Gap'].shift(2))
+        & (df_analysis['MACD_Momentum'] > 0)
+    )
+
+    # Scenario 3: Higher low bounce
+    higher_low_bounce = (
+        (df_analysis['MACD_Gap'] > 0)
+        & (df_analysis['MACD_Gap'] < df_analysis['MACD_Gap'].shift(1))
+        & (df_analysis['MACD_Momentum'] > 0)
+        & (df_analysis['MACD_Momentum'] > df_analysis['MACD_Momentum'].shift(1))
+        & (df_analysis['MACD_Gap'] > 0.1)
+    )
+
+    # Scenario 4: Momentum building
+    momentum_building = (
+        (df_analysis['MACD_Gap'] > 0)
+        & (df_analysis['MACD_Gap'].shift(1) > 0)
+        & (df_analysis['MACD_Gap'].shift(2) > 0)
+        & (df_analysis['MACD_Momentum'] > 0)
+        & (df_analysis['MACD_Momentum'].shift(1) <= 0.05)
+        & (df_analysis['MACD_Hist'] > df_analysis['MACD_Hist'].shift(1))
+    )
+
+    macd_trigger = (classic_crossover | approaching_from_below | 
+                    higher_low_bounce | momentum_building)
+
+    # ==================== FINAL GOLDEN LAUNCH ====================
     launch = (
-        macd_cross_up &  # ← KEY: Only on the crossover day itself
-        (df_analysis['MA20'] > df_analysis['MA50']) &  # Bullish MA alignment
-        (df_analysis['ADX'] > 25) &  # Strong trend
-        (df_analysis['RSI_14'] > 50) &  # Momentum
-        (df_analysis['RSI_14'] < 70)  # Not overextended
+        macd_trigger
+        & (df_analysis['MA20'] > df_analysis['MA50'])
+        & adx_healthy  # Smart ADX: bottoming, accelerating, or strong-stable
+        & (df_analysis['RSI_14'] >= 50)
+        & (df_analysis['RSI_14'] <= 70)
+        & (df_analysis['Volume'] > df_analysis['Volume'].rolling(20).mean())
     )
+
     df_analysis.loc[launch, 'Signal_GoldenLaunch'] = True
+
 
     
     # Exit Signal: Multiple conditions (any one triggers)
@@ -456,130 +609,103 @@ def calculate_trend_forecast(df: pd.DataFrame, lookback: int = 60, forecast_days
 
 def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) -> go.Figure:
     """
-    Create 4-panel chart with trading blocks.
+    Create 5-panel chart with trading blocks.
     Blocks drawn as horizontal rectangles during their active period.
     """
-    df = df.tail(250).sort_index()
+    df = analysis_df.tail(250).sort_index()
     dates = df.index.strftime('%Y-%m-%d')
     
+    # ==================== CHANGE: 4 rows -> 5 rows ====================
     fig = make_subplots(
-        rows=4, cols=1,
+        rows=5, cols=1,  # Changed from 4 to 5
+        
         shared_xaxes=True,
-        vertical_spacing=0.02,
-        subplot_titles=('Price + Trading Blocks + Signals', 'Volume + OBV', 'MACD', 'RSI + ADX'),
-        row_heights=[0.5, 0.15, 0.15, 0.15]
+        vertical_spacing=0.03,
+        subplot_titles=(
+            'Price & Trading Blocks + Signals',
+            'Volume & OBV',
+            'MACD',
+            'RSI',  # No ADX here anymore
+            'ADX Trend Analysis'  # New panel
+        ),
+        row_heights=[0.45, 0.12, 0.12, 0.12, 0.22]  # Adjusted heights
     )
     
-    # ==========================================
-    # PANEL 1: PRICE
-    # ==========================================
-    
+    # ==================== ROW 1: Price Chart (no changes) ====================
     # Bollinger Bands
     fig.add_trace(go.Scatter(
         x=dates, y=df['BB_Upper'],
         line=dict(color='rgba(147,197,253,0.5)', width=1),
-        name='BB Upper',
-        showlegend=True
+        name='BB Upper', showlegend=True
     ), row=1, col=1)
     
     fig.add_trace(go.Scatter(
         x=dates, y=df['BB_Lower'],
         line=dict(color='rgba(147,197,253,0.5)', width=1),
-        fill='tonexty',
-        fillcolor='rgba(59,130,246,0.05)',
-        name='BB Lower',
-        showlegend=True
+        fill='tonexty', fillcolor='rgba(59,130,246,0.05)',
+        name='BB Lower', showlegend=True
     ), row=1, col=1)
     
     # Candlestick
     fig.add_trace(go.Candlestick(
         x=dates,
         open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-        name='Price',
-        showlegend=True,
+        name='Price', showlegend=True,
         increasing=dict(line=dict(color='#ef4444')),
         decreasing=dict(line=dict(color='#22c55e'))
     ), row=1, col=1)
     
     # Moving Averages
     fig.add_trace(go.Scatter(
-        x=dates, y=df['MA20'], 
-        name='MA20',
+        x=dates, y=df['MA20'], name='MA20',
         line=dict(color='#fbbf24', dash='dot', width=1.5),
         showlegend=True
     ), row=1, col=1)
     
     fig.add_trace(go.Scatter(
-        x=dates, y=df['MA50'], 
-        name='MA50',
+        x=dates, y=df['MA50'], name='MA50',
         line=dict(color='#3b82f6', width=2),
         showlegend=True
     ), row=1, col=1)
     
     fig.add_trace(go.Scatter(
-        x=dates, y=df['MA200'], 
-        name='MA200',
+        x=dates, y=df['MA200'], name='MA200',
         line=dict(color='#374151', width=2.5),
         showlegend=True
     ), row=1, col=1)
     
-    # ==========================================
-    # TRADING BLOCKS (Original Simple Version)
-    # ==========================================
-    
+    # Trading Blocks
     if blocks:
-        colors = [
-            'rgba(255, 99, 71, 0.2)',   # Red
-            'rgba(255, 165, 0, 0.2)',    # Orange
-            'rgba(255, 215, 0, 0.2)'     # Yellow
-        ]
-        
+        colors = ['rgba(255, 99, 71, 0.2)', 'rgba(255, 165, 0, 0.2)', 'rgba(255, 215, 0, 0.2)']
         for idx, block in enumerate(blocks[:3]):
             color = colors[idx % len(colors)]
-            
             start_date = block['start'].strftime('%Y-%m-%d')
             end_date = block['end'].strftime('%Y-%m-%d')
             
-            # Draw rectangle for the block
             fig.add_shape(
-                type="rect",
-                x0=start_date,
-                x1=end_date,
-                y0=block['bot'],
-                y1=block['top'],
+                type='rect', x0=start_date, x1=end_date,
+                y0=block['bot'], y1=block['top'],
                 fillcolor=color,
                 line=dict(color='rgba(0,0,0,0.3)', width=1, dash='dash'),
                 row=1, col=1
             )
             
-            #Add label
             fig.add_annotation(
-                x=end_date,
-                y=block['top'] * 1.02,
-                text=f"Box {idx+1}<br>¥{block['bot']:.2f}-¥{block['top']:.2f}<br>{block['status']}",
-                showarrow=True,
-                arrowhead=2,
-                arrowsize=1,
-                ay=-30,
+                x=end_date, y=block['top'] * 1.02,
+                text=f"Box {idx+1}<br>{block['bot']:.2f}-{block['top']:.2f}<br>{block['status']}",
+                showarrow=True, arrowhead=2, arrowsize=1, ay=-30,
                 font=dict(size=9, color='black'),
                 bgcolor='rgba(255,255,255,0.85)',
-                bordercolor='gray',
-                borderwidth=1,
-                borderpad=3,
+                bordercolor='gray', borderwidth=1, borderpad=3,
                 row=1, col=1
             )
-  
-    # ==========================================
-    # PHASE SIGNALS
-    # ==========================================
     
+    # Signal markers
     acc = df[df['Signal_Accumulation']]
     if not acc.empty:
         fig.add_trace(go.Scatter(
-            x=acc.index.strftime('%Y-%m-%d'),
-            y=acc['Low'] * 0.98,
-            mode='markers', 
-            name='Phase 1: Accumulation',
+            x=acc.index.strftime('%Y-%m-%d'), y=acc['Low'] * 0.98,
+            mode='markers', name='Phase 1: Accumulation',
             marker=dict(color='#eab308', size=10, symbol='circle'),
             showlegend=True
         ), row=1, col=1)
@@ -587,22 +713,17 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
     sqz = df[df['Signal_Squeeze']]
     if not sqz.empty:
         fig.add_trace(go.Scatter(
-            x=sqz.index.strftime('%Y-%m-%d'),
-            y=sqz['High'] * 1.02,
-            mode='markers', 
-            name='Phase 2: Squeeze',
+            x=sqz.index.strftime('%Y-%m-%d'), y=sqz['High'] * 1.02,
+            mode='markers', name='Phase 2: Squeeze',
             marker=dict(color='#64748b', size=8, symbol='square'),
             showlegend=True
         ), row=1, col=1)
-
     
     launch = df[df['Signal_GoldenLaunch']]
     if not launch.empty:
         fig.add_trace(go.Scatter(
-            x=launch.index.strftime('%Y-%m-%d'),
-            y=launch['High'] * 1.05,
-            mode='markers', 
-            name='🚀 GOLDEN LAUNCH',
+            x=launch.index.strftime('%Y-%m-%d'), y=launch['High'] * 1.05,
+            mode='markers', name='⭐ GOLDEN LAUNCH',
             marker=dict(color='#ef4444', size=16, symbol='star',
                        line=dict(width=2, color='black')),
             showlegend=True
@@ -611,124 +732,231 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
     exits = df[df['Exit_MACDLead']]
     if not exits.empty:
         fig.add_trace(go.Scatter(
-            x=exits.index.strftime('%Y-%m-%d'),
-            y=exits['High'] * 1.01,
-            mode='markers',
-            name='Exit Signal',
+            x=exits.index.strftime('%Y-%m-%d'), y=exits['High'] * 1.01,
+            mode='markers', name='Exit Signal',
             marker=dict(color='#22c55e', size=10, symbol='x'),
             showlegend=True
         ), row=1, col=1)
     
-    # ==========================================
-    # PANEL 2: VOLUME + OBV
-    # ==========================================
-    
+    # ==================== ROW 2: VOLUME WITH NORMALIZED OBV ====================
+    # Volume bars
+    colors_volume = ['#ef4444' if df.loc[idx, 'Close'] > df.loc[idx, 'Open'] 
+                    else '#22c55e' for idx in df.index]
+
     fig.add_trace(go.Bar(
-        x=dates, 
-        y=df['Volume'],
-        name='Volume',
-        marker=dict(color='rgba(209, 213, 219, 0.5)'),
+        x=dates, y=df['Volume'], name='Volume',
+        marker=dict(color=colors_volume, opacity=0.7),
         showlegend=True
     ), row=2, col=1)
-    
-    if 'OBV' in df.columns:
+
+    # Volume-Scaled OBV - Normalized to Volume Scale
+    if 'Volume_Scaled_OBV' in df.columns:
+        # Scale OBV to match volume range for visibility
+        obv_min = df['Volume_Scaled_OBV'].min()
+        obv_max = df['Volume_Scaled_OBV'].max()
+        vol_min = df['Volume'].min()
+        vol_max = df['Volume'].max()
+        
         # Normalize OBV to volume scale
-        obv_normalized = df['OBV'] / df['OBV'].max() * df['Volume'].max()
+        df['OBV_Scaled_Display'] = (
+            (df['Volume_Scaled_OBV'] - obv_min) / (obv_max - obv_min) * 
+            (vol_max - vol_min) + vol_min
+        )
         
         fig.add_trace(go.Scatter(
-            x=dates, 
-            y=obv_normalized,
-            name='OBV (scaled)',
-            line=dict(color='#f97316', width=3),
-            showlegend=True
+            x=dates, y=df['OBV_Scaled_Display'], 
+            name='Vol-Scaled OBV',
+            line=dict(color='#f59e0b', width=3),
+            mode='lines',
+            showlegend=True,
+            hovertemplate='OBV: %{customdata:.2f}<extra></extra>',  # Show real OBV value
+            customdata=df['Volume_Scaled_OBV']  # Original values for hover
         ), row=2, col=1)
+
+
     
-    # ==========================================
-    # PANEL 3: MACD
-    # ==========================================
-    
+    # ==================== ROW 3: MACD (no changes) ====================
     colors = ['#ef4444' if val > 0 else '#22c55e' for val in df['MACD_Hist']]
-    
     fig.add_trace(go.Bar(
-        x=dates, 
-        y=df['MACD_Hist'],
-        name='MACD Histogram',
+        x=dates, y=df['MACD_Hist']*2.5, name='MACD Histogram (2.5)',
         marker=dict(color=colors),
         showlegend=True
     ), row=3, col=1)
     
     fig.add_trace(go.Scatter(
-        x=dates, 
-        y=df['MACD'],
-        name='MACD',
+        x=dates, y=df['MACD'], name='MACD',
         line=dict(color='#2563eb', width=2),
         showlegend=True
     ), row=3, col=1)
     
     fig.add_trace(go.Scatter(
-        x=dates, 
-        y=df['MACD_Signal'],
-        name='MACD Signal',
+        x=dates, y=df['MACD_Signal'], name='MACD Signal',
         line=dict(color='#f97316', width=2),
         showlegend=True
     ), row=3, col=1)
     
-    # ==========================================
-    # PANEL 4: RSI + ADX
-    # ==========================================
-    
+    # ==================== ROW 4: RSI ONLY (REMOVED ADX) ====================
     fig.add_trace(go.Scatter(
-        x=dates, 
-        y=df['RSI_14'],
-        name='RSI (14)',
+        x=dates, y=df['RSI_14'], name='RSI (14)',
         line=dict(color='#8b5cf6', width=2.5),
         showlegend=True
     ), row=4, col=1)
     
-    fig.add_hline(y=70, line_dash='dot', line_color='#dc2626', 
-                  annotation_text="Overbought (70)", row=4, col=1)
-    fig.add_hline(y=30, line_dash='dot', line_color='#16a34a', 
-                  annotation_text="Oversold (30)", row=4, col=1)
+    fig.add_hline(
+        y=70, line_dash='dot', line_color='#dc2626',
+        annotation_text='Overbought (70)',
+        row=4, col=1
+    )
     
-    if 'ADX' in df.columns:
+    fig.add_hline(
+        y=30, line_dash='dot', line_color='#16a34a',
+        annotation_text='Oversold (30)',
+        row=4, col=1
+    )
+    
+    # ==================== ROW 5: NEW ADX PANEL WITH LABELS ====================
+    # Raw ADX
+    fig.add_trace(go.Scatter(
+        x=dates, y=df['ADX'], name='ADX (Raw)',
+        line=dict(color='rgba(100,116,139,0.6)', width=2),
+        mode='lines+markers',
+        marker=dict(size=3, color='rgba(100,116,139,0.6)'),
+        showlegend=True
+    ), row=5, col=1)
+
+    # ADX LOWESS (smooth)
+    if 'ADX_LOWESS' in df.columns:
         fig.add_trace(go.Scatter(
-            x=dates, 
-            y=df['ADX'],
-            name='ADX (Trend Strength)',
-            line=dict(color='#10b981', width=2.5, dash='dash'),
+            x=dates, y=df['ADX_LOWESS'], name='ADX LOWESS',
+            line=dict(color='#10b981', width=3),
             showlegend=True
-        ), row=4, col=1)
+        ), row=5, col=1)
+
+    # ADX Bollinger Bands
+    if 'ADX_BB_Upper' in df.columns and 'ADX_BB_Lower' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=dates, y=df['ADX_BB_Upper'], name='ADX BB Upper',
+            line=dict(color='#ef4444', width=1.5, dash='dash'),
+            showlegend=True
+        ), row=5, col=1)
         
-        fig.add_hline(y=25, line_dash='dot', line_color='#6b7280',
-                     annotation_text="Strong Trend (25+)", row=4, col=1)
+        fig.add_trace(go.Scatter(
+            x=dates, y=df['ADX_BB_Lower'], name='ADX BB Lower',
+            line=dict(color='#ef4444', width=1.5, dash='dash'),
+            fill='tonexty', fillcolor='rgba(239,68,68,0.1)',
+            showlegend=True
+        ), row=5, col=1)
+
+    # ==================== ADD PATTERN LABELS ====================
+    if 'ADX_Pattern' in df.columns:
+        # Mark Bottoming (Reversal Setup)
+        bottoming = df[df['ADX_Pattern'] == 'Reversal Setup']
+        if not bottoming.empty:
+            fig.add_trace(go.Scatter(
+                x=bottoming.index.strftime('%Y-%m-%d'),
+                y=bottoming['ADX'] * 0.95,
+                mode='markers+text',
+                name='🔄 Bottoming',
+                marker=dict(color='#f59e0b', size=12, symbol='triangle-up'),
+                text='🔄',
+                textposition='bottom center',
+                showlegend=True
+            ), row=5, col=1)
+        
+        # Mark Accelerating (Breakout Mode)
+        accelerating = df[df['ADX_Pattern'] == 'Breakout Mode']
+        if not accelerating.empty:
+            fig.add_trace(go.Scatter(
+                x=accelerating.index.strftime('%Y-%m-%d'),
+                y=accelerating['ADX'] * 1.05,
+                mode='markers+text',
+                name='🚀 Accelerating',
+                marker=dict(color='#ef4444', size=12, symbol='triangle-up'),
+                text='🚀',
+                textposition='top center',
+                showlegend=True
+            ), row=5, col=1)
+        
+        # Mark Strong Trend
+        strong = df[df['ADX_Pattern'] == 'Strong Trend']
+        if not strong.empty:
+            fig.add_trace(go.Scatter(
+                x=strong.index.strftime('%Y-%m-%d'),
+                y=strong['ADX'],
+                mode='markers',
+                name='💪 Strong',
+                marker=dict(color='#10b981', size=8, symbol='diamond', opacity=0.5),
+                showlegend=True
+            ), row=5, col=1)
+        
+        # Mark Peaking (NEW - Warning!)
+        peaking = df[df['ADX_Pattern'] == 'Peaking (Warning)']
+        if not peaking.empty:
+            fig.add_trace(go.Scatter(
+                x=peaking.index.strftime('%Y-%m-%d'),
+                y=peaking['ADX'] * 1.08,
+                mode='markers+text',
+                name='⚠️ Peaking',
+                marker=dict(color='#f59e0b', size=14, symbol='triangle-down'),
+                text='⚠️',
+                textposition='top center',
+                showlegend=True
+            ), row=5, col=1)
+        
+        # Mark Reversing Down (NEW - Danger!)
+        reversing = df[df['ADX_Pattern'] == 'Reversing Down']
+        if not reversing.empty:
+            fig.add_trace(go.Scatter(
+                x=reversing.index.strftime('%Y-%m-%d'),
+                y=reversing['ADX'] * 1.05,
+                mode='markers+text',
+                name='🔻 Reversing',
+                marker=dict(color='#22c55e', size=14, symbol='triangle-down'),
+                text='🔻',
+                textposition='top center',
+                showlegend=True
+            ), row=5, col=1)
+
+
+    # Reference lines
+    fig.add_hline(
+        y=25, line_dash='dot', line_color='#6b7280',
+        annotation_text='Strong Trend (25)',
+        row=5, col=1
+    )
+
+    fig.add_hline(
+        y=20, line_dash='dot', line_color='#d1d5db',
+        annotation_text='Weak Trend (20)',
+        row=5, col=1
+    )
+
     
-    # ==========================================
-    # LAYOUT
-    # ==========================================
-    
+    # ==================== UPDATE LAYOUT ====================
     fig.update_layout(
-        height=1100,
+        height=1300,  # Increased from 1100
         template='plotly_white',
         xaxis_rangeslider_visible=False,
         hovermode='x unified',
-        xaxis4_title='Date',
-        yaxis1_title='Price (¥)',
+        xaxis5_title='Date',  # Changed from xaxis4 to xaxis5
+        yaxis1_title='Price',
         yaxis2_title='Volume',
         yaxis3_title='MACD',
-        yaxis4_title='RSI / ADX',
-        yaxis4_range=[0, 100],
+        yaxis4_title='RSI',
+        yaxis5_title='ADX',  # New axis
+        yaxis4_range=[0, 100],  # RSI range
+        yaxis5_range=[0, 60],   # ADX range
         showlegend=True,
         legend=dict(
-            orientation="v",
-            yanchor="top",
-            y=0.99,
-            xanchor="left",
-            x=1.01,
-            bgcolor="rgba(255, 255, 255, 0.9)",
-            bordercolor="gray",
+            orientation='v',
+            yanchor='top', y=0.99,
+            xanchor='left', x=1.01,
+            bgcolor='rgba(255, 255, 255, 0.9)',
+            bordercolor='gray',
             borderwidth=1
         )
     )
+
     
     return fig
 
@@ -2049,31 +2277,70 @@ with c1:
 with c2:
     st.button("Analyze", key='analyze_btn', on_click=analyze_ticker)
 
-# Search history
+# Around line 2054 - Replace the search history section:
+
+# Search history section - Fixed version
 history = data_manager.get_search_history()
-if history:
-    st.caption("Recent searches (click to load):")
-    hist_cols = st.columns(min(len(history), 5), gap='small')
-    for idx, item in enumerate(history):
-        col = hist_cols[idx % len(hist_cols)]
-        with col:
-            st.button(
-                item['ticker'],
-                key=f'history_{idx}',
-                on_click=set_active_ticker,
-                args=(item['ticker'],)
-            )
+
+if history and len(history) > 0:
+    # Create options list with empty default
+    history_options = [""] + [item['display'] for item in history[:10]]
+    
+    def on_history_change():
+        """Callback when history selection changes"""
+        selected = st.session_state.history_select
+        if selected and selected != "":
+            # Find the ticker for the selected display name
+            for item in history:
+                if item['display'] == selected:
+                    st.session_state.active_ticker = item['ticker']
+                    # Clear the selectbox back to empty
+                    st.session_state.history_select = ""
+                    break
+    
+    # Selectbox with callback
+    selected = st.selectbox(
+        "📜 Recent searches:",
+        options=history_options,
+        format_func=lambda x: "Select a recent search..." if x == "" else x,
+        key="history_select",
+        on_change=on_history_change
+    )
+
+
+
+
+
+
+
 
 # Main analysis
 if st.session_state.active_ticker:
     ticker = st.session_state.active_ticker.strip()
     
     with st.spinner(f"Loading {ticker}..."):
+        company_name = data_manager.update_search_history(ticker)
         stock_df = load_single_stock(ticker,date.today())
     
     if stock_df is None or stock_df.empty:
         st.error(f"No data found for {ticker}. Check ticker is valid.")
     else:
+        # Display stock header
+        st.markdown(f"""
+        <div style="
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        ">
+            <h3 style="color: white; margin: 0;">{company_name}</h1>
+            <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0 0; font-size: 14px;">
+                📈 {ticker} | Latest: ¥{stock_df['Close'].iloc[-1]:.2f}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+
         # Run analysis
         analysis_df = run_single_stock_analysis(stock_df)
         

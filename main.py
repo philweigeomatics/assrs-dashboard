@@ -104,6 +104,21 @@ def run_sector_backtest_v2():
         print("!! ERROR: Tushare token appears to be invalid. Exiting.")
         sys.exit(1)
 
+    # ==================== STEP 1.5: Update Stock Basic (NEW!) ====================
+    print("=" * 60)
+    print("STEP 1.5: Updating stock_basic table (company names)")
+    print("=" * 60)
+    try:
+        updated = data_manager.update_stock_basic_table()
+        if updated:
+            print("✅ stock_basic table updated with latest company names")
+        else:
+            print("ℹ️  stock_basic already up-to-date (updated today)")
+    except Exception as e:
+        print(f"⚠️  WARNING: Failed to update stock_basic: {e}")
+        print("   Continuing with other updates...")
+    print()
+
     # === STEP 2: Sync Stock Data ===
     print(f"\n{'='*60}")
     print(f"STEP 1: Syncing stock database")
