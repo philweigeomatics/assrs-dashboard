@@ -358,13 +358,14 @@ def update_search_history(ticker):
 
 
 
-def get_search_history():
+def get_search_history(limit=10):
     """Returns list of last 10 searched stocks with display names."""
     with sqlite3.connect(DB_NAME) as conn:
         create_history_table(conn)
         
         cursor = conn.execute(
-            "SELECT ticker, company_name FROM search_history ORDER BY timestamp DESC LIMIT 10"
+            "SELECT ticker, company_name FROM search_history ORDER BY timestamp DESC LIMIT ?",
+            (limit,) 
         )
         
         results = []
