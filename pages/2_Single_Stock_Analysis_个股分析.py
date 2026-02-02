@@ -245,7 +245,7 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
         return series.rolling(window=window, min_periods=3).apply(get_slope, raw=False)
 
     # Calculate ADX trend (5-day slope)
-    df_analysis['ADX_Slope'] = calculate_adx_trend(df_analysis['ADX'], window=5)
+    df_analysis['ADX_Slope'] = calculate_adx_trend(df_analysis['ADX_LOWESS'], window=5)
 
     # Calculate ADX acceleration (change in slope = 2nd derivative)
     df_analysis['ADX_Acceleration'] = df_analysis['ADX_Slope'] - df_analysis['ADX_Slope'].shift(1)
@@ -254,13 +254,13 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     adx_bottoming = (
         (df_analysis['ADX'] < 25)  # ADX is low (weak trend)
         & (df_analysis['ADX_Slope'] < 0)  # Still falling (but...)
-        & (df_analysis['ADX_Acceleration'] > 0.1)  # Deceleration slowing (getting less negative)
+        & (df_analysis['ADX_Acceleration'] > 0.15)  # Deceleration slowing (getting less negative)
         & (df_analysis['ADX_Slope'] > df_analysis['ADX_Slope'].shift(1))  # Slope improving
     )
 
     # ==================== PATTERN 2: ADX ACCELERATING (Breakout Coming) ====================
     adx_accelerating = (
-        (df_analysis['ADX_Slope'] > 0.3)  # Positive slope (trending up)
+        (df_analysis['ADX_Slope'] > 0.5)  # Positive slope (trending up)
         & (df_analysis['ADX_Acceleration'] > 0.1)  # Accelerating (getting steeper)
     )
     
@@ -275,7 +275,7 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     adx_peaking = (
         (df_analysis['ADX'] >= 30)  # ADX is high (strong trend)
         & (df_analysis['ADX_Slope'] > 0)  # Still rising BUT...
-        & (df_analysis['ADX_Acceleration'] < -0.1)  # Decelerating (slowing down)
+        & (df_analysis['ADX_Acceleration'] < -0.15)  # Decelerating (slowing down)
         & (df_analysis['ADX_Slope'] < df_analysis['ADX_Slope'].shift(1))  # Slope weakening
     )
 
@@ -337,8 +337,6 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
         )
     )
 
-    # Scenario 3: Bottoming
-    # Scenario 3: Bottoming - MACD below Signal, making a low, about to reverse
     # Scenario 3: Bottoming - MACD falling is slowing down, Signal catching up
     bottoming = (
         # Part 1: In BEARISH territory (MACD below Signal)
@@ -356,39 +354,97 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     
     )
 
+    # Scenario 4: Momentum building (requires 2 consecutive days of acceleration)
 
-
-
-    # Scenario 4: Momentum building
-    momentum_building = (
-        (df_analysis['MACD_Gap'] > 0)
-        & (df_analysis['MACD_Gap'].shift(1) > 0)
-        & (df_analysis['MACD_Gap'].shift(2) > 0)
-        & (df_analysis['MACD_Momentum_Pct'] > 0.8)           # MACD rising (any positive %)
-        & (df_analysis['MACD_Momentum_Pct'].shift(1) < 0.40)  # Was growing <2% yesterday
-        & (df_analysis['MACD_Hist'] > df_analysis['MACD_Hist'].shift(1))
+    # Add helper columns (in MACD calculations section)
+    df_analysis['MACD_Gap_Ratio'] = df_analysis['MACD_Gap'] / df_analysis['MACD_Signal'].abs()
+    df_analysis['MACD_Gap_Ratio_Change'] = (
+        df_analysis['MACD_Gap_Ratio'] - df_analysis['MACD_Gap_Ratio'].shift(1)
     )
+
+    momentum_building = (
+        (df_analysis['MACD_Gap'] > 0) &           # In bullish zone
+        (df_analysis['MACD_Gap'].shift(1) > 0) &  # Was bullish yesterday
+        (df_analysis['MACD_Gap'].shift(2) > 0) &  # Was bullish 2 days ago
+        (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1)) &  # Gap increasing TODAY  
+        # Gap ratio increasing TODAY (e.g., 20% → 30%)
+        (df_analysis['MACD_Gap_Ratio'] > df_analysis['MACD_Gap_Ratio'].shift(1)) &
+        
+        # Gap ratio was ALSO increasing YESTERDAY (e.g., 15% → 20%)
+        (df_analysis['MACD_Gap_Ratio'].shift(1) > df_analysis['MACD_Gap_Ratio'].shift(2)) &
+        
+        # Both days had meaningful acceleration (>10% each day)
+        (df_analysis['MACD_Gap_Ratio_Change'] > 0.10) &
+        (df_analysis['MACD_Gap_Ratio_Change'].shift(1) > 0.10) &
+        
+        # MACD itself is rising (not just Signal falling)
+        (df_analysis['MACD'] > df_analysis['MACD'].shift(1))
+    )
+
 
     macd_trigger = (classic_crossover | approaching_from_below | 
                     bottoming | momentum_building)
 
-    # ==================== STORE SCENARIO COLUMNS (NEW) ====================
+
+    # ==================== An MACD Exit Scenario : Peaking (BEARISH WARNING) ====================
+    peaking = (
+        (df_analysis['MACD_Gap'] > 0)  # MACD above Signal (still bullish)
+        & (df_analysis['MACD'].shift(1) > df_analysis['MACD'].shift(2))  # Was rising
+        & (df_analysis['MACD'] < df_analysis['MACD'].shift(1))  # Now falling (PEAK!)
+        & (df_analysis['MACD_Momentum_Pct'] < df_analysis['MACD_Momentum_Pct'].shift(1))  # Decelerating
+    )
+
+    # ==================== NEW: Scenario 6: MACD Bearish Crossover (DOWNWARD CROSS) ====================
+    bearish_crossover = (
+        (df_analysis['MACD_Gap'].shift(1) > 0) &  # Was above Signal (bullish)
+        (df_analysis['MACD_Gap'] <= 0) &          # Crossed below Signal (bearish)
+        (df_analysis['MACD'].shift(1) > 0)        # Was in positive territory (stronger signal)
+    )
+
+    # ================= STORE SCENARIO COLUMNS (NEW) ====================
     df_analysis['MACD_ClassicCrossover'] = classic_crossover
     df_analysis['MACD_Approaching'] = approaching_from_below
     df_analysis['MACD_Bottoming'] = bottoming
     df_analysis['MACD_MomentumBuilding'] = momentum_building
     df_analysis['MACD_Trigger'] = macd_trigger
+    df_analysis['MACD_Peaking'] = peaking   
+    df_analysis['MACD_BearishCrossover'] = bearish_crossover
 
-    # ==================== SIMPLE TREND DETECTION: SMOOTHED MACD ====================
-    # Smooth MACD line to detect large trends
-    df_analysis['MACD_Smooth'] = df_analysis['MACD'].rolling(window=4, center=False).mean()
+    # ==================== SIMPLE TREND DETECTION: USE MACD SIGNAL LINE ====================
+    # Use the MACD Signal line as the smoothed trend (it's already an EMA of MACD)
+    # Calculate trend direction based on Signal line slope
+    df_analysis['MACD_Signal_Slope'] = df_analysis['MACD_Signal'] - df_analysis['MACD_Signal'].shift(2)
 
-    # Large trend based on smoothed MACD slope
-    df_analysis['MACD_Smooth_Slope'] = df_analysis['MACD_Smooth'] - df_analysis['MACD_Smooth'].shift(5)
+    # Define large trends based on Signal line direction
+    df_analysis['Large_Uptrend'] = df_analysis['MACD_Signal_Slope'] > 0
+    df_analysis['Large_Downtrend'] = df_analysis['MACD_Signal_Slope'] < 0
 
-    # Define large trends
-    df_analysis['Large_Uptrend'] = df_analysis['MACD_Smooth_Slope'] > 0
-    df_analysis['Large_Downtrend'] = df_analysis['MACD_Smooth_Slope'] < 0
+
+    # ==================== RSI DYNAMIC PERCENTILE THRESHOLDS ====================
+    # Calculate RSI percentiles based on last 252 trading days (1 year)
+    lookback_window = min(252, len(df_analysis))  # Use 1 year or available data
+
+    if 'RSI_14' in df_analysis.columns:
+        # Rolling percentile calculation
+        df_analysis['RSI_P10'] = df_analysis['RSI_14'].rolling(
+            window=lookback_window, min_periods=60
+        ).quantile(0.10)  # Bottom 10%
+        
+        df_analysis['RSI_P90'] = df_analysis['RSI_14'].rolling(
+            window=lookback_window, min_periods=60
+        ).quantile(0.90)  # Top 10%
+        
+        # Bottoming: Must be BOTH in bottom 10% AND <= 30
+        df_analysis['RSI_Bottoming'] = (
+            (df_analysis['RSI_14'] <= df_analysis['RSI_P10']) &  # In bottom 10% for THIS stock
+            (df_analysis['RSI_14'] <= 30)  # AND below absolute threshold
+        )
+        
+        # Peaking: Must be BOTH in top 10% AND >= 70
+        df_analysis['RSI_Peaking'] = (
+            (df_analysis['RSI_14'] >= df_analysis['RSI_P90']) &  # In top 10% for THIS stock
+            (df_analysis['RSI_14'] >= 70)  # AND above absolute threshold
+        )
 
     # ==================== FINAL GOLDEN LAUNCH ====================
     launch = (
@@ -432,7 +488,55 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     exit_signal = macd_bearish_cross | ma_cross_down
 
     df_analysis.loc[exit_signal, 'Exit_MACDLead'] = True
-    
+
+    # ==================== SCORING SYSTEM ====================
+    # Initialize score column
+    df_analysis['Signal_Score'] = 0
+
+    # POSITIVE INDICATORS (+1 each)
+    if 'ADX_Bottoming' in df_analysis.columns:
+        df_analysis.loc[df_analysis['ADX_Bottoming'], 'Signal_Score'] += 1
+
+    if 'ADX_Accelerating' in df_analysis.columns:
+        df_analysis.loc[df_analysis['ADX_Accelerating'], 'Signal_Score'] += 1
+
+    if 'RSI_Bottoming' in df_analysis.columns:
+        df_analysis.loc[df_analysis['RSI_Bottoming'], 'Signal_Score'] += 1
+
+    if 'MACD_Bottoming' in df_analysis.columns:
+        df_analysis.loc[df_analysis['MACD_Bottoming'], 'Signal_Score'] += 1
+
+    if 'MACD_Approaching' in df_analysis.columns:
+        df_analysis.loc[df_analysis['MACD_Approaching'], 'Signal_Score'] += 1
+
+    if 'MACD_ClassicCrossover' in df_analysis.columns:
+        df_analysis.loc[df_analysis['MACD_ClassicCrossover'], 'Signal_Score'] += 1
+
+    if 'MACD_MomentumBuilding' in df_analysis.columns:
+        df_analysis.loc[df_analysis['MACD_MomentumBuilding'], 'Signal_Score'] += 1
+
+    if 'Signal_Accumulation' in df_analysis.columns:
+        df_analysis.loc[df_analysis['Signal_Accumulation'], 'Signal_Score'] += 1
+
+    # NEGATIVE INDICATORS (-1 each)
+    if 'MACD_Peaking' in df_analysis.columns:
+        df_analysis.loc[df_analysis['MACD_Peaking'], 'Signal_Score'] -= 1
+
+    if 'MACD_BearishCrossover' in df_analysis.columns:
+        df_analysis.loc[df_analysis['MACD_BearishCrossover'], 'Signal_Score'] -= 1
+
+    if 'RSI_Peaking' in df_analysis.columns:
+        df_analysis.loc[df_analysis['RSI_Peaking'], 'Signal_Score'] -= 1
+
+    if 'ADX_Peaking' in df_analysis.columns:
+        df_analysis.loc[df_analysis['ADX_Peaking'], 'Signal_Score'] -= 1
+
+    if 'ADX_Reversing' in df_analysis.columns:
+        df_analysis.loc[df_analysis['ADX_Reversing'], 'Signal_Score'] -= 1
+
+    # Calculate cumulative score (optional - for trend tracking)
+    df_analysis['Cumulative_Score'] = df_analysis['Signal_Score'].cumsum()
+
     return df_analysis
 
 def calculate_adaptive_parameters_percentile(df, lookback_days=30):
@@ -681,7 +785,7 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
     Blocks drawn as horizontal rectangles during their active period.
     """
     df = analysis_df.tail(250).sort_index()
-    dates = df.index.strftime('%Y-%m-%d')
+    dates = df.index.strftime('%Y-%m-%d').tolist()
     
     # ==================== CHANGE: 4 rows -> 5 rows ====================
     fig = make_subplots(
@@ -694,9 +798,9 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
             'Volume & OBV',
             'MACD',
             'RSI',  # No ADX here anymore
-            'ADX Trend Analysis'  # New panel
+            'ADX Trend Analysis',  
         ),
-        row_heights=[0.45, 0.12, 0.22, 0.08, 0.22]  # Adjusted heights
+        row_heights=[0.45, 0.12, 0.22, 0.12, 0.22]  # Adjusted heights
     )
     
     # ==================== ROW 1: Price Chart (no changes) ====================
@@ -869,6 +973,7 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
         showlegend=True
     ), row=3, col=1)
 
+
     # Zero line
     fig.add_hline(y=0, line_dash='solid', line_color='gray', line_width=1, row=3, col=1)
 
@@ -886,43 +991,75 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
             return 'Bottoming'
         elif row.get('MACD_MomentumBuilding', False):
             return 'Momentum'
+        elif row.get('MACD_Peaking', False):
+            return 'Peaking'
+        elif row.get('MACD_BearishCrossover', False):
+            return 'Bear Cross'
         else:
             return None
 
-    # Apply labels
-    if 'MACD_Trigger' in df.columns:
+    # Apply labeling
+    if 'MACD_Trigger' in df.columns or 'MACD_Peaking' in df.columns or 'MACD_BearishCrossover' in df.columns:
         df['MACD_Scenario_Label'] = df.apply(get_macd_scenario_label, axis=1)
         
-        # Filter to only MACD triggers
-        macd_signals = df[df['MACD_Trigger'] == True].copy()
+        # BULLISH signals
+        macd_signals = df[df.get('MACD_Trigger', False) == True].copy()
         
+        # BEARISH warnings
+        macd_peaking = df[df.get('MACD_Peaking', False) == True].copy()
+        macd_bearish = df[df.get('MACD_BearishCrossover', False) == True].copy()  # NEW
+        
+        # Plot bullish signals (existing code)
         if not macd_signals.empty:
-            # Color coding by scenario
             colors_map = {
-                'Crossover': '#10b981',      # Green
-                'Approaching': '#3b82f6',    # Blue
-                'Bottoming': '#f59e0b',     # Orange
-                'Momentum': '#ef4444'        # Red
+                'Crossover': '#10b981',
+                'Approaching': '#3b82f6',
+                'Bottoming': '#f59e0b',
+                'Momentum': '#ef4444'
             }
-            
             marker_colors = [colors_map.get(label, '#6b7280') for label in macd_signals['MACD_Scenario_Label']]
             
             fig.add_trace(go.Scatter(
                 x=macd_signals.index.strftime('%Y-%m-%d'),
-                y=macd_signals['MACD'] * 1.12,  # Position above MACD line
+                y=macd_signals['MACD'] * 1.12,
                 mode='markers+text',
                 name='MACD Triggers',
-                marker=dict(
-                    color=marker_colors,
-                    size=12,
-                    symbol='circle',
-                    line=dict(width=2, color='white')
-                ),
+                marker=dict(color=marker_colors, size=12, symbol='circle', line=dict(width=2, color='white')),
                 text=macd_signals['MACD_Scenario_Label'],
                 textposition='top center',
                 textfont=dict(size=9, color='black'),
                 showlegend=True,
                 hovertemplate='%{text}<br>MACD: %{y:.4f}<extra></extra>'
+            ), row=3, col=1)
+        
+        # Plot PEAKING warnings (existing code)
+        if not macd_peaking.empty:
+            fig.add_trace(go.Scatter(
+                x=macd_peaking.index.strftime('%Y-%m-%d'),
+                y=macd_peaking['MACD'] * 1.15,
+                mode='markers+text',
+                name='MACD Peaking',
+                marker=dict(color="#ffee00", size=12, symbol='triangle-down', line=dict(width=2, color="#000000")),
+                text='',
+                textposition='top center',
+                textfont=dict(size=12, color='#dc2626'),
+                showlegend=True,
+                hovertemplate='<b>Peaking Warning</b><br>MACD: %{y:.4f}<extra></extra>'
+            ), row=3, col=1)
+        
+        # ==================== NEW: Plot BEARISH CROSSOVER (strong exit signal) ====================
+        if not macd_bearish.empty:
+            fig.add_trace(go.Scatter(
+                x=macd_bearish.index.strftime('%Y-%m-%d'),
+                y=macd_bearish['MACD'] * 0.85,  # Position below MACD line
+                mode='markers+text',
+                name='Bearish Cross',
+                marker=dict(color="#f30000", size=12, symbol='triangle-down', line=dict(width=2, color='#7f1d1d')),
+                text='',
+                textposition='top center',
+                textfont=dict(size=14, color='#991b1b'),
+                showlegend=True,
+                hovertemplate='<b>Bearish Crossover</b><br>MACD: %{y:.4f}<extra></extra>'
             ), row=3, col=1)
 
     # ==================== BACKGROUND SHADING: LARGE TRENDS ONLY ====================
@@ -963,24 +1100,82 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
                     )
 
 
-    # ==================== ROW 4: RSI ONLY (REMOVED ADX) ====================
+    # ==================== ROW 4: RSI WITH DYNAMIC PERCENTILE ZONES (CHINESE STYLE) ====================
+
+    
+    # Main RSI line
     fig.add_trace(go.Scatter(
-        x=dates, y=df['RSI_14'], name='RSI (14)',
-        line=dict(color='#8b5cf6', width=2.5),
+        x=dates, 
+        y=df['RSI_14'],
+        name='RSI(14)',
+        line=dict(color='#1f2937', width=2.5),
         showlegend=True
     ), row=4, col=1)
+        
+    # ==================== MARK EXTREME RSI EVENTS ====================
+    # Bottom 10% - Potential buying opportunity (green markers below)
+    if 'RSI_Bottoming' in df.columns:
+        rsi_bottoming = df[df['RSI_Bottoming'] == True].copy()
+        if not rsi_bottoming.empty:
+            fig.add_trace(go.Scatter(
+                x=rsi_bottoming.index.strftime('%Y-%m-%d'),
+                y=rsi_bottoming['RSI_14'] * 0.92,  # Position below RSI line
+                mode='markers',
+                name='🔵 RSI 极低 (P10)',
+                marker=dict(color='#16a34a', size=10, symbol='triangle-up', 
+                        line=dict(width=1, color='#15803d')),
+                showlegend=True,
+                hovertemplate='<b>RSI Bottoming</b><br>RSI: %{y:.1f}<extra></extra>'
+            ), row=4, col=1)
     
+    # Top 10% - Potential selling opportunity (red markers above)
+    if 'RSI_Peaking' in df.columns:
+        rsi_peaking = df[df['RSI_Peaking'] == True].copy()
+        if not rsi_peaking.empty:
+            fig.add_trace(go.Scatter(
+                x=rsi_peaking.index.strftime('%Y-%m-%d'),
+                y=rsi_peaking['RSI_14'] * 1.08,  # Position above RSI line
+                mode='markers',
+                name='🔴 RSI 极高 (P90)',
+                marker=dict(color='#dc2626', size=10, symbol='triangle-down',
+                        line=dict(width=1, color='#991b1b')),
+                showlegend=True,
+                hovertemplate='<b>RSI Peaking</b><br>RSI: %{y:.1f}<extra></extra>'
+            ), row=4, col=1)
+    
+    
+    # Reference lines
+    fig.add_hline(y=50, line_dash='solid', line_color='#6b7280', line_width=2,
+                annotation_text='中性 50', annotation_position='right',
+                row=4, col=1)
+
+    # 70 line (Overbought)
     fig.add_hline(
-        y=70, line_dash='dot', line_color='#dc2626',
-        annotation_text='Overbought (70)',
+        y=70, 
+        line_dash='dash', 
+        line_color='#dc2626', 
+        line_width=1.5,
+        annotation_text='超买 70',
+        annotation_position='right',
         row=4, col=1
     )
-    
+
+    # 30 line (Oversold)
     fig.add_hline(
-        y=30, line_dash='dot', line_color='#16a34a',
-        annotation_text='Oversold (30)',
+        y=30, 
+        line_dash='dash', 
+        line_color='#16a34a', 
+        line_width=1.5,
+        annotation_text='超卖 30',
+        annotation_position='right',
         row=4, col=1
     )
+
+    
+    # Update y-axis
+    fig.update_yaxes(title_text='RSI', range=[0, 100], row=4, col=1)
+
+
     
     # ==================== ROW 5: NEW ADX PANEL WITH LABELS ====================
     # Raw ADX
@@ -1102,30 +1297,66 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
     
     # ==================== UPDATE LAYOUT ====================
     fig.update_layout(
-        height=1300,  # Increased from 1100
+        height=1300,  # ← Increased from 1300 to accommodate new panel
         template='plotly_white',
         xaxis_rangeslider_visible=False,
         hovermode='x unified',
-        xaxis5_title='Date',  # Changed from xaxis4 to xaxis5
+        xaxis5_title='Date',  # ← Changed from xaxis5 to xaxis6
         yaxis1_title='Price',
         yaxis2_title='Volume',
         yaxis3_title='MACD',
         yaxis4_title='RSI',
-        yaxis5_title='ADX',  # New axis
-        yaxis4_range=[0, 100],  # RSI range
-        yaxis5_range=[0, 60],   # ADX range
+        yaxis5_title='ADX',
+        yaxis4_range=[0, 100],
+        yaxis5_range=[0, 60],
         showlegend=True,
         legend=dict(
-            orientation='v',
-            yanchor='top', y=0.99,
-            xanchor='left', x=1.01,
-            bgcolor='rgba(255, 255, 255, 0.9)',
-            bordercolor='gray',
+            orientation="v",
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=1.01,
+            bgcolor="rgba(255, 255, 255, 0.9)",
+            bordercolor="gray",
             borderwidth=1
         )
     )
 
-    
+
+    # Smart tick selection
+    total_dates = len(dates)
+
+    if total_dates <= 30:
+        tick_interval = 1  # Show all dates
+    elif total_dates <= 60:
+        tick_interval = 3  # Show every 3rd
+    elif total_dates <= 120:
+        tick_interval = 5  # Show every 5th
+    else:
+        tick_interval = max(5, total_dates // 20)  # Show ~20 ticks
+
+    # Select dates to display
+    tick_vals = dates[::tick_interval]
+    tick_text = tick_vals
+
+    # Update only the bottom x-axis with labels
+    fig.update_xaxes(
+        type='category',
+        tickangle=-45,
+        tickmode='array',
+        tickvals=tick_vals,
+        ticktext=tick_text,
+        row=5, col=1
+    )
+
+    # Hide tick labels on upper panels (but keep grid aligned)
+    for row in range(1, 5):
+        fig.update_xaxes(
+            type='category',
+            showticklabels=False,
+            row=row, col=1
+        )
+
     return fig
 
 
