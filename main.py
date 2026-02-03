@@ -1,7 +1,7 @@
 import pandas as pd
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import data_manager_v2 as dm
+import data_manager as dm
 from assrs_logic_V2_enhanced import calculate_regime_scores
 import time
 import sys
