@@ -302,6 +302,9 @@ def insert_data(ticker, df):
     df_to_insert.reset_index(inplace=True)
     df_to_insert['Date'] = df_to_insert['Date'].astype(str)
     
+    # Normalize Date to string format YYYY-MM-DD
+    df_to_insert['Date'] = pd.to_datetime(df_to_insert['Date']).dt.strftime('%Y-%m-%d')
+
     records = df_to_insert.to_dict('records')
     db.insert_records(ticker, records, upsert=True)
 
@@ -395,7 +398,7 @@ def get_all_stock_data_from_db():
             
             df = db.read_table(ticker)
             if not df.empty:
-                df['Date'] = pd.to_datetime(df['Date'])
+                df['Date'] = pd.to_datetime(df['Date'], format='mixed', errors='coerce')
                 df = df.set_index('Date').sort_index()
                 
                 missing_cols_db = [col for col in REQUIRED_COLUMNS if col not in df.columns]
@@ -419,7 +422,7 @@ def get_single_stock_data_from_db(ticker):
         
         df = db.read_table(ticker)
         if not df.empty:
-            df['Date'] = pd.to_datetime(df['Date'])
+            df['Date'] = pd.to_datetime(df['Date'], format='mixed', errors='coerce')
             df = df.set_index('Date').sort_index()
             
             missing_cols_db = [col for col in REQUIRED_COLUMNS if col not in df.columns]
@@ -583,7 +586,7 @@ def load_ppi_data_from_db():
             
             df = db.read_table(table_name)
             if not df.empty:
-                df['Date'] = pd.to_datetime(df['Date'])
+                df['Date'] = pd.to_datetime(df['Date'], format='mixed', errors='coerce')
                 df = df.set_index('Date').sort_index()
                 df.rename(columns={'Norm_Vol_Metric': 'Volume_Metric'}, inplace=True)
                 all_ppi_data[sector_name] = df
@@ -700,7 +703,7 @@ def save_signals_to_cache(df, scan_date, scan_duration):
         
         # Save signals
         records = df_to_save.to_dict('records')
-        db.insert_records('daily_signals', records)
+        db.insert_records('daily_signals', records, upsert=True)
         
         # Save metadata
         opportunities = len(df[df['Type'] == '🚀 Opportunity'])

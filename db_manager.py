@@ -85,6 +85,11 @@ class DatabaseManager:
         """
         if isinstance(records, dict):
             records = [records]
+
+        # Normalize Date Fields to YYYY-MM-DD format
+        for record in records:
+            if 'Date' in record:
+                record['Date'] = pd.to_datetime(record['Date'], format='mixed', errors='coerce').strftime('%Y-%m-%d')
         
         if self.use_supabase:
             # Batch insert in chunks of 1000 to avoid Supabase limits
@@ -127,31 +132,59 @@ class DatabaseManager:
     def delete_all_records(self, table_name):
         """Delete all records from a table"""
         if self.use_supabase:
-            # Supabase requires a condition, use a workaround
-            # First get all ids, then delete in batches
             try:
-                response = supabase_client.table(table_name).select('*').execute()
-                if response.data:
-                    # For tables with 'id' column
-                    if 'id' in response.data[0]:
-                        for record in response.data:
-                            supabase_client.table(table_name).delete().eq('id', record['id']).execute()
-                    # For tables with other primary keys
-                    elif 'ts_code' in response.data[0]:
-                        for record in response.data:
-                            supabase_client.table(table_name).delete().eq('ts_code', record['ts_code']).execute()
-                    elif 'ticker' in response.data[0]:
-                        for record in response.data:
-                            supabase_client.table(table_name).delete().eq('ticker', record['ticker']).execute()
-                    elif 'scan_date' in response.data[0]:
-                        for record in response.data:
-                            supabase_client.table(table_name).delete().eq('scan_date', record['scan_date']).execute()
-            except:
-                pass
+                print(f"   Fetching records from {table_name}...")
+                response = supabase_client.table(table_name).select('*').limit(10000).execute()
+                
+                print(f"   Found {len(response.data)} records")
+                
+                if not response.data:
+                    print(f"   No data found!")
+                    return
+                
+                first_record = response.data[0]
+                print(f"   First record keys: {list(first_record.keys())}")
+                
+                # Determine primary key
+                if 'Date' in first_record:
+                    pk_column = 'Date'
+                elif 'id' in first_record:
+                    pk_column = 'id'
+                elif 'tscode' in first_record:
+                    pk_column = 'tscode'
+                elif 'ticker' in first_record:
+                    pk_column = 'ticker'
+                elif 'scan_date' in first_record:
+                    pk_column = 'scan_date'
+                else:
+                    print(f"   ❌ Cannot find primary key. Available keys: {list(first_record.keys())}")
+                    return
+                
+                print(f"   Using primary key: {pk_column}")
+                print(f"   Deleting {len(response.data)} records...")
+                
+                # Delete one by one with confirmation
+                deleted_count = 0
+                for i, record in enumerate(response.data):
+                    try:
+                        delete_response = supabase_client.table(table_name).delete().eq(pk_column, record[pk_column]).execute()
+                        deleted_count += 1
+                        if (i + 1) % 100 == 0:
+                            print(f"   Deleted {i + 1}/{len(response.data)}...")
+                    except Exception as e:
+                        print(f"   ❌ Failed to delete record {i}: {e}")
+                
+                print(f"   ✅ Deleted {deleted_count} records")
+                
+            except Exception as e:
+                print(f"   ❌ Error in delete_all_records: {e}")
+                import traceback
+                traceback.print_exc()
         else:
             with sqlite3.connect(self.dbname) as conn:
-                conn.execute(f'DELETE FROM "{table_name}"')
+                conn.execute(f"DELETE FROM {table_name}")
                 conn.commit()
+
     
     def execute_raw_sql(self, query, params=None):
         """Execute raw SQL (SQLite only)"""
