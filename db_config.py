@@ -20,6 +20,6 @@ else:
     SUPABASE_URL = "https://cttiqtuqywekemlaexop.supabase.co"
     SUPABASE_KEY = os.environ.get(
         "SUPABASE_SECRET_KEY",
-        "sb_secret_-1qTazqAH3SGE4aAqU69dA_e0Hyspqg"
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN0dGlxdHVxeXdla2VtbGFleG9wIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MDA4ODQ0NywiZXhwIjoyMDg1NjY0NDQ3fQ.WDo6JqlpCl45N02_dc4nZow21Q2Qr513r55z4eDcvnI"
     )
     print(f"   - Supabase URL: {SUPABASE_URL}")
