@@ -300,7 +300,6 @@ def insert_data(ticker, df):
     df_to_insert = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
     df_to_insert.index.name = 'Date'
     df_to_insert.reset_index(inplace=True)
-    df_to_insert['Date'] = df_to_insert['Date'].astype(str)
     
     # Normalize Date to string format YYYY-MM-DD
     df_to_insert['Date'] = pd.to_datetime(df_to_insert['Date']).dt.strftime('%Y-%m-%d')
@@ -553,7 +552,6 @@ def save_ppi_data_to_db(all_ppi_data):
         df_to_insert = df_to_insert[['Open', 'High', 'Low', 'Close', 'Norm_Vol_Metric']]
         df_to_insert.index.name = 'Date'
         df_to_insert.reset_index(inplace=True)
-        df_to_insert['Date'] = df_to_insert['Date'].astype(str)
         
         records = df_to_insert.to_dict('records')
         

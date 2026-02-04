@@ -1,7 +1,7 @@
 import os
 
 # Simple binary detection: local or production
-IS_LOCAL = os.environ.get('USER') == "phil-f" or os.environ.get('USERNAME') == "phil-f"
+IS_LOCAL = os.environ.get('USER') == "phil" or os.environ.get('USERNAME') == "phil"
 
 # Local = SQLite, Not Local = Supabase
 USE_SQLITE = IS_LOCAL

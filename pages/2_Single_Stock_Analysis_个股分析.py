@@ -12,6 +12,7 @@ import ta
 import data_manager
 from datetime import date
 from scipy import stats
+from analysis_engine import run_single_stock_analysis
 
 
 
@@ -63,533 +64,579 @@ def detect_price_trend(df, window=10):
     return df
 
 
-def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Advanced 3-Phase Analysis:
-    Phase 1: Accumulation (OBV rising)
-    Phase 2: Squeeze (BB width contraction)
-    Phase 3: Golden Launch (ADX + MACD trigger)
-    """
-    df_analysis = df.copy()
+# def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
+#     """
+#     Advanced 3-Phase Analysis:
+#     Phase 1: Accumulation (OBV rising)
+#     Phase 2: Squeeze (BB width contraction)
+#     Phase 3: Golden Launch (ADX + MACD trigger)
+#     """
+#     df_analysis = df.copy()
     
-    if not isinstance(df_analysis.index, pd.DatetimeIndex):
-        df_analysis.index = pd.to_datetime(df_analysis.index)
-    df_analysis = df_analysis.sort_index()
+#     if not isinstance(df_analysis.index, pd.DatetimeIndex):
+#         df_analysis.index = pd.to_datetime(df_analysis.index)
+#     df_analysis = df_analysis.sort_index()
     
-    # Moving Averages
-    df_analysis['MA20'] = ta.trend.sma_indicator(df_analysis['Close'], window=20)
-    df_analysis['MA50'] = ta.trend.sma_indicator(df_analysis['Close'], window=50)
-    df_analysis['MA200'] = ta.trend.sma_indicator(df_analysis['Close'], window=200)
+#     # Moving Averages
+#     df_analysis['MA20'] = ta.trend.sma_indicator(df_analysis['Close'], window=20)
+#     df_analysis['MA50'] = ta.trend.sma_indicator(df_analysis['Close'], window=50)
+#     df_analysis['MA200'] = ta.trend.sma_indicator(df_analysis['Close'], window=200)
     
-    # Bollinger Bands
-    bb = ta.volatility.BollingerBands(df_analysis['Close'], window=20, window_dev=2)
-    df_analysis['BB_Upper'] = bb.bollinger_hband()
-    df_analysis['BB_Lower'] = bb.bollinger_lband()
-    df_analysis['BB_Width'] = (df_analysis['BB_Upper'] - df_analysis['BB_Lower']) / df_analysis['Close']
+#     # Bollinger Bands
+#     bb = ta.volatility.BollingerBands(df_analysis['Close'], window=20, window_dev=2)
+#     df_analysis['BB_Upper'] = bb.bollinger_hband()
+#     df_analysis['BB_Lower'] = bb.bollinger_lband()
+#     df_analysis['BB_Width'] = (df_analysis['BB_Upper'] - df_analysis['BB_Lower']) / df_analysis['Close']
     
-    # MACD
-    macd = ta.trend.MACD(df_analysis['Close'])
-    df_analysis['MACD'] = macd.macd()
-    df_analysis['MACD_Signal'] = macd.macd_signal()
-    df_analysis['MACD_Hist'] = macd.macd_diff()
+#     # MACD
+#     macd = ta.trend.MACD(df_analysis['Close'])
+#     df_analysis['MACD'] = macd.macd()
+#     df_analysis['MACD_Signal'] = macd.macd_signal()
+#     df_analysis['MACD_Hist'] = macd.macd_diff()
     
-    # RSI
-    df_analysis['RSI_14'] = ta.momentum.RSIIndicator(df_analysis['Close'], window=14).rsi()
+#     # RSI
+#     df_analysis['RSI_14'] = ta.momentum.RSIIndicator(df_analysis['Close'], window=14).rsi()
     
-    # ADX
-    adx = ta.trend.ADXIndicator(df_analysis['High'], df_analysis['Low'], df_analysis['Close'], window=14)
-    df_analysis['ADX'] = adx.adx()
+#     # ADX
+#     adx = ta.trend.ADXIndicator(df_analysis['High'], df_analysis['Low'], df_analysis['Close'], window=14)
+#     df_analysis['ADX'] = adx.adx()
 
-    # ==================== ADD ADX SMOOTHING (NEW) ====================
-    try:
-        from scipy.signal import savgol_filter
-        # LOWESS smoothing
-        df_analysis['ADX_LOWESS'] = savgol_filter(
-            df_analysis['ADX'].fillna(method='ffill'),
-            window_length=11,
-            polyorder=3
-        )
-    except:
-        # Fallback to EMA if scipy not available
-        df_analysis['ADX_LOWESS'] = df_analysis['ADX'].ewm(span=9, adjust=False).mean()
+#     # ==================== ADD ADX SMOOTHING (NEW) ====================
+#     try:
+#         from scipy.signal import savgol_filter
+#         # LOWESS smoothing
+#         df_analysis['ADX_LOWESS'] = savgol_filter(
+#             df_analysis['ADX'].fillna(method='ffill'),
+#             window_length=11,
+#             polyorder=3
+#         )
+#     except:
+#         # Fallback to EMA if scipy not available
+#         df_analysis['ADX_LOWESS'] = df_analysis['ADX'].ewm(span=9, adjust=False).mean()
 
-    # Bollinger Bands for ADX
-    df_analysis['ADX_BB_Middle'] = df_analysis['ADX'].rolling(window=20).mean()
-    df_analysis['ADX_BB_Std'] = df_analysis['ADX'].rolling(window=20).std()
-    df_analysis['ADX_BB_Upper'] = df_analysis['ADX_BB_Middle'] + (2 * df_analysis['ADX_BB_Std'])
-    df_analysis['ADX_BB_Lower'] = df_analysis['ADX_BB_Middle'] - (2 * df_analysis['ADX_BB_Std'])
+#     # Bollinger Bands for ADX
+#     df_analysis['ADX_BB_Middle'] = df_analysis['ADX'].rolling(window=20).mean()
+#     df_analysis['ADX_BB_Std'] = df_analysis['ADX'].rolling(window=20).std()
+#     df_analysis['ADX_BB_Upper'] = df_analysis['ADX_BB_Middle'] + (2 * df_analysis['ADX_BB_Std'])
+#     df_analysis['ADX_BB_Lower'] = df_analysis['ADX_BB_Middle'] - (2 * df_analysis['ADX_BB_Std'])
     
-    # OBV (On-Balance Volume)
-    df_analysis['OBV'] = ta.volume.on_balance_volume(df_analysis['Close'], df_analysis['Volume'])
-    df_analysis['Volume_Scaled_OBV'] = (df_analysis['OBV'] / df_analysis['Volume'].rolling(window=20).mean())
+#     # OBV (On-Balance Volume)
+#     df_analysis['OBV'] = ta.volume.on_balance_volume(df_analysis['Close'], df_analysis['Volume'])
+#     df_analysis['Volume_Scaled_OBV'] = (df_analysis['OBV'] / df_analysis['Volume'].rolling(window=20).mean())
     
-    # Price & OBV changes (Adaptive, previously we used 20 days fixed  )
-    params = calculate_adaptive_parameters_percentile(df, lookback_days=30)
-    lookback = params['obv_lookback']  # Could be 5, 7, 10, 12, or 15!
+#     # Price & OBV changes (Adaptive, previously we used 20 days fixed  )
+#     params = calculate_adaptive_parameters_percentile(df, lookback_days=30)
+#     lookback = params['obv_lookback']  # Could be 5, 7, 10, 12, or 15!
 
-    # Volume Stats
-    df_analysis['VolMean_100d'] = df_analysis['Volume'].rolling(window=100, min_periods=20).mean()
-    df_analysis['VolStd_100d'] = df_analysis['Volume'].rolling(window=100, min_periods=20).std()
-    df_analysis['Volume_ZScore'] = (df_analysis['Volume'] - df_analysis['VolMean_100d']) / df_analysis['VolStd_100d']
+#     # Volume Stats
+#     df_analysis['VolMean_100d'] = df_analysis['Volume'].rolling(window=100, min_periods=20).mean()
+#     df_analysis['VolStd_100d'] = df_analysis['Volume'].rolling(window=100, min_periods=20).std()
+#     df_analysis['Volume_ZScore'] = (df_analysis['Volume'] - df_analysis['VolMean_100d']) / df_analysis['VolStd_100d']
     
-    # Initialize signal columns
-    df_analysis['Signal_Accumulation'] = False
-    df_analysis['Signal_Squeeze'] = False
-    df_analysis['Signal_GoldenLaunch'] = False
-    df_analysis['Exit_MACDLead'] = False
+#     # Initialize signal columns
+#     df_analysis['Signal_Accumulation'] = False
+#     df_analysis['Signal_Squeeze'] = False
+#     df_analysis['Signal_Golden_Launch'] = False
+#     df_analysis['Exit_MACD_Lead'] = False
     
-    # Phase 1: Accumulation (OPTIMAL)
-    # OBV rising while price is relatively flat (classic smart money accumulation)
+#     # Phase 1: Accumulation (OPTIMAL)
+#     # OBV rising while price is relatively flat (classic smart money accumulation)
 
-    df_analysis['PriceChg'] = df_analysis['Close'].pct_change(periods=lookback)
-    df_analysis[f'OBVChg{lookback}d'] = df_analysis['OBV'].pct_change(periods=lookback)
+#     df_analysis['PriceChg'] = df_analysis['Close'].pct_change(periods=lookback)
+#     df_analysis[f'OBVChg{lookback}d'] = df_analysis['OBV'].pct_change(periods=lookback)
 
-    accumulation = (
-        (df_analysis[f'OBVChg{lookback}d'] > params['obv_threshold']) &  # OBV up an adaptive % (volume accumulating)
-        (df_analysis['PriceChg'].abs() < params['price_flat_threshold']) &  # Price relatively flat
-        (df_analysis['RSI_14'] < 60)  # Not overbought (60 not 50 - allows early stage)
-    )
-    df_analysis.loc[accumulation, 'Signal_Accumulation'] = True
+#     accumulation = (
+#         (df_analysis[f'OBVChg{lookback}d'] > params['obv_threshold']) &  # OBV up an adaptive % (volume accumulating)
+#         (df_analysis['PriceChg'].abs() < params['price_flat_threshold']) &  # Price relatively flat
+#         (df_analysis['RSI_14'] < 60)  # Not overbought (60 not 50 - allows early stage)
+#     )
+#     df_analysis.loc[accumulation, 'Signal_Accumulation'] = True
 
     
-    # ============================================
-    # IMPROVED Phase 2: Squeeze Detection
-    # Fixes: Adaptive lookback, percentile threshold, duration filter, age tracking
-    # ============================================
-    # Phase 2: Squeeze
+#     # ============================================
+#     # IMPROVED Phase 2: Squeeze Detection
+#     # Fixes: Adaptive lookback, percentile threshold, duration filter, age tracking
+#     # ============================================
+#     # Phase 2: Squeeze
 
-    # Helper function for adaptive lookback
-    def get_adaptive_lookback(df_length, min_days=60, max_days=250):
-        """Scales lookback based on available data"""
-        if df_length < 120:
-            return max(min_days, int(df_length * 0.5))  # Use 50% of available data
-        elif df_length < 250:
-            return 120
-        else:
-            return max_days  # For long histories, use ~1 year
+#     # Helper function for adaptive lookback
+#     def get_adaptive_lookback(df_length, min_days=60, max_days=250):
+#         """Scales lookback based on available data"""
+#         if df_length < 120:
+#             return max(min_days, int(df_length * 0.5))  # Use 50% of available data
+#         elif df_length < 250:
+#             return 120
+#         else:
+#             return max_days  # For long histories, use ~1 year
         
-    # FIX 1: Adaptive lookback instead of fixed 120 days
-    lookback_period = get_adaptive_lookback(len(df_analysis))
+#     # FIX 1: Adaptive lookback instead of fixed 120 days
+#     lookback_period = get_adaptive_lookback(len(df_analysis))
 
-    # FIX 2: Percentile-based threshold instead of 1.20 multiplier
-    # Calculate rolling percentile rank for BB_Width
-    df_analysis['BB_Width_Percentile'] = df_analysis['BB_Width'].rolling(
-        window=lookback_period, 
-        min_periods=20
-    ).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan)
+#     # FIX 2: Percentile-based threshold instead of 1.20 multiplier
+#     # Calculate rolling percentile rank for BB_Width
+#     df_analysis['BB_Width_Percentile'] = df_analysis['BB_Width'].rolling(
+#         window=lookback_period, 
+#         min_periods=20
+#     ).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan)
 
-    # Squeeze = BB width in bottom 10% of historical range
-    df_analysis['Squeeze_Raw'] = df_analysis['BB_Width_Percentile'] <= 0.10
+#     # Squeeze = BB width in bottom 10% of historical range
+#     df_analysis['Squeeze_Raw'] = df_analysis['BB_Width_Percentile'] <= 0.10
 
-    # FIX 4: Minimum duration filter - require 3 consecutive days
-    def consecutive_days_filter(series, min_days=3):
-        """Require condition to persist for min_days consecutive periods"""
-        if series.sum() == 0:  # No True values
-            return pd.Series(False, index=series.index)
-        groups = (series != series.shift()).cumsum()
-        count = series.groupby(groups).transform('size')
-        return (series) & (count >= min_days)
+#     # FIX 4: Minimum duration filter - require 3 consecutive days
+#     def consecutive_days_filter(series, min_days=3):
+#         """Require condition to persist for min_days consecutive periods"""
+#         if series.sum() == 0:  # No True values
+#             return pd.Series(False, index=series.index)
+#         groups = (series != series.shift()).cumsum()
+#         count = series.groupby(groups).transform('size')
+#         return (series) & (count >= min_days)
 
-    df_analysis['Signal_Squeeze'] = consecutive_days_filter(df_analysis['Squeeze_Raw'], min_days=3)
+#     df_analysis['Signal_Squeeze'] = consecutive_days_filter(df_analysis['Squeeze_Raw'], min_days=3)
 
-    # FIX 5: Squeeze age tracking - count days in squeeze
-    squeeze_groups = (df_analysis['Signal_Squeeze'] != df_analysis['Signal_Squeeze'].shift()).cumsum()
-    df_analysis['Squeeze_Age'] = df_analysis.groupby(squeeze_groups)['Signal_Squeeze'].cumsum()
+#     # FIX 5: Squeeze age tracking - count days in squeeze
+#     squeeze_groups = (df_analysis['Signal_Squeeze'] != df_analysis['Signal_Squeeze'].shift()).cumsum()
+#     df_analysis['Squeeze_Age'] = df_analysis.groupby(squeeze_groups)['Signal_Squeeze'].cumsum()
 
-    # Flag mature squeezes (5+ days active)
-    df_analysis['Squeeze_Mature'] = (df_analysis['Signal_Squeeze']) & (df_analysis['Squeeze_Age'] >= 5)
+#     # Flag mature squeezes (5+ days active)
+#     df_analysis['Squeeze_Mature'] = (df_analysis['Signal_Squeeze']) & (df_analysis['Squeeze_Age'] >= 5)
 
-    # Keep legacy column for backward compatibility
-    df_analysis['Min_Width_120d'] = df_analysis['BB_Width'].rolling(window=120, min_periods=20).min()
+#     # Keep legacy column for backward compatibility
+#     df_analysis['Min_Width_120d'] = df_analysis['BB_Width'].rolling(window=120, min_periods=20).min()
 
-    # # BB width contraction
-    # df_analysis['Min_Width_120d'] = df_analysis['BB_Width'].rolling(window=120, min_periods=20).min()
-    # # Squeeze = BB width is near its 120-day low (within 25%)
-    # squeeze = df_analysis['BB_Width'] <= (df_analysis['Min_Width_120d'] * 1.20)
+#     # # BB width contraction
+#     # df_analysis['Min_Width_120d'] = df_analysis['BB_Width'].rolling(window=120, min_periods=20).min()
+#     # # Squeeze = BB width is near its 120-day low (within 25%)
+#     # squeeze = df_analysis['BB_Width'] <= (df_analysis['Min_Width_120d'] * 1.20)
 
-    # df_analysis.loc[squeeze, 'Signal_Squeeze'] = True
+#     # df_analysis.loc[squeeze, 'Signal_Squeeze'] = True
     
-    # # Phase 3: Golden Launch
-    # # Strong trend + MACD CROSSOVER (not just above)
+#     # # Phase 3: Golden Launch
+#     # # Strong trend + MACD CROSSOVER (not just above)
 
-    # # Detect MACD crossover (just happened)
-    # macd_cross_up = (
-    #     (df_analysis['MACD'].shift(1) <= df_analysis['MACD_Signal'].shift(1)) &  # Was below/at yesterday
-    #     (df_analysis['MACD'] > df_analysis['MACD_Signal'])  # Is above today
-    # )
+#     # # Detect MACD crossover (just happened)
+#     # macd_cross_up = (
+#     #     (df_analysis['MACD'].shift(1) <= df_analysis['MACD_Signal'].shift(1)) &  # Was below/at yesterday
+#     #     (df_analysis['MACD'] > df_analysis['MACD_Signal'])  # Is above today
+#     # )
 
-    # # Golden Launch = Fresh MACD cross + confirming conditions
-    # launch = (
-    #     macd_cross_up &  # ← KEY: Only on the crossover day itself
-    #     (df_analysis['MA20'] > df_analysis['MA50']) &  # Bullish MA alignment
-    #     (df_analysis['ADX'] > 25) &  # Strong trend
-    #     (df_analysis['RSI_14'] > 50) &  # Momentum
-    #     (df_analysis['RSI_14'] < 70)  # Not overextended
-    # )
-    # df_analysis.loc[launch, 'Signal_GoldenLaunch'] = True
+#     # # Golden Launch = Fresh MACD cross + confirming conditions
+#     # launch = (
+#     #     macd_cross_up &  # ← KEY: Only on the crossover day itself
+#     #     (df_analysis['MA20'] > df_analysis['MA50']) &  # Bullish MA alignment
+#     #     (df_analysis['ADX'] > 25) &  # Strong trend
+#     #     (df_analysis['RSI_14'] > 50) &  # Momentum
+#     #     (df_analysis['RSI_14'] < 70)  # Not overextended
+#     # )
+#     # df_analysis.loc[launch, 'Signal_Golden_Launch'] = True
 
-    # Phase 3: Golden Launch - ADX REVERSAL & BREAKOUT DETECTION
+#     # Phase 3: Golden Launch - ADX REVERSAL & BREAKOUT DETECTION
 
-    import numpy as np
-    from scipy import stats
+#     import numpy as np
+#     from scipy import stats
 
-    # ==================== ADX TREND & ACCELERATION ====================
-    def calculate_adx_trend(series, window=5):
-        """Calculate ADX slope using linear regression"""
-        def get_slope(y):
-            if len(y) < 3 or y.isna().any():
-                return 0
-            x = np.arange(len(y))
-            slope, _, _, _, _ = stats.linregress(x, y)
-            return slope
-        return series.rolling(window=window, min_periods=3).apply(get_slope, raw=False)
+#     # ==================== ADX TREND & ACCELERATION ====================
+#     def calculate_adx_trend(series, window=5):
+#         """Calculate ADX slope using linear regression"""
+#         def get_slope(y):
+#             if len(y) < 3 or y.isna().any():
+#                 return 0
+#             x = np.arange(len(y))
+#             slope, _, _, _, _ = stats.linregress(x, y)
+#             return slope
+#         return series.rolling(window=window, min_periods=3).apply(get_slope, raw=False)
 
-    # Calculate ADX trend (5-day slope)
-    df_analysis['ADX_Slope'] = calculate_adx_trend(df_analysis['ADX_LOWESS'], window=5)
+#     # Calculate ADX trend (5-day slope)
+#     df_analysis['ADX_Slope'] = calculate_adx_trend(df_analysis['ADX_LOWESS'], window=5)
 
-    # Calculate ADX acceleration (change in slope = 2nd derivative)
-    df_analysis['ADX_Acceleration'] = df_analysis['ADX_Slope'] - df_analysis['ADX_Slope'].shift(1)
+#     # Calculate ADX acceleration (change in slope = 2nd derivative)
+#     df_analysis['ADX_Acceleration'] = df_analysis['ADX_Slope'] - df_analysis['ADX_Slope'].shift(1)
 
-    # ==================== PATTERN 1: ADX BOTTOMING (Reversal Coming) ====================
-    adx_bottoming = (
-        (df_analysis['ADX'] < 25)  # ADX is low (weak trend)
-        & (df_analysis['ADX_Slope'] < 0)  # Still falling (but...)
-        & (df_analysis['ADX_Acceleration'] > 0.15)  # Deceleration slowing (getting less negative)
-        & (df_analysis['ADX_Slope'] > df_analysis['ADX_Slope'].shift(1))  # Slope improving
-    )
+#     # ==================== PATTERN 1: ADX BOTTOMING (Reversal Coming) ====================
+#     adx_bottoming = (
+#         (df_analysis['ADX'] < 25)  # ADX is low (weak trend)
+#         & (df_analysis['ADX_Slope'] < 0)  # Still falling (but...)
+#         & (df_analysis['ADX_Acceleration'] > 0.15)  # Deceleration slowing (getting less negative)
+#         & (df_analysis['ADX_Slope'] > df_analysis['ADX_Slope'].shift(1))  # Slope improving
+#     )
 
-    # ==================== PATTERN 2: ADX ACCELERATING (Breakout Coming) ====================
-    adx_accelerating = (
-        (df_analysis['ADX_Slope'] > 0.5)  # Positive slope (trending up)
-        & (df_analysis['ADX_Acceleration'] > 0.1)  # Accelerating (getting steeper)
-    )
+#     # Pattern 2: REVERSING UP (ADX just turned from down to up)
+#     adx_reversing_up = (
+#         (df_analysis['ADX'] < 30) &  # Not too high yet
+#         (df_analysis['ADX_Slope'] > 0) &  # Now rising
+#         (df_analysis['ADX_Slope'].shift(1) <= 0)  # Was falling yesterday
+#     )
+
+#     # ==================== PATTERN 3 ADX ACCELERATING (Breakout Coming) ====================
+#     adx_accelerating_up = (
+#         (df_analysis['ADX_Slope'] > 0.5)  # Positive slope (trending up)
+#         & (df_analysis['ADX_Acceleration'] > 0.1)  # Accelerating (getting steeper)
+#     )
     
-    # ==================== PATTERN 3: ADX STRONG & STABLE ====================
-    adx_strong_stable = (
-        (df_analysis['ADX'] >= 30)  # Already strong
-        & (df_analysis['ADX_Slope'] >= -0.3)  # Not falling fast
-        & (df_analysis['ADX_Slope'] <= 0.3)  # Relatively stable
-    )
-
-    # Pattern 4: ADX Peaking (NEW - Exhaustion/Reversal Warning)
-    adx_peaking = (
-        (df_analysis['ADX'] >= 30)  # ADX is high (strong trend)
-        & (df_analysis['ADX_Slope'] > 0)  # Still rising BUT...
-        & (df_analysis['ADX_Acceleration'] < -0.15)  # Decelerating (slowing down)
-        & (df_analysis['ADX_Slope'] < df_analysis['ADX_Slope'].shift(1))  # Slope weakening
-    )
-
-    # Pattern 5: ADX Reversing Down (Trend Breaking)
-    adx_reversing_down = (
-        (df_analysis['ADX'] >= 25)  # Was in a trend
-        & (df_analysis['ADX_Slope'] < 0)  # Now falling
-        & (df_analysis['ADX_Slope'].shift(1) > 0)  # Was rising yesterday (just turned)
-    )
+#     # ==================== PATTERN 4 ADX STRONG & STABLE ====================
+#     adx_strong_stable = (
+#         (df_analysis['ADX'] >= 30)  # Already strong
+#         & (df_analysis['ADX_Slope'] >= -0.3)  # Not falling fast
+#         & (df_analysis['ADX_Slope'] <= 0.3)  # Relatively stable
+#     )
 
 
-    # Combine ADX conditions
-    adx_healthy = adx_bottoming | adx_accelerating | adx_strong_stable
-    adx_warning = adx_peaking | adx_reversing_down
+#     # =====   Pattern 5: DECELERATING UP (ADX rising but slowing down)
+#     adx_decelerating_up = (
+#         (df_analysis['ADX'] > 25) &  # Already in a trend
+#         (df_analysis['ADX_Slope'] > 0) &  # Still rising
+#         (df_analysis['ADX_Acceleration'] < -0.1)  # But decelerating
+#     )
 
-    df_analysis['ADX_Pattern'] = 'Neutral'
-    df_analysis.loc[adx_bottoming, 'ADX_Pattern'] = 'Reversal Setup'
-    df_analysis.loc[adx_accelerating, 'ADX_Pattern'] = 'Breakout Mode'
-    df_analysis.loc[adx_strong_stable, 'ADX_Pattern'] = 'Strong Trend'
-    df_analysis.loc[adx_peaking, 'ADX_Pattern'] = 'Peaking (Warning)'  # NEW
-    df_analysis.loc[adx_reversing_down, 'ADX_Pattern'] = 'Reversing Down'  # NEW
+#     # Pattern 6 ADX Peaking (NEW - Exhaustion/Reversal Warning)
+#     adx_peaking = (
+#         (df_analysis['ADX'] >= 30)  # ADX is high (strong trend)
+#         & (df_analysis['ADX_Slope'] > 0)  # Still rising BUT...
+#         & (df_analysis['ADX_Acceleration'] < -0.15)  # Decelerating (slowing down)
+#         & (df_analysis['ADX_Slope'] < df_analysis['ADX_Slope'].shift(1))  # Slope weakening
+#     )
+
+#     # Pattern 7: ADX Reversing Down (Trend Breaking)
+#     adx_reversing_down = (
+#         (df_analysis['ADX'] >= 25)  # Was in a trend
+#         & (df_analysis['ADX_Slope'] < 0)  # Now falling
+#         & (df_analysis['ADX_Slope'].shift(1) > 0)  # Was rising yesterday (just turned)
+#     )
+
+
+#     # Pattern 8: ACCELERATING DOWN (ADX falling and speeding up downward)
+#     adx_accelerating_down = (
+#         (df_analysis['ADX_Slope'] < -0.5) &  # Negative slope (trending down)
+#         (df_analysis['ADX_Acceleration'] < -0.1)  # Accelerating downward (getting steeper)
+#     )
+
+
+#     # Pattern 9: DECELERATING DOWN (ADX falling but slowing)
+#     adx_decelerating_down = (
+#         (df_analysis['ADX'] < 30) &  # Not too high
+#         (df_analysis['ADX_Slope'] < 0) &  # Still falling
+#         (df_analysis['ADX_Acceleration'] > 0.1)  # But decelerating (toward bottoming)
+#     )
+
+#     # Assign patterns (priority order matters!)
+#     df_analysis['ADX_Pattern'] = 'Neutral'
+
+#     # Low ADX states (potential trend starting)
+#     df_analysis.loc[adx_bottoming, 'ADX_Pattern'] = 'Bottoming'
+#     df_analysis.loc[adx_reversing_up, 'ADX_Pattern'] = 'Reversing Up'
+#     df_analysis.loc[adx_accelerating_up, 'ADX_Pattern'] = 'Accelerating Up'
+
+#     # High ADX states (strong trend or exhaustion)
+#     df_analysis.loc[adx_strong_stable, 'ADX_Pattern'] = 'Strong Trend'
+#     df_analysis.loc[adx_decelerating_up, 'ADX_Pattern'] = 'Losing Steam'
+#     df_analysis.loc[adx_peaking, 'ADX_Pattern'] = 'Peaking'
+
+#     # Falling ADX states (trend weakening)
+#     df_analysis.loc[adx_reversing_down, 'ADX_Pattern'] = 'Reversing Down'
+#     df_analysis.loc[adx_accelerating_down, 'ADX_Pattern'] = 'Accelerating Down'
+#     df_analysis.loc[adx_decelerating_down, 'ADX_Pattern'] = 'Slowing Down'
+
+#     # Combine ADX conditions
+#     adx_healthy = adx_bottoming | adx_reversing_up | adx_accelerating_up | adx_strong_stable
+#     adx_warning = adx_peaking | adx_reversing_down | adx_accelerating_down
+
+#     # df_analysis['ADX_Pattern'] = 'Neutral'
+#     # df_analysis.loc[adx_bottoming, 'ADX_Pattern'] = 'Reversal Setup'
+#     # df_analysis.loc[adx_accelerating_up, 'ADX_Pattern'] = 'Breakout Mode'
+#     # df_analysis.loc[adx_strong_stable, 'ADX_Pattern'] = 'Strong Trend'
+#     # df_analysis.loc[adx_peaking, 'ADX_Pattern'] = 'Peaking (Warning)'  # NEW
+#     # df_analysis.loc[adx_reversing_down, 'ADX_Pattern'] = 'Reversing Down'  # NEW
 
     
-    # ==================== MACD SCENARIOS ====================
-    df_analysis['MACD_Gap'] = df_analysis['MACD'] - df_analysis['MACD_Signal']
-    df_analysis['MACD_Momentum'] = df_analysis['MACD'] - df_analysis['MACD'].shift(1)
-    df_analysis['MACD_Momentum_Pct'] = df_analysis['MACD'].pct_change()
-    df_analysis['MACD_Acceleration'] = df_analysis['MACD_Momentum_Pct'] - df_analysis['MACD_Momentum_Pct'].shift(1)
+#     # ==================== MACD SCENARIOS ====================
+#     df_analysis['MACD_Gap'] = df_analysis['MACD'] - df_analysis['MACD_Signal']
+#     df_analysis['MACD_Momentum'] = df_analysis['MACD'] - df_analysis['MACD'].shift(1)
+#     df_analysis['MACD_Momentum_Pct'] = df_analysis['MACD'].pct_change()
+#     df_analysis['MACD_Acceleration'] = df_analysis['MACD_Momentum_Pct'] - df_analysis['MACD_Momentum_Pct'].shift(1)
 
-    # Scenario 1: Classic crossover
-    classic_crossover = (
-        (df_analysis['MACD_Gap'].shift(1) <= 0)
-        & (df_analysis['MACD_Gap'] > 0)
-    )
+#     # Scenario 1: Classic crossover
+#     classic_crossover = (
+#         (df_analysis['MACD_Gap'].shift(1) <= 0)
+#         & (df_analysis['MACD_Gap'] > 0)
+#     )
 
-    # Scenario 2: Approaching from below
-    approaching_from_below = (
-        # Part 1: MACD below Signal but close
-        (df_analysis['MACD_Gap'] < 0)  # Still in bearish territory
-        & (df_analysis['MACD_Gap'] > -0.5 * df_analysis['MACD_Signal'].abs())  # Within 50% of Signal
+#     # Scenario 2: Approaching from below
+#     approaching_from_below = (
+#         # Part 1: MACD below Signal but close
+#         (df_analysis['MACD_Gap'] < 0)  # Still in bearish territory
+#         & (df_analysis['MACD_Gap'] > -0.5 * df_analysis['MACD_Signal'].abs())  # Within 50% of Signal
         
-        # Part 2: Gap consistently narrowing
-        & (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1))  # Gap narrowing today
-        & (df_analysis['MACD_Gap'].shift(1) > df_analysis['MACD_Gap'].shift(2))  # Was narrowing yesterday
+#         # Part 2: Gap consistently narrowing
+#         & (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1))  # Gap narrowing today
+#         & (df_analysis['MACD_Gap'].shift(1) > df_analysis['MACD_Gap'].shift(2))  # Was narrowing yesterday
         
-        # Part 3: MACD rising
-        & (df_analysis['MACD_Momentum_Pct'] > 0)  # Positive momentum
+#         # Part 3: MACD rising
+#         & (df_analysis['MACD_Momentum_Pct'] > 0)  # Positive momentum
         
-        # Part 4: Downtrend slowing down significantly (KEY CRITERIA)
-        & (
-            # Either: Strong positive acceleration (deceleration of fall)
-            (df_analysis['MACD_Acceleration'] > 0.03)  # Fall slowed by 3+ percentage points
+#         # Part 4: Downtrend slowing down significantly (KEY CRITERIA)
+#         & (
+#             # Either: Strong positive acceleration (deceleration of fall)
+#             (df_analysis['MACD_Acceleration'] > 0.03)  # Fall slowed by 3+ percentage points
             
-            # Or: Was falling significantly, now barely falling or rising
-            | (
-                (df_analysis['MACD_Momentum_Pct'].shift(2) < -0.05)  # Was falling >5% two days ago
-                & (df_analysis['MACD_Momentum_Pct'] > -0.02)  # Now falling <2% or rising
-            )
-        )
-    )
+#             # Or: Was falling significantly, now barely falling or rising
+#             | (
+#                 (df_analysis['MACD_Momentum_Pct'].shift(2) < -0.05)  # Was falling >5% two days ago
+#                 & (df_analysis['MACD_Momentum_Pct'] > -0.02)  # Now falling <2% or rising
+#             )
+#         )
+#     )
 
-    # Scenario 3: Bottoming - MACD falling is slowing down, Signal catching up
-    bottoming = (
-        # Part 1: In BEARISH territory (MACD below Signal)
-        (df_analysis['MACD_Gap'] < 0)                              # MACD below Signal
+#     # Scenario 3: Bottoming - MACD falling is slowing down, Signal catching up
+#     bottoming = (
+#         # Part 1: In BEARISH territory (MACD below Signal)
+#         (df_analysis['MACD_Gap'] < 0)                              # MACD below Signal
         
-        # Part 2: Gap was widening (MACD falling away from Signal)
-        & (df_analysis['MACD_Gap'].shift(1) < df_analysis['MACD_Gap'].shift(2))  # Gap more negative yesterday
+#         # Part 2: Gap was widening (MACD falling away from Signal)
+#         & (df_analysis['MACD_Gap'].shift(1) < df_analysis['MACD_Gap'].shift(2))  # Gap more negative yesterday
 
-         # Part 3: MACD was falling, now rising (BOTTOM DETECTED!)
-        & (df_analysis['MACD'].shift(1) < df_analysis['MACD'].shift(2))  # Was falling yesterday
-        & (df_analysis['MACD'] > df_analysis['MACD'].shift(1))            # Now rising (Yesterday = BOTTOM!)
+#          # Part 3: MACD was falling, now rising (BOTTOM DETECTED!)
+#         & (df_analysis['MACD'].shift(1) < df_analysis['MACD'].shift(2))  # Was falling yesterday
+#         & (df_analysis['MACD'] > df_analysis['MACD'].shift(1))            # Now rising (Yesterday = BOTTOM!)
         
-        # Part 4: Gap is narrowing (Signal catching up)
-        & (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1))  # Gap less negative today
+#         # Part 4: Gap is narrowing (Signal catching up)
+#         & (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1))  # Gap less negative today
     
-    )
+#     )
 
-    # Scenario 4: Momentum building (requires 2 consecutive days of acceleration)
+#     # Scenario 4: Momentum building (requires 2 consecutive days of acceleration)
 
-    # Add helper columns (in MACD calculations section)
-    df_analysis['MACD_Gap_Ratio'] = df_analysis['MACD_Gap'] / df_analysis['MACD_Signal'].abs()
-    df_analysis['MACD_Gap_Ratio_Change'] = (
-        df_analysis['MACD_Gap_Ratio'] - df_analysis['MACD_Gap_Ratio'].shift(1)
-    )
+#     # Add helper columns (in MACD calculations section)
+#     df_analysis['MACD_Gap_Ratio'] = df_analysis['MACD_Gap'] / df_analysis['MACD_Signal'].abs()
+#     df_analysis['MACD_Gap_Ratio_Change'] = (
+#         df_analysis['MACD_Gap_Ratio'] - df_analysis['MACD_Gap_Ratio'].shift(1)
+#     )
 
-    momentum_building = (
-        (df_analysis['MACD_Gap'] > 0) &           # In bullish zone
-        (df_analysis['MACD_Gap'].shift(1) > 0) &  # Was bullish yesterday
-        (df_analysis['MACD_Gap'].shift(2) > 0) &  # Was bullish 2 days ago
-        (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1)) &  # Gap increasing TODAY  
-        # Gap ratio increasing TODAY (e.g., 20% → 30%)
-        (df_analysis['MACD_Gap_Ratio'] > df_analysis['MACD_Gap_Ratio'].shift(1)) &
+#     momentum_building = (
+#         (df_analysis['MACD_Gap'] > 0) &           # In bullish zone
+#         (df_analysis['MACD_Gap'].shift(1) > 0) &  # Was bullish yesterday
+#         (df_analysis['MACD_Gap'].shift(2) > 0) &  # Was bullish 2 days ago
+#         (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1)) &  # Gap increasing TODAY  
+#         # Gap ratio increasing TODAY (e.g., 20% → 30%)
+#         (df_analysis['MACD_Gap_Ratio'] > df_analysis['MACD_Gap_Ratio'].shift(1)) &
         
-        # Gap ratio was ALSO increasing YESTERDAY (e.g., 15% → 20%)
-        (df_analysis['MACD_Gap_Ratio'].shift(1) > df_analysis['MACD_Gap_Ratio'].shift(2)) &
+#         # Gap ratio was ALSO increasing YESTERDAY (e.g., 15% → 20%)
+#         (df_analysis['MACD_Gap_Ratio'].shift(1) > df_analysis['MACD_Gap_Ratio'].shift(2)) &
         
-        # Both days had meaningful acceleration (>10% each day)
-        (df_analysis['MACD_Gap_Ratio_Change'] > 0.10) &
-        (df_analysis['MACD_Gap_Ratio_Change'].shift(1) > 0.10) &
+#         # Both days had meaningful acceleration (>10% each day)
+#         (df_analysis['MACD_Gap_Ratio_Change'] > 0.10) &
+#         (df_analysis['MACD_Gap_Ratio_Change'].shift(1) > 0.10) &
         
-        # MACD itself is rising (not just Signal falling)
-        (df_analysis['MACD'] > df_analysis['MACD'].shift(1))
-    )
+#         # MACD itself is rising (not just Signal falling)
+#         (df_analysis['MACD'] > df_analysis['MACD'].shift(1))
+#     )
 
 
-    macd_trigger = (classic_crossover | approaching_from_below | 
-                    bottoming | momentum_building)
+#     macd_trigger = (classic_crossover | approaching_from_below | 
+#                     bottoming | momentum_building)
 
 
-    # ==================== An MACD Exit Scenario : Peaking (BEARISH WARNING) ====================
-    peaking = (
-        (df_analysis['MACD_Gap'] > 0)  # MACD above Signal (still bullish)
-        & (df_analysis['MACD'].shift(1) > df_analysis['MACD'].shift(2))  # Was rising
-        & (df_analysis['MACD'] < df_analysis['MACD'].shift(1))  # Now falling (PEAK!)
-        & (df_analysis['MACD_Momentum_Pct'] < df_analysis['MACD_Momentum_Pct'].shift(1))  # Decelerating
-    )
+#     # ==================== An MACD Exit Scenario : Peaking (BEARISH WARNING) ====================
+#     peaking = (
+#         (df_analysis['MACD_Gap'] > 0)  # MACD above Signal (still bullish)
+#         & (df_analysis['MACD'].shift(1) > df_analysis['MACD'].shift(2))  # Was rising
+#         & (df_analysis['MACD'] < df_analysis['MACD'].shift(1))  # Now falling (PEAK!)
+#         & (df_analysis['MACD_Momentum_Pct'] < df_analysis['MACD_Momentum_Pct'].shift(1))  # Decelerating
+#     )
 
-    # ==================== NEW: Scenario 6: MACD Bearish Crossover (DOWNWARD CROSS) ====================
-    bearish_crossover = (
-        (df_analysis['MACD_Gap'].shift(1) > 0) &  # Was above Signal (bullish)
-        (df_analysis['MACD_Gap'] <= 0) &          # Crossed below Signal (bearish)
-        (df_analysis['MACD'].shift(1) > 0)        # Was in positive territory (stronger signal)
-    )
+#     # ==================== NEW: Scenario 6: MACD Bearish Crossover (DOWNWARD CROSS) ====================
+#     bearish_crossover = (
+#         (df_analysis['MACD_Gap'].shift(1) > 0) &  # Was above Signal (bullish)
+#         (df_analysis['MACD_Gap'] <= 0) &          # Crossed below Signal (bearish)
+#         (df_analysis['MACD'].shift(1) > 0)        # Was in positive territory (stronger signal)
+#     )
 
-    # ================= STORE SCENARIO COLUMNS (NEW) ====================
-    df_analysis['MACD_ClassicCrossover'] = classic_crossover
-    df_analysis['MACD_Approaching'] = approaching_from_below
-    df_analysis['MACD_Bottoming'] = bottoming
-    df_analysis['MACD_MomentumBuilding'] = momentum_building
-    df_analysis['MACD_Trigger'] = macd_trigger
-    df_analysis['MACD_Peaking'] = peaking   
-    df_analysis['MACD_BearishCrossover'] = bearish_crossover
+#     # ================= STORE SCENARIO COLUMNS (NEW) ====================
+#     df_analysis['MACD_ClassicCrossover'] = classic_crossover
+#     df_analysis['MACD_Approaching'] = approaching_from_below
+#     df_analysis['MACD_Bottoming'] = bottoming
+#     df_analysis['MACD_MomentumBuilding'] = momentum_building
+#     df_analysis['MACD_Trigger'] = macd_trigger
+#     df_analysis['MACD_Peaking'] = peaking   
+#     df_analysis['MACD_BearishCrossover'] = bearish_crossover
 
-    # ==================== SIMPLE TREND DETECTION: USE MACD SIGNAL LINE ====================
-    # Use the MACD Signal line as the smoothed trend (it's already an EMA of MACD)
-    # Calculate trend direction based on Signal line slope
-    df_analysis['MACD_Signal_Slope'] = df_analysis['MACD_Signal'] - df_analysis['MACD_Signal'].shift(2)
+#     # ==================== SIMPLE TREND DETECTION: USE MACD SIGNAL LINE ====================
+#     # Use the MACD Signal line as the smoothed trend (it's already an EMA of MACD)
+#     # Calculate trend direction based on Signal line slope
+#     df_analysis['MACD_Signal_Slope'] = df_analysis['MACD_Signal'] - df_analysis['MACD_Signal'].shift(2)
 
-    # Define large trends based on Signal line direction
-    df_analysis['Large_Uptrend'] = df_analysis['MACD_Signal_Slope'] > 0
-    df_analysis['Large_Downtrend'] = df_analysis['MACD_Signal_Slope'] < 0
+#     # Define large trends based on Signal line direction
+#     df_analysis['Large_Uptrend'] = df_analysis['MACD_Signal_Slope'] > 0
+#     df_analysis['Large_Downtrend'] = df_analysis['MACD_Signal_Slope'] < 0
 
 
-    # ==================== RSI DYNAMIC PERCENTILE THRESHOLDS ====================
-    # Calculate RSI percentiles based on last 252 trading days (1 year)
-    lookback_window = min(252, len(df_analysis))  # Use 1 year or available data
+#     # ==================== RSI DYNAMIC PERCENTILE THRESHOLDS ====================
+#     # Calculate RSI percentiles based on last 252 trading days (1 year)
+#     lookback_window = min(252, len(df_analysis))  # Use 1 year or available data
 
-    if 'RSI_14' in df_analysis.columns:
-        # Rolling percentile calculation
-        df_analysis['RSI_P10'] = df_analysis['RSI_14'].rolling(
-            window=lookback_window, min_periods=60
-        ).quantile(0.10)  # Bottom 10%
+#     if 'RSI_14' in df_analysis.columns:
+#         # Rolling percentile calculation
+#         df_analysis['RSI_P10'] = df_analysis['RSI_14'].rolling(
+#             window=lookback_window, min_periods=60
+#         ).quantile(0.10)  # Bottom 10%
         
-        df_analysis['RSI_P90'] = df_analysis['RSI_14'].rolling(
-            window=lookback_window, min_periods=60
-        ).quantile(0.90)  # Top 10%
+#         df_analysis['RSI_P90'] = df_analysis['RSI_14'].rolling(
+#             window=lookback_window, min_periods=60
+#         ).quantile(0.90)  # Top 10%
         
-        # Bottoming: Must be BOTH in bottom 10% AND <= 30
-        df_analysis['RSI_Bottoming'] = (
-            (df_analysis['RSI_14'] <= df_analysis['RSI_P10']) &  # In bottom 10% for THIS stock
-            (df_analysis['RSI_14'] <= 30)  # AND below absolute threshold
-        )
+#         # Bottoming: Must be BOTH in bottom 10% AND <= 30
+#         df_analysis['RSI_Bottoming'] = (
+#             (df_analysis['RSI_14'] <= df_analysis['RSI_P10']) &  # In bottom 10% for THIS stock
+#             (df_analysis['RSI_14'] <= 30)  # AND below absolute threshold
+#         )
         
-        # Peaking: Must be BOTH in top 10% AND >= 70
-        df_analysis['RSI_Peaking'] = (
-            (df_analysis['RSI_14'] >= df_analysis['RSI_P90']) &  # In top 10% for THIS stock
-            (df_analysis['RSI_14'] >= 70)  # AND above absolute threshold
-        )
+#         # Peaking: Must be BOTH in top 10% AND >= 70
+#         df_analysis['RSI_Peaking'] = (
+#             (df_analysis['RSI_14'] >= df_analysis['RSI_P90']) &  # In top 10% for THIS stock
+#             (df_analysis['RSI_14'] >= 70)  # AND above absolute threshold
+#         )
 
-    # ==================== FINAL GOLDEN LAUNCH ====================
-    launch = (
-        macd_trigger
-        & (df_analysis['MA20'] > df_analysis['MA50'])
-        & adx_healthy  # Smart ADX: bottoming, accelerating, or strong-stable
-        & (df_analysis['RSI_14'] >= 50)
-        & (df_analysis['RSI_14'] <= 70)
-        & (df_analysis['Volume'] > df_analysis['Volume'].rolling(20).mean())
-    )
+#     # ==================== FINAL GOLDEN LAUNCH ====================
+#     launch = (
+#         macd_trigger
+#         & (df_analysis['MA20'] > df_analysis['MA50'])
+#         & adx_healthy  # Smart ADX: bottoming, accelerating, or strong-stable
+#         & (df_analysis['RSI_14'] <= 70)
+#         & (df_analysis['Volume'] > df_analysis['Volume'].rolling(5).mean())
+#     )
 
-    df_analysis.loc[launch, 'Signal_GoldenLaunch'] = True
+#     df_analysis.loc[launch, 'Signal_Golden_Launch'] = True
 
-
-    
-    # Exit Signal: Multiple conditions (any one triggers)
-
-    # ==========================================
-    # EXIT SIGNAL (Improved - Less Noise)
-    # ==========================================
-
-    # Condition 1: MACD crosses down from bullish zone WITH confirmation
-    macd_bearish_cross = (
-        (df_analysis['MACD'].shift(1) > df_analysis['MACD_Signal'].shift(1)) &  # Was above
-        (df_analysis['MACD'] < df_analysis['MACD_Signal']) &  # Crossed down
-        (df_analysis['MACD'].shift(1) > 0) &  # Was in bullish territory
-        (df_analysis['MACD_Hist'] < df_analysis['MACD_Hist'].shift(1))  # Histogram weakening
-    )
-
-    # Condition 2: MA20 crosses below MA50 (major trend reversal)
-    ma_cross_down = (
-        (df_analysis['MA20'].shift(1) > df_analysis['MA50'].shift(1)) &
-        (df_analysis['MA20'] < df_analysis['MA50']) &
-        (df_analysis['ADX'] > 20)  # ← ADD: Only in trending conditions (not noise)
-    )
-
-    # Condition 3: RSI extreme exhaustion (remove this - too frequent)
-    # rsi_exhaustion causes too many false exits - REMOVED
-
-    # Combine conditions (both must be stronger signals now)
-    exit_signal = macd_bearish_cross | ma_cross_down
-
-    df_analysis.loc[exit_signal, 'Exit_MACDLead'] = True
-
-    # ==================== SCORING SYSTEM ====================
-    # Initialize score column
-    df_analysis['Signal_Score'] = 0
-
-    # POSITIVE INDICATORS (+1 each)
-    if 'ADX_Bottoming' in df_analysis.columns:
-        df_analysis.loc[df_analysis['ADX_Bottoming'], 'Signal_Score'] += 1
-
-    if 'ADX_Accelerating' in df_analysis.columns:
-        df_analysis.loc[df_analysis['ADX_Accelerating'], 'Signal_Score'] += 1
-
-    if 'RSI_Bottoming' in df_analysis.columns:
-        df_analysis.loc[df_analysis['RSI_Bottoming'], 'Signal_Score'] += 1
-
-    if 'MACD_Bottoming' in df_analysis.columns:
-        df_analysis.loc[df_analysis['MACD_Bottoming'], 'Signal_Score'] += 1
-
-    if 'MACD_Approaching' in df_analysis.columns:
-        df_analysis.loc[df_analysis['MACD_Approaching'], 'Signal_Score'] += 1
-
-    if 'MACD_ClassicCrossover' in df_analysis.columns:
-        df_analysis.loc[df_analysis['MACD_ClassicCrossover'], 'Signal_Score'] += 1
-
-    if 'MACD_MomentumBuilding' in df_analysis.columns:
-        df_analysis.loc[df_analysis['MACD_MomentumBuilding'], 'Signal_Score'] += 1
-
-    if 'Signal_Accumulation' in df_analysis.columns:
-        df_analysis.loc[df_analysis['Signal_Accumulation'], 'Signal_Score'] += 1
-
-    # NEGATIVE INDICATORS (-1 each)
-    if 'MACD_Peaking' in df_analysis.columns:
-        df_analysis.loc[df_analysis['MACD_Peaking'], 'Signal_Score'] -= 1
-
-    if 'MACD_BearishCrossover' in df_analysis.columns:
-        df_analysis.loc[df_analysis['MACD_BearishCrossover'], 'Signal_Score'] -= 1
-
-    if 'RSI_Peaking' in df_analysis.columns:
-        df_analysis.loc[df_analysis['RSI_Peaking'], 'Signal_Score'] -= 1
-
-    if 'ADX_Peaking' in df_analysis.columns:
-        df_analysis.loc[df_analysis['ADX_Peaking'], 'Signal_Score'] -= 1
-
-    if 'ADX_Reversing' in df_analysis.columns:
-        df_analysis.loc[df_analysis['ADX_Reversing'], 'Signal_Score'] -= 1
-
-    # Calculate cumulative score (optional - for trend tracking)
-    df_analysis['Cumulative_Score'] = df_analysis['Signal_Score'].cumsum()
-
-    return df_analysis
-
-def calculate_adaptive_parameters_percentile(df, lookback_days=30):
-    df_temp = df.copy()
-    # Calculate volatility windows
-    for window in [10, 15, 20, 25, 30]:
-        df_temp[f'vol_{window}d'] = df_temp['Close'].pct_change().rolling(window).std()
 
     
-    current_vol_10d = df_temp['vol_10d'].iloc[-1]
-    vol_5days_ago = df_temp['vol_10d'].iloc[-5] if len(df_temp) >= 5 else current_vol_10d
+#     # Exit Signal: Multiple conditions (any one triggers)
+
+#     # ==========================================
+#     # EXIT SIGNAL (Improved - Less Noise)
+#     # ==========================================
+
+#     # Condition 1: MACD crosses down from bullish zone WITH confirmation
+#     macd_bearish_cross = (
+#         (df_analysis['MACD'].shift(1) > df_analysis['MACD_Signal'].shift(1)) &  # Was above
+#         (df_analysis['MACD'] < df_analysis['MACD_Signal']) &  # Crossed down
+#         (df_analysis['MACD'].shift(1) > 0) &  # Was in bullish territory
+#         (df_analysis['MACD_Hist'] < df_analysis['MACD_Hist'].shift(1))  # Histogram weakening
+#     )
+
+#     # Condition 2: MA20 crosses below MA50 (major trend reversal)
+#     ma_cross_down = (
+#         (df_analysis['MA20'].shift(1) > df_analysis['MA50'].shift(1)) &
+#         (df_analysis['MA20'] < df_analysis['MA50']) &
+#         (df_analysis['ADX'] > 20)  # ← ADD: Only in trending conditions (not noise)
+#     )
+
+#     # Condition 3: RSI extreme exhaustion (remove this - too frequent)
+#     # rsi_exhaustion causes too many false exits - REMOVED
+
+#     # Combine conditions (both must be stronger signals now)
+#     exit_signal = macd_bearish_cross | ma_cross_down
+
+#     df_analysis.loc[exit_signal, 'Exit_MACD_Lead'] = True
+
+#     # ==================== SCORING SYSTEM ====================
+#     # Initialize score column
+#     df_analysis['Signal_Score'] = 0
+
+#     # POSITIVE INDICATORS (+1 each)
+#     if 'ADX_Bottoming' in df_analysis.columns:
+#         df_analysis.loc[df_analysis['ADX_Bottoming'], 'Signal_Score'] += 1
+
+#     if 'ADX_Accelerating' in df_analysis.columns:
+#         df_analysis.loc[df_analysis['ADX_Accelerating'], 'Signal_Score'] += 1
+
+#     if 'RSI_Bottoming' in df_analysis.columns:
+#         df_analysis.loc[df_analysis['RSI_Bottoming'], 'Signal_Score'] += 1
+
+#     if 'MACD_Bottoming' in df_analysis.columns:
+#         df_analysis.loc[df_analysis['MACD_Bottoming'], 'Signal_Score'] += 1
+
+#     if 'MACD_Approaching' in df_analysis.columns:
+#         df_analysis.loc[df_analysis['MACD_Approaching'], 'Signal_Score'] += 1
+
+#     if 'MACD_ClassicCrossover' in df_analysis.columns:
+#         df_analysis.loc[df_analysis['MACD_ClassicCrossover'], 'Signal_Score'] += 1
+
+#     if 'MACD_MomentumBuilding' in df_analysis.columns:
+#         df_analysis.loc[df_analysis['MACD_MomentumBuilding'], 'Signal_Score'] += 1
+
+#     if 'Signal_Accumulation' in df_analysis.columns:
+#         df_analysis.loc[df_analysis['Signal_Accumulation'], 'Signal_Score'] += 1
+
+#     # NEGATIVE INDICATORS (-1 each)
+#     if 'MACD_Peaking' in df_analysis.columns:
+#         df_analysis.loc[df_analysis['MACD_Peaking'], 'Signal_Score'] -= 1
+
+#     if 'MACD_BearishCrossover' in df_analysis.columns:
+#         df_analysis.loc[df_analysis['MACD_BearishCrossover'], 'Signal_Score'] -= 1
+
+#     if 'RSI_Peaking' in df_analysis.columns:
+#         df_analysis.loc[df_analysis['RSI_Peaking'], 'Signal_Score'] -= 1
+
+#     if 'ADX_Peaking' in df_analysis.columns:
+#         df_analysis.loc[df_analysis['ADX_Peaking'], 'Signal_Score'] -= 1
+
+#     if 'ADX_Reversing' in df_analysis.columns:
+#         df_analysis.loc[df_analysis['ADX_Reversing'], 'Signal_Score'] -= 1
+
+#     # Calculate cumulative score (optional - for trend tracking)
+#     df_analysis['Cumulative_Score'] = df_analysis['Signal_Score'].cumsum()
+
+#     return df_analysis
+
+# def calculate_adaptive_parameters_percentile(df, lookback_days=30):
+#     df_temp = df.copy()
+#     # Calculate volatility windows
+#     for window in [10, 15, 20, 25, 30]:
+#         df_temp[f'vol_{window}d'] = df_temp['Close'].pct_change().rolling(window).std()
+
     
-    # Determine the volatility trend
-    vol_trend = 'rising' if current_vol_10d > vol_5days_ago * 1.2 else \
-                'falling' if current_vol_10d < vol_5days_ago * 0.8 else 'stable'
+#     current_vol_10d = df_temp['vol_10d'].iloc[-1]
+#     vol_5days_ago = df_temp['vol_10d'].iloc[-5] if len(df_temp) >= 5 else current_vol_10d
     
-    recent_vol = df_temp['vol_10d'].iloc[-lookback_days:].dropna()
+#     # Determine the volatility trend
+#     vol_trend = 'rising' if current_vol_10d > vol_5days_ago * 1.2 else \
+#                 'falling' if current_vol_10d < vol_5days_ago * 0.8 else 'stable'
     
-    if len(recent_vol) < 10:
-        return {'vol_window': 20, 'obv_lookback': 10, 'obv_threshold': 0.025,
-                'current_vol': current_vol_10d, 'vol_regime': 'insufficient_data'}
+#     recent_vol = df_temp['vol_10d'].iloc[-lookback_days:].dropna()
     
-    p25, p50, p75, p90 = recent_vol.quantile([0.25, 0.50, 0.75, 0.90])
+#     if len(recent_vol) < 10:
+#         return {'vol_window': 20, 'obv_lookback': 10, 'obv_threshold': 0.025,
+#                 'current_vol': current_vol_10d, 'vol_regime': 'insufficient_data'}
     
-    # Determine regime based on percentile
-    if current_vol_10d >= p90:
-        vol_regime, percentile, vol_window, obv_lookback = 'very_high', 90, 10, 5
-    elif current_vol_10d >= p75:
-        vol_regime, percentile, vol_window, obv_lookback = 'high', 75, 15, 7
-    elif current_vol_10d >= p50:
-        vol_regime, percentile, vol_window, obv_lookback = 'medium_high', 60, 20, 10
-    elif current_vol_10d >= p25:
-        vol_regime, percentile, vol_window, obv_lookback = 'medium_low', 40, 25, 12
-    else:
-        vol_regime, percentile, vol_window, obv_lookback = 'low', 20, 30, 15
+#     p25, p50, p75, p90 = recent_vol.quantile([0.25, 0.50, 0.75, 0.90])
     
-    # Adjust for trend
-    if vol_trend == 'rising' and vol_regime in ['high', 'very_high']:
-        vol_window = max(10, vol_window - 5)
-        obv_lookback = max(5, obv_lookback - 2)
+#     # Determine regime based on percentile
+#     if current_vol_10d >= p90:
+#         vol_regime, percentile, vol_window, obv_lookback = 'very_high', 90, 10, 5
+#     elif current_vol_10d >= p75:
+#         vol_regime, percentile, vol_window, obv_lookback = 'high', 75, 15, 7
+#     elif current_vol_10d >= p50:
+#         vol_regime, percentile, vol_window, obv_lookback = 'medium_high', 60, 20, 10
+#     elif current_vol_10d >= p25:
+#         vol_regime, percentile, vol_window, obv_lookback = 'medium_low', 40, 25, 12
+#     else:
+#         vol_regime, percentile, vol_window, obv_lookback = 'low', 20, 30, 15
     
-    current_vol = df_temp[f'vol_{min(vol_window, 30)}d'].iloc[-1]
-    obv_threshold = max(0.008, min(0.08, current_vol * obv_lookback * 0.35))
-    price_flat_threshold = max(0.03, min(0.08, current_vol * obv_lookback * 0.5))
+#     # Adjust for trend
+#     if vol_trend == 'rising' and vol_regime in ['high', 'very_high']:
+#         vol_window = max(10, vol_window - 5)
+#         obv_lookback = max(5, obv_lookback - 2)
     
-    return {
-        'vol_window': vol_window, 'current_vol': current_vol,
-        'vol_percentile': percentile, 'vol_regime': vol_regime,
-        'vol_trend': vol_trend, 'p25': p25, 'p50': p50, 'p75': p75, 'p90': p90,
-        'obv_lookback': obv_lookback, 'obv_threshold': obv_threshold,
-        'price_flat_threshold': price_flat_threshold,
-        'cycle_estimate': obv_lookback * 2
-    }
+#     current_vol = df_temp[f'vol_{min(vol_window, 30)}d'].iloc[-1]
+#     obv_threshold = max(0.008, min(0.08, current_vol * obv_lookback * 0.35))
+#     price_flat_threshold = max(0.03, min(0.08, current_vol * obv_lookback * 0.5))
+    
+#     return {
+#         'vol_window': vol_window, 'current_vol': current_vol,
+#         'vol_percentile': percentile, 'vol_regime': vol_regime,
+#         'vol_trend': vol_trend, 'p25': p25, 'p50': p50, 'p75': p75, 'p90': p90,
+#         'obv_lookback': obv_lookback, 'obv_threshold': obv_threshold,
+#         'price_flat_threshold': price_flat_threshold,
+#         'cycle_estimate': obv_lookback * 2
+#     }
 
 
 def calculate_multiple_blocks(df, lookback=60):
@@ -891,7 +938,7 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
             showlegend=True
         ), row=1, col=1)
     
-    launch = df[df['Signal_GoldenLaunch']]
+    launch = df[df['Signal_Golden_Launch']]
     if not launch.empty:
         fig.add_trace(go.Scatter(
             x=launch.index.strftime('%Y-%m-%d'), y=launch['High'] * 1.05,
@@ -901,7 +948,7 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
             showlegend=True
         ), row=1, col=1)
     
-    exits = df[df['Exit_MACDLead']]
+    exits = df[df['Exit_MACD_Lead']]
     if not exits.empty:
         fig.add_trace(go.Scatter(
             x=exits.index.strftime('%Y-%m-%d'), y=exits['High'] * 1.01,
@@ -1212,8 +1259,8 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
 
     # ==================== ADD PATTERN LABELS ====================
     if 'ADX_Pattern' in df.columns:
-        # Mark Bottoming (Reversal Setup)
-        bottoming = df[df['ADX_Pattern'] == 'Reversal Setup']
+        # Mark Bottoming
+        bottoming = df[df['ADX_Pattern'] == 'Bottoming']
         if not bottoming.empty:
             fig.add_trace(go.Scatter(
                 x=bottoming.index.strftime('%Y-%m-%d'),
@@ -1225,16 +1272,29 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
                 textposition='bottom center',
                 showlegend=True
             ), row=5, col=1)
-        
-        # Mark Accelerating (Breakout Mode)
-        accelerating = df[df['ADX_Pattern'] == 'Breakout Mode']
-        if not accelerating.empty:
+
+        reversing_up = df[df['ADX_Pattern'] == 'Reversing Up']
+        if not reversing_up.empty:
             fig.add_trace(go.Scatter(
-                x=accelerating.index.strftime('%Y-%m-%d'),
-                y=accelerating['ADX'] * 1.05,
+                x=reversing_up.index.strftime('%Y-%m-%d'),
+                y=reversing_up['ADX'] * 1.05,
+                mode='markers+text',
+                name='Reversing Up',
+                marker=dict(color='#22c55e', size=12, symbol='triangle-up'),
+                text='🔺',
+                textposition='bottom center',
+                showlegend=True
+            ), row=5, col=1)
+        
+        # Mark Accelerating Up
+        accelerating_up = df[df['ADX_Pattern'] == 'Accelerating Up']
+        if not accelerating_up.empty:
+            fig.add_trace(go.Scatter(
+                x=accelerating_up.index.strftime('%Y-%m-%d'),
+                y=accelerating_up['ADX'] * 1.05,
                 mode='markers+text',
                 name='🚀 Accelerating',
-                marker=dict(color='#ef4444', size=12, symbol='triangle-up'),
+                marker=dict(color='#ef4444', size=10, symbol='triangle-up'),
                 text='🚀',
                 textposition='top center',
                 showlegend=True
@@ -1248,7 +1308,19 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
                 y=strong['ADX'],
                 mode='markers',
                 name='💪 Strong',
-                marker=dict(color='#10b981', size=8, symbol='diamond', opacity=0.5),
+                marker=dict(color="#ff0000", size=9, symbol='diamond', opacity=0.5),
+                showlegend=True
+            ), row=5, col=1)
+
+        # Losing Steam
+        losing_steam = df[df['ADX_Pattern'] == 'Losing Steam']
+        if not losing_steam.empty:
+            fig.add_trace(go.Scatter(
+                x=losing_steam.index.strftime('%Y-%m-%d'),
+                y=losing_steam['ADX'],
+                mode='markers',
+                name='⚠️ Losing Steam',
+                marker=dict(color='#f59e0b', size=9, symbol='diamond', opacity=0.5),
                 showlegend=True
             ), row=5, col=1)
         
@@ -1259,26 +1331,53 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
                 x=peaking.index.strftime('%Y-%m-%d'),
                 y=peaking['ADX'] * 1.08,
                 mode='markers+text',
-                name='⚠️ Peaking',
-                marker=dict(color='#f59e0b', size=14, symbol='triangle-down'),
-                text='⚠️',
+                name='🔴 Peaking',
+                marker=dict(color="#ff1f01", size=14, symbol='triangle-down'),
+                text='🔴',
                 textposition='top center',
                 showlegend=True
             ), row=5, col=1)
         
         # Mark Reversing Down (NEW - Danger!)
-        reversing = df[df['ADX_Pattern'] == 'Reversing Down']
-        if not reversing.empty:
+        reversing_down = df[df['ADX_Pattern'] == 'Reversing Down']
+        if not reversing_down.empty:
             fig.add_trace(go.Scatter(
-                x=reversing.index.strftime('%Y-%m-%d'),
-                y=reversing['ADX'] * 1.05,
+                x=reversing_down.index.strftime('%Y-%m-%d'),
+                y=reversing_down['ADX'] * 1.05,
                 mode='markers+text',
                 name='🔻 Reversing',
-                marker=dict(color='#22c55e', size=14, symbol='triangle-down'),
+                marker=dict(color="#00f85b", size=14, symbol='triangle-down'),
                 text='🔻',
                 textposition='top center',
                 showlegend=True
             ), row=5, col=1)
+
+        accelerating_down = df[df['ADX_Pattern'] == 'Accelerating Down']
+        if not accelerating_down.empty:
+            fig.add_trace(go.Scatter(
+                x=accelerating_down.index.strftime('%Y-%m-%d'),
+                y=accelerating_down['ADX'] * 1.05,
+                mode='markers+text',
+                name='📉 Accelerating Down',
+                marker=dict(color="#025721", size=14, symbol='triangle-down'),
+                text='📉',
+                textposition='top center',
+                showlegend=True
+            ), row=5, col=1)
+
+        slowing_down = df[df['ADX_Pattern'] == 'Slowing Down']
+        if not slowing_down.empty:
+            fig.add_trace(go.Scatter(
+                x=slowing_down.index.strftime('%Y-%m-%d'),
+                y=slowing_down['ADX'] * 1.05,
+                mode='markers+text',
+                name='🔽 Slowing Down',
+                marker=dict(color="#3b82f6", size=14, symbol='triangle-down'),
+                text='🔽',
+                textposition='top center',
+                showlegend=True
+            ), row=5, col=1)
+
 
 
     # Reference lines
@@ -2761,7 +2860,7 @@ if st.session_state.active_ticker:
             
             accum = bool(latest_row.get('Signal_Accumulation', False))
             squeeze = bool(latest_row.get('Signal_Squeeze', False))
-            launch = bool(latest_row.get('Signal_GoldenLaunch', False))
+            launch = bool(latest_row.get('Signal_Golden_Launch', False))
             adx_val = float(latest_row.get('ADX', 0.0))
             
             with cola:
@@ -2792,7 +2891,7 @@ if st.session_state.active_ticker:
             st.subheader("Key Metrics")
             
             table_cols = ['Close', 'MA20', 'MA50', 'MA200', 'RSI_14', 'ADX',
-                         'Signal_Accumulation', 'Signal_Squeeze', 'Signal_GoldenLaunch']
+                         'Signal_Accumulation', 'Signal_Squeeze', 'Signal_Golden_Launch']
             
             metrics_df = analysis_df[table_cols].tail(5)
             st.dataframe(metrics_df, use_container_width=True)

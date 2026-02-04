@@ -364,6 +364,214 @@ def make_heatmap(probs, title="Transition Probabilities"):
     )
     return fig
 
+# ========================================== 
+# NEW: PERFORMANCE & ROTATION FUNCTIONS
+# ========================================== 
+
+def create_performance_comparison_chart(hist_df, lookback_days=60, selected_sectors=None):
+    """Create normalized performance comparison chart (base 100)."""
+    # Get data for the last N days based on actual dates
+    latest_date = hist_df['Date'].max()
+    start_date = latest_date - pd.Timedelta(days=lookback_days)
+    recent = hist_df[hist_df['Date'] >= start_date].copy()
+    
+    # DEBUG: Print what we have
+    print(f"Date range: {recent['Date'].min()} to {recent['Date'].max()}")
+    print(f"Available sectors: {recent['Sector'].unique().tolist()}")
+    print(f"Selected sectors: {selected_sectors}")
+    
+    # Pivot to get Close prices by sector
+    pivot = recent.pivot_table(index='Date', columns='Sector', values='Close')
+    
+    # Filter selected sectors if provided
+    if selected_sectors and len(selected_sectors) > 0:
+        # Only keep sectors that exist in both selected list AND pivot columns
+        available_sectors = [s for s in selected_sectors if s in pivot.columns]
+        print(f"Filtered to: {available_sectors}")
+        
+        if available_sectors:
+            pivot = pivot[available_sectors]
+        else:
+            # If no match, show all
+            st.warning(f"Selected sectors not found in data. Showing all sectors.")
+    
+    # Remove MARKET_PROXY if it exists and wasn't explicitly selected
+    if 'MARKET_PROXY' in pivot.columns:
+        if not selected_sectors or 'MARKET_PROXY' not in selected_sectors:
+            pivot = pivot.drop(columns=['MARKET_PROXY'])
+    
+    # Normalize to base 100
+    first_valid_row = pivot.dropna(how='all').iloc[0]
+    normalized = (pivot / first_valid_row * 100)
+    
+    # Create chart
+    fig = go.Figure()
+    
+    # Add trace for each sector
+    for sector in normalized.columns:
+        sector_data = normalized[sector].dropna()
+        
+        fig.add_trace(go.Scatter(
+            x=sector_data.index,
+            y=sector_data.values,
+            name=sector,
+            mode='lines',
+            line=dict(width=2),
+            hovertemplate=f'<b>{sector}</b><br>Date: %{{x|%Y-%m-%d}}<br>Index: %{{y:.1f}}<extra></extra>'
+        ))
+    
+    # Add horizontal line at 100
+    fig.add_hline(y=100, line_dash='dash', line_color='gray', opacity=0.5)
+    
+    fig.update_layout(
+        title=f'Sector Performance Comparison (Base 100) - Last {lookback_days} Days',
+        xaxis_title='Date',
+        yaxis_title='Normalized Index (Base 100)',
+        height=600,
+        template='plotly_white',
+        hovermode='x unified',
+        legend=dict(
+            orientation="v",
+            yanchor="top",
+            y=1,
+            xanchor="left",
+            x=1.02
+        )
+    )
+    
+    return fig
+
+
+def create_sector_rotation_map(hist_df, lookback_short=5, lookback_long=20):
+    """Create sector rotation quadrant map."""
+    # Get latest data
+    latest_date = hist_df['Date'].max()
+    recent = hist_df[hist_df['Date'] >= latest_date - pd.Timedelta(days=lookback_long*2)]
+    
+    # Pivot Close prices
+    pivot = recent.pivot_table(index='Date', columns='Sector', values='Close').sort_index()
+    
+    if len(pivot) < lookback_long:
+        return None
+    
+    sectors_data = []
+    
+    for sector in pivot.columns:
+        if sector == 'MARKET_PROXY':
+            continue
+            
+        prices = pivot[sector].dropna()
+        if len(prices) < lookback_long:
+            continue
+        
+        # Calculate relative strength (% change over long period)
+        long_change = ((prices.iloc[-1] - prices.iloc[-lookback_long]) / prices.iloc[-lookback_long]) * 100
+        
+        # Calculate momentum (recent vs prior period)
+        recent_avg = prices.iloc[-lookback_short:].mean()
+        prior_avg = prices.iloc[-lookback_long:-lookback_short].mean()
+        momentum = ((recent_avg - prior_avg) / prior_avg) * 100
+        
+        sectors_data.append({
+            'Sector': sector,
+            'Relative_Strength': long_change,
+            'Momentum': momentum,
+            'Current_Price': prices.iloc[-1]
+        })
+    
+    if not sectors_data:
+        return None
+    
+    df = pd.DataFrame(sectors_data)
+    
+    # Calculate average for quadrant lines
+    avg_strength = df['Relative_Strength'].mean()
+    avg_momentum = df['Momentum'].mean()
+    
+    # Assign quadrants
+    def assign_quadrant(row):
+        if row['Relative_Strength'] >= avg_strength and row['Momentum'] >= avg_momentum:
+            return '🟢 Leading'
+        elif row['Relative_Strength'] >= avg_strength and row['Momentum'] < avg_momentum:
+            return '🟡 Weakening'
+        elif row['Relative_Strength'] < avg_strength and row['Momentum'] < avg_momentum:
+            return '🔴 Lagging'
+        else:
+            return '🔵 Improving'
+    
+    df['Quadrant'] = df.apply(assign_quadrant, axis=1)
+    
+    # Create scatter plot
+    fig = go.Figure()
+    
+    # Color mapping
+    color_map = {
+        '🟢 Leading': '#15803d',
+        '🟡 Weakening': '#f59e0b',
+        '🔴 Lagging': '#dc2626',
+        '🔵 Improving': '#3b82f6'
+    }
+    
+    for quadrant in df['Quadrant'].unique():
+        quad_data = df[df['Quadrant'] == quadrant]
+        fig.add_trace(go.Scatter(
+            x=quad_data['Relative_Strength'],
+            y=quad_data['Momentum'],
+            mode='markers+text',
+            name=quadrant,
+            text=quad_data['Sector'],
+            textposition='top center',
+            marker=dict(
+                size=15,
+                color=color_map.get(quadrant, 'gray'),
+                line=dict(width=2, color='white')
+            ),
+            hovertemplate='<b>%{text}</b><br>' +
+                         f'Relative Strength: %{{x:.1f}}%<br>' +
+                         f'Momentum: %{{y:.1f}}%<br>' +
+                         '<extra></extra>'
+        ))
+    
+    # Add quadrant lines
+    fig.add_vline(x=avg_strength, line_dash='dash', line_color='gray', opacity=0.5)
+    fig.add_hline(y=avg_momentum, line_dash='dash', line_color='gray', opacity=0.5)
+    
+    # Add quadrant labels
+    max_x = df['Relative_Strength'].max()
+    min_x = df['Relative_Strength'].min()
+    max_y = df['Momentum'].max()
+    min_y = df['Momentum'].min()
+    
+    annotations = [
+        dict(x=max_x*0.8, y=max_y*0.8, text="🟢 LEADING<br>(Buy/Hold)", showarrow=False, 
+             font=dict(size=12, color='#15803d'), opacity=0.3),
+        dict(x=min_x*0.8, y=max_y*0.8, text="🔵 IMPROVING<br>(Watch/Early Buy)", showarrow=False,
+             font=dict(size=12, color='#3b82f6'), opacity=0.3),
+        dict(x=max_x*0.8, y=min_y*0.8, text="🟡 WEAKENING<br>(Take Profits)", showarrow=False,
+             font=dict(size=12, color='#f59e0b'), opacity=0.3),
+        dict(x=min_x*0.8, y=min_y*0.8, text="🔴 LAGGING<br>(Avoid)", showarrow=False,
+             font=dict(size=12, color='#dc2626'), opacity=0.3)
+    ]
+    
+    fig.update_layout(
+        title=f'Sector Rotation Map (Strength: {lookback_long}d, Momentum: {lookback_short}d vs prior)',
+        xaxis_title=f'Relative Strength (% Change, {lookback_long} days)',
+        yaxis_title=f'Momentum (Recent {lookback_short}d vs Prior)',
+        height=700,
+        template='plotly_white',
+        annotations=annotations,
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+    
+    return fig, df
+
 
 # ==========================================
 # MAIN APP
@@ -379,7 +587,7 @@ if v2_latest is None:
     st.stop()
 
 # Create tabs
-tab1, tab2 = st.tabs(["📊 Dashboard", "🔬 Interaction Lab"])
+tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "🔬 Interaction Lab", "🎯 Performance & Rotation"])
 
 # ==========================================
 # TAB 1: DASHBOARD
@@ -684,3 +892,334 @@ with tab2:
         
         fig.update_layout(height=700, template='plotly_white', showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
+
+
+# ========================================== 
+# TAB 3: PERFORMANCE & ROTATION
+# ========================================== 
+with tab3:
+
+    # ========================================== 
+    # TAB 3: PERFORMANCE & ROTATION
+    # ========================================== 
+    st.header("📈 Sector Co-Movement Analysis")
+
+    # Sector selection
+    all_sectors = sorted([s for s in v2_hist['Sector'].unique() if s != 'MARKET_PROXY'])
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        selected_sectors = st.multiselect(
+            "Select sectors to compare (2-5 recommended)",
+            options=all_sectors,
+            default=all_sectors[:3] if len(all_sectors) >= 3 else all_sectors,
+            key="sector_selector"
+        )
+    with col2:
+        lookback = st.selectbox("Time Period", [30, 60, 90, 120, 180], index=1, key="lookback_selector")
+
+    if not selected_sectors or len(selected_sectors) < 2:
+        st.warning("Please select at least 2 sectors to compare")
+        st.stop()
+
+    # Get data
+    latest_date = v2_hist['Date'].max()
+    start_date = latest_date - pd.Timedelta(days=lookback)
+    recent = v2_hist[v2_hist['Date'] >= start_date].copy()
+
+    # Pivot and calculate daily returns
+    pivot = recent.pivot_table(index='Date', columns='Sector', values='Close')
+    pivot = pivot[selected_sectors]
+    returns = pivot.pct_change() * 100  # Daily % returns
+
+    # Drop first row (NaN) and remove days with missing data
+    returns = returns.dropna()
+
+    st.markdown("---")
+
+    # ========================================== 
+    # 1. DAILY RETURNS COMPARISON (Main View)
+    # ========================================== 
+    st.subheader("📊 Daily Returns Comparison")
+    st.caption("Shows how much each sector moved (%) each day - easy to see which move together")
+
+    # Create multi-line chart of daily returns
+    fig_returns = go.Figure()
+
+    for sector in returns.columns:
+        fig_returns.add_trace(go.Scatter(
+            x=returns.index,
+            y=returns[sector],
+            name=sector,
+            mode='lines+markers',
+            line=dict(width=2),
+            marker=dict(size=4),
+            hovertemplate=f'<b>{sector}</b><br>Date: %{{x|%Y-%m-%d}}<br>Daily Return: %{{y:.2f}}%<extra></extra>'
+        ))
+
+    fig_returns.add_hline(y=0, line_dash='solid', line_color='gray', line_width=1, opacity=0.5)
+
+    fig_returns.update_layout(
+        xaxis_title='Date',
+        yaxis_title='Daily Return (%)',
+        height=500,
+        template='plotly_white',
+        hovermode='x unified',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+
+    st.plotly_chart(fig_returns, use_container_width=True)
+
+    st.markdown("---")
+
+    # ========================================== 
+    # 2. CORRELATION HEATMAP
+    # ========================================== 
+    st.subheader("🔥 Correlation Matrix")
+    st.caption("Shows how sectors move together: 1.0 = perfect sync, -1.0 = perfect opposite, 0 = independent")
+
+    corr_matrix = returns.corr()
+
+    fig_corr = go.Figure(data=go.Heatmap(
+        z=corr_matrix.values,
+        x=corr_matrix.columns.tolist(),
+        y=corr_matrix.index.tolist(),
+        colorscale='RdYlGn',
+        zmid=0,
+        text=corr_matrix.values.round(2),
+        texttemplate='%{text}',
+        textfont=dict(size=14),
+        colorbar=dict(title="Correlation"),
+        zmin=-1,
+        zmax=1
+    ))
+
+    fig_corr.update_layout(
+        title=f'Daily Return Correlation - Last {lookback} Days',
+        height=max(400, len(selected_sectors) * 60),
+        template='plotly_white',
+        xaxis=dict(tickfont=dict(size=12)),
+        yaxis=dict(tickfont=dict(size=12))
+    )
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.plotly_chart(fig_corr, use_container_width=True)
+
+    with col2:
+        st.markdown("**Interpretation:**")
+        
+        # Find highest correlation pairs
+        corr_pairs = []
+        for i in range(len(corr_matrix.columns)):
+            for j in range(i+1, len(corr_matrix.columns)):
+                corr_pairs.append({
+                    'Pair': f"{corr_matrix.columns[i]} ↔ {corr_matrix.columns[j]}",
+                    'Correlation': corr_matrix.iloc[i, j]
+                })
+        
+        corr_df = pd.DataFrame(corr_pairs).sort_values('Correlation', ascending=False)
+        
+        # Only show if we have enough pairs
+        if len(corr_df) > 3:
+            st.markdown("**Highest Correlation:**")
+            for _, row in corr_df.head(3).iterrows():
+                corr_val = row['Correlation']
+                if corr_val > 0.7:
+                    emoji = "🟢"
+                elif corr_val > 0.3:
+                    emoji = "🟡"
+                else:
+                    emoji = "⚪"
+                st.markdown(f"{emoji} {row['Pair']}: **{corr_val:.2f}**")
+            
+            st.markdown("**Lowest Correlation:**")
+            for _, row in corr_df.tail(3).iterrows():
+                corr_val = row['Correlation']
+                if corr_val < -0.3:
+                    emoji = "🔴"
+                elif corr_val < 0.3:
+                    emoji = "🟡"
+                else:
+                    emoji = "⚪"
+                st.markdown(f"{emoji} {row['Pair']}: **{corr_val:.2f}**")
+        else:
+            # Just show all pairs when there are 3 or fewer
+            st.markdown("**Sector Pairs:**")
+            for _, row in corr_df.iterrows():
+                corr_val = row['Correlation']
+                if corr_val > 0.7:
+                    emoji = "🟢 Strong"
+                elif corr_val > 0.3:
+                    emoji = "🟡 Moderate"
+                elif corr_val > -0.3:
+                    emoji = "⚪ Weak"
+                else:
+                    emoji = "🔴 Negative"
+                st.markdown(f"{emoji} {row['Pair']}: **{corr_val:.2f}**")
+            
+            st.caption(f"Select more sectors to see top/bottom correlations")
+
+
+    st.markdown("---")
+
+    # ========================================== 
+    # 3. SCATTER PLOT (Pairwise Comparison)
+    # ========================================== 
+    if len(selected_sectors) >= 2:
+        st.subheader("📍 Pairwise Movement Scatter")
+        st.caption("When Sector X moves +1%, what does Sector Y do? Each dot is one day.")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            sector_x = st.selectbox("X-axis (Reference Sector)", selected_sectors, index=0, key="scatter_x")
+        with col2:
+            sector_y = st.selectbox("Y-axis (Compare To)", 
+                                    [s for s in selected_sectors if s != sector_x], 
+                                    index=0, key="scatter_y")
+        
+        # Create scatter plot
+        fig_scatter = go.Figure()
+        date_numeric = (returns.index - returns.index.min()).days
+
+        fig_scatter.add_trace(go.Scatter(
+            x=returns[sector_x],
+            y=returns[sector_y],
+            mode='markers',
+            marker=dict(
+                size=8,
+                color=date_numeric,  # ✅ Numbers work with colorscale
+                colorscale='Viridis',
+                showscale=False
+            ),
+            text=returns.index.strftime('%Y-%m-%d'),
+            hovertemplate=f'<b>%{{text}}</b><br>{sector_x}: %{{x:.2f}}%<br>{sector_y}: %{{y:.2f}}%<extra></extra>'
+        ))
+        
+        # Add diagonal line (perfect correlation)
+        max_val = max(returns[sector_x].max(), returns[sector_y].max())
+        min_val = min(returns[sector_x].min(), returns[sector_y].min())
+        fig_scatter.add_trace(go.Scatter(
+            x=[min_val, max_val],
+            y=[min_val, max_val],
+            mode='lines',
+            line=dict(dash='dash', color='gray'),
+            name='Perfect Correlation',
+            showlegend=True
+        ))
+        
+        # Add zero lines
+        fig_scatter.add_hline(y=0, line_dash='solid', line_color='lightgray', line_width=1)
+        fig_scatter.add_vline(x=0, line_dash='solid', line_color='lightgray', line_width=1)
+        
+        # Calculate correlation
+        correlation = returns[sector_x].corr(returns[sector_y])
+        
+        fig_scatter.update_layout(
+            title=f'{sector_x} vs {sector_y} | Correlation: {correlation:.2f}',
+            xaxis_title=f'{sector_x} Daily Return (%)',
+            yaxis_title=f'{sector_y} Daily Return (%)',
+            height=500,
+            template='plotly_white',
+            showlegend=True
+        )
+        
+        st.plotly_chart(fig_scatter, use_container_width=True)
+        
+        # Interpretation
+        if correlation > 0.7:
+            st.success(f"**Strong Positive Correlation ({correlation:.2f}):** These sectors move together. When {sector_x} goes up 1%, {sector_y} typically goes up too.")
+        elif correlation > 0.3:
+            st.info(f"**Moderate Positive Correlation ({correlation:.2f}):** These sectors somewhat move together.")
+        elif correlation > -0.3:
+            st.warning(f"**Low Correlation ({correlation:.2f}):** These sectors move independently. Good for diversification!")
+        else:
+            st.error(f"**Negative Correlation ({correlation:.2f}):** These sectors move opposite. When {sector_x} goes up, {sector_y} tends to go down.")
+
+    st.markdown("---")
+
+    # ========================================== 
+    # 4. DAILY MOVEMENT TABLE
+    # ========================================== 
+    with st.expander("📋 Show Daily Movement Table", expanded=False):
+        st.caption("Raw data: Daily % changes for each sector")
+        
+        display_returns = returns.tail(30).copy()  # Last 30 days
+        display_returns = display_returns.sort_index(ascending=False)
+        
+        # Format with color
+        def color_returns(val):
+            if pd.isna(val):
+                return ''
+            color = '#dcfce7' if val > 0 else '#fee2e2' if val < 0 else ''
+            return f'background-color: {color}'
+        
+        styled_returns = display_returns.style.format('{:+.2f}%').applymap(color_returns)
+        
+        st.dataframe(styled_returns, use_container_width=True, height=400)
+
+
+    
+    # Rotation Map
+    st.header("🎯 Sector Rotation Map")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        short_period = st.slider("Momentum Period (days)", 3, 10, 5)
+    with col2:
+        long_period = st.slider("Strength Period (days)", 10, 30, 20)
+    
+    rotation_chart, rotation_df = create_sector_rotation_map(
+        v2_hist,
+        lookback_short=short_period,
+        lookback_long=long_period
+    )
+    
+    if rotation_chart:
+        st.plotly_chart(rotation_chart, use_container_width=True)
+        
+        # Summary by quadrant
+        st.subheader("📊 Quadrant Breakdown")
+        
+        quad_cols = st.columns(4)
+        for idx, (quadrant, color) in enumerate([
+            ('🟢 Leading', '#dcfce7'),
+            ('🔵 Improving', '#dbeafe'),
+            ('🟡 Weakening', '#fef9c3'),
+            ('🔴 Lagging', '#fee2e2')
+        ]):
+            with quad_cols[idx]:
+                sectors_in_quad = rotation_df[rotation_df['Quadrant'] == quadrant]['Sector'].tolist()
+                st.markdown(f"**{quadrant}**")
+                if sectors_in_quad:
+                    for sector in sectors_in_quad:
+                        st.markdown(f"• {sector}")
+                else:
+                    st.caption("None")
+        
+        # Detailed table
+        st.subheader("📋 Detailed Metrics")
+        display_rotation = rotation_df[['Sector', 'Quadrant', 'Relative_Strength', 'Momentum']].copy()
+        display_rotation['Relative_Strength'] = display_rotation['Relative_Strength'].map('{:+.1f}%'.format)
+        display_rotation['Momentum'] = display_rotation['Momentum'].map('{:+.1f}%'.format)
+        display_rotation = display_rotation.sort_values('Quadrant')
+        
+        st.dataframe(display_rotation, hide_index=True, use_container_width=True)
+        
+        # Explanation
+        with st.expander("💡 How to use the Rotation Map"):
+            st.markdown("""
+            **Quadrants explain sector lifecycle:**
+            - **🟢 Leading (Top Right):** Strong AND accelerating → **BUY or HOLD**
+            - **🔵 Improving (Top Left):** Weak but gaining momentum → **WATCH for entry**
+            - **🟡 Weakening (Bottom Right):** Strong but slowing down → **TAKE PROFITS**
+            - **🔴 Lagging (Bottom Left):** Weak AND declining → **AVOID**
+            
+            **Trading Strategy:**
+            1. **Buy** when sectors move from Improving → Leading
+            2. **Hold** while in Leading quadrant
+            3. **Sell** when sectors move from Leading → Weakening
+            4. **Avoid** sectors in Lagging quadrant
+            """)
+    else:
+        st.warning("Not enough data to create rotation map")

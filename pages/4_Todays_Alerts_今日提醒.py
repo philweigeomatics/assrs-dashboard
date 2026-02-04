@@ -32,16 +32,23 @@ BEARISH_SIGNALS = {
     'RSI_Peaking': 'RSI Peaking'
 }
 
-# ADX_Pattern column values (string-based)
+# ==========================================
+# ADX PATTERN SIGNALS (WITH PRICE CONTEXT)
+# ==========================================
+
+# BULLISH: ADX patterns that signal BUY opportunities
+# Only reversal patterns after price decline
 ADX_BULLISH_PATTERNS = {
-    'Reversal Setup': 'ADX Bottoming'
+    'Bottoming + Downtrend': 'ADX Bottoming (after decline)',
+    'Reversing Up + Downtrend': 'ADX Reversing Up (after decline)',
 }
 
+# BEARISH: ADX patterns that signal SELL alerts
+# Only exhaustion patterns after price rally
 ADX_BEARISH_PATTERNS = {
-    'Peaking Warning': 'ADX Peaking',
-    'Reversing Down': 'ADX Reversing'
+    'Peaking + Uptrend': 'ADX Peaking (after rally)',
+    'Reversing Down + Uptrend': 'ADX Reversing Down (after rally)',
 }
-
 
 def get_beijing_date():
     """Get current date in Beijing timezone"""
@@ -100,6 +107,26 @@ def scan_all_stocks():
             stock_name = data_manager.get_stock_name_from_db(ticker)
             if not stock_name:
                 stock_name = ticker
+
+            # ==========================================
+            # CALCULATE PRICE TREND (using EMA)
+            # ==========================================
+            
+            # Calculate 5-day EMA of closing prices
+            ema_5d = analysis_df['Close'].ewm(span=5, adjust=False).mean()
+            
+            # Get current price and current EMA
+            current_price = latest['Close']
+            current_ema = ema_5d.iloc[-1]
+            
+            # Determine trend: price above EMA = uptrend, below = downtrend
+            # Use 2% threshold to avoid noise
+            if current_price > current_ema * 1.02:
+                price_trend = 'uptrend'
+            elif current_price < current_ema * 0.98:
+                price_trend = 'downtrend'
+            else:
+                price_trend = 'neutral'
             
             # ==================== CHECK BULLISH SIGNALS ====================
             bullish_signals_found = []
@@ -109,11 +136,17 @@ def scan_all_stocks():
                 if signal_col in latest.index and latest[signal_col] == True:
                     bullish_signals_found.append(signal_name)
             
-            # Check ADX_Pattern column for bullish patterns
+            # Check ADX Pattern with PRICE CONTEXT
             if 'ADX_Pattern' in latest.index:
                 adx_pattern = str(latest['ADX_Pattern'])
-                if adx_pattern in ADX_BULLISH_PATTERNS:
-                    bullish_signals_found.append(ADX_BULLISH_PATTERNS[adx_pattern])
+                
+                # Bottoming: Only bullish if price is in downtrend (reversal setup)
+                if adx_pattern == 'Bottoming' and price_trend == 'downtrend':
+                    bullish_signals_found.append(ADX_BULLISH_PATTERNS['Bottoming + Downtrend'])
+                
+                # Reversing Up: Only bullish if price is in downtrend (catching reversal)
+                elif adx_pattern == 'Reversing Up' and price_trend == 'downtrend':
+                    bullish_signals_found.append(ADX_BULLISH_PATTERNS['Reversing Up + Downtrend'])
             
             if bullish_signals_found:
                 results.append({
@@ -137,11 +170,17 @@ def scan_all_stocks():
                 if signal_col in latest.index and latest[signal_col] == True:
                     bearish_signals_found.append(signal_name)
             
-            # Check ADX_Pattern column for bearish patterns
+            # Check ADX Pattern with PRICE CONTEXT
             if 'ADX_Pattern' in latest.index:
                 adx_pattern = str(latest['ADX_Pattern'])
-                if adx_pattern in ADX_BEARISH_PATTERNS:
-                    bearish_signals_found.append(ADX_BEARISH_PATTERNS[adx_pattern])
+                
+                # Peaking: Only bearish if price is in uptrend (exhaustion at top)
+                if adx_pattern == 'Peaking' and price_trend == 'uptrend':
+                    bearish_signals_found.append(ADX_BEARISH_PATTERNS['Peaking + Uptrend'])
+                
+                # Reversing Down: Only bearish if price is in uptrend (trend breaking)
+                elif adx_pattern == 'Reversing Down' and price_trend == 'uptrend':
+                    bearish_signals_found.append(ADX_BEARISH_PATTERNS['Reversing Down + Uptrend'])
             
             if bearish_signals_found:
                 results.append({
