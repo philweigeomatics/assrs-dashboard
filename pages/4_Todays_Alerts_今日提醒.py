@@ -64,6 +64,169 @@ def init_signals_tables():
 
 def scan_all_stocks():
     """
+    Scan all stocks for signals using LIVE Tushare data (qfq).
+    Returns combined_df with opportunities and alerts.
+    """
+    import time
+    start_time = time.time()
+    
+    results = []
+    
+    # Create progress bars
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # ✅ STEP 1: Fetch all stock data LIVE from Tushare (qfq)
+    status_text.text("📡 正在从Tushare获取股票数据 (qfq前复权)...")
+    
+    def progress_callback(current, total, ticker):
+        progress = current / total
+        progress_bar.progress(progress)
+        status_text.text(f"📡 获取 {current}/{total}: {ticker} - {progress*100:.1f}%")
+    
+    all_stock_data = data_manager.get_all_stock_data_live(progress_callback=progress_callback)
+    
+    if not all_stock_data:
+        progress_bar.empty()
+        status_text.empty()
+        return None, 0
+    
+    total_stocks = len(all_stock_data)
+    
+    # ✅ STEP 2: Analyze each stock for signals
+    progress_bar.progress(0)
+    status_text.text("🔍 开始分析股票信号...")
+    
+    for idx, (ticker, stock_df) in enumerate(all_stock_data.items(), 1):
+        # Update progress
+        progress = idx / total_stocks
+        progress_bar.progress(progress)
+        status_text.text(f"🔍 分析 {idx}/{total_stocks}: {ticker} - {progress*100:.1f}%")
+        
+        try:
+            # Skip if not enough data
+            if stock_df is None or len(stock_df) < 100:
+                continue
+            
+            # Run technical analysis
+            analysis_df = run_single_stock_analysis(stock_df)
+            
+            if analysis_df is None or analysis_df.empty:
+                continue
+            
+            # Get latest row (today's signals)
+            latest = analysis_df.iloc[-1]
+            
+            # Get stock name from database
+            stock_name = data_manager.get_stock_name_from_db(ticker)
+            if not stock_name:
+                stock_name = ticker
+            
+            # Calculate 5-day EMA of closing prices
+            ema_5d = analysis_df['Close'].ewm(span=5, adjust=False).mean()
+            
+            # Get current price and current EMA
+            current_price = latest['Close']
+            current_ema = ema_5d.iloc[-1]
+            
+            # Use 2% threshold to avoid noise
+            if current_price > current_ema * 1.02:
+                price_trend = 'uptrend'
+            elif current_price < current_ema * 0.98:
+                price_trend = 'downtrend'
+            else:
+                price_trend = 'neutral'
+            
+            # --- CHECK BULLISH SIGNALS ---
+            bullish_signals_found = []
+            
+            # Check boolean columns
+            for signal_col, signal_name in BULLISH_SIGNALS.items():
+                if signal_col in latest.index and latest[signal_col] == True:
+                    bullish_signals_found.append(signal_name)
+            
+            # Check ADX Pattern with PRICE CONTEXT
+            if 'ADX_Pattern' in latest.index:
+                adx_pattern = str(latest['ADX_Pattern'])
+                
+                # Bottoming: Only bullish if price is in downtrend (reversal setup)
+                if adx_pattern == 'Bottoming' and price_trend == 'downtrend':
+                    bullish_signals_found.append(ADX_BULLISH_PATTERNS['Bottoming_Downtrend'])
+                # Reversing Up: Only bullish if price is in downtrend (catching reversal)
+                elif adx_pattern == 'Reversing Up' and price_trend == 'downtrend':
+                    bullish_signals_found.append(ADX_BULLISH_PATTERNS['Reversing Up_Downtrend'])
+            
+            if bullish_signals_found:
+                results.append({
+                    'Type': 'Opportunity',
+                    'Ticker': ticker,
+                    'Name': stock_name,
+                    'Signals': ', '.join(bullish_signals_found),
+                    'SignalCount': len(bullish_signals_found),
+                    'Price': float(latest.get('Close', 0)),
+                    'RSI': float(latest.get('RSI_14', 0)),
+                    'ADX': float(latest.get('ADX', 0)),
+                    'MACD': float(latest.get('MACD', 0)),
+                    'Volume': float(latest.get('Volume', 0))
+                })
+            
+            # --- CHECK BEARISH SIGNALS ---
+            bearish_signals_found = []
+            
+            # Check boolean columns
+            for signal_col, signal_name in BEARISH_SIGNALS.items():
+                if signal_col in latest.index and latest[signal_col] == True:
+                    bearish_signals_found.append(signal_name)
+            
+            # Check ADX Pattern with PRICE CONTEXT
+            if 'ADX_Pattern' in latest.index:
+                adx_pattern = str(latest['ADX_Pattern'])
+                
+                # Peaking: Only bearish if price is in uptrend (exhaustion at top)
+                if adx_pattern == 'Peaking' and price_trend == 'uptrend':
+                    bearish_signals_found.append(ADX_BEARISH_PATTERNS['Peaking_Uptrend'])
+                # Reversing Down: Only bearish if price is in uptrend (trend breaking)
+                elif adx_pattern == 'Reversing Down' and price_trend == 'uptrend':
+                    bearish_signals_found.append(ADX_BEARISH_PATTERNS['Reversing Down_Uptrend'])
+            
+            if bearish_signals_found:
+                results.append({
+                    'Type': 'Alert',
+                    'Ticker': ticker,
+                    'Name': stock_name,
+                    'Signals': ', '.join(bearish_signals_found),
+                    'SignalCount': len(bearish_signals_found),
+                    'Price': float(latest.get('Close', 0)),
+                    'RSI': float(latest.get('RSI_14', 0)),
+                    'ADX': float(latest.get('ADX', 0)),
+                    'MACD': float(latest.get('MACD', 0)),
+                    'Volume': float(latest.get('Volume', 0))
+                })
+   
+        except Exception as e:
+            continue
+    
+    # Clear progress indicators
+    progress_bar.empty()
+    status_text.empty()
+    
+    # Calculate scan duration
+    scan_duration = time.time() - start_time
+    
+    if results:
+        # Convert to DataFrame
+        df = pd.DataFrame(results)
+        # Sort by type (Opportunities first), then by signal count
+        df = df.sort_values(['Type', 'SignalCount'], ascending=[True, False])
+        return df, scan_duration
+    else:
+        return pd.DataFrame(), scan_duration
+
+
+
+# this is the old scan_all_stocks, that fetches from the database.
+def scan_all_stocks_old():
+    """
     Scan all stocks in the database for signals.
     Returns: combined_df with opportunities and alerts
     """
@@ -195,6 +358,7 @@ def scan_all_stocks():
                     'MACD': float(latest.get('MACD', 0)),
                     'Volume': float(latest.get('Volume', 0))
                 })
+                
         
         except Exception as e:
             continue
@@ -305,6 +469,15 @@ if df.empty:
     st.info("💡 This could mean:\n- All stocks are in neutral zones\n- No strong trends detected\n- Market is consolidating")
     st.stop()
 
+# ✅ COMPUTE CONFLICT INDICATOR (for both cached and fresh data)
+if 'Conflict' not in df.columns:
+    opportunity_tickers = set(df[df['Type'] == '🚀 Opportunity']['Ticker'])
+    alert_tickers = set(df[df['Type'] == '⚠️ Alert']['Ticker'])
+    conflict_tickers = opportunity_tickers & alert_tickers
+    df['Conflict'] = df['Ticker'].apply(lambda x: '⚠️' if x in conflict_tickers else '')
+
+
+
 # Apply filters
 filtered_df = df.copy()
 
@@ -353,16 +526,22 @@ else:
     display_df['Volume'] = display_df['Volume'].apply(lambda x: f"{x:,.0f}")
     
     # Reorder columns
-    display_df = display_df[[
-        'Type', 'Ticker', 'Name', 'Signal_Count', 'Signals', 
-        'Price', 'RSI', 'ADX', 'MACD', 'Volume'
-    ]]
+    # display_df = display_df[[
+    #     'Type', 'Ticker', 'Name', 'Signal_Count', 'Signals', 
+    #     'Price', 'RSI', 'ADX', 'MACD', 'Volume'
+    # ]]
+    
+    # # Rename columns for display
+    # display_df.columns = [
+    #     'Type', 'Code', 'Stock Name', '# Signals', 'Signal Details',
+    #     'Price', 'RSI', 'ADX', 'MACD', 'Volume'
+    # ]
+
+    # Reorder columns for display
+    display_df = display_df[['Conflict', 'Type', 'Ticker', 'Name', 'Signal_Count', 'Signals', 'Price', 'RSI', 'ADX', 'MACD', 'Volume']]
     
     # Rename columns for display
-    display_df.columns = [
-        'Type', 'Code', 'Stock Name', '# Signals', 'Signal Details',
-        'Price', 'RSI', 'ADX', 'MACD', 'Volume'
-    ]
+    display_df.columns = ['Conflict', 'Type', 'Code', 'Stock Name', '# Signals', 'Signal Details', 'Price', 'RSI', 'ADX', 'MACD', 'Volume']
     
     # Display with color coding
     st.dataframe(
@@ -371,6 +550,11 @@ else:
         height=600,
         hide_index=True,
         column_config={
+            'Conflict': st.column_config.TextColumn(
+                        'Conflict',
+                        width='small',
+                        help='Conflict indicator - stock has both bullish and bearish signals'
+                    ),
             "Type": st.column_config.TextColumn("Type", width="small"),
             "Code": st.column_config.TextColumn("Code", width="small"),
             "Stock Name": st.column_config.TextColumn("Stock Name", width="medium"),

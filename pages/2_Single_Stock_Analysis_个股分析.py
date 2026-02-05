@@ -42,8 +42,8 @@ except ImportError:
 
 @st.cache_data(ttl=60)
 def load_single_stock(ticker, cache_date):
-    """Load stock data using data_manager."""
-    return data_manager.get_single_stock_data(ticker, use_data_start_date=True)
+    """Load stock data LIVE from Tushare API (qfq adjusted, no database)."""
+    return data_manager.get_single_stock_data_live(ticker, lookback_years=3)
 
 
 # ==================== PRICE STRUCTURE TREND DETECTION ====================
@@ -1325,7 +1325,7 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
             ), row=5, col=1)
         
         # Mark Peaking (NEW - Warning!)
-        peaking = df[df['ADX_Pattern'] == 'Peaking (Warning)']
+        peaking = df[df['ADX_Pattern'] == 'Peaking']
         if not peaking.empty:
             fig.add_trace(go.Scatter(
                 x=peaking.index.strftime('%Y-%m-%d'),
@@ -2811,13 +2811,13 @@ if history and len(history) > 0:
 if st.session_state.active_ticker:
     ticker = st.session_state.active_ticker.strip()
     
-    with st.spinner(f"Loading {ticker}..."):
-        company_name = data_manager.update_search_history(ticker)
+    with st.spinner(f"Loading {ticker}...前复权数据"):
         stock_df = load_single_stock(ticker,date.today())
     
     if stock_df is None or stock_df.empty:
         st.error(f"No data found for {ticker}. Check ticker is valid.")
     else:
+        company_name = data_manager.update_search_history(ticker)
         # Display stock header
         st.markdown(f"""
         <div style="

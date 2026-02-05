@@ -386,6 +386,94 @@ def ensure_data_in_db(start_date, end_date):
         
         time.sleep(1.0)
 
+
+def get_all_stock_data_live(progress_callback=None):
+    """
+    Fetch ALL stocks data LIVE from Tushare API (no database).
+    Uses qfq (forward adjusted) prices.
+    
+    Args:
+        progress_callback: Optional function(current, total, ticker) to report progress
+    
+    Returns:
+        Dictionary of {ticker: DataFrame}
+    """
+    global TUSHARE_API
+    
+    print(f"[data_manager] 📡 Fetching ALL {len(ALL_STOCK_TICKERS)} stocks live from Tushare (qfq)...")
+    
+    # Initialize Tushare if needed
+    if TUSHARE_API is None:
+        ok = init_tushare()
+        if not ok:
+            print(f"[data_manager] ❌ Tushare initialization failed")
+            return {}
+    
+    # Calculate date range (3 years of data for technical analysis)
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=365 * 3)
+    start_str = start_date.strftime('%Y%m%d')
+    end_str = end_date.strftime('%Y%m%d')
+    
+    all_stock_data = {}
+    total = len(ALL_STOCK_TICKERS)
+    
+    for idx, ticker in enumerate(ALL_STOCK_TICKERS, 1):
+        if progress_callback:
+            progress_callback(idx, total, ticker)
+        
+        try:
+            ts_code = get_tushare_ticker(ticker)
+            
+            # Fetch with qfq
+            df = ts.pro_bar(
+                ts_code=ts_code,
+                adj='qfq',
+                start_date=start_str,
+                end_date=end_str,
+                asset='E'
+            )
+            
+            if df is None or df.empty:
+                print(f"  ⚠️ {ticker}: No data")
+                continue
+            
+            # Rename columns
+            df = df.rename(columns={
+                'trade_date': 'Date',
+                'open': 'Open',
+                'high': 'High',
+                'low': 'Low',
+                'close': 'Close',
+                'vol': 'Volume'
+            })
+            
+            # Convert date and set index
+            df['Date'] = pd.to_datetime(df['Date'])
+            df.set_index('Date', inplace=True)
+            df.sort_index(inplace=True)
+            
+            # Keep only required columns
+            df = df[REQUIRED_COLUMNS]
+            
+            # Calculate volume metrics
+            df['Vol_Mean'] = df['Volume'].rolling(window=VOL_ZSCORE_LOOKBACK, min_periods=20).mean()
+            df['Vol_Std'] = df['Volume'].rolling(window=VOL_ZSCORE_LOOKBACK, min_periods=20).std()
+            df['Norm_Vol_Metric'] = (df['Volume'] - df['Vol_Mean']) / df['Vol_Std']
+            
+            all_stock_data[ticker] = df
+            
+            # Rate limiting - sleep briefly to avoid hitting API limits
+            time.sleep(0.3)  # 200 calls/min at 2000 points = 1 call per 0.3s
+            
+        except Exception as e:
+            print(f"  ❌ {ticker}: {e}")
+            continue
+    
+    print(f"[data_manager] ✅ Loaded {len(all_stock_data)}/{total} stocks successfully (qfq adjusted)")
+    
+    return all_stock_data
+
 def get_all_stock_data_from_db():
     """Loads all stock data from the DB into a dictionary of DataFrames."""
     all_stock_data = {}
@@ -544,6 +632,87 @@ def get_single_stock_data(ticker, use_data_start_date: bool = True, lookback_yea
     if df_final is None or df_final.empty:
         return df_ts
     return df_final
+
+
+def get_single_stock_data_live(ticker, lookback_years=3):
+    """
+    Fetch single stock data DIRECTLY from Tushare API (no database).
+    Uses qfq (forward adjusted) prices for dividend/split adjustment.
+    
+    Args:
+        ticker: 6-digit stock code (e.g., '600809')
+        lookback_years: How many years of history to fetch (default: 3)
+    
+    Returns:
+        DataFrame with OHLCV data and calculated technical indicators
+    """
+    global TUSHARE_API
+    
+    print(f"[data_manager] Fetching {ticker} live from Tushare API (qfq)...")
+    
+    # Initialize Tushare if needed
+    if TUSHARE_API is None:
+        ok = init_tushare()
+        if not ok:
+            print(f"[data_manager] ❌ Tushare initialization failed")
+            return None
+    
+    # Calculate date range
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=365 * lookback_years)
+    start_str = start_date.strftime('%Y%m%d')
+    end_str = end_date.strftime('%Y%m%d')
+    
+    ts_code = get_tushare_ticker(ticker)
+    
+    try:
+        # ✅ Fetch with qfq (forward adjusted) - current price = market price
+        df = ts.pro_bar(
+            ts_code=ts_code,
+            adj='qfq',
+            start_date=start_str,
+            end_date=end_str,
+            asset='E'
+        )
+        
+        if df is None or df.empty:
+            print(f"[data_manager] ❌ No data returned for {ticker}")
+            return None
+        
+        # Rename columns to match your expected format
+        df = df.rename(columns={
+            'trade_date': 'Date',
+            'open': 'Open',
+            'high': 'High',
+            'low': 'Low',
+            'close': 'Close',
+            'vol': 'Volume'
+        })
+        
+        # Convert date and set index
+        df['Date'] = pd.to_datetime(df['Date'])
+        df.set_index('Date', inplace=True)
+        df.sort_index(inplace=True)
+        
+        # Keep only required columns
+        df = df[REQUIRED_COLUMNS]
+        
+        # ✅ Calculate volume metrics (for technical indicators)
+        df['Vol_Mean_100d'] = df['Volume'].rolling(window=VOL_ZSCORE_LOOKBACK, min_periods=20).mean()
+        df['Vol_Std_100d'] = df['Volume'].rolling(window=VOL_ZSCORE_LOOKBACK, min_periods=20).std()
+        df['Volume_ZScore'] = (df['Volume'] - df['Vol_Mean_100d']) / df['Vol_Std_100d']
+        
+        print(f"[data_manager] ✅ Fetched {len(df)} rows for {ticker} (qfq adjusted)")
+        print(f"[data_manager]    Date range: {df.index.min().strftime('%Y-%m-%d')} to {df.index.max().strftime('%Y-%m-%d')}")
+        print(f"[data_manager]    Latest Close: ¥{df['Close'].iloc[-1]:.2f} (market price)")
+        
+        return df
+        
+    except Exception as e:
+        print(f"[data_manager] ❌ Failed to fetch {ticker}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def aggregate_ppi_data(all_stock_data, sector_start_dates=None):
