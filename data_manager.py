@@ -60,7 +60,7 @@ def get_tushare_ticker(ticker):
     """Converts 6-digit ticker to Tushare's format."""
     ticker = ticker.split('.')[0]
     
-    if ticker.startswith(('43', '83', '87')):
+    if ticker.startswith(('43', '83', '87','92')):
         return f"{ticker}.BJ"
     elif ticker.startswith('6') or ticker.startswith('688'):
         return f"{ticker}.SH"
@@ -311,6 +311,8 @@ def fetch_stock_data_robust(ticker, start_date, end_date):
     """Fetches and reconstructs hfq (forward-adjusted) data using Tushare Pro."""
     global TUSHARE_API
     ts_code = get_tushare_ticker(ticker)
+
+    print(f" - Fetching data for {ticker} ({ts_code}) from {start_date} to {end_date}...")  
     
     try:
         df = TUSHARE_API.daily(ts_code=ts_code, start_date=start_date, end_date=end_date,
