@@ -158,7 +158,7 @@ def scan_all_stocks():
             
             if bullish_signals_found:
                 results.append({
-                    'Type': 'Opportunity',
+                    'Type': '🚀 Opportunity',
                     'Ticker': ticker,
                     'Name': stock_name,
                     'Signals': ', '.join(bullish_signals_found),
@@ -191,7 +191,7 @@ def scan_all_stocks():
             
             if bearish_signals_found:
                 results.append({
-                    'Type': 'Alert',
+                    'Type': '⚠️ Alert',
                     'Ticker': ticker,
                     'Name': stock_name,
                     'Signals': ', '.join(bearish_signals_found),
