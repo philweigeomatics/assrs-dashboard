@@ -876,6 +876,13 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
     
     # Moving Averages
     fig.add_trace(go.Scatter(
+        x=dates, y=df['EMA5'],
+        name='EMA5',
+        line=dict(color='#a855f7', width=1.5),
+        showlegend=True
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
         x=dates, y=df['MA20'], name='MA20',
         line=dict(color='#fbbf24', dash='dot', width=1.5),
         showlegend=True
@@ -2885,7 +2892,7 @@ if st.session_state.active_ticker:
             st.markdown("---")
             st.subheader("Key Metrics")
             
-            table_cols = ['Close', 'MA20', 'MA50', 'MA200', 'RSI_14', 'ADX',
+            table_cols = ['Close', 'EMA5','MA20', 'MA50', 'MA200', 'RSI_14', 'ADX',
                          'Signal_Accumulation', 'Signal_Squeeze', 'Signal_Golden_Launch']
             
             metrics_df = analysis_df[table_cols].tail(5)

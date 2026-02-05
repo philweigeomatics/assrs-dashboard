@@ -124,18 +124,19 @@ def scan_all_stocks():
             
             # Calculate 5-day EMA of closing prices
             ema_5d = analysis_df['Close'].ewm(span=5, adjust=False).mean()
-            
-            # Get current price and current EMA
+
+            # Get current price, current EMA, and previous EMA
             current_price = latest['Close']
             current_ema = ema_5d.iloc[-1]
-            
-            # Use 2% threshold to avoid noise
-            if current_price > current_ema * 1.02:
-                price_trend = 'uptrend'
-            elif current_price < current_ema * 0.98:
-                price_trend = 'downtrend'
+            previous_ema = ema_5d.iloc[-2] if len(ema_5d) >= 2 else current_ema
+
+            # Determine trend based on price vs EMA AND EMA slope
+            if current_price > current_ema and current_ema > previous_ema:
+                price_trend = 'uptrend'  # Price above EMA AND EMA rising
+            elif current_price < current_ema and current_ema < previous_ema:
+                price_trend = 'downtrend'  # Price below EMA AND EMA falling
             else:
-                price_trend = 'neutral'
+                price_trend = 'neutral'  # Mixed signals
             
             # --- CHECK BULLISH SIGNALS ---
             bullish_signals_found = []

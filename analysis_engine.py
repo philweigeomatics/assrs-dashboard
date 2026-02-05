@@ -29,6 +29,8 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     df_analysis = df_analysis.sort_index()
     
     # ==================== MOVING AVERAGES ====================
+    df_analysis['MA5'] = ta.trend.sma_indicator(df_analysis['Close'], window=5)
+    df_analysis['EMA5'] = ta.trend.ema_indicator(df_analysis['Close'], window=5)
     df_analysis['MA20'] = ta.trend.sma_indicator(df_analysis['Close'], window=20)
     df_analysis['MA50'] = ta.trend.sma_indicator(df_analysis['Close'], window=50)
     df_analysis['MA200'] = ta.trend.sma_indicator(df_analysis['Close'], window=200)
