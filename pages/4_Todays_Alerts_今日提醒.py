@@ -162,7 +162,7 @@ def scan_all_stocks():
                     'Ticker': ticker,
                     'Name': stock_name,
                     'Signals': ', '.join(bullish_signals_found),
-                    'SignalCount': len(bullish_signals_found),
+                    'Signal_Count': len(bullish_signals_found),
                     'Price': float(latest.get('Close', 0)),
                     'RSI': float(latest.get('RSI_14', 0)),
                     'ADX': float(latest.get('ADX', 0)),
@@ -195,7 +195,7 @@ def scan_all_stocks():
                     'Ticker': ticker,
                     'Name': stock_name,
                     'Signals': ', '.join(bearish_signals_found),
-                    'SignalCount': len(bearish_signals_found),
+                    'Signal_Count': len(bearish_signals_found),
                     'Price': float(latest.get('Close', 0)),
                     'RSI': float(latest.get('RSI_14', 0)),
                     'ADX': float(latest.get('ADX', 0)),
@@ -217,7 +217,7 @@ def scan_all_stocks():
         # Convert to DataFrame
         df = pd.DataFrame(results)
         # Sort by type (Opportunities first), then by signal count
-        df = df.sort_values(['Type', 'SignalCount'], ascending=[True, False])
+        df = df.sort_values(['Type', 'Signal_Count'], ascending=[True, False])
         return df, scan_duration
     else:
         return pd.DataFrame(), scan_duration
