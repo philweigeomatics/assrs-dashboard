@@ -109,16 +109,73 @@ def run_sector_backtest_v2():
         sys.exit(1)
     print(f"✅ Loaded {len(all_stock_data)} stocks from database.\n")
     
-    # === STEP 4: Aggregate PPIs ===
+    # === STEP 4: Aggregate PPIs (Incremental) ===
     print(f"{'='*60}")
-    print(f"STEP 3: Aggregating sector PPIs")
+    print(f"STEP 3: Aggregating sector PPIs (incremental update)")
     print(f"{'='*60}")
-    all_ppi_data = dm.aggregate_ppi_data(all_stock_data)
-    if not all_ppi_data:
-        print("!! ERROR: Failed to aggregate PPIs. Exiting.")
-        sys.exit(1)
-    dm.save_ppi_data_to_db(all_ppi_data)
-    print(f"✅ Aggregated and saved {len(all_ppi_data)} sector PPIs.\n")
+
+    # ✅ Build a dict of start_date per sector
+    sector_start_dates = {}
+
+    for sector in dm.SECTOR_STOCK_MAP.keys():
+        tablename = f'PPI_{sector}'
+        sector_stocks = dm.SECTOR_STOCK_MAP[sector]
+        
+        # Get latest date in PPI table
+        ppi_latest_date = None
+        try:
+            sector_df = dm.db.read_table(tablename, columns='Date', orderby='-Date', limit=1)
+            if not sector_df.empty:
+                ppi_latest_date = pd.to_datetime(sector_df['Date'].iloc[0])
+                print(f"  ℹ️ {sector}: PPI latest date = {ppi_latest_date.strftime('%Y-%m-%d')}")
+        except Exception as e:
+            print(f"  ℹ️ {sector}: PPI table doesn't exist or is empty")
+            ppi_latest_date = None
+        
+        # Get max latest date across all stocks in this sector
+        stock_max_date = None
+        for ticker in sector_stocks:
+            if ticker in all_stock_data and not all_stock_data[ticker].empty:
+                ticker_max = all_stock_data[ticker].index.max()
+                if stock_max_date is None or ticker_max > stock_max_date:
+                    stock_max_date = ticker_max
+        
+        if stock_max_date is None:
+            print(f"  ⚠️ {sector}: No stock data available, skipping")
+            continue
+        
+        print(f"  ℹ️ {sector}: Stock data latest date = {stock_max_date.strftime('%Y-%m-%d')}")
+        
+        # Determine if we need to update
+        if ppi_latest_date is None:
+            # PPI table is empty, do full aggregation
+            sector_start_dates[sector] = None
+            print(f"  ✅ {sector}: PPI table empty, will do FULL aggregation")
+        elif stock_max_date > ppi_latest_date:
+            # Stock data is ahead, do incremental update from day after PPI latest
+            next_date = (ppi_latest_date + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+            sector_start_dates[sector] = next_date
+            print(f"  ✅ {sector}: Stock data ahead, will aggregate from {next_date}")
+        else:
+            # PPI is up-to-date, skip this sector
+            print(f"  ⏭️ {sector}: PPI is up-to-date, skipping")
+
+    # Only aggregate sectors that need updates
+    if not sector_start_dates:
+        print("  ℹ️ All PPIs are up-to-date, nothing to aggregate")
+        all_ppi_data = {}
+    else:
+        # Aggregate with per-sector start dates
+        all_ppi_data = dm.aggregate_ppi_data(all_stock_data, sector_start_dates=sector_start_dates)
+
+    if all_ppi_data:
+        # Save only new dates
+        dm.save_ppi_data_to_db(all_ppi_data)
+        print(f"✅ Aggregated and saved {len(all_ppi_data)} sector PPIs (incremental).\n")
+    else:
+        print(f"✅ No PPI updates needed.\n")
+
+
     
     # === STEP 5: Load PPIs from DB ===
     print(f"{'='*60}")

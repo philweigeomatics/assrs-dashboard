@@ -440,41 +440,98 @@ def get_single_stock_data_from_db(ticker):
         return None
 
 def get_single_stock_data(ticker, use_data_start_date: bool = True, lookback_years: int = 3):
-    """Unified accessor for single-stock analysis."""
-    if ticker not in ALL_STOCK_TICKERS:
-        print(f"Warning: Ticker {ticker} not in the defined SECTOR_STOCK_MAP.")
-    
-    # Step 1: Try DB first
-    df_db = get_single_stock_data_from_db(ticker)
-    if df_db is not None and not df_db.empty:
-        print(f"[data_manager] Loaded {ticker} from DB")
-        return df_db
-    
-    # Step 2: Fetch from Tushare
+    """
+    Unified accessor for single-stock analysis.
+    ✅ FIXED: Now checks if data is stale and updates accordingly
+    """
     global TUSHARE_API
+
+    if ticker not in ALL_STOCK_TICKERS:
+        print(f"[data_manager] Warning: Ticker {ticker} not in the defined SECTOR_STOCK_MAP.")
+    
+    # === Step 1: Check if data exists in DB ===
+    df_db = get_single_stock_data_from_db(ticker)
+    
+    if df_db is not None and not df_db.empty:
+        # ✅ NEW: Check if data is stale
+        last_date_in_db = df_db.index.max()
+        
+        # Get current date (Beijing time)
+        from zoneinfo import ZoneInfo
+        CHINA_TZ = ZoneInfo("Asia/Shanghai")
+        today_beijing = datetime.now(CHINA_TZ).date()
+        yesterday_beijing = today_beijing - timedelta(days=1)
+        
+        # Convert last_date_in_db to date for comparison
+        if isinstance(last_date_in_db, pd.Timestamp):
+            last_date_in_db = last_date_in_db.date()
+        
+        # ✅ If data is up-to-date (has yesterday's data), return it
+        if last_date_in_db >= yesterday_beijing:
+            print(f"[data_manager] Loaded {ticker} from DB (up-to-date: {last_date_in_db})")
+            return df_db
+        else:
+            # ✅ Data is stale, need to update
+            print(f"[data_manager] {ticker} data is stale (last date: {last_date_in_db}), updating...")
+            
+            # Fetch only missing dates
+            fetch_start_date = (last_date_in_db + timedelta(days=1)).strftime('%Y%m%d')
+            fetch_end_date = datetime.today().strftime('%Y%m%d')
+            
+            print(f"[data_manager] Fetching {ticker} from {fetch_start_date} to {fetch_end_date}...")
+            
+            if TUSHARE_API is None:
+                ok = init_tushare()
+                if not ok:
+                    print("[data_manager] Tushare initialization failed, returning stale data.")
+                    return df_db
+            
+            # Fetch incremental data
+            df_new = fetch_stock_data_robust(ticker, fetch_start_date, fetch_end_date)
+            
+            if df_new is not None and not df_new.empty:
+                try:
+                    # Insert new data
+                    insert_data(ticker, df_new)
+                    print(f"[data_manager] Updated {ticker} with {len(df_new)} new rows.")
+                    
+                    # Reload from DB to get full dataset with calculated metrics
+                    df_final = get_single_stock_data_from_db(ticker)
+                    if df_final is not None:
+                        return df_final
+                except Exception as e:
+                    print(f"[data_manager] Failed to update {ticker}: {e}")
+            else:
+                print(f"[data_manager] No new data available for {ticker} (weekend/holiday)")
+            
+            # Return existing data if update failed
+            return df_db
+    
+    # === Step 2: No data in DB, fetch full history from Tushare ===
     if TUSHARE_API is None:
         ok = init_tushare()
         if not ok:
             print("[data_manager] Tushare initialization failed inside get_single_stock_data.")
             return None
     
+    # Determine date range
     if use_data_start_date:
         start_str = DATA_START_DATE
     else:
         end_dt = datetime.today()
         start_dt = end_dt - timedelta(days=365 * lookback_years)
-        start_str = start_dt.strftime("%Y%m%d")
+        start_str = start_dt.strftime('%Y%m%d')
     
-    end_str = datetime.today().strftime("%Y%m%d")
+    end_str = datetime.today().strftime('%Y%m%d')
     
-    print(f"[data_manager] {ticker} not found in DB, fetching from Tushare ({start_str} → {end_str})...")
+    print(f"[data_manager] {ticker} not found in DB, fetching from Tushare ({start_str} - {end_str})...")
     df_ts = fetch_stock_data_robust(ticker, start_str, end_str)
     
     if df_ts is None or df_ts.empty:
         print(f"[data_manager] Tushare fetch failed or returned empty for {ticker}.")
         return None
     
-    # Step 3: Save to DB
+    # === Step 3: Save to DB ===
     try:
         create_table(ticker)
         insert_data(ticker, df_ts)
@@ -482,93 +539,185 @@ def get_single_stock_data(ticker, use_data_start_date: bool = True, lookback_yea
     except Exception as e:
         print(f"[data_manager] Failed to save {ticker} Tushare data to DB: {e}")
     
-    # Step 4: Reload from DB to get calculated metrics
+    # === Step 4: Reload from DB to get calculated metrics ===
     df_final = get_single_stock_data_from_db(ticker)
     if df_final is None or df_final.empty:
         return df_ts
     return df_final
 
-def aggregate_ppi_data(all_stock_data):
-    """Aggregates individual stock data into sector-level Proxy Portfolio Indexes (PPIs)."""
-    print("\n--- Aggregating Stock Data into Sector PPIs (V3.6 Logic) ---")
+
+def aggregate_ppi_data(all_stock_data, sector_start_dates=None):
+    """
+    Aggregates individual stock data into sector-level Proxy Portfolio Indexes (PPIs).
+    
+    Args:
+        all_stock_data: Dict of ticker -> DataFrame
+        sector_start_dates: Dict of sector -> start_date (None = full aggregation for that sector)
+                           If None (not provided), do full aggregation for all sectors
+    """
+    print("--- Aggregating Stock Data into Sector PPIs (V3.6 Logic) ---")
     
     all_sector_ppi_data = {}
     
     for sector, stock_list in SECTOR_STOCK_MAP.items():
+        # ✅ Determine start_date for THIS sector
+        if sector_start_dates and sector in sector_start_dates:
+            start_date = sector_start_dates[sector]
+            if start_date:
+                print(f"  ℹ️ {sector}: Incremental mode from {start_date}")
+            else:
+                print(f"  ℹ️ {sector}: Full aggregation mode")
+        else:
+            start_date = None
+        
+        # Collect DataFrames for this sector
         named_dfs = []
         for ticker in stock_list:
             if ticker in all_stock_data:
                 temp_df = all_stock_data[ticker].copy()
+                
+                # ✅ FILTER: Only process data from start_date onwards (if specified)
+                if start_date:
+                    temp_df = temp_df[temp_df.index >= pd.to_datetime(start_date)]
+                    if temp_df.empty:
+                        continue
+                
+                # Mark halted days
                 is_halted = (temp_df['Volume'] == 0)
-                temp_df[is_halted] = np.nan
+                temp_df['is_halted'] = np.nan
+                temp_df = temp_df[~is_halted]
                 temp_df.name = ticker
                 named_dfs.append(temp_df)
         
-        if not named_dfs: continue
+        if not named_dfs:
+            continue
         
-        aligned_df = pd.concat(named_dfs, axis=1, keys=[df.name for df in named_dfs], join='outer')
+        # Concatenate all stock data for this sector
+        aligned_df = pd.concat(
+            named_dfs, 
+            axis=1, 
+            keys=[df.name for df in named_dfs], 
+            join='outer'
+        )
         
         valid_tickers = [t for t in stock_list if (t, 'Close') in aligned_df.columns]
-        if not valid_tickers: continue
+        if not valid_tickers:
+            continue
         
+        # Calculate returns
         open_prices = aligned_df.xs('Open', level=1, axis=1)[valid_tickers]
         high_prices = aligned_df.xs('High', level=1, axis=1)[valid_tickers]
         low_prices = aligned_df.xs('Low', level=1, axis=1)[valid_tickers]
         close_prices = aligned_df.xs('Close', level=1, axis=1)[valid_tickers]
-        
         prev_close_prices = close_prices.shift(1)
         
-        ret_open = (open_prices / prev_close_prices - 1).mean(axis=1)
-        ret_high = (high_prices / prev_close_prices - 1).mean(axis=1)
-        ret_low = (low_prices / prev_close_prices - 1).mean(axis=1)
-        ret_close = (close_prices / prev_close_prices - 1).mean(axis=1)
-        
+        ret_open = ((open_prices / prev_close_prices) - 1).mean(axis=1)
+        ret_high = ((high_prices / prev_close_prices) - 1).mean(axis=1)
+        ret_low = ((low_prices / prev_close_prices) - 1).mean(axis=1)
+        ret_close = ((close_prices / prev_close_prices) - 1).mean(axis=1)
         norm_vol_metric = aligned_df.xs('Norm_Vol_Metric', level=1, axis=1)[valid_tickers]
         
+        # Build PPI DataFrame
         ppi_df = pd.DataFrame(index=aligned_df.index)
-        ppi_df['Close'] = 100 * (1 + ret_close.fillna(0)).cumprod()
+        ppi_df['Close'] = (100 * (1 + ret_close.fillna(0)).cumprod())
         ppi_df['Open'] = ppi_df['Close'].shift(1) * (1 + ret_open)
         ppi_df['High'] = ppi_df['Close'].shift(1) * (1 + ret_high)
         ppi_df['Low'] = ppi_df['Close'].shift(1) * (1 + ret_low)
         ppi_df['Norm_Vol_Metric'] = norm_vol_metric.mean(axis=1)
-        
         ppi_df.dropna(inplace=True)
         
-        if len(ppi_df) >= MIN_HISTORY_DAYS:
+        # ✅ De-duplicate dates
+        ppi_df = ppi_df[~ppi_df.index.duplicated(keep='last')]
+        
+        # ✅ Check minimum history requirement
+        # For incremental updates, we only need at least 1 row
+        # For full aggregation, we need MIN_HISTORY_DAYS
+        min_required = 1 if start_date else MIN_HISTORY_DAYS
+        
+        if len(ppi_df) >= min_required:
             all_sector_ppi_data[sector] = ppi_df
+            print(f"  ✅ {sector}: Aggregated {len(ppi_df)} dates")
+        else:
+            print(f"  ⚠️ {sector}: Insufficient data ({len(ppi_df)} < {min_required}), skipping")
     
     print("--- PPI Aggregation Complete ---")
     return all_sector_ppi_data
 
 def save_ppi_data_to_db(all_ppi_data):
-    """Saves the aggregated PPI DataFrames into tables in the DB."""
-    print(f"\n--- Saving {len(all_ppi_data)} PPIs to database ---")
+    """
+    Saves the aggregated PPI DataFrames into tables in the DB.
+    Only inserts NEW dates that don't already exist in the database.
+    """
+    print(f"--- Saving {len(all_ppi_data)} PPIs to database (incremental) ---")
     
-    for sector_name, ppi_df in all_ppi_data.items():
-        table_name = f"PPI_{sector_name}"
-        create_ppi_table(sector_name)
+    for sectorname, ppi_df in all_ppi_data.items():
+        tablename = f"PPI_{sectorname}"
+        create_ppi_table(sectorname)
         
+        if ppi_df is None or ppi_df.empty:
+            print(f"  ⚠️ Skipping {sectorname} - no data")
+            continue
+        
+        # ✅ STEP 1: De-duplicate dates in new data (CRITICAL FIX)
         df_to_insert = ppi_df.copy()
-        df_to_insert = df_to_insert[['Open', 'High', 'Low', 'Close', 'Norm_Vol_Metric']]
-        df_to_insert.index.name = 'Date'
-        df_to_insert.reset_index(inplace=True)
+        df_to_insert.index = pd.to_datetime(df_to_insert.index)
+        df_to_insert = df_to_insert[~df_to_insert.index.duplicated(keep='last')]
         
-        records = df_to_insert.to_dict('records')
-        
-        # Clear old data first
+        # ✅ STEP 2: Get existing dates from database
         try:
-            existing = db.read_table(table_name, columns='Date')
-            if not existing.empty:
-                for _, row in existing.iterrows():
-                    db.delete_records(table_name, {'Date': row['Date']})
-        except:
-            pass
+            existing_df = db.read_table(tablename, columns='Date')
+            if not existing_df.empty:
+                # Normalize existing dates to datetime for comparison
+                existing_dates = pd.to_datetime(existing_df['Date']).dt.strftime('%Y-%m-%d').tolist()
+                existing_dates_set = set(existing_dates)
+            else:
+                existing_dates_set = set()
+        except Exception as e:
+            print(f"  ℹ️ {tablename} doesn't exist yet or is empty, will create with all data")
+            existing_dates_set = set()
         
-        # Insert new data
-        db.insert_records(table_name, records, upsert=True)
-        print(f" - Successfully saved '{table_name}' with {len(df_to_insert)} rows.")
+        # ✅ STEP 3: Filter out dates that already exist
+        new_dates_mask = ~df_to_insert.index.strftime('%Y-%m-%d').isin(existing_dates_set)
+        df_new_only = df_to_insert[new_dates_mask].copy()
+        
+        if df_new_only.empty:
+            print(f"  ✅ {sectorname}: Already up-to-date (no new dates to add)")
+            continue
+        
+        # ✅ STEP 4: Prepare data for insertion
+        df_new_only = df_new_only[['Open', 'High', 'Low', 'Close', 'Norm_Vol_Metric']]
+        df_new_only.index.name = 'Date'
+        df_new_only.reset_index(inplace=True)
+        
+        # Normalize dates to YYYY-MM-DD format (no timestamp)
+        df_new_only['Date'] = pd.to_datetime(df_new_only['Date']).dt.strftime('%Y-%m-%d')
+        
+        # ✅ STEP 5: Final de-duplication (CRITICAL - prevents the duplicate key error)
+        df_new_only = df_new_only.drop_duplicates(subset=['Date'], keep='last')
+        
+        records = df_new_only.to_dict('records')
+        
+        # ✅ STEP 6: Insert only new records (use upsert=False since we filtered out existing)
+        try:
+            db.insert_records(tablename, records, upsert=False)
+            print(f"  ✅ {sectorname}: Added {len(df_new_only)} new dates "
+                  f"({df_new_only['Date'].min()} to {df_new_only['Date'].max()})")
+        except Exception as e:
+            # If insert fails (rare case), try upsert as fallback
+            print(f"  ⚠️ {sectorname}: Regular insert failed, trying upsert: {e}")
+            try:
+                # Extra de-duplication before upsert
+                df_new_only = df_new_only.drop_duplicates(subset=['Date'], keep='last')
+                records = df_new_only.to_dict('records')
+                db.insert_records(tablename, records, upsert=True)
+                print(f"  ✅ {sectorname}: Upserted {len(df_new_only)} records")
+            except Exception as e2:
+                print(f"  ❌ {sectorname}: Failed to save PPI data: {e2}")
+                continue
     
     print("--- PPI Database Save Complete ---")
+
+
 
 def load_ppi_data_from_db():
     """Loads all 'PPI_' tables from the DB into a dictionary of DataFrames."""

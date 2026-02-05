@@ -2807,11 +2807,6 @@ if history and len(history) > 0:
 
 
 
-
-
-
-
-
 # Main analysis
 if st.session_state.active_ticker:
     ticker = st.session_state.active_ticker.strip()
