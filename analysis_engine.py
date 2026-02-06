@@ -150,10 +150,10 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     
     # Pattern 1: BOTTOMING (Low ADX, falling but slowing down)
     adx_bottoming = (
-        (df_analysis['ADX'] < 25) &
+        (df_analysis['ADX'] < 22) &
         (df_analysis['ADX_Slope'] < 0) &
-        (df_analysis['ADX_Acceleration'] > 0.15) &
-        (df_analysis['ADX_Slope'] > df_analysis['ADX_Slope'].shift(1))
+        (df_analysis['ADX_Slope'] > -0.15) &  # But BARELY falling (almost flat)
+        (df_analysis['ADX_Acceleration'] > 0.05)
     )
     
     # Pattern 2: REVERSING UP (ADX just turned from down to up)
@@ -207,7 +207,7 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     # Pattern 9: DECELERATING DOWN (ADX falling but slowing)
     adx_decelerating_down = (
         (df_analysis['ADX'] < 30) &
-        (df_analysis['ADX_Slope'] < 0) &
+        (df_analysis['ADX_Slope'] < -0.3 ) &
         (df_analysis['ADX_Acceleration'] > 0.1)
     )
     

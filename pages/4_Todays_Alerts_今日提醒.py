@@ -9,11 +9,70 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import pytz
-import sqlite3
 import data_manager
 
 # Import from shared engine
 from analysis_engine import run_single_stock_analysis
+
+
+MY_WATCHLIST = [
+    # === Example stocks (replace with your own!) ===
+    '002474', #'双环传动',
+    '300124', #'汇川技术',
+    '000977', #'浪潮信息',
+    '300499', #'高澜股份',
+    '301018', #'申菱环境',
+    '002837', #'英维克',
+    '600980', #'北矿科技',
+    '601717', #'中创智领',
+    '600031', #'三一重工',
+    '603650', #'彤程新材',
+    '300346', #'南大光电',
+    '300236', #'上海新阳',
+    '002938', #'鹏鼎控股',
+    '600312', #'平高电气',
+    '600406', #'国电南自',
+    '600089', #'特变电工',
+    '603556', #'海兴电力',
+    '002028', #'思源电气',
+    '002080', #'中材科技',
+    '600570', #'恒生电子',
+    '002281', #'光迅科技',
+    '000988', #'华工科技',
+    '600562', #'国睿科技',
+    '600435', #'北方导航',
+    '002414', #'高德红外',
+    '002389', #'航天彩虹',
+    '601318', #'中国平安',
+    '002670', #'国信证券',
+    '000333', #'美的集团',
+    '002050', #'三花智控',
+    '600809', #'山西汾酒',
+    '000596', #'古井贡酒',
+    '601633', #'长城汽车',
+    '000625', #'长安汽车',
+    '300750', #'宁德时代',
+    '002212', #'天融信',
+    '300010', #'豆神教育',
+    '600501', #'航天晨光',
+    '000876', #'新希望',
+    '601800', #'中国交建',
+    '000755', #'山西高速',
+    '603019', #'中科曙光',
+    '600886', #'国投电力',
+    '600795', #'国电电力',
+    '001309', # 德明利,
+    '600588', # 用友网络,
+    '002230', # 科大讯飞,
+    '002202', # 金风科技,
+    '002531', # 天顺风能,
+    '300443', # 金雷股份,    
+
+    
+    # 🔥 ADD YOUR STOCKS BELOW 🔥
+    # 'XXXXXX.SH',  # Stock name
+    # 'XXXXXX.SZ',  # Stock name
+]
 
 if 'force_rescan' not in st.session_state:
     st.session_state.force_rescan = False
@@ -62,13 +121,19 @@ def init_signals_tables():
 
 
 
-def scan_all_stocks():
+
+# this is the old scan_all_stocks, that fetches from the database.
+def scan_my_watchlist():
     """
-    Scan all stocks for signals using LIVE Tushare data (qfq).
-    Returns combined_df with opportunities and alerts.
+    Scan YOUR custom watchlist for signals using LIVE Tushare data.
+    No more sector map dependency!
     """
     import time
     start_time = time.time()
+    
+    if not MY_WATCHLIST:
+        st.error("❌ Your watchlist is empty! Please add stocks to MY_WATCHLIST at the top of this file.")
+        return None, 0
     
     results = []
     
@@ -76,36 +141,21 @@ def scan_all_stocks():
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # ✅ STEP 1: Fetch all stock data LIVE from Tushare (qfq)
-    status_text.text("📡 正在从Tushare获取股票数据 (qfq前复权)...")
+    total_stocks = len(MY_WATCHLIST)
+    status_text.text(f"📡 正在扫描您的观察列表 ({total_stocks} 只股票)...")
     
-    def progress_callback(current, total, ticker):
-        progress = current / total
-        progress_bar.progress(progress)
-        status_text.text(f"📡 获取 {current}/{total}: {ticker} - {progress*100:.1f}%")
-    
-    all_stock_data = data_manager.get_all_stock_data_live(progress_callback=progress_callback)
-    
-    if not all_stock_data:
-        progress_bar.empty()
-        status_text.empty()
-        return None, 0
-    
-    total_stocks = len(all_stock_data)
-    
-    # ✅ STEP 2: Analyze each stock for signals
-    progress_bar.progress(0)
-    status_text.text("🔍 开始分析股票信号...")
-    
-    for idx, (ticker, stock_df) in enumerate(all_stock_data.items(), 1):
+    for idx, ticker in enumerate(MY_WATCHLIST, 1):
         # Update progress
         progress = idx / total_stocks
         progress_bar.progress(progress)
-        status_text.text(f"🔍 分析 {idx}/{total_stocks}: {ticker} - {progress*100:.1f}%")
+        status_text.text(f"🔍 调取并分析 {idx}/{total_stocks}: {ticker} - {progress*100:.1f}%")
         
         try:
-            # Skip if not enough data
+            # Fetch LIVE data from Tushare (qfq)
+            stock_df = data_manager.get_single_stock_data_live(ticker, lookback_years=1)
+            
             if stock_df is None or len(stock_df) < 100:
+                st.warning(f"⚠️ {ticker}: 数据不足 (需要至少100天)")
                 continue
             
             # Run technical analysis
@@ -117,45 +167,38 @@ def scan_all_stocks():
             # Get latest row (today's signals)
             latest = analysis_df.iloc[-1]
             
-            # Get stock name from database
+            # Get stock name
             stock_name = data_manager.get_stock_name_from_db(ticker)
             if not stock_name:
                 stock_name = ticker
             
-            # Calculate 5-day EMA of closing prices
+            # Calculate 5-day EMA for trend
             ema_5d = analysis_df['Close'].ewm(span=5, adjust=False).mean()
-
-            # Get current price, current EMA, and previous EMA
             current_price = latest['Close']
             current_ema = ema_5d.iloc[-1]
             previous_ema = ema_5d.iloc[-2] if len(ema_5d) >= 2 else current_ema
-
-            # Determine trend based on price vs EMA AND EMA slope
+            
+            # Determine trend
             if current_price > current_ema and current_ema > previous_ema:
-                price_trend = 'uptrend'  # Price above EMA AND EMA rising
+                price_trend = 'uptrend'
             elif current_price < current_ema and current_ema < previous_ema:
-                price_trend = 'downtrend'  # Price below EMA AND EMA falling
+                price_trend = 'downtrend'
             else:
-                price_trend = 'neutral'  # Mixed signals
+                price_trend = 'neutral'
             
             # --- CHECK BULLISH SIGNALS ---
             bullish_signals_found = []
             
-            # Check boolean columns
             for signal_col, signal_name in BULLISH_SIGNALS.items():
                 if signal_col in latest.index and latest[signal_col] == True:
                     bullish_signals_found.append(signal_name)
             
-            # Check ADX Pattern with PRICE CONTEXT
             if 'ADX_Pattern' in latest.index:
                 adx_pattern = str(latest['ADX_Pattern'])
-                
-                # Bottoming: Only bullish if price is in downtrend (reversal setup)
                 if adx_pattern == 'Bottoming' and price_trend == 'downtrend':
-                    bullish_signals_found.append(ADX_BULLISH_PATTERNS['Bottoming_Downtrend'])
-                # Reversing Up: Only bullish if price is in downtrend (catching reversal)
+                    bullish_signals_found.append(ADX_BULLISH_PATTERNS['Bottoming + Downtrend'])
                 elif adx_pattern == 'Reversing Up' and price_trend == 'downtrend':
-                    bullish_signals_found.append(ADX_BULLISH_PATTERNS['Reversing Up_Downtrend'])
+                    bullish_signals_found.append(ADX_BULLISH_PATTERNS['Reversing Up + Downtrend'])
             
             if bullish_signals_found:
                 results.append({
@@ -174,175 +217,14 @@ def scan_all_stocks():
             # --- CHECK BEARISH SIGNALS ---
             bearish_signals_found = []
             
-            # Check boolean columns
             for signal_col, signal_name in BEARISH_SIGNALS.items():
                 if signal_col in latest.index and latest[signal_col] == True:
                     bearish_signals_found.append(signal_name)
             
-            # Check ADX Pattern with PRICE CONTEXT
             if 'ADX_Pattern' in latest.index:
                 adx_pattern = str(latest['ADX_Pattern'])
-                
-                # Peaking: Only bearish if price is in uptrend (exhaustion at top)
-                if adx_pattern == 'Peaking' and price_trend == 'uptrend':
-                    bearish_signals_found.append(ADX_BEARISH_PATTERNS['Peaking_Uptrend'])
-                # Reversing Down: Only bearish if price is in uptrend (trend breaking)
-                elif adx_pattern == 'Reversing Down' and price_trend == 'uptrend':
-                    bearish_signals_found.append(ADX_BEARISH_PATTERNS['Reversing Down_Uptrend'])
-            
-            if bearish_signals_found:
-                results.append({
-                    'Type': '⚠️ Alert',
-                    'Ticker': ticker,
-                    'Name': stock_name,
-                    'Signals': ', '.join(bearish_signals_found),
-                    'Signal_Count': len(bearish_signals_found),
-                    'Price': float(latest.get('Close', 0)),
-                    'RSI': float(latest.get('RSI_14', 0)),
-                    'ADX': float(latest.get('ADX', 0)),
-                    'MACD': float(latest.get('MACD', 0)),
-                    'Volume': float(latest.get('Volume', 0))
-                })
-   
-        except Exception as e:
-            continue
-    
-    # Clear progress indicators
-    progress_bar.empty()
-    status_text.empty()
-    
-    # Calculate scan duration
-    scan_duration = time.time() - start_time
-    
-    if results:
-        # Convert to DataFrame
-        df = pd.DataFrame(results)
-        # Sort by type (Opportunities first), then by signal count
-        df = df.sort_values(['Type', 'Signal_Count'], ascending=[True, False])
-        return df, scan_duration
-    else:
-        return pd.DataFrame(), scan_duration
-
-
-
-# this is the old scan_all_stocks, that fetches from the database.
-def scan_all_stocks_old():
-    """
-    Scan all stocks in the database for signals.
-    Returns: combined_df with opportunities and alerts
-    """
-    import time
-    start_time = time.time()
-    
-    # Load all stock data
-    all_stock_data = data_manager.get_all_stock_data_from_db()
-    
-    if not all_stock_data:
-        return None, 0
-    
-    results = []
-    total_stocks = len(all_stock_data)
-    
-    # Create progress bar
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    for idx, (ticker, stock_df) in enumerate(all_stock_data.items(), 1):
-        # Update progress
-        progress = idx / total_stocks
-        progress_bar.progress(progress)
-        status_text.text(f"Scanning: {idx}/{total_stocks} stocks ({progress*100:.1f}%)")
-        
-        try:
-            # Skip if not enough data
-            if stock_df is None or len(stock_df) < 100:
-                continue
-            
-            # Run technical analysis
-            analysis_df = run_single_stock_analysis(stock_df)
-            
-            if analysis_df is None or analysis_df.empty:
-                continue
-            
-            # Get latest row (today's signals)
-            latest = analysis_df.iloc[-1]
-            
-            # Get stock name from database
-            stock_name = data_manager.get_stock_name_from_db(ticker)
-            if not stock_name:
-                stock_name = ticker
-
-            # ==========================================
-            # CALCULATE PRICE TREND (using EMA)
-            # ==========================================
-            
-            # Calculate 5-day EMA of closing prices
-            ema_5d = analysis_df['Close'].ewm(span=5, adjust=False).mean()
-            
-            # Get current price and current EMA
-            current_price = latest['Close']
-            current_ema = ema_5d.iloc[-1]
-            
-            # Determine trend: price above EMA = uptrend, below = downtrend
-            # Use 2% threshold to avoid noise
-            if current_price > current_ema * 1.02:
-                price_trend = 'uptrend'
-            elif current_price < current_ema * 0.98:
-                price_trend = 'downtrend'
-            else:
-                price_trend = 'neutral'
-            
-            # ==================== CHECK BULLISH SIGNALS ====================
-            bullish_signals_found = []
-            
-            # Check boolean columns
-            for signal_col, signal_name in BULLISH_SIGNALS.items():
-                if signal_col in latest.index and latest[signal_col] == True:
-                    bullish_signals_found.append(signal_name)
-            
-            # Check ADX Pattern with PRICE CONTEXT
-            if 'ADX_Pattern' in latest.index:
-                adx_pattern = str(latest['ADX_Pattern'])
-                
-                # Bottoming: Only bullish if price is in downtrend (reversal setup)
-                if adx_pattern == 'Bottoming' and price_trend == 'downtrend':
-                    bullish_signals_found.append(ADX_BULLISH_PATTERNS['Bottoming + Downtrend'])
-                
-                # Reversing Up: Only bullish if price is in downtrend (catching reversal)
-                elif adx_pattern == 'Reversing Up' and price_trend == 'downtrend':
-                    bullish_signals_found.append(ADX_BULLISH_PATTERNS['Reversing Up + Downtrend'])
-            
-            if bullish_signals_found:
-                results.append({
-                    'Type': '🚀 Opportunity',
-                    'Ticker': ticker,
-                    'Name': stock_name,
-                    'Signals': ', '.join(bullish_signals_found),
-                    'Signal_Count': len(bullish_signals_found),
-                    'Price': float(latest.get('Close', 0)),
-                    'RSI': float(latest.get('RSI_14', 0)),
-                    'ADX': float(latest.get('ADX', 0)),
-                    'MACD': float(latest.get('MACD', 0)),
-                    'Volume': float(latest.get('Volume', 0))
-                })
-            
-            # ==================== CHECK BEARISH SIGNALS ====================
-            bearish_signals_found = []
-            
-            # Check boolean columns
-            for signal_col, signal_name in BEARISH_SIGNALS.items():
-                if signal_col in latest.index and latest[signal_col] == True:
-                    bearish_signals_found.append(signal_name)
-            
-            # Check ADX Pattern with PRICE CONTEXT
-            if 'ADX_Pattern' in latest.index:
-                adx_pattern = str(latest['ADX_Pattern'])
-                
-                # Peaking: Only bearish if price is in uptrend (exhaustion at top)
                 if adx_pattern == 'Peaking' and price_trend == 'uptrend':
                     bearish_signals_found.append(ADX_BEARISH_PATTERNS['Peaking + Uptrend'])
-                
-                # Reversing Down: Only bearish if price is in uptrend (trend breaking)
                 elif adx_pattern == 'Reversing Down' and price_trend == 'uptrend':
                     bearish_signals_found.append(ADX_BEARISH_PATTERNS['Reversing Down + Uptrend'])
             
@@ -360,8 +242,8 @@ def scan_all_stocks_old():
                     'Volume': float(latest.get('Volume', 0))
                 })
                 
-        
         except Exception as e:
+            st.warning(f"⚠️ {ticker} 分析失败: {str(e)}")
             continue
     
     # Clear progress indicators
@@ -371,10 +253,8 @@ def scan_all_stocks_old():
     # Calculate scan duration
     scan_duration = time.time() - start_time
     
-    # Convert to DataFrame
     if results:
         df = pd.DataFrame(results)
-        # Sort by type (Opportunities first), then by signal count
         df = df.sort_values(['Type', 'Signal_Count'], ascending=[True, False])
         return df, scan_duration
     else:
@@ -448,11 +328,12 @@ if cached_df is not None:
     st.info(f"📦 Loaded from cache (scanned earlier today)")
 else:
     # Need to scan
+    st.info(f"🎯 Scanning your watchlist with ({len(MY_WATCHLIST)} stocks. )")
     with st.spinner("🔍 Scanning all stocks for signals... This may take a few minutes."):
-        df, scan_duration = scan_all_stocks()
+        df, scan_duration = scan_my_watchlist()
         
         if df is None:
-            st.error("❌ No stock data found in database. Please run data sync first.")
+            st.error("❌ Scanning failed! ")
             st.stop()
         
         # Save to cache
