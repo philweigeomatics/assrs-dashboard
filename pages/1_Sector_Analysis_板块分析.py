@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
+import data_manager
 
 st.set_page_config(
     page_title="📊 Sector Analysis | 板块分析",
@@ -579,12 +580,12 @@ def create_sector_rotation_map(hist_df, lookback_short=5, lookback_long=20):
 
 st.title("📊 Sector Analysis")
 
-# Load data
 v2_latest, v2_hist, v2_date, v2_error = load_v2_data()
 
 if v2_latest is None:
-    st.error(f"Error loading data: {v2_error}")
+    st.error(f"❌ Error loading data: {v2_error}")
     st.stop()
+
 
 # Create tabs
 tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "🔬 Interaction Lab", "🎯 Performance & Rotation"])
@@ -624,47 +625,151 @@ with tab1:
             st.caption(f"📅 {v2_date}")
             st.markdown("---")
     
-    # Sector Table
-    st.subheader("🎯 Sector Signals")
+    # === TWO COLUMNS: SECTOR SIGNALS + CSI 300 CHART ===
+    col_left, col_right = st.columns([1, 1])
     
-    sectors_df = v2_latest[v2_latest['Sector'] != 'MARKET_PROXY'].copy()
-    sectors_df = sectors_df.sort_values('TOTAL_SCORE', ascending=False)
-    
-    display_df = sectors_df[['Sector', 'TOTAL_SCORE', 'ACTION', 'Market_Breadth','Excess_Prob', 'Position_Size']].copy()
-    display_df['TOTAL_SCORE'] = (display_df['TOTAL_SCORE'] * 100).map('{:.0f}%'.format)
-    display_df['Excess_Prob'] = display_df['Excess_Prob'].map(lambda x: f"{x:+.2f}")
-    display_df['Position_Size'] = (display_df['Position_Size'] * 100).map('{:.0f}%'.format)
-    display_df['Market_Breadth'] = (display_df['Market_Breadth'] * 100).map('{:.0f}%'.format)
-    
-    def style_breadth(val):
-        """Style breadth: <50% green (opportunity), >=50% red (overextended)"""
-        if isinstance(val, str) and '%' in val:
-            pct = float(val.replace('%', ''))
-            if pct < 50:
+    with col_left:
+        st.subheader("📊 Sector Signals")
+        
+        sectors_df = v2_latest[v2_latest['Sector'] != 'MARKET_PROXY'].copy()
+        sectors_df = sectors_df.sort_values('TOTAL_SCORE', ascending=False)
+        
+        display_df = sectors_df[['Sector', 'TOTAL_SCORE', 'ACTION', 'Market_Breadth', 'Excess_Prob', 'Position_Size']].copy()
+        display_df['TOTAL_SCORE'] = display_df['TOTAL_SCORE'].apply(lambda x: f"{x*100:.0f}%")
+        display_df['Excess_Prob'] = display_df['Excess_Prob'].map(lambda x: f"{x:.2f}")
+        display_df['Position_Size'] = (display_df['Position_Size'] * 100).map(lambda x: f"{x:.0f}%")
+        display_df['Market_Breadth'] = (display_df['Market_Breadth'] * 100).map(lambda x: f"{x:.0f}%")
+        
+        def style_action(val):
+            if 'BUY' in val:
                 return 'color: #15803d; background-color: #dcfce7; font-weight: 600'
-            else:
+            elif 'AVOID' in val:
                 return 'color: #b91c1c; background-color: #fee2e2; font-weight: 600'
-        return ''
+            return ''
+        
+        def style_breadth(val):
+            if isinstance(val, str) and '%' in val:
+                pct = float(val.replace('%', ''))
+                if pct > 50:
+                    return 'color: #15803d; background-color: #dcfce7; font-weight: 600'
+                else:
+                    return 'color: #b91c1c; background-color: #fee2e2; font-weight: 600'
+            return ''
+        
+        styled = display_df.style.map(style_action, subset=['ACTION']).map(style_breadth, subset=['Market_Breadth'])
+        st.dataframe(styled, hide_index=True, use_container_width=True, height=400)
+        
+        # Summary
+        st.markdown("**Summary**")
+        buy = sectors_df[sectors_df['ACTION'].str.contains('BUY', na=False, case=False)]
+        avoid = sectors_df[sectors_df['ACTION'].str.contains('AVOID', na=False, case=False)]
+        
+        s1, s2, s3 = st.columns(3)
+        s1.metric("🟢 BUY", len(buy))
+        if not buy.empty:
+            s1.caption(", ".join(buy['Sector'].head(3).tolist()))
+        
+        s2.metric("📊 Exposure", f"{sectors_df['Position_Size'].sum()*100:.0f}%")
+        
+        s3.metric("🔴 AVOID", len(avoid))
+        if not avoid.empty:
+            s3.caption(", ".join(avoid['Sector'].head(3).tolist()))
     
-    styled = display_df.style.map(style_action, subset=['ACTION']).map(style_breadth, subset=['Market_Breadth'])    
+    with col_right:
+        st.subheader("📈 CSI 300 指数")
+        
+        # Frequency selector (horizontal, compact)
+        freq = st.radio("周期", ["日线", "周线"], key='csi300_freq', horizontal=True, label_visibility="collapsed")
+        
+        # Fetch data based on frequency
+        if freq == "日线":
+            with st.spinner("📡 加载中..."):
+                chart_df = data_manager.get_index_data_live('000300.SH', lookback_days=180, freq='daily')
+                title = "CSI 300 - 日K线 (6个月)"
+        else:  # 周线
+            with st.spinner("📡 加载中..."):
+                chart_df = data_manager.get_index_data_live('000300.SH', lookback_days=365, freq='weekly')
+                title = "CSI 300 - 周K线 (1年)"
+        
+        if chart_df is not None and not chart_df.empty:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
+            
+            # Prepare dates as strings
+            dates = chart_df.index.strftime('%Y-%m-%d').tolist()
+            
+            # === SHOW ONLY 5 DATES ===
+            total_dates = len(dates)
+            tick_interval = max(1, total_dates // 5)  # Divide into 5 segments
+            tick_vals = dates[::tick_interval][:5]  # Take only first 5
+            tick_text = tick_vals
+            
+            # Create compact candlestick chart with volume
+            fig = make_subplots(
+                rows=2, cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.03,
+                row_heights=[0.7, 0.3]
+            )
+            
+            # Candlestick
+            fig.add_trace(go.Candlestick(
+                x=dates,
+                open=chart_df['Open'],
+                high=chart_df['High'],
+                low=chart_df['Low'],
+                close=chart_df['Close'],
+                name='CSI 300',
+                increasing_line_color='#ef4444',
+                decreasing_line_color='#22c55e'
+            ), row=1, col=1)
+            
+            # Volume bars
+            colors = ['#ef4444' if chart_df['Close'].iloc[i] >= chart_df['Open'].iloc[i] 
+                    else '#22c55e' for i in range(len(chart_df))]
+            
+            fig.add_trace(go.Bar(
+                x=dates,
+                y=chart_df['Volume'],
+                name='成交量',
+                marker_color=colors,
+                opacity=0.7
+            ), row=2, col=1)
+            
+            fig.update_layout(
+                title=title,
+                height=500,
+                template='plotly_white',
+                xaxis_rangeslider_visible=False,
+                hovermode='x unified',
+                showlegend=False,
+                margin=dict(l=10, r=10, t=40, b=40)
+            )
+            
+            fig.update_yaxes(title_text="指数", row=1, col=1)
+            fig.update_yaxes(title_text="成交量", row=2, col=1)
+            
+            # Show only 5 dates, horizontal
+            fig.update_xaxes(
+                type='category',
+                tickmode='array',
+                tickvals=tick_vals,
+                ticktext=tick_text,
+                tickangle=0,  # Horizontal
+                row=2, col=1
+            )
+            
+            # Hide ticks on top panel
+            fig.update_xaxes(
+                type='category',
+                showticklabels=False,
+                row=1, col=1
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.error("❌ 无法加载数据")
 
-    st.dataframe(styled, hide_index=True, use_container_width=True)
-    
-    # Summary
-    st.markdown("### 📊 Summary")
-    buy = sectors_df[sectors_df['ACTION'].str.contains('BUY', na=False, case=False)]
-    avoid = sectors_df[sectors_df['ACTION'].str.contains('AVOID', na=False, case=False)]
-    
-    s1, s2, s3 = st.columns(3)
-    s1.metric("🟢 BUY", len(buy))
-    if not buy.empty:
-        s1.caption(", ".join(buy['Sector'].head(3).tolist()))
-    
-    s2.metric("💰 Exposure", f"{sectors_df['Position_Size'].sum()*100:.0f}%")
-    
-    s3.metric("🔴 AVOID", len(avoid))
-    if not avoid.empty:
-        s3.caption(", ".join(avoid['Sector'].head(3).tolist()))
     
 
     # Add after the Summary section (around line 460)

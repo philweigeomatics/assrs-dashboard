@@ -826,7 +826,7 @@ def calculate_trend_forecast(df: pd.DataFrame, lookback: int = 60, forecast_days
         return None, None, None
 
 
-def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) -> go.Figure:
+def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.DataFrame = None, blocks: list = None) -> go.Figure:
     """
     Create 5-panel chart with trading blocks.
     Blocks drawn as horizontal rectangles during their active period.
@@ -836,7 +836,7 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
     
     # ==================== CHANGE: 4 rows -> 5 rows ====================
     fig = make_subplots(
-        rows=5, cols=1,  # Changed from 4 to 5
+        rows=6, cols=1,  # Changed from 4 to 5
         
         shared_xaxes=True,
         vertical_spacing=0.03,
@@ -846,8 +846,9 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
             'MACD',
             'RSI',  # No ADX here anymore
             'ADX Trend Analysis',  
+            'P/E Ratio'
         ),
-        row_heights=[0.45, 0.12, 0.22, 0.12, 0.22]  # Adjusted heights
+        row_heights=[0.45, 0.12, 0.22, 0.12, 0.22,0.10]  # Adjusted heights
     )
     
     # ==================== ROW 1: Price Chart (no changes) ====================
@@ -1400,14 +1401,44 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
         row=5, col=1
     )
 
+
+        # === ROW 6: P/E RATIO ===
+    if fundamentals_df is not None and not fundamentals_df.empty:
+        # Merge fundamentals with analysis dates
+        fund_aligned = fundamentals_df.reindex(df.index, method='ffill')
+        
+        if 'PE_TTM' in fund_aligned.columns:
+            pe_data = fund_aligned['PE_TTM'].dropna()
+            if not pe_data.empty:
+                pe_dates = pe_data.index.strftime('%Y-%m-%d').tolist()
+                
+                fig.add_trace(go.Scatter(
+                    x=pe_dates, y=pe_data,
+                    name='P/E (TTM)',
+                    line=dict(color='#8b5cf6', width=2.5),
+                    showlegend=True
+                ), row=6, col=1)
+                
+                # Add reference lines
+                pe_median = pe_data.median()
+                fig.add_hline(
+                    y=pe_median,
+                    line_dash='dash',
+                    line_color='gray',
+                    annotation_text=f'Median: {pe_median:.1f}',
+                    row=6, col=1
+                )
+    
+    fig.update_yaxes(title_text='P/E', row=6, col=1)
+    
     
     # ==================== UPDATE LAYOUT ====================
     fig.update_layout(
-        height=1300,  # ← Increased from 1300 to accommodate new panel
+        height=1500,  # ← Increased from 1300 to 1500 to accommodate new panel
         template='plotly_white',
         xaxis_rangeslider_visible=False,
         hovermode='x unified',
-        xaxis5_title='Date',  # ← Changed from xaxis5 to xaxis6
+        xaxis6_title='Date',  # ← Changed from xaxis5 to xaxis6
         yaxis1_title='Price',
         yaxis2_title='Volume',
         yaxis3_title='MACD',
@@ -1452,11 +1483,11 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, blocks: list = None) ->
         tickmode='array',
         tickvals=tick_vals,
         ticktext=tick_text,
-        row=5, col=1
+        row=6, col=1
     )
 
     # Hide tick labels on upper panels (but keep grid aligned)
-    for row in range(1, 5):
+    for row in range(1, 6):
         fig.update_xaxes(
             type='category',
             showticklabels=False,
@@ -2825,20 +2856,46 @@ if st.session_state.active_ticker:
         st.error(f"No data found for {ticker}. Check ticker is valid.")
     else:
         company_name = data_manager.update_search_history(ticker)
-        # Display stock header
+
+        # Fetch fundamental data
+        start_date_str = stock_df.index.min().strftime('%Y%m%d')
+        end_date_str = stock_df.index.max().strftime('%Y%m%d')
+        fundamentals_df = data_manager.get_stock_fundamentals_live(ticker, start_date_str, end_date_str)
+        
+        # Get latest fundamentals for display
+        latest_fund = {}
+        if fundamentals_df is not None and not fundamentals_df.empty:
+            latest_row = fundamentals_df.iloc[-1]
+            latest_fund = {
+                'PE_TTM': latest_row.get('PE_TTM', 'N/A'),
+                'PB': latest_row.get('PB', 'N/A'),
+                'Total_MV_Yi': latest_row.get('Total_MV_Yi', 'N/A'),
+                'Circ_MV_Yi': latest_row.get('Circ_MV_Yi', 'N/A'),
+                'Turnover_Rate': latest_row.get('Turnover_Rate', 'N/A')
+            }
+
+        # Format fundamentals for display
+        pe_str = f"{latest_fund['PE_TTM']:.2f}" if isinstance(latest_fund.get('PE_TTM'), (int, float)) else 'N/A'
+        pb_str = f"{latest_fund['PB']:.2f}" if isinstance(latest_fund.get('PB'), (int, float)) else 'N/A'
+        mv_str = f"{latest_fund['Total_MV_Yi']:.0f}亿" if isinstance(latest_fund.get('Total_MV_Yi'), (int, float)) else 'N/A'
+        circ_mv_str = f"{latest_fund['Circ_MV_Yi']:.0f}亿" if isinstance(latest_fund.get('Circ_MV_Yi'), (int, float)) else 'N/A'
+        turnover_str = f"{latest_fund['Turnover_Rate']:.2f}%" if isinstance(latest_fund.get('Turnover_Rate'), (int, float)) else 'N/A'
+
         st.markdown(f"""
-        <div style="
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 10px;
-            border-radius: 5px;
-            margin-bottom: 10px;
-        ">
-            <h3 style="color: white; margin: 0;">{company_name}</h1>
-            <p style="color: rgba(255,255,255,0.9); margin: 5px 0 0 0; font-size: 14px;">
-                📈 {ticker} | Latest: ¥{stock_df['Close'].iloc[-1]:.2f}
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 15px; border-radius: 5px; margin-bottom: 10px;">
+                <h3 style="color: white; margin: 0 0 10px 0;">{company_name}</h3>
+                <p style="color: rgba(255,255,255,0.9); margin: 0; font-size: 14px;">
+                    <strong>{ticker}</strong> | 最新价: <strong>¥{stock_df['Close'].iloc[-1]:.2f}</strong>
+                </p>
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; font-size: 13px; color: rgba(255,255,255,0.85);">
+                    <div>P/E (TTM): <strong>{pe_str}</strong></div>
+                    <div>P/B: <strong>{pb_str}</strong></div>
+                    <div>总市值: <strong>{mv_str}</strong></div>
+                    <div>流通市值: <strong>{circ_mv_str}</strong></div>
+                    <div>换手率: <strong>{turnover_str}</strong></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
 
         # Run analysis
@@ -2851,7 +2908,7 @@ if st.session_state.active_ticker:
             blocks = calculate_multiple_blocks(analysis_df, lookback=60)
             
             # Display chart
-            fig_stock = create_single_stock_chart_analysis(analysis_df, blocks=blocks)
+            fig_stock = create_single_stock_chart_analysis(analysis_df, fundamentals_df=fundamentals_df, blocks=blocks)
             st.plotly_chart(fig_stock, use_container_width=True)
             
             # Latest status cards
