@@ -389,6 +389,149 @@ def ensure_data_in_db(start_date, end_date):
         time.sleep(1.0)
 
 
+def get_index_data_live(index_code='000300.SH', lookback_days=180, freq='daily'):
+    """
+    Fetch index data from Tushare (e.g., CSI 300).
+    
+    Args:
+        index_code: Index code in Tushare format (e.g., '000300.SH' for CSI 300)
+        lookback_days: Number of days of historical data
+        freq: 'daily' or 'weekly' - determines which API to call
+    
+    Returns:
+        DataFrame with index OHLC data
+    """
+    global TUSHARE_API
+    
+    if TUSHARE_API is None:
+        ok = init_tushare()
+        if not ok:
+            print("[data_manager] ❌ Tushare initialization failed")
+            return None
+    
+    try:
+        from datetime import datetime, timedelta
+        end_date = datetime.now().strftime('%Y%m%d')
+        start_date = (datetime.now() - timedelta(days=lookback_days + 30)).strftime('%Y%m%d')
+        
+        # Choose API based on frequency
+        if freq == 'weekly':
+            # Use index_weekly API
+            df = TUSHARE_API.index_weekly(
+                ts_code=index_code,
+                start_date=start_date,
+                end_date=end_date,
+                fields='ts_code,trade_date,close,open,high,low,pre_close,change,pct_chg,vol,amount'
+            )
+        else:  # daily
+            # Use index_daily API
+            df = TUSHARE_API.index_daily(
+                ts_code=index_code,
+                start_date=start_date,
+                end_date=end_date,
+                fields='ts_code,trade_date,close,open,high,low,pre_close,change,pct_chg,vol,amount'
+            )
+        
+        if df is None or df.empty:
+            print(f"[data_manager] ❌ No {freq} data for index {index_code}")
+            return None
+        
+        # Rename and format
+        df = df.rename(columns={
+            'trade_date': 'Date',
+            'close': 'Close',
+            'open': 'Open',
+            'high': 'High',
+            'low': 'Low',
+            'pre_close': 'Pre_Close',
+            'change': 'Change',
+            'pct_chg': 'Pct_Change',
+            'vol': 'Volume',
+            'amount': 'Amount'
+        })
+        
+        # Convert date and set index
+        df['Date'] = pd.to_datetime(df['Date'])
+        df.set_index('Date', inplace=True)
+        df.sort_index(inplace=True)
+        
+        print(f"[data_manager] ✅ Fetched {len(df)} {freq} periods of index data for {index_code}")
+        
+        return df
+        
+    except Exception as e:
+        print(f"[data_manager] ❌ Failed to fetch {freq} index {index_code}: {e}")
+        return None
+
+
+
+
+def get_stock_fundamentals_live(ticker, start_date, end_date):
+    """
+    Fetch daily fundamental metrics (PE, PB, Market Cap) from Tushare.
+    
+    Args:
+        ticker: 6-digit stock code
+        start_date: Start date (YYYYMMDD format string)
+        end_date: End date (YYYYMMDD format string)
+    
+    Returns:
+        DataFrame with PE, PB, Market Cap data indexed by date
+    """
+    global TUSHARE_API
+    
+    if TUSHARE_API is None:
+        ok = init_tushare()
+        if not ok:
+            print("[data_manager] ❌ Tushare initialization failed")
+            return None
+    
+    ts_code = get_tushare_ticker(ticker)
+    
+    try:
+        df = TUSHARE_API.daily_basic(
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+            fields='ts_code,trade_date,close,pe,pe_ttm,pb,ps,ps_ttm,total_mv,circ_mv,turnover_rate,dv_ratio'
+        )
+        
+        if df is None or df.empty:
+            print(f"[data_manager] ❌ No fundamental data for {ticker}")
+            return None
+        
+        # Rename and format columns
+        df = df.rename(columns={
+            'trade_date': 'Date',
+            'pe': 'PE',
+            'pe_ttm': 'PE_TTM',
+            'pb': 'PB',
+            'ps': 'PS',
+            'ps_ttm': 'PS_TTM',
+            'total_mv': 'Total_MV',
+            'circ_mv': 'Circ_MV',
+            'turnover_rate': 'Turnover_Rate',
+            'dv_ratio': 'Dividend_Yield'
+        })
+        
+        # Convert date and set index
+        df['Date'] = pd.to_datetime(df['Date'])
+        df.set_index('Date', inplace=True)
+        df.sort_index(inplace=True)
+        
+        # Convert market cap from 万元 to 亿元 for readability
+        df['Total_MV_Yi'] = df['Total_MV'] / 10000
+        df['Circ_MV_Yi'] = df['Circ_MV'] / 10000
+        
+        print(f"[data_manager] ✅ Fetched {len(df)} days of fundamental data for {ticker}")
+        
+        return df
+        
+    except Exception as e:
+        print(f"[data_manager] ❌ Failed to fetch fundamentals for {ticker}: {e}")
+        return None
+
+
 def get_all_stock_data_live(progress_callback=None):
     """
     Fetch ALL stocks data LIVE from Tushare API (no database).
