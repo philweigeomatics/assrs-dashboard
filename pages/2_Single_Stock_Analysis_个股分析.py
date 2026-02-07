@@ -546,6 +546,91 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
         ),
         row_heights=[0.45, 0.12, 0.22, 0.12, 0.22,0.10]  # Adjusted heights
     )
+
+    # ====== ADD REGIME SHADING HERE (right after make_subplots, before any traces) ======
+    
+    regime_colors = {
+        'Low Volatility': 'rgba(34, 197, 94, 0.08)',
+        'Normal Volatility': 'rgba(59, 130, 246, 0.05)',
+        'High Volatility': 'rgba(251, 191, 36, 0.12)',
+        'Extreme Volatility': 'rgba(239, 68, 68, 0.15)'
+    }
+    
+    if 'Market_Regime' in df.columns:
+        
+        # Remove NaN regimes first
+        df_clean = df.dropna(subset=['Market_Regime'])
+
+        
+        if not df_clean.empty:
+            # Find regime changes
+            regime_changes = (df_clean['Market_Regime'] != df_clean['Market_Regime'].shift(1))
+            change_indices = df_clean[regime_changes].index.tolist()
+
+            # Add first index if not already there
+            if len(change_indices) == 0 or change_indices[0] != df_clean.index[0]:
+                change_indices.insert(0, df_clean.index[0])
+
+            for i in range(len(change_indices)):
+                start_idx = change_indices[i]
+                end_idx = change_indices[i+1] if i+1 < len(change_indices) else df_clean.index[-1]
+                
+                regime = df_clean.loc[start_idx, 'Market_Regime']
+                start_date = start_idx.strftime('%Y-%m-%d')
+                end_date = end_idx.strftime('%Y-%m-%d')
+                
+                # Only draw if regime is valid
+                if regime in regime_colors:
+                    # Get the y-axis range for the price chart
+                    y_min = df_clean['Low'].min() * 0.98
+                    y_max = df_clean['High'].max() * 1.02
+                    
+                    # Add shape instead of vrect
+                    fig.add_shape(
+                        type="rect",
+                        x0=start_date,
+                        x1=end_date,
+                        y0=y_min,
+                        y1=y_max,
+                        fillcolor=regime_colors[regime],
+                        line=dict(width=0),
+                        layer="below",
+                        row=1, col=1
+                    )
+                    
+                    # Add label logic - FIXED
+                    should_label = False
+                    if i == 0:
+                        # First segment - always label it
+                        should_label = True
+                    elif i > 0 and regime != df_clean.loc[change_indices[i-1], 'Market_Regime']:
+                        # Not first segment - only label if regime actually changed
+                        should_label = True
+                    
+                    if should_label:
+                        # Get y position for label
+                        # Add label for each regime segment
+                        segment_data = df_clean.loc[start_idx:end_idx]
+                        y_label = df_clean['High'].max() * 1.01  # Even higher above the highest price
+
+                        fig.add_annotation(
+                            x=start_date,
+                            y=y_label,
+                            text=regime,
+                            showarrow=False,
+                            font=dict(size=9, color='black'),
+                            bgcolor='rgba(255,255,255,0.9)',
+                            bordercolor='gray',
+                            borderwidth=1,
+                            borderpad=2,
+                            xanchor='left',
+                            yanchor='bottom',  # Changed from top
+                            row=1, col=1
+                        )
+
+
+
+    # ====== END OF REGIME SHADING ======
     
     # ==================== ROW 1: Price Chart (no changes) ====================
     # Bollinger Bands
@@ -600,7 +685,10 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
     # Trading Blocks
     if blocks:
         colors = ['rgba(255, 99, 71, 0.2)', 'rgba(255, 165, 0, 0.2)', 'rgba(255, 215, 0, 0.2)']
-        for idx, block in enumerate(blocks[:3]):
+        recent_blocks = blocks[-3:]  # Get last 3 blocks
+    
+        for idx, block in enumerate(recent_blocks):
+            color = colors[idx % len(colors)]
             color = colors[idx % len(colors)]
             start_date = block['start'].strftime('%Y-%m-%d')
             end_date = block['end'].strftime('%Y-%m-%d')
@@ -642,15 +730,15 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
             showlegend=True
         ), row=1, col=1)
     
-    launch = df[df['Signal_Golden_Launch']]
-    if not launch.empty:
-        fig.add_trace(go.Scatter(
-            x=launch.index.strftime('%Y-%m-%d'), y=launch['High'] * 1.05,
-            mode='markers', name='⭐ GOLDEN LAUNCH',
-            marker=dict(color='#ef4444', size=16, symbol='star',
-                       line=dict(width=2, color='black')),
-            showlegend=True
-        ), row=1, col=1)
+    # launch = df[df['Signal_Golden_Launch']]
+    # if not launch.empty:
+    #     fig.add_trace(go.Scatter(
+    #         x=launch.index.strftime('%Y-%m-%d'), y=launch['High'] * 1.05,
+    #         mode='markers', name='⭐ GOLDEN LAUNCH',
+    #         marker=dict(color='#ef4444', size=16, symbol='star',
+    #                    line=dict(width=2, color='black')),
+    #         showlegend=True
+    #     ), row=1, col=1)
     
     exits = df[df['Exit_MACD_Lead']]
     if not exits.empty:
@@ -2497,7 +2585,7 @@ def analyze_down_day_bounce_probability(df, ticker_name="Stock"):
 # MAIN APP
 # ==========================================
 
-st.title("📈 Single Stock Analysis")
+st.subheader("📈 Single Stock Analysis")
 
 # Input section
 c1, c2 = st.columns([3, 1])
@@ -2572,73 +2660,198 @@ if st.session_state.active_ticker:
         # Format fundamentals for display
         pe_str = f"{latest_fund['PE_TTM']:.2f}" if isinstance(latest_fund.get('PE_TTM'), (int, float)) else 'N/A'
         pb_str = f"{latest_fund['PB']:.2f}" if isinstance(latest_fund.get('PB'), (int, float)) else 'N/A'
-        mv_str = f"{latest_fund['Total_MV_Yi']:.0f}亿" if isinstance(latest_fund.get('Total_MV_Yi'), (int, float)) else 'N/A'
-        circ_mv_str = f"{latest_fund['Circ_MV_Yi']:.0f}亿" if isinstance(latest_fund.get('Circ_MV_Yi'), (int, float)) else 'N/A'
-        turnover_str = f"{latest_fund['Turnover_Rate']:.2f}%" if isinstance(latest_fund.get('Turnover_Rate'), (int, float)) else 'N/A'
-
-        st.markdown(f"""
-            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 15px; border-radius: 5px; margin-bottom: 10px;">
-                <h3 style="color: white; margin: 0 0 10px 0;">{company_name}</h3>
-                <p style="color: rgba(255,255,255,0.9); margin: 0; font-size: 14px;">
-                    <strong>{ticker}</strong> | 最新价: <strong>¥{stock_df['Close'].iloc[-1]:.2f}</strong>
-                </p>
-                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; font-size: 13px; color: rgba(255,255,255,0.85);">
-                    <div>P/E (TTM): <strong>{pe_str}</strong></div>
-                    <div>P/B: <strong>{pb_str}</strong></div>
-                    <div>总市值: <strong>{mv_str}</strong></div>
-                    <div>流通市值: <strong>{circ_mv_str}</strong></div>
-                    <div>换手率: <strong>{turnover_str}</strong></div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
+        mv_str = f"{latest_fund['Total_MV_Yi']:.0f}" if isinstance(latest_fund.get('Total_MV_Yi'), (int, float)) else 'N/A'
+        circ_mv_str = f"{latest_fund['Circ_MV_Yi']:.0f}" if isinstance(latest_fund.get('Circ_MV_Yi'), (int, float)) else 'N/A'
+        turnover_str = f"{latest_fund['Turnover_Rate']:.2f}" if isinstance(latest_fund.get('Turnover_Rate'), (int, float)) else 'N/A'
 
         # Run analysis
         analysis_df = run_single_stock_analysis(stock_df)
+
         
         if analysis_df.empty or len(analysis_df) < 50:
             st.error("Not enough data to compute signals.")
         else:
             # Detect trading blocks
             blocks = calculate_multiple_blocks(analysis_df, lookback=60)
+
+            # ==================== COMPANY INFO HEADER (NARROW) ====================
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 12px 20px; border-radius: 10px; margin-bottom: 15px;">
+                <div style="display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr 1fr; gap: 20px; align-items: center;">
+                    <div>
+                        <h3 style="color: white; margin: 0; font-size: 20px;">{company_name}</h3>
+                        <p style="color: rgba(255,255,255,0.8); margin: 5px 0 0 0; font-size: 13px;">{ticker}</p>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="color: rgba(255,255,255,0.7); font-size: 11px;">昨日停盘价</div>
+                        <div style="color: white; font-size: 16px; font-weight: bold;">¥{stock_df['Close'].iloc[-1]:.2f}</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="color: rgba(255,255,255,0.7); font-size: 11px;">P/E</div>
+                        <div style="color: white; font-size: 14px; font-weight: bold;">{pe_str}</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="color: rgba(255,255,255,0.7); font-size: 11px;">P/B</div>
+                        <div style="color: white; font-size: 14px; font-weight: bold;">{pb_str}</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="color: rgba(255,255,255,0.7); font-size: 11px;">总市值</div>
+                        <div style="color: white; font-size: 14px; font-weight: bold;">{mv_str}亿</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="color: rgba(255,255,255,0.7); font-size: 11px;">换手率</div>
+                        <div style="color: white; font-size: 14px; font-weight: bold;">{turnover_str}%</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ==================== MARKET STATUS (STREAMLIT NATIVE) ====================
+            # Get latest row for status display
+            latest_row = analysis_df.iloc[-1]
+            close_price = latest_row['Close']
+            prev_close = analysis_df.iloc[-2]['Close'] if len(analysis_df) > 1 else close_price
+
+            # Get all signals
+            accumulation = bool(latest_row.get('Signal_Accumulation', False))
+            squeeze = bool(latest_row.get('Signal_Squeeze', False))
+
+            # Bull signals
+            macd_bottoming = bool(latest_row.get('MACD_Bottoming', False))
+            macd_crossover = bool(latest_row.get('MACD_Classic_Crossover', False))
+            rsi_bottoming = bool(latest_row.get('RSI_Bottoming', False))
+
+            # Bear signals
+            macd_peaking = bool(latest_row.get('MACD_Peaking', False))
+            macd_bearish = bool(latest_row.get('MACD_Bearish_Crossover', False))
+            rsi_peaking = bool(latest_row.get('RSI_Peaking', False))
+
+            # ADX info
+            adx_val = float(latest_row.get('ADX', 0.0))
+            adx_pattern = str(latest_row.get('ADX_Pattern', ''))
+
+            # ========================== Market Status =================== #
+            col1, col2, col3, col4, col5 = st.columns(5)
+
+            with col1:
+                st.markdown("**🔄 Squeeze**")
+                if squeeze:
+                    st.success("TIGHT")
+                    st.caption("低波动")
+                else:
+                    st.info("LOOSE")
+                    st.caption("正常波动")
+
+            with col2:
+                st.markdown("**📥 Accumulation**")
+                if accumulation:
+                    st.success("ACTIVE")
+                    st.caption("建仓阶段")
+                else:
+                    st.info("INACTIVE")
+                    st.caption("等待中")
+
+            with col3:
+                st.markdown("**🐂 Bull Signals**")
+                bull_signals = []
+                if macd_bottoming:
+                    bull_signals.append("MACD底")
+                if macd_crossover:
+                    bull_signals.append("MACD金叉")
+                if rsi_bottoming:
+                    bull_signals.append("RSI底")
+                
+                if bull_signals:
+                    st.success(" | ".join(bull_signals))
+                    st.caption(f"{len(bull_signals)}个信号")
+                else:
+                    st.info("无")
+                    st.caption("等待信号")
+
+            with col4:
+                st.markdown("**🐻 Bear Signals**")
+                bear_signals = []
+                if macd_peaking:
+                    bear_signals.append("MACD顶")
+                if macd_bearish:
+                    bear_signals.append("MACD死叉")
+                if rsi_peaking:
+                    bear_signals.append("RSI顶")
+                
+                if bear_signals:
+                    st.error(" | ".join(bear_signals))
+                    st.caption(f"{len(bear_signals)}个信号")
+                else:
+                    st.info("无")
+                    st.caption("等待信号")
+
+            with col5:
+                st.markdown("**📦 Trading Block**")
+                if blocks:
+                    block = blocks[-1]
+                    status = block['status']
+                    
+                    # Only show if it's the active block
+                    if block.get('is_active', False):
+                        if status == 'BREAKOUT':
+                            st.error("BREAKOUT")
+                        elif status == 'BREAKDOWN':
+                            st.success("BREAKDOWN")
+                        elif status == 'INSIDE':
+                            st.warning("INSIDE")
+                        else:
+                            st.info(status)
+                        
+                        st.caption(f"¥{block['bot']:.2f}-¥{block['top']:.2f}")
+                    else:
+                        st.info("NO ACTIVE BLOCK")
+                        st.caption("Historical block only")
+                else:
+                    st.info("无")
+                    st.caption("无明确区间")
+
+            st.caption(f"📈 ADX: **{adx_val:.1f}** | Pattern: **{adx_pattern if adx_pattern else 'None'}**")
+
+            st.markdown("---")
+            # ==================== END MARKET STATUS ====================
             
             # Display chart
             fig_stock = create_single_stock_chart_analysis(analysis_df, fundamentals_df=fundamentals_df, blocks=blocks)
             st.plotly_chart(fig_stock, use_container_width=True)
             
-            # Latest status cards
-            latest_row = analysis_df.iloc[-1]
+            # # Latest status cards
+            # latest_row = analysis_df.iloc[-1]
             
-            st.subheader("Latest Status")
-            cola, colb, colc, cold = st.columns(4)
+            # st.subheader("Latest Status")
+            # cola, colb, colc, cold = st.columns(4)
             
-            accum = bool(latest_row.get('Signal_Accumulation', False))
-            squeeze = bool(latest_row.get('Signal_Squeeze', False))
-            launch = bool(latest_row.get('Signal_Golden_Launch', False))
-            adx_val = float(latest_row.get('ADX', 0.0))
+            # accum = bool(latest_row.get('Signal_Accumulation', False))
+            # squeeze = bool(latest_row.get('Signal_Squeeze', False))
+            # launch = bool(latest_row.get('Signal_Golden_Launch', False))
+            # adx_val = float(latest_row.get('ADX', 0.0))
             
-            with cola:
-                st.markdown("**Phase 1: Accumulation**")
-                st.markdown(f":{('orange' if accum else 'grey')}[{'ACTIVE' if accum else 'INACTIVE'}]")
+            # with cola:
+            #     st.markdown("**Phase 1: Accumulation**")
+            #     st.markdown(f":{('orange' if accum else 'grey')}[{'ACTIVE' if accum else 'INACTIVE'}]")
             
-            with colb:
-                st.markdown("**Phase 2: Squeeze**")
-                st.markdown(f":{('grey')}[{'TIGHT' if squeeze else 'LOOSE'}]")
+            # with colb:
+            #     st.markdown("**Phase 2: Squeeze**")
+            #     st.markdown(f":{('grey')}[{'TIGHT' if squeeze else 'LOOSE'}]")
             
-            with colc:
-                st.markdown("**Phase 3: LAUNCH**")
-                st.markdown(f":{('red' if launch else 'grey')}[{'TRIGGERED' if launch else 'WAITING'}]")
+            # with colc:
+            #     st.markdown("**Phase 3: LAUNCH**")
+            #     st.markdown(f":{('red' if launch else 'grey')}[{'TRIGGERED' if launch else 'WAITING'}]")
             
-            with cold:
-                st.markdown("**Trading Block (Latest)**")
-                if blocks:
-                    block = blocks[0]
-                    status = block['status']
-                    color = 'red' if status == 'BREAKOUT' else 'green' if status == 'BREAKDOWN' else 'grey'
-                    st.markdown(f":{color}[{status}]")
-                    st.caption(f"Range: {block['bot']:.2f} - {block['top']:.2f}")
-                else:
-                    st.markdown(":grey[NO BLOCKS]")
+            # with cold:
+            #     st.markdown("**Trading Block (Latest)**")
+            #     if blocks:
+            #         block = blocks[0]
+            #         status = block['status']
+            #         color = 'red' if status == 'BREAKOUT' else 'green' if status == 'BREAKDOWN' else 'grey'
+            #         st.markdown(f":{color}[{status}]")
+            #         st.caption(f"Range: {block['bot']:.2f} - {block['top']:.2f}")
+            #     else:
+            #         st.markdown(":grey[NO BLOCKS]")
             
             # # Metrics table
             # st.markdown("---")
@@ -2655,105 +2868,101 @@ if st.session_state.active_ticker:
             st.subheader("🎯 Setup-Conditioned Expectancy")
             st.markdown("Test your strategy: Buy on bullish signals, sell on bearish signals.")
             
-            # Signal selectors
-            col_buy, col_sell = st.columns(2)
-            
+            # ADD THIS: Date Range Selector
+            col_date, col_buy, col_sell = st.columns([1, 1, 1])
+
+            with col_date:
+                # Get available date range from analysis data
+                min_date = analysis_df.index.min().date()
+                max_date = analysis_df.index.max().date()
+                
+                backtest_start = st.date_input(
+                    "Backtest Start Date",
+                    value=min_date,  # Default to earliest date
+                    min_value=min_date,
+                    max_value=max_date,
+                    key='backtest_start_date'
+                )
+                
+                st.caption(f"Available: {min_date} to {max_date}")
+
             with col_buy:
-                # Combine boolean signals and ADX patterns
+                # Your existing buy signal selector
                 buy_options = list(BULLISH_SIGNALS.keys()) + list(ADX_BULLISH_PATTERNS.keys())
                 buy_display = {**BULLISH_SIGNALS, **ADX_BULLISH_PATTERNS}
-                
                 buy_signal = st.selectbox(
-                    "📈 Buy Signal (Entry)",
-                    buy_options,
+                    "Buy Signal (Entry)", 
+                    buy_options, 
                     format_func=lambda x: buy_display[x]
                 )
-            
+
             with col_sell:
-                # Combine boolean signals and ADX patterns
+                # Your existing sell signal selector
                 sell_options = list(BEARISH_SIGNALS.keys()) + list(ADX_BEARISH_PATTERNS.keys())
                 sell_display = {**BEARISH_SIGNALS, **ADX_BEARISH_PATTERNS}
-                
                 sell_signal = st.selectbox(
-                    "📉 Sell Signal (Exit)",
-                    sell_options,
+                    "Sell Signal (Exit)", 
+                    sell_options, 
                     format_func=lambda x: sell_display[x]
                 )
-            
-            # Run backtest
+
+            # Filter analysis data based on selected start date
             if buy_signal and sell_signal:
-                with st.spinner("🔍 Running backtest..."):
-                    trades_df, summary = backtest_signal_expectancy(
-                        analysis_df,
-                        buy_signal,
-                        sell_signal
-                    )
-                
-                if summary is None:
-                    st.warning("⚠️ No complete transactions found in lookback period. Try different signals or longer period.")
-                else:
-                    # Display summary metrics
-                    col1, col2, col3, col4 = st.columns(4)
+                with st.spinner("Running backtest..."):
+                    # Filter data from selected start date
+                    backtest_df = analysis_df[analysis_df.index >= pd.Timestamp(backtest_start)]
                     
-                    with col1:
-                        st.metric("Total Transactions", int(summary['Total_Transactions']))
-                        st.caption(f"✅ {int(summary['Winning_Trades'])} wins | ❌ {int(summary['Losing_Trades'])} losses")
-                    
-                    with col2:
-                        win_rate = summary['Win_Rate']
-                        st.metric("Win Rate", f"{win_rate:.1f}%")
-                        if win_rate >= 60:
-                            st.success("Strong")
-                        elif win_rate >= 50:
-                            st.info("Decent")
-                        else:
-                            st.warning("Weak")
-                    
-                    with col3:
-                        avg_profit = summary['Avg_Profit_Pct']
-                        st.metric("Avg Profit/Trade", f"{avg_profit:.2f}%")
-                        if avg_profit > 0:
-                            st.success(f"💰 +¥{summary['Total_Profit']:.2f} total")
-                        else:
-                            st.error(f"💸 ¥{summary['Total_Profit']:.2f} total")
-                    
-                    with col4:
-                        st.metric("Best Trade", f"{summary['Best_Trade_Pct']:.2f}%")
-                        st.caption(f"Worst: {summary['Worst_Trade_Pct']:.2f}%")
-                    
-                    # Chart
-                    fig_backtest = create_backtest_chart(trades_df, analysis_df)
-                    st.plotly_chart(fig_backtest, use_container_width=True)
-                    
-                    # Transaction table (expandable)
-                    with st.expander("📋 View All Transactions"):
-                        # Show complete transactions only
-                        complete_trans = []
-                        buy_group = []
+                    if len(backtest_df) < 10:
+                        st.warning(f"⚠️ Not enough data from {backtest_start}. Need at least 10 days.")
+                    else:
+                        # Run backtest on filtered data
+                        trades_df, summary = backtest_signal_expectancy(
+                            backtest_df,  # Use filtered data
+                            buy_signal, 
+                            sell_signal
+                        )
                         
-                        for _, trade in trades_df.iterrows():
-                            if trade['Action'] == 'BUY':
-                                buy_group.append(trade)
-                            elif trade['Action'] == 'SELL ALL' and buy_group:
-                                complete_trans.append({
-                                    'Entry Date': buy_group[0]['Date'].strftime('%Y-%m-%d'),
-                                    'Exit Date': trade['Date'].strftime('%Y-%m-%d'),
-                                    'Shares': int(trade['Shares']),
-                                    'Avg Buy Price': f"¥{trade['Avg_Cost']:.2f}",
-                                    'Sell Price': f"¥{trade['Price']:.2f}",
-                                    'Profit': f"¥{trade['Profit']:.2f}",
-                                    'Profit %': f"{trade['Profit_Pct']:.2f}%"
-                                })
-                                buy_group = []
-                        
-                        if complete_trans:
-                            st.dataframe(
-                                pd.DataFrame(complete_trans),
-                                use_container_width=True,
-                                hide_index=True
-                            )
+                        if summary is None:
+                            st.warning("No complete transactions found in selected period. Try different signals or earlier start date.")
                         else:
-                            st.info("No complete transactions yet.")
+                            # Show backtest period info
+                            st.info(f"📊 Backtesting from **{backtest_start}** to **{max_date}** ({len(backtest_df)} days)")
+                            
+                            # Display chart (pass filtered data)
+                            fig_backtest = create_backtest_chart(trades_df, backtest_df)
+                            st.plotly_chart(fig_backtest, use_container_width=True)
+                            
+                            # Display metrics
+                            col1, col2, col3, col4 = st.columns(4)
+
+                            with col1:
+                                st.metric("Total Transactions", int(summary['Total_Transactions']))
+                                st.caption(f"{int(summary['Winning_Trades'])} wins / {int(summary['Losing_Trades'])} losses")
+
+                            with col2:
+                                win_rate = summary['Win_Rate']
+                                st.metric("Win Rate", f"{win_rate:.1f}%")
+                                if win_rate >= 60:
+                                    st.success("Strong")
+                                elif win_rate >= 50:
+                                    st.info("Decent")
+                                else:
+                                    st.warning("Weak")
+
+                            with col3:
+                                avg_profit = summary['Avg_Profit_Pct']
+                                st.metric("Avg Profit/Trade", f"{avg_profit:.2f}%")
+                                total_profit_dollars = summary['Total_Profit']
+                                if avg_profit > 0:
+                                    st.success(f"¥{total_profit_dollars:.2f} total")  # Display as currency, not %
+                                else:
+                                    st.error(f"¥{total_profit_dollars:.2f} total")
+
+
+                            with col4:
+                                st.metric("Best Trade", f"{summary['Best_Trade_Pct']:.2f}%")
+                                st.caption(f"Worst: {summary['Worst_Trade_Pct']:.2f}%")
+
 
 
 

@@ -10,10 +10,6 @@ from scipy import stats
 
 def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Advanced 3-Phase Trading System Analysis
-    Phase 1: Accumulation (OBV rising while price flat - smart money)
-    Phase 2: Squeeze (BB width contraction - energy building)
-    Phase 3: Golden Launch (ADX + MACD trigger - breakout)
     
     Args:
         df: DataFrame with OHLC data (columns: Open, High, Low, Close, Volume)
@@ -158,7 +154,7 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     
     # Pattern 2: REVERSING UP (ADX just turned from down to up)
     adx_reversing_up = (
-        (df_analysis['ADX'] < 30) &
+        (df_analysis['ADX'] < 25 ) &
         (df_analysis['ADX_Slope'] > 0) &
         (df_analysis['ADX_Slope'].shift(1) <= 0)
     )
@@ -261,14 +257,125 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
         )
     )
     
-    # Scenario 3: Bottoming
+    # Scenario 3: Bottoming (MACD in bottom zone with recovery signs)
+    # Calculate rolling stats for context
+    df_analysis['MACD_5d_Low'] = df_analysis['MACD'].rolling(5).min()
+    df_analysis['MACD_10d_Low'] = df_analysis['MACD'].rolling(10).min()
+
     bottoming = (
-        (df_analysis['MACD_Gap'] < 0) &
-        (df_analysis['MACD_Gap'].shift(1) < df_analysis['MACD_Gap'].shift(2)) &
-        (df_analysis['MACD'].shift(1) < df_analysis['MACD'].shift(2)) &
-        (df_analysis['MACD'] > df_analysis['MACD'].shift(1)) &
-        (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1))
+        (df_analysis['MACD'] < 0) &
+        # Tighter window: within 5% of low instead of 15%
+        (df_analysis['MACD'] >= df_analysis['MACD_10d_Low']) &
+        (df_analysis['MACD'] <= df_analysis['MACD_10d_Low'] * 0.95) &  # Changed from 0.85 to 0.95
+        
+        # Require at least 2 out of 4 signals:
+        (
+            (
+                # first detect that MACD is coming back from yesterday, meaning that yesterday is even lower.
+                # 2nd is that the MACD today is higher than the lowest of the last 5 days, showing that it's trying to come off the bottom.
+                # 3rd is that the GAP between MACD and signal line is narrowing, showing that the signal line hasn't picked up yet.
+                # 4th is that OBV is rising, showing that volume is supporting the move.
+                (df_analysis['MACD'] >= df_analysis['MACD'].shift(1)).astype(int) +
+                (df_analysis['MACD'] > df_analysis['MACD_5d_Low']).astype(int) +
+                (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1)).astype(int) +
+                (df_analysis['OBV'] > df_analysis['OBV'].shift(3)).astype(int)
+            ) >= 4  # Need at least 2 signals
+        )
     )
+
+    def debug_macd_bottoming(df_analysis, target_date='2025-09-10'):
+  
+        try:
+            import pandas as pd
+            target = pd.to_datetime(target_date)
+            
+            # Get 10 days leading up to and including target
+            mask = (df_analysis.index >= target - pd.Timedelta(days=15)) & \
+                (df_analysis.index <= target + pd.Timedelta(days=2))
+            
+            if not mask.any():
+                print(f"❌ Date {target_date} not found in data")
+                return
+            
+            print("\n" + "="*120)
+            print(f"🔍 MACD BOTTOMING DEBUG - Last 10 Days Around {target_date}")
+            print("="*120)
+            
+            debug_rows = df_analysis[mask].tail(10).copy()
+            
+            print("\n📊 RAW VALUES (Last 10 Days):")
+            print("-"*120)
+            raw_cols = ['MACD', 'MACD_Signal', 'MACD_Gap', 'OBV', 'MACD_5d_Low', 'MACD_10d_Low']
+            raw_df = debug_rows[raw_cols].copy()
+            raw_df.index = raw_df.index.strftime('%Y-%m-%d')
+            print(raw_df.to_string())
+            
+            print("\n" + "="*120)
+            print("🔬 CONDITION CHECKS (Last 10 Days):")
+            print("-"*120)
+            
+            # Now check conditions for each row
+            debug_data = []
+            for idx in debug_rows.index:
+                row = df_analysis.loc[idx]
+                idx_loc = df_analysis.index.get_loc(idx)
+                
+                # Get previous values safely
+                macd_prev = df_analysis.iloc[idx_loc-1]['MACD'] if idx_loc > 0 else None
+                gap_prev = df_analysis.iloc[idx_loc-1]['MACD_Gap'] if idx_loc > 0 else None
+                obv_prev3 = df_analysis.iloc[idx_loc-3]['OBV'] if idx_loc >= 3 else None
+                
+                # Calculate conditions
+                cond1_macd_neg = row['MACD'] < 0
+                cond2_within_15pct = row['MACD'] <= row['MACD_10d_Low'] * 1.15
+                
+                signal1_stopped = (row['MACD'] >= macd_prev) if macd_prev is not None else False
+                signal2_off_low = row['MACD'] > row['MACD_5d_Low']
+                signal3_gap_narrow = (row['MACD_Gap'] > gap_prev) if gap_prev is not None else False
+                signal4_obv_rising = (row['OBV'] > obv_prev3) if obv_prev3 is not None else False
+                
+                any_signal = signal1_stopped or signal2_off_low or signal3_gap_narrow or signal4_obv_rising
+                bottoming_detected = cond1_macd_neg and cond2_within_15pct and any_signal
+                
+                debug_data.append({
+                    'Date': idx.strftime('%m-%d'),
+                    'MACD<0': '✓' if cond1_macd_neg else '✗',
+                    'Within15%': '✓' if cond2_within_15pct else '✗',
+                    '├─10d_Low*1.15': f"{row['MACD_10d_Low']*1.15:.4f}",
+                    'Stopped↑': '✓' if signal1_stopped else '✗',
+                    '├─Δ': f"{row['MACD']-macd_prev:.4f}" if macd_prev else 'N/A',
+                    'Off_5d_Low': '✓' if signal2_off_low else '✗',
+                    'Gap_Narrow': '✓' if signal3_gap_narrow else '✗',
+                    '├─Gap_Δ': f"{row['MACD_Gap']-gap_prev:.4f}" if gap_prev else 'N/A',
+                    'OBV_Up3d': '✓' if signal4_obv_rising else '✗',
+                    '├─OBV_Δ': f"{(row['OBV']-obv_prev3)/obv_prev3*100:.1f}%" if obv_prev3 else 'N/A',
+                    'ANY': '✓' if any_signal else '✗',
+                    '🎯': '✅' if bottoming_detected else '❌'
+                })
+            
+            df_debug = pd.DataFrame(debug_data)
+            print(df_debug.to_string(index=False))
+            
+            print("\n" + "="*120)
+            print("📋 WHAT TO LOOK FOR:")
+            print("  1. Check RAW VALUES: Is MACD actually at/near bottom on Sep 10?")
+            print("  2. Check MACD vs 10d_Low*1.15: Is MACD within the 15% threshold?")
+            print("  3. Check Δ (delta) values: Did MACD stop falling? Did gap narrow?")
+            print("  4. If all look correct but still ❌, the threshold (15%, 3d, etc.) is too strict")
+            print("\n💡 ADJUSTMENTS:")
+            print("  - If MACD outside 15%: Increase to 1.20 or 1.25")
+            print("  - If Stopped always ✗: MACD is still falling (expected at true bottom)")
+            print("  - If Gap_Narrow always ✗: Gap still widening (classic late detection)")
+            print("  - If OBV_Up3d ✗: Try OBV.shift(5) or remove OBV requirement")
+            print("="*120 + "\n")
+            
+        except Exception as e:
+            print(f"❌ Debug failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # Call it
+    debug_macd_bottoming(df_analysis, target_date='2025-09-10')
     
     # Scenario 4: Momentum building (2-day acceleration)
     df_analysis['MACD_Gap_Ratio'] = df_analysis['MACD_Gap'] / df_analysis['MACD_Signal'].abs()
@@ -293,6 +400,8 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     # Scenario 5: Peaking (BEARISH)
     peaking = (
         (df_analysis['MACD_Gap'] > 0) &
+        (df_analysis['MACD'] > 0 ) &
+        (df_analysis['MACD_Signal'] > 0 ) &
         (df_analysis['MACD'].shift(1) > df_analysis['MACD'].shift(2)) &
         (df_analysis['MACD'] < df_analysis['MACD'].shift(1)) &
         (df_analysis['MACD_Momentum_Pct'] < df_analysis['MACD_Momentum_Pct'].shift(1))
@@ -343,15 +452,15 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
             (df_analysis['RSI_14'] >= 70)
         )
     
-    # ==================== PHASE 3: GOLDEN LAUNCH ====================
-    launch = (
-        macd_trigger &
-        (df_analysis['MA20'] > df_analysis['MA50']) &
-        adx_healthy &
-        (df_analysis['RSI_14'] <= 70) &
-        (df_analysis['Volume'] > df_analysis['Volume'].rolling(5).mean())
-    )
-    df_analysis.loc[launch, 'Signal_Golden_Launch'] = True
+    # ==================== PHASE 3: GOLDEN LAUNCH (Old Code) ====================
+    # launch = (
+    #     macd_trigger &
+    #     (df_analysis['MA20'] > df_analysis['MA50']) &
+    #     adx_healthy &
+    #     (df_analysis['RSI_14'] <= 70) &
+    #     (df_analysis['Volume'] > df_analysis['Volume'].rolling(5).mean())
+    # )
+    # df_analysis.loc[launch, 'Signal_Golden_Launch'] = True
     
     # ==================== EXIT SIGNALS ====================
     macd_bearish_cross = (
@@ -369,6 +478,10 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     
     exit_signal = macd_bearish_cross | ma_cross_down
     df_analysis.loc[exit_signal, 'Exit_MACD_Lead'] = True
+
+
+    # ==================== MARKET REGIME DETECTION ====================
+    df_analysis = detect_market_regime(df_analysis)
     
     # ==================== SIGNAL SCORE ====================
     df_analysis['Signal_Score'] = 0
@@ -493,3 +606,69 @@ def calculate_adaptive_parameters_percentile(df, lookback_days=30):
         'price_flat_threshold': price_flat_threshold,
         'cycle_estimate': obv_lookback * 2
     }
+
+
+def detect_market_regime(df):
+    """
+    Simple volatility-based regime detection using ATR
+    
+    Regimes:
+    - Low Volatility: Calm, predictable moves
+    - Normal Volatility: Standard market conditions  
+    - High Volatility: Elevated risk, bigger moves
+    - Extreme Volatility: Crisis/panic mode
+    """
+    
+    # Calculate ATR if not already present
+    if 'ATR_20' not in df.columns:
+        import ta
+        df['ATR_20'] = ta.volatility.AverageTrueRange(
+            high=df['High'],
+            low=df['Low'],
+            close=df['Close'],
+            window=20
+        ).average_true_range()
+    
+    # ATR as percentage of price (normalized across different price levels)
+    df['ATR_Pct'] = (df['ATR_20'] / df['Close']) * 100
+    
+    # Calculate ATR percentile (where current volatility sits historically)
+    df['ATR_Percentile'] = df['ATR_Pct'].rolling(window=252, min_periods=60).rank(pct=True)
+    
+    # Classify volatility regime with hysteresis (prevents flip-flopping)
+    df['Market_Regime'] = 'Normal Volatility'
+    
+    # Initial classification
+    df.loc[df['ATR_Percentile'] < 0.25, 'Market_Regime'] = 'Low Volatility'
+    df.loc[df['ATR_Percentile'] > 0.75, 'Market_Regime'] = 'High Volatility'
+    df.loc[df['ATR_Percentile'] > 0.90, 'Market_Regime'] = 'Extreme Volatility'
+    
+    # Apply hysteresis: once in a regime, need to move further to exit
+    for i in range(1, len(df)):
+        prev_regime = df.iloc[i-1]['Market_Regime']
+        current_pct = df.iloc[i]['ATR_Percentile']
+        
+        # If was Low Vol, need to exceed 0.35 to exit (not just 0.25)
+        if prev_regime == 'Low Volatility' and current_pct < 0.35:
+            df.iloc[i, df.columns.get_loc('Market_Regime')] = 'Low Volatility'
+        
+        # If was High Vol, need to drop below 0.65 to exit (not just 0.75)
+        elif prev_regime == 'High Volatility' and 0.65 < current_pct < 0.90:
+            df.iloc[i, df.columns.get_loc('Market_Regime')] = 'High Volatility'
+        
+        # If was Extreme, need to drop below 0.85 to exit (not just 0.90)
+        elif prev_regime == 'Extreme Volatility' and current_pct > 0.85:
+            df.iloc[i, df.columns.get_loc('Market_Regime')] = 'Extreme Volatility'
+    
+    # Minimum duration filter: require 5 consecutive days to confirm regime change
+    min_duration = 5
+    regime_changes = (df['Market_Regime'] != df['Market_Regime'].shift(1)).cumsum()
+    regime_duration = df.groupby(regime_changes)['Market_Regime'].transform('size')
+    
+    # If regime lasted less than min_duration, use previous regime
+    df['Market_Regime'] = df['Market_Regime'].where(
+        regime_duration >= min_duration
+    ).fillna(method='ffill')
+    
+    return df
+
