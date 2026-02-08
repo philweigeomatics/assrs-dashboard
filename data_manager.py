@@ -14,22 +14,23 @@ DATA_START_DATE = '20240101'
 
 SECTOR_STOCK_MAP = {
     'MARKET_PROXY':['601318','600519','300750','300308','600036','601899','300502','000333','300274','601166','600900'], # 中国平安, 贵州茅台, 宁德时代, 中际旭创, 招商银行, 紫金矿业, 新易盛, 美的集团, 阳光电源, 兴业银行，长江电力
-    '银行': ['601398','601939','601288'], # 工商银行, 建设银行, 农业银行     
+    '银行': ['601398','601939','601288','600036','601998','000001'], # 工商银行, 建设银行, 农业银行, 招商银行, 中信银行, 平安银行     
     '非银金融':['600030','601318','601628','000750','000776','002736','002670'], # 中信证券, 中国平安, 中国人寿, 国海证券, 广发证券, 国信证券
     '半导体': ['688981','688041','688256','002371','688347','001309','002049','603986'], # 中芯国际, 海光信息, 寒武纪，北方华创，华虹公司，德明利，紫光国微，兆易创新
     '软件': ['688111','002230','600588','300033','601360','300339','600570'],   # 金山办公, 科大讯飞, 用友网络, 同花顺，三六零，润和软件，恒生电子
     '光模块中游': ['300308','300394','002281','603083','300620','300548'], # 中际旭创, 天孚通讯, 光迅科技，剑桥科技，光库科技，长兴博创
-    '液冷':['002837','300499','301018','603019','000977'],# 英维克，高澜股份，申菱环境，中科曙光，浪潮信息
+    '液冷':['002837','300499','301018','603019','000977','000938'],# 英维克，高澜股份，申菱环境，中科曙光，浪潮信息，紫光股份
     '军工电子': ['600760','002414','600562','002179','688002','600990'],  # 中航沈飞, 高德红外, 国睿科技, 中航光电, 睿创微纳, 四创电子
     '风电设备':['002202','002531','002487','300443'], # 金风科技, 天顺风能, 大金重工,金雷股份
     '家用电器': ['000333','600690','000921','000651','002050','603486'], # 美的集团, 海尔智家, 海信家电, 格力电器, 三花智控, 科沃斯
     '电力': ['600900','601985','600886','600905','600795','600157'], # 长江电力, 中国核电, 国投电力, 三峡能源, 国电电力, 永泰能源
-    '白酒': ['000568','000596', '600809','600519'],    # 泸州老窖, 古井贡酒, 山西汾酒，贵州茅台
+    '白酒': ['000568','000596', '600809','600519','000858','002304'],    # 泸州老窖, 古井贡酒, 山西汾酒，贵州茅台, 五粮液，洋河股份
     '电网设备':['600406','002028','600089','601877','300274','600312','601179'], # 国电南瑞, 思源电气, 特变电工，生态电器，阳光电源，平高电气，中国西电
     '电池': ['300014','002074','300750','688778','300450'],   # 亿纬锂能, 国轩高科, 宁德时代，厦钨新能，先导智能
     '整车':['600104','601633','000625','601238','002594','600418'], # 上汽集团, 长城汽车, 长安汽车，广汽汽车，比亚迪，江淮汽车
     '有色金属':['000630','000878','601899','600362','601600','000426'], # 铜陵有色, 云铝股份, 紫金矿业, 江西铜业, 中国铝业，兴业银锡
-    '能源':['601800','601857','601225','600028','600938','002353','600188'] # 中国交建, 中国石油, 陕西煤业, 中国石化, 中国海油, 杰瑞股份，兖创能源
+    '能源':['601800','601857','601225','600028','600938','002353','600188'], # 中国交建, 中国石油, 陕西煤业, 中国石化, 中国海油, 杰瑞股份，兖创能源
+    '机器人': ['300124','601689','688777','002008','002472','688017'] # 汇川技术, 拓普集团, 中控技术, 大族激光，双环传动，绿的谐波
 }
 
 
@@ -505,8 +506,6 @@ def get_index_data_live(index_code='000300.SH', lookback_days=180, freq='daily')
         return None
 
 
-
-
 def get_stock_fundamentals_live(ticker, start_date, end_date):
     """
     Fetch daily fundamental metrics (PE, PB, Market Cap) from Tushare.
@@ -911,175 +910,322 @@ def get_single_stock_data_live(ticker, lookback_years=3, start_date=None, end_da
         return None
 
 
-def aggregate_ppi_data(all_stock_data, sector_start_dates=None):
+def aggregate_ppi_data(sector_start_dates=None):
     """
-    Aggregates individual stock data into sector-level Proxy Portfolio Indexes (PPIs).
+    Aggregates individual stock data into sector-level PPIs using MARKET CAP WEIGHTING.
     
-    Args:
-        all_stock_data: Dict of ticker -> DataFrame
-        sector_start_dates: Dict of sector -> start_date (None = full aggregation for that sector)
-                           If None (not provided), do full aggregation for all sectors
+    Uses RETURN-BASED calculation to handle sector composition changes correctly.
     """
-    print("--- Aggregating Stock Data into Sector PPIs (V3.6 Logic) ---")
+    print("=" * 60)
+    print("📊 Aggregating Stock Data into Sector PPIs (Market Cap Weighted)")
+    print("=" * 60)
     
     all_sector_ppi_data = {}
     
-    for sector, stock_list in SECTOR_STOCK_MAP.items():
-        # ✅ Determine start_date for THIS sector
-        if sector_start_dates and sector in sector_start_dates:
-            start_date = sector_start_dates[sector]
-            if start_date:
-                print(f"  ℹ️ {sector}: Incremental mode from {start_date}")
-            else:
-                print(f"  ℹ️ {sector}: Full aggregation mode")
-        else:
-            start_date = None
-        
-        # Collect DataFrames for this sector
-        named_dfs = []
-        for ticker in stock_list:
-            if ticker in all_stock_data:
-                temp_df = all_stock_data[ticker].copy()
-                
-                # ✅ FILTER: Only process data from start_date onwards (if specified)
-                if start_date:
-                    temp_df = temp_df[temp_df.index >= pd.to_datetime(start_date)]
-                    if temp_df.empty:
-                        continue
-                
-                # Mark halted days
-                is_halted = (temp_df['Volume'] == 0)
-                temp_df['is_halted'] = np.nan
-                temp_df = temp_df[~is_halted]
-                temp_df.name = ticker
-                named_dfs.append(temp_df)
-        
-        if not named_dfs:
-            continue
-        
-        # Concatenate all stock data for this sector
-        aligned_df = pd.concat(
-            named_dfs, 
-            axis=1, 
-            keys=[df.name for df in named_dfs], 
-            join='outer'
-        )
-        
-        valid_tickers = [t for t in stock_list if (t, 'Close') in aligned_df.columns]
-        if not valid_tickers:
-            continue
-        
-        # Calculate returns
-        open_prices = aligned_df.xs('Open', level=1, axis=1)[valid_tickers]
-        high_prices = aligned_df.xs('High', level=1, axis=1)[valid_tickers]
-        low_prices = aligned_df.xs('Low', level=1, axis=1)[valid_tickers]
-        close_prices = aligned_df.xs('Close', level=1, axis=1)[valid_tickers]
-        prev_close_prices = close_prices.shift(1)
-        
-        ret_open = ((open_prices / prev_close_prices) - 1).mean(axis=1)
-        ret_high = ((high_prices / prev_close_prices) - 1).mean(axis=1)
-        ret_low = ((low_prices / prev_close_prices) - 1).mean(axis=1)
-        ret_close = ((close_prices / prev_close_prices) - 1).mean(axis=1)
-        norm_vol_metric = aligned_df.xs('Norm_Vol_Metric', level=1, axis=1)[valid_tickers]
-        
-        # Build PPI DataFrame
-        ppi_df = pd.DataFrame(index=aligned_df.index)
-        ppi_df['Close'] = (100 * (1 + ret_close.fillna(0)).cumprod())
-        ppi_df['Open'] = ppi_df['Close'].shift(1) * (1 + ret_open)
-        ppi_df['High'] = ppi_df['Close'].shift(1) * (1 + ret_high)
-        ppi_df['Low'] = ppi_df['Close'].shift(1) * (1 + ret_low)
-        ppi_df['Norm_Vol_Metric'] = norm_vol_metric.mean(axis=1)
-        ppi_df.dropna(inplace=True)
-        
-        # ✅ De-duplicate dates
-        ppi_df = ppi_df[~ppi_df.index.duplicated(keep='last')]
-        
-        # ✅ Check minimum history requirement
-        # For incremental updates, we only need at least 1 row
-        # For full aggregation, we need MIN_HISTORY_DAYS
-        min_required = 1 if start_date else MIN_HISTORY_DAYS
-        
-        if len(ppi_df) >= min_required:
-            all_sector_ppi_data[sector] = ppi_df
-            print(f"  ✅ {sector}: Aggregated {len(ppi_df)} dates")
-        else:
-            print(f"  ⚠️ {sector}: Insufficient data ({len(ppi_df)} < {min_required}), skipping")
+    end_date = datetime.today()
+    end_str = end_date.strftime('%Y%m%d')
     
-    print("--- PPI Aggregation Complete ---")
+    if sector_start_dates is None:
+        sector_start_dates = {sector: DATA_START_DATE for sector in SECTOR_STOCK_MAP.keys()}
+    
+    for sector, stock_list in SECTOR_STOCK_MAP.items():
+        if sector not in sector_start_dates:
+            continue
+        
+        # ✅ FLEXIBLE DATE HANDLING - Accept any format
+        start_date_input = sector_start_dates[sector]
+        if start_date_input is None:
+            # Full aggregation
+            start_date_str = DATA_START_DATE
+        elif isinstance(start_date_input, str):
+            # Convert to YYYYMMDD format regardless of input format
+            if '-' in start_date_input:
+                # YYYY-MM-DD format
+                start_date_str = start_date_input.replace('-', '')
+            else:
+                # Already YYYYMMDD format
+                start_date_str = start_date_input
+        else:
+            # datetime or Timestamp object
+            try:
+                start_date_str = pd.to_datetime(start_date_input).strftime('%Y%m%d')
+            except:
+                print(f"   ⚠️ {sector}: Invalid start_date format, using DATA_START_DATE")
+                start_date_str = DATA_START_DATE
+
+        print(f"📊 {sector}: Aggregation from {start_date_str}")
+        
+        # ✅ STEP 1: Fetch OHLC data and market cap for all stocks in sector
+        stock_data = {}
+        market_caps = {}
+        
+        print(f"   → Fetching {len(stock_list)} stocks...")
+        
+        for ticker in stock_list:
+            df_price = get_single_stock_data_live(
+                ticker, 
+                start_date=start_date_str,
+                end_date=end_str
+            )
+            
+            if df_price is None or df_price.empty:
+                print(f"   ⚠️ {ticker}: No price data")
+                continue
+            
+            df_fundamentals = get_stock_fundamentals_live(
+                ticker,
+                start_date=start_date_str,
+                end_date=end_str
+            )
+            
+            if df_fundamentals is None or df_fundamentals.empty:
+                print(f"   ⚠️ {ticker}: No fundamental data")
+                continue
+            
+            # ✅ Extract market cap (snake_case)
+            if 'Total_MV' in df_fundamentals.columns:
+                market_cap_col = 'Total_MV'
+            elif 'Total_MV_Yi' in df_fundamentals.columns:
+                market_cap_col = 'Total_MV_Yi'
+            else:
+                print(f"   ⚠️ {ticker}: No market cap column found. Available: {df_fundamentals.columns.tolist()}")
+                continue
+            
+            stock_data[ticker] = df_price[['Open', 'High', 'Low', 'Close', 'Volume']]
+            market_caps[ticker] = df_fundamentals[market_cap_col]
+            
+            time.sleep(0.35)
+        
+        if len(stock_data) < 2:
+            print(f"   ❌ {sector}: Insufficient data ({len(stock_data)} stocks)")
+            continue
+        
+        print(f"   ✅ Loaded {len(stock_data)} stocks with market cap data")
+        
+        # ✅ STEP 2: Get union of all dates
+        all_dates = set()
+        for ticker in stock_data.keys():
+            ticker_dates = stock_data[ticker].index.intersection(market_caps[ticker].index)
+            all_dates.update(ticker_dates)
+        
+        all_dates = pd.DatetimeIndex(sorted(all_dates))
+        print(f"   → Total unique dates: {len(all_dates)}")
+        
+        # ✅ STEP 3: Calculate market-cap-weighted RETURNS for each date
+        daily_returns = []
+        valid_dates = []
+        daily_volumes = []
+        
+        for i, date in enumerate(all_dates):
+            if i == 0:
+                # First day - no return to calculate yet
+                continue
+            
+            prev_date = all_dates[i - 1]
+            
+            total_cap_today = 0
+            weighted_return = 0
+            weighted_volume = 0
+            valid_stocks = 0
+            
+            # Calculate weighted return for this date
+            for ticker in stock_data.keys():
+                try:
+                    # Check if stock has data for both dates
+                    if date not in stock_data[ticker].index or prev_date not in stock_data[ticker].index:
+                        continue
+                    if date not in market_caps[ticker].index or prev_date not in market_caps[ticker].index:
+                        continue
+                    
+                    # Use today's market cap for weighting
+                    cap_today = market_caps[ticker].loc[date]
+                    
+                    if pd.isna(cap_today) or cap_today <= 0:
+                        continue
+                    
+                    # Calculate return
+                    close_prev = stock_data[ticker].loc[prev_date, 'Close']
+                    close_today = stock_data[ticker].loc[date, 'Close']
+                    
+                    if pd.isna(close_prev) or pd.isna(close_today) or close_prev <= 0:
+                        continue
+                    
+                    stock_return = (close_today - close_prev) / close_prev
+                    volume_today = stock_data[ticker].loc[date, 'Volume']
+                    
+                    # Accumulate weighted values
+                    total_cap_today += cap_today
+                    weighted_return += stock_return * cap_today
+                    
+                    if pd.notna(volume_today):
+                        weighted_volume += volume_today * cap_today
+                    
+                    valid_stocks += 1
+                    
+                except (KeyError, IndexError, ZeroDivisionError):
+                    continue
+            
+            # Only add date if we have at least 2 valid stocks
+            if valid_stocks >= 2 and total_cap_today > 0:
+                daily_returns.append(weighted_return / total_cap_today)
+                daily_volumes.append(weighted_volume / total_cap_today)
+                valid_dates.append(date)
+        
+        if len(daily_returns) < 20:
+            print(f"   ❌ {sector}: Insufficient valid dates ({len(daily_returns)})")
+            continue
+        
+        # ✅ STEP 4: Build PPI by chaining returns (starting at 100)
+        ppi_values = [100.0]  # Base value
+        
+        for ret in daily_returns:
+            ppi_values.append(ppi_values[-1] * (1 + ret))
+        
+        # Create DataFrame
+        ppi_df = pd.DataFrame({
+            'Close': ppi_values[1:],  # Skip first 100 base value
+            'Volume': daily_volumes
+        }, index=valid_dates)
+        
+        # ✅ Generate OHLC from Close
+        ppi_df['Open'] = ppi_df['Close'].shift(1)  # Yesterday's close = today's open
+        ppi_df['High'] = ppi_df['Close']  # Conservative
+        ppi_df['Low'] = ppi_df['Close']   # Conservative
+        
+        # Drop first row (no previous close for Open)
+        ppi_df = ppi_df.dropna(subset=['Open'])
+        
+        # ✅ Calculate volume z-score (snake_case column name)
+        ppi_df['Vol_Mean'] = ppi_df['Volume'].rolling(window=VOL_ZSCORE_LOOKBACK, min_periods=20).mean()
+        ppi_df['Vol_Std'] = ppi_df['Volume'].rolling(window=VOL_ZSCORE_LOOKBACK, min_periods=20).std()
+        ppi_df['Norm_Vol_Metric'] = (ppi_df['Volume'] - ppi_df['Vol_Mean']) / ppi_df['Vol_Std']
+        
+        # Clean up - use snake_case column name
+        ppi_df = ppi_df[['Open', 'High', 'Low', 'Close', 'Norm_Vol_Metric']]
+        ppi_df = ppi_df.dropna(subset=['Open', 'High', 'Low', 'Close'])
+        
+        if len(ppi_df) < MIN_HISTORY_DAYS:
+            print(f"   ❌ {sector}: Insufficient history ({len(ppi_df)} days)")
+            continue
+        
+        all_sector_ppi_data[sector] = ppi_df
+        print(f"   ✅ {sector}: Aggregated {len(ppi_df)} dates (return-based PPI)")
+        print(f"      Date range: {ppi_df.index.min().strftime('%Y-%m-%d')} to {ppi_df.index.max().strftime('%Y-%m-%d')}")
+        print(f"      PPI range: {ppi_df['Close'].min():.2f} to {ppi_df['Close'].max():.2f}")
+    
+    print("=" * 60)
+    print(f"✅ PPI Aggregation Complete: {len(all_sector_ppi_data)} sectors")
+    print("=" * 60)
+    
     return all_sector_ppi_data
 
 def save_ppi_data_to_db(all_ppi_data):
     """
     Saves the aggregated PPI DataFrames into tables in the DB.
     Only inserts NEW dates that don't already exist in the database.
+
+    ✅ IMPROVED: Checks if table exists in Supabase before attempting insert
     """
     print(f"--- Saving {len(all_ppi_data)} PPIs to database (incremental) ---")
-    
-    for sectorname, ppi_df in all_ppi_data.items():
-        tablename = f"PPI_{sectorname}"
-        create_ppi_table(sectorname)
-        
-        if ppi_df is None or ppi_df.empty:
-            print(f"  ⚠️ Skipping {sectorname} - no data")
-            continue
-        
-        # ✅ STEP 1: De-duplicate dates in new data (CRITICAL FIX)
-        df_to_insert = ppi_df.copy()
-        df_to_insert.index = pd.to_datetime(df_to_insert.index)
-        df_to_insert = df_to_insert[~df_to_insert.index.duplicated(keep='last')]
-        
-        # ✅ STEP 2: Get existing dates from database
-        try:
-            existing_df = db.read_table(tablename, columns='Date')
-            if not existing_df.empty:
-                # Normalize existing dates to datetime for comparison
-                existing_dates = pd.to_datetime(existing_df['Date']).dt.strftime('%Y-%m-%d').tolist()
-                existing_dates_set = set(existing_dates)
+
+    # ✅ NEW: Track missing tables for Supabase
+    missing_tables = []
+
+    for sector_name, ppi_df in all_ppi_data.items():
+        tablename = f'PPI_{sector_name}'
+
+        # ✅ NEW: Check if table exists (especially important for Supabase)
+        if not db.table_exists(tablename):
+            if db_config.USE_SQLITE:
+                # SQLite: Create table automatically
+                print(f"   📝 {sector_name}: Creating new table {tablename}")
+                create_ppi_table(sector_name)
             else:
-                existing_dates_set = set()
-        except Exception as e:
-            print(f"  ℹ️ {tablename} doesn't exist yet or is empty, will create with all data")
-            existing_dates_set = set()
-        
-        # ✅ STEP 3: Filter out dates that already exist
-        new_dates_mask = ~df_to_insert.index.strftime('%Y-%m-%d').isin(existing_dates_set)
-        df_new_only = df_to_insert[new_dates_mask].copy()
-        
-        if df_new_only.empty:
-            print(f"  ✅ {sectorname}: Already up-to-date (no new dates to add)")
-            continue
-        
-        # ✅ STEP 4: Prepare data for insertion
-        df_new_only = df_new_only[['Open', 'High', 'Low', 'Close', 'Norm_Vol_Metric']]
-        df_new_only.index.name = 'Date'
-        df_new_only.reset_index(inplace=True)
-        
-        # Normalize dates to YYYY-MM-DD format (no timestamp)
-        df_new_only['Date'] = pd.to_datetime(df_new_only['Date']).dt.strftime('%Y-%m-%d')
-        
-        # ✅ STEP 5: Final de-duplication (CRITICAL - prevents the duplicate key error)
-        df_new_only = df_new_only.drop_duplicates(subset=['Date'], keep='last')
-        
-        records = df_new_only.to_dict('records')
-        
-        # ✅ STEP 6: Insert only new records (use upsert=False since we filtered out existing)
-        try:
-            db.insert_records(tablename, records, upsert=False)
-            print(f"  ✅ {sectorname}: Added {len(df_new_only)} new dates "
-                  f"({df_new_only['Date'].min()} to {df_new_only['Date'].max()})")
-        except Exception as e:
-            # If insert fails (rare case), try upsert as fallback
-            print(f"  ⚠️ {sectorname}: Regular insert failed, trying upsert: {e}")
-            try:
-                # Extra de-duplication before upsert
-                df_new_only = df_new_only.drop_duplicates(subset=['Date'], keep='last')
-                records = df_new_only.to_dict('records')
-                db.insert_records(tablename, records, upsert=True)
-                print(f"  ✅ {sectorname}: Upserted {len(df_new_only)} records")
-            except Exception as e2:
-                print(f"  ❌ {sectorname}: Failed to save PPI data: {e2}")
+                # Supabase: Cannot create tables on the fly
+                print(f"   ❌ {sector_name}: Table {tablename} does not exist in Supabase!")
+                missing_tables.append((sector_name, tablename))
                 continue
-    
+
+        if ppi_df is None or ppi_df.empty:
+            print(f"   ⏭️ Skipping {sector_name} - no data")
+            continue
+
+        try:
+            # STEP 1: De-duplicate dates in new data
+            ppi_df = ppi_df[~ppi_df.index.duplicated(keep='last')]
+
+            # STEP 2: Get existing dates from database
+            try:
+                existing_df = db.read_table(tablename, columns='Date')
+                if not existing_df.empty:
+                    existing_dates = pd.to_datetime(existing_df['Date']).dt.strftime('%Y-%m-%d').tolist()
+                    existing_dates_set = set(existing_dates)
+                else:
+                    existing_dates_set = set()
+            except Exception as e:
+                print(f"   ℹ️ {tablename} doesn't exist yet or is empty, will create with all data")
+                existing_dates_set = set()
+
+            # STEP 3: Filter out dates that already exist
+            df_to_insert = ppi_df.copy()
+            df_to_insert.index = pd.to_datetime(df_to_insert.index)
+            df_to_insert = df_to_insert[~df_to_insert.index.duplicated(keep='last')]
+
+            # STEP 4: Prepare data for insertion
+            df_new_only = df_to_insert[['Open', 'High', 'Low', 'Close', 'Norm_Vol_Metric']]
+            df_new_only.index.name = 'Date'
+            df_new_only.reset_index(inplace=True)
+
+            new_dates_mask = ~df_new_only['Date'].dt.strftime('%Y-%m-%d').isin(existing_dates_set)
+            df_new_only = df_new_only[new_dates_mask].copy()
+
+            if df_new_only.empty:
+                print(f"   ⏭️ {sector_name}: Already up-to-date (no new dates to add)")
+                continue
+
+            # STEP 5: Final de-duplication
+            df_new_only = df_new_only.drop_duplicates(subset='Date', keep='last')
+
+            # STEP 6: Insert only new records
+            records = df_new_only.to_dict('records')
+            db.insert_records(tablename, records, upsert=True)
+
+            print(f"   ✅ {sector_name}: Upserted {len(df_new_only)} records")
+
+        except Exception as e2:
+            print(f"   ❌ {sector_name}: Failed to save PPI data: {e2}")
+            continue
+
+    # ✅ NEW: Show helpful message for missing Supabase tables
+    if missing_tables and not db_config.USE_SQLITE:
+        print()
+        print("=" * 70)
+        print("⚠️ WARNING: Missing Supabase Tables")
+        print("=" * 70)
+        print("The following sectors cannot be saved because their tables")
+        print("do not exist in Supabase. You need to create them manually.")
+        print()
+        print("Run this SQL in your Supabase SQL Editor:")
+        print("-" * 70)
+
+        for sector, tablename in missing_tables:
+            sql = f"""
+            -- Table for sector: {sector}
+            CREATE TABLE IF NOT EXISTS "{tablename}" (
+                "Date" TEXT PRIMARY KEY,
+                "Open" REAL,
+                "High" REAL,
+                "Low" REAL,
+                "Close" REAL,
+                "Norm_Vol_Metric" REAL
+            );
+            """
+            print(sql)
+
+        print("-" * 70)
+        print(f"After creating these {len(missing_tables)} table(s), run main.py again.")
+        print("=" * 70)
+
     print("--- PPI Database Save Complete ---")
 
 
