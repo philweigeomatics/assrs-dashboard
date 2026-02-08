@@ -252,7 +252,7 @@ with col_right:
 
 # Market Breadth History
 st.markdown("---")
-st.subheader("📊 Market Breadth History - 最近20天")
+st.subheader("📊 Market Breadth History - 超20天均线")
 
 breadth_history = v2hist[v2hist['Sector'] != "MARKET_PROXY"].copy()
 breadth_history = breadth_history.sort_values('Date', ascending=False)
@@ -293,6 +293,8 @@ else:
     # Get dates for current page
     end_idx = start_idx + DAYS_PER_PAGE
     page_dates = unique_dates[start_idx:end_idx]
+    page_dates = page_dates[::-1]  # ✅ Reverse order: Latest dates on RIGHT
+
     
     # Build the breadth table
     breadth_data = []

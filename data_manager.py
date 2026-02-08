@@ -1252,6 +1252,16 @@ def load_ppi_data_from_db():
                 df['Date'] = pd.to_datetime(df['Date'], format='mixed', errors='coerce')
                 df = df.set_index('Date').sort_index()
                 df.rename(columns={'Norm_Vol_Metric': 'Volume_Metric'}, inplace=True)
+                # ✅ Fix statsmodels warning: Set frequency
+                try:
+                    df.index.freq = pd.infer_freq(df.index)
+                except:
+                    pass
+
+                if df.index.freq is None:
+                    df = df.asfreq('B')  # Business day frequency
+                    df = df.dropna(subset=['Close'])  # Remove any NaN rows
+
                 all_ppi_data[sector_name] = df
         except Exception as e:
             print(f"Failed to load data for {table_name} from DB: {e}")

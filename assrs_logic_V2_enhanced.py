@@ -4,6 +4,12 @@ import statsmodels.api as sm
 import statsmodels
 from datetime import datetime
 import warnings
+from statsmodels.tools.sm_exceptions import ValueWarning
+
+# Suppress frequency warning for time series models
+warnings.filterwarnings('ignore', category=ValueWarning, 
+                       message='.*date index.*frequency.*')
+
 
 
 # --- 1. MODEL CONSTANTS ---
