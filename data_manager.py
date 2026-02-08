@@ -1094,6 +1094,9 @@ def aggregate_ppi_data(sector_start_dates=None):
         
         # Drop first row (no previous close for Open)
         ppi_df = ppi_df.dropna(subset=['Open'])
+
+        # Drop the remaining with NA values (if any)
+        ppi_df = ppi_df.dropna()
         
         # ✅ Calculate volume z-score (snake_case column name)
         ppi_df['Vol_Mean'] = ppi_df['Volume'].rolling(window=VOL_ZSCORE_LOOKBACK, min_periods=20).mean()
@@ -1178,6 +1181,8 @@ def save_ppi_data_to_db(all_ppi_data):
 
             new_dates_mask = ~df_new_only['Date'].dt.strftime('%Y-%m-%d').isin(existing_dates_set)
             df_new_only = df_new_only[new_dates_mask].copy()
+            df_new_only = df_new_only.replace([np.inf, -np.inf], np.nan)
+            df_new_only = df_new_only.dropna()  # Drop rows with NaN
 
             if df_new_only.empty:
                 print(f"   ⏭️ {sector_name}: Already up-to-date (no new dates to add)")
