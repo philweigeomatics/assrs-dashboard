@@ -65,9 +65,9 @@ class DatabaseManager:
                 order_clause = ""
                 if order_by:
                     if order_by.startswith('-'):
-                        order_clause = f" ORDER BY {order_by[1:]} DESC"
+                        order_clause = f' ORDER BY "{order_by[1:]}" DESC'
                     else:
-                        order_clause = f" ORDER BY {order_by}"
+                        order_clause = f' ORDER BY "{order_by}"'
                 
                 limit_clause = f" LIMIT {limit}" if limit else ""
                 
@@ -182,7 +182,7 @@ class DatabaseManager:
                 traceback.print_exc()
         else:
             with sqlite3.connect(self.dbname) as conn:
-                conn.execute(f"DELETE FROM {table_name}")
+                conn.execute(f'DELETE FROM "{table_name}"')
                 conn.commit()
 
     

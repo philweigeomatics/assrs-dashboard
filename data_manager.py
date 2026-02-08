@@ -370,7 +370,7 @@ def ensure_data_in_db(start_date, end_date):
                 fetch_start_date = (last_db_date_dt + timedelta(days=1)).strftime('%Y%m%d')
         
         print(f" -> Fetching new data for {ticker} from {fetch_start_date} to {end_date}...")
-        new_data_df = fetch_stock_data_robust(ticker, fetch_start_date, end_date)
+        new_data_df = get_single_stock_data_live(ticker, start_date=fetch_start_date, end_date=end_date)
         
         if new_data_df is not None and not new_data_df.empty:
             if last_db_date_str:
@@ -387,6 +387,47 @@ def ensure_data_in_db(start_date, end_date):
             print(f" - FAILED to fetch new data for {ticker}.")
         
         time.sleep(1.0)
+
+def migrate_to_qfq_data():
+    """ONE-TIME migration using get_single_stock_data_live()."""
+    # ... (same print statements) ...
+    total = len(ALL_STOCK_TICKERS)
+    success_count = 0
+    for idx, ticker in enumerate(ALL_STOCK_TICKERS, 1):
+        print(f"[{idx}/{total}] Processing {ticker}...", end=' ')
+        
+        try:
+            # Use the multifunctional get_single_stock_data_live
+            df = get_single_stock_data_live(
+                ticker,
+                start_date=DATA_START_DATE,
+                end_date=datetime.today().strftime('%Y%m%d')
+            )
+            
+            if df is None or df.empty:
+                print(f"❌ No data")
+                continue
+            
+            # DELETE old data and INSERT new qfq data
+            if db.table_exists(ticker):
+                db.delete_all_records(ticker)
+                print(f"🗑️ Deleted old", end=' ')
+            
+            create_table(ticker)
+            insert_data(ticker, df)
+            
+            print(f"✅ {len(df)} rows (qfq)")
+            success_count += 1
+            time.sleep(0.31)
+            
+        except Exception as e:
+            print(f"❌ {e}")
+            continue
+
+    print("=" * 60)
+    print(f"✅ Migration Complete: {success_count}/{total} stocks migrated to qfq")
+    print("=" * 60)
+    return True
 
 
 def get_index_data_live(index_code='000300.SH', lookback_days=180, freq='daily'):
@@ -779,7 +820,7 @@ def get_single_stock_data(ticker, use_data_start_date: bool = True, lookback_yea
     return df_final
 
 
-def get_single_stock_data_live(ticker, lookback_years=3):
+def get_single_stock_data_live(ticker, lookback_years=3, start_date=None, end_date =None):
     """
     Fetch single stock data DIRECTLY from Tushare API (no database).
     Uses qfq (forward adjusted) prices for dividend/split adjustment.
@@ -801,12 +842,22 @@ def get_single_stock_data_live(ticker, lookback_years=3):
         if not ok:
             print(f"[data_manager] ❌ Tushare initialization failed")
             return None
+        
+    # Determine date range
+    if start_date is None:
+        # Use lookback_years
+        end_dt = datetime.today()
+        start_dt = end_dt - timedelta(days=365 * lookback_years)
+        start_str = start_dt.strftime('%Y%m%d')
+    else:
+        # Use provided start_date
+        start_str = start_date
     
-    # Calculate date range
-    end_date = datetime.today()
-    start_date = end_date - timedelta(days=365 * lookback_years)
-    start_str = start_date.strftime('%Y%m%d')
-    end_str = end_date.strftime('%Y%m%d')
+    if end_date is None:
+        end_str = datetime.today().strftime('%Y%m%d')
+    else:
+        end_str = end_date
+
     
     ts_code = get_tushare_ticker(ticker)
     
