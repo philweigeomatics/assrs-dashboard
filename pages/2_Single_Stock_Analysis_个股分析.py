@@ -552,8 +552,8 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
     regime_colors = {
         'Low Volatility': 'rgba(34, 197, 94, 0.08)',
         'Normal Volatility': 'rgba(59, 130, 246, 0.05)',
-        'High Volatility': 'rgba(251, 191, 36, 0.12)',
-        'Extreme Volatility': 'rgba(239, 68, 68, 0.15)'
+        'High Volatility': 'rgba(255, 110, 0, 0.11)',
+        'Extreme Volatility': 'rgba(239, 68, 68, 0.16)'
     }
     
     if 'Market_Regime' in df.columns:
@@ -2329,7 +2329,8 @@ def analyze_down_day_bounce_probability(df, ticker_name="Stock"):
         # Kelly Criterion (optimal position size)
         # Kelly = (p * b - q) / b, where p=win_prob, q=lose_prob, b=win/loss ratio
         if continuation_probability > 0 and avg_if_continue != 0:
-            kelly_pct = (bounce_probability * abs(avg_if_bounce/avg_if_continue) - continuation_probability) / abs(avg_if_bounce/avg_if_continue)
+            # this line below caused RunTimeError: divide by zero encountered in scalar divide
+            kelly_pct = (bounce_probability * abs(avg_if_bounce/avg_if_continue) - continuation_probability) / abs(avg_if_bounce/avg_if_continue)  
             kelly_pct = max(0, min(kelly_pct, 1))  # Clamp between 0-100%
         else:
             kelly_pct = 0
@@ -2731,7 +2732,7 @@ if st.session_state.active_ticker:
             adx_pattern = str(latest_row.get('ADX_Pattern', ''))
 
             # ========================== Market Status =================== #
-            col1, col2, col3, col4, col5 = st.columns(5)
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
 
             with col1:
                 st.markdown("**🔄 Squeeze**")
@@ -2809,6 +2810,20 @@ if st.session_state.active_ticker:
                 else:
                     st.info("无")
                     st.caption("无明确区间")
+
+            with col6:
+                st.markdown("**📊 Market Regime**")
+                regime = latest_row.get('Market_Regime', 'Normal Volatility')
+                
+                if regime == 'High Volatility':
+                    st.error("HIGH")
+                    st.caption("高波动环境")
+                elif regime == 'Low Volatility':
+                    st.success("LOW")
+                    st.caption("低波动环境")
+                else:
+                    st.info("NORMAL")
+                    st.caption("正常环境")
 
             st.caption(f"📈 ADX: **{adx_val:.1f}** | Pattern: **{adx_pattern if adx_pattern else 'None'}**")
 

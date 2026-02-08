@@ -375,7 +375,7 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
             traceback.print_exc()
 
     # Call it
-    debug_macd_bottoming(df_analysis, target_date='2025-09-10')
+    # debug_macd_bottoming(df_analysis, target_date='2025-09-10')
     
     # Scenario 4: Momentum building (2-day acceleration)
     df_analysis['MACD_Gap_Ratio'] = df_analysis['MACD_Gap'] / df_analysis['MACD_Signal'].abs()
@@ -608,67 +608,363 @@ def calculate_adaptive_parameters_percentile(df, lookback_days=30):
     }
 
 
-def detect_market_regime(df):
+
+from hmmlearn.hmm import GaussianHMM
+from sklearn.preprocessing import StandardScaler
+from scipy import stats
+
+# INTERNAL TOGGLE: Set this to 'HMM', 'JUMP', or 'ATR'
+REGIME_METHOD = 'HMM' 
+
+def detect_market_regime(
+    df: pd.DataFrame,
+    freq: str = "daily",
+    method: str | None = None,
+    fallback_method: str | None = "JUMP",
+    window: int | None = None,
+    refit_every: int | None = None,
+    min_obs: int | None = None,
+    z_clip: float = 3.0,
+):
     """
-    Simple volatility-based regime detection using ATR
-    
-    Regimes:
-    - Low Volatility: Calm, predictable moves
-    - Normal Volatility: Standard market conditions  
-    - High Volatility: Elevated risk, bigger moves
-    - Extreme Volatility: Crisis/panic mode
+    Volatility/Liquidity regime detection.
+
+    Backward compatible:
+      - existing calls: detect_market_regime(df) still work (defaults to daily + global REGIME_METHOD)
+    Robust:
+      - auto fallback from HMM -> JUMP if insufficient data or fit issues
+      - weekly-safe (won't crash due to uninitialized model/rank_map)
     """
-    
-    # Calculate ATR if not already present
-    if 'ATR_20' not in df.columns:
-        import ta
-        df['ATR_20'] = ta.volatility.AverageTrueRange(
-            high=df['High'],
-            low=df['Low'],
-            close=df['Close'],
-            window=20
-        ).average_true_range()
-    
-    # ATR as percentage of price (normalized across different price levels)
-    df['ATR_Pct'] = (df['ATR_20'] / df['Close']) * 100
-    
-    # Calculate ATR percentile (where current volatility sits historically)
-    df['ATR_Percentile'] = df['ATR_Pct'].rolling(window=252, min_periods=60).rank(pct=True)
-    
-    # Classify volatility regime with hysteresis (prevents flip-flopping)
-    df['Market_Regime'] = 'Normal Volatility'
-    
-    # Initial classification
-    df.loc[df['ATR_Percentile'] < 0.25, 'Market_Regime'] = 'Low Volatility'
-    df.loc[df['ATR_Percentile'] > 0.75, 'Market_Regime'] = 'High Volatility'
-    df.loc[df['ATR_Percentile'] > 0.90, 'Market_Regime'] = 'Extreme Volatility'
-    
-    # Apply hysteresis: once in a regime, need to move further to exit
-    for i in range(1, len(df)):
-        prev_regime = df.iloc[i-1]['Market_Regime']
-        current_pct = df.iloc[i]['ATR_Percentile']
-        
-        # If was Low Vol, need to exceed 0.35 to exit (not just 0.25)
-        if prev_regime == 'Low Volatility' and current_pct < 0.35:
-            df.iloc[i, df.columns.get_loc('Market_Regime')] = 'Low Volatility'
-        
-        # If was High Vol, need to drop below 0.65 to exit (not just 0.75)
-        elif prev_regime == 'High Volatility' and 0.65 < current_pct < 0.90:
-            df.iloc[i, df.columns.get_loc('Market_Regime')] = 'High Volatility'
-        
-        # If was Extreme, need to drop below 0.85 to exit (not just 0.90)
-        elif prev_regime == 'Extreme Volatility' and current_pct > 0.85:
-            df.iloc[i, df.columns.get_loc('Market_Regime')] = 'Extreme Volatility'
-    
-    # Minimum duration filter: require 5 consecutive days to confirm regime change
-    min_duration = 5
-    regime_changes = (df['Market_Regime'] != df['Market_Regime'].shift(1)).cumsum()
-    regime_duration = df.groupby(regime_changes)['Market_Regime'].transform('size')
-    
-    # If regime lasted less than min_duration, use previous regime
-    df['Market_Regime'] = df['Market_Regime'].where(
-        regime_duration >= min_duration
-    ).fillna(method='ffill')
-    
+
+    if df is None or df.empty:
+        return df
+
+    # Resolve method locally (do NOT mutate global REGIME_METHOD)
+    m = (method or REGIME_METHOD).upper()
+
+    tf = (freq or "daily").lower()
+    is_weekly = ("week" in tf) or tf.startswith("w") or ("周" in tf)
+
+    # Defaults scale with timeframe
+    if window is None:
+        window = 26 if is_weekly else 90
+    if refit_every is None:
+        refit_every = 2 if is_weekly else 5
+    if min_obs is None:
+        # enough for rolling z-score + stable HMM
+        min_obs = 70 if is_weekly else 120
+
+    # If not enough data, fallback if HMM was requested
+    if len(df) < min_obs:
+        if m == "HMM" and fallback_method:
+            return detect_market_regime(df, freq=freq, method=fallback_method, fallback_method=None)
+        df = df.copy()
+        df["Market_Regime"] = "Normal Volatility"
+        df["ATR_Percentile"] = 0.5
+        return df
+
+    # =========================
+    # HMM MODE
+    # =========================
+    if m == "HMM":
+        df = df.copy()
+
+        vol_ma_len = 10 if is_weekly else 20
+        ewm_span = 2 if is_weekly else 3
+
+        # True range & NATR
+        df["prev_close"] = df["Close"].shift(1)
+        df["h_l"] = df["High"] - df["Low"]
+        df["h_pc"] = (df["High"] - df["prev_close"]).abs()
+        df["l_pc"] = (df["Low"] - df["prev_close"]).abs()
+        df["TR"] = df[["h_l", "h_pc", "l_pc"]].max(axis=1)
+        df["NATR"] = (df["TR"] / df["Close"]) * 100
+
+        # RVOL (log)
+        df["Vol_MA"] = df["Volume"].rolling(vol_ma_len).mean()
+        df["RVOL"] = df["Volume"] / (df["Vol_MA"] + 1)
+        df["Log_RVOL"] = np.log(df["RVOL"] + 0.1)
+
+        # Smooth then rolling z-score
+        feat_df = df[["NATR", "Log_RVOL"]].copy()
+        feat_df["NATR"] = feat_df["NATR"].ewm(span=ewm_span).mean()
+        feat_df["Log_RVOL"] = feat_df["Log_RVOL"].ewm(span=ewm_span).mean()
+
+        # raw=True => x is ndarray, x[-1] is always "last"
+        zfn = lambda x: (x[-1] - x.mean()) / (x.std() + 1e-6)
+
+        feat_df["scaled_natr"] = feat_df["NATR"].rolling(window=window).apply(zfn, raw=True)
+        feat_df["scaled_rvol"] = feat_df["Log_RVOL"].rolling(window=window).apply(zfn, raw=True)
+
+        features = feat_df[["scaled_natr", "scaled_rvol"]].dropna()
+        if features.empty or len(features) < (window + 5):
+            if fallback_method:
+                return detect_market_regime(df, freq=freq, method=fallback_method, fallback_method=None)
+            df["Market_Regime"] = "Normal Volatility"
+            df["ATR_Percentile"] = 0.5
+            return df
+
+        # clamp extreme spikes (A-share theme bursts / limit behavior)
+        features = features.clip(-z_clip, z_clip)
+        X = features.values
+
+        # Rolling refit HMM + robust fallback
+        final_regimes = [1] * window  # 1 = Normal baseline
+
+        model = None
+        rank_map = None
+        last_good_model = None
+        last_good_rank_map = None
+
+        for i in range(window, len(X)):
+            need_refit = (model is None) or (i % refit_every == 0)
+
+            if need_refit:
+                X_train = X[i - window : i]
+                try:
+                    mm = GaussianHMM(
+                        n_components=3,
+                        covariance_type="diag",
+                        n_iter=200,
+                        random_state=42
+                    )
+                    mm.fit(X_train)
+
+                    state_energy = [float(mm.means_[j][0] + mm.means_[j][1]) for j in range(3)]
+                    ordered = np.argsort(state_energy)
+                    rm = {int(ordered[0]): 0, int(ordered[1]): 1, int(ordered[2]): 2}
+
+                    model = mm
+                    rank_map = rm
+                    last_good_model = mm
+                    last_good_rank_map = rm
+
+                except Exception:
+                    # fallback to last good model OR fallback method
+                    if last_good_model is not None:
+                        model = last_good_model
+                        rank_map = last_good_rank_map
+                    elif fallback_method:
+                        return detect_market_regime(df, freq=freq, method=fallback_method, fallback_method=None)
+                    else:
+                        final_regimes.append(1)
+                        continue
+
+            # decode sequence (less jumpy than single-point predict)
+            seq_start = max(0, i - window)
+            decoded = model.predict(X[seq_start : i + 1])
+            current_state = int(decoded[-1])
+            final_regimes.append(int(rank_map.get(current_state, 1)))
+
+        # Smart persistence (keep your original intent)
+        smoothed_final = []
+        curr_fixed = final_regimes[0]
+        strength = 5.0
+        natr_series = features["scaled_natr"].values
+
+        for i in range(len(final_regimes)):
+            s = final_regimes[i]
+            is_wide_candle = natr_series[i] > 0.5
+            target_state = 1 if (s == 0 and is_wide_candle) else s
+
+            if target_state == 2 and target_state != curr_fixed:
+                strength = 0
+                curr_fixed = 2
+            elif target_state != curr_fixed:
+                strength -= 1.0
+            else:
+                strength = min(10.0, strength + 1.0)
+
+            if strength <= 0:
+                curr_fixed = target_state
+                strength = 4.0
+
+            smoothed_final.append(curr_fixed)
+
+        smoothed_series = pd.Series(smoothed_final, index=features.index)
+        label_map = {0: "Low Volatility", 1: "Normal Volatility", 2: "High Volatility"}
+
+        df["Market_Regime"] = smoothed_series.map(label_map).reindex(df.index, method="ffill")
+        df["ATR_Percentile"] = smoothed_series.map({0: 0.2, 1: 0.5, 2: 0.8}).reindex(df.index, method="ffill")
+        return df
+
+    # =========================
+    # JUMP MODE
+    # =========================
+    if m == "JUMP":
+        df = df.copy()
+        vol_win = 10 if is_weekly else 20
+        df["vol_rolling"] = df["Close"].pct_change().rolling(vol_win).std()
+
+        thresh_hi = df["vol_rolling"].quantile(0.8)
+        thresh_lo = df["vol_rolling"].quantile(0.2)
+
+        regimes = []
+        curr = "Normal Volatility"
+        for v in df["vol_rolling"]:
+            if pd.isna(v):
+                regimes.append(curr)
+                continue
+            if v > thresh_hi:
+                curr = "High Volatility"
+            elif v < thresh_lo:
+                curr = "Low Volatility"
+            else:
+                curr = "Normal Volatility"
+            regimes.append(curr)
+
+        df["Market_Regime"] = regimes
+        df["ATR_Percentile"] = pd.Series(regimes).map(
+            {"Low Volatility": 0.2, "Normal Volatility": 0.5, "High Volatility": 0.8}
+        ).values
+        return df
+
+    # Fallback
+    df = df.copy()
+    df["Market_Regime"] = "Normal Volatility"
+    df["ATR_Percentile"] = 0.5
     return df
 
+
+
+# def detect_market_regime(df):
+#     """
+#     Advanced Regime Detection with Noise Filtering.
+#     """
+#     if df.empty or len(df) < 100:
+#         df['Market_Regime'] = 'Normal Volatility'
+#         df['ATR_Percentile'] = 0.5
+#         return df
+
+#     # ==========================================================
+#     # OPTION 3: DENOISED HIDDEN MARKOV MODEL (HMM)
+#     # ==========================================================
+#     if REGIME_METHOD == 'HMM':
+#         # 1. PURE ENERGY FEATURES
+#         df['prev_close'] = df['Close'].shift(1)
+#         df['h_l'] = df['High'] - df['Low']
+#         df['h_pc'] = (df['High'] - df['prev_close']).abs()
+#         df['l_pc'] = (df['Low'] - df['prev_close']).abs()
+#         df['TR'] = df[['h_l', 'h_pc', 'l_pc']].max(axis=1)
+#         df['NATR'] = (df['TR'] / df['Close']) * 100
+        
+#         df['Vol_MA'] = df['Volume'].rolling(20).mean()
+#         df['RVOL'] = df['Volume'] / (df['Vol_MA'] + 1)
+#         df['Log_RVOL'] = np.log(df['RVOL'] + 0.1) 
+
+#         # 2. FEATURE ENGINEERING
+#         window = 90
+#         feat_df = df[['NATR', 'Log_RVOL']].copy()
+#         feat_df['NATR'] = feat_df['NATR'].ewm(span=3).mean()
+#         feat_df['Log_RVOL'] = feat_df['Log_RVOL'].ewm(span=3).mean()
+        
+#         feat_df['scaled_natr'] = feat_df['NATR'].rolling(window=window).apply(
+#             lambda x: (x.iloc[-1]  - x.mean()) / (x.std() + 1e-6)
+#         )
+#         feat_df['scaled_rvol'] = feat_df['Log_RVOL'].rolling(window=window).apply(
+#             lambda x: (x.iloc[-1] - x.mean()) / (x.std() + 1e-6)
+#         )
+        
+#         features = feat_df[['scaled_natr', 'scaled_rvol']].dropna()
+#         X = features.values
+
+#         # 3. ONLINE ROLLING HMM FIT
+#         final_regimes = []
+#         for _ in range(window): final_regimes.append(1)
+            
+#         for i in range(window, len(X)):
+#             if i % 5 == 0:
+#                 X_train = X[i-window:i]
+#                 model = GaussianHMM(n_components=3, covariance_type="diag", n_iter=100, random_state=42)
+#                 try: model.fit(X_train)
+#                 except: pass
+                
+#                 # Sort by Energy (0=Low, 2=High)
+#                 state_energy = [model.means_[j][0] + model.means_[j][1] for j in range(3)]
+#                 ordered = np.argsort(state_energy)
+#                 rank_map = {ordered[0]: 0, ordered[1]: 1, ordered[2]: 2}
+            
+#             states = model.predict(X[i-window:i+1])
+#             current_state = states[-1]
+#             final_regimes.append(rank_map[current_state])
+
+#         # 4. SMART PERSISTENCE (The Fix)
+#         smoothed_final = []
+#         if final_regimes:
+#             curr_fixed = final_regimes[0]
+#             strength = 5.0
+#             natr_series = features['scaled_natr'].values
+            
+#             for i in range(len(final_regimes)):
+#                 s = final_regimes[i]
+#                 # Raised threshold: Only consider candles "Wide" if Z-Score > 0.5
+#                 is_wide_candle = natr_series[i] > 0.5
+                
+#                 # --- THE COMPROMISE LOGIC ---
+#                 # If HMM wants 'Low Vol' (0) but candles are 'Wide', 
+#                 # we force the target to 'Normal Vol' (1).
+#                 # This prevents Green, but allows Red to decay to Blue.
+#                 if s == 0 and is_wide_candle:
+#                     target_state = 1 
+#                 else:
+#                     target_state = s
+                
+#                 # --- STANDARD DECAY LOGIC ---
+#                 if target_state == 2 and target_state != curr_fixed:
+#                     strength = 0 # Instant Red
+#                     curr_fixed = 2
+#                 elif target_state != curr_fixed:
+#                     decay_rate = 1.0 # Standard decay speed
+#                     strength -= decay_rate
+#                 else:
+#                     strength = min(10.0, strength + 1.0)
+                
+#                 if strength <= 0:
+#                     curr_fixed = target_state
+#                     strength = 4.0
+                
+#                 smoothed_final.append(curr_fixed)
+
+#         smoothed_series = pd.Series(smoothed_final, index=features.index)
+#         label_map = {0: 'Low Volatility', 1: 'Normal Volatility', 2: 'High Volatility'}
+        
+#         df['Market_Regime'] = smoothed_series.map(label_map).reindex(df.index, method='ffill')
+#         df['ATR_Percentile'] = smoothed_series.map({0: 0.2, 1: 0.5, 2: 0.8}).reindex(df.index, method='ffill')
+#     # ==========================================================
+#     # OPTION 4: JUMP MODEL (Persistence-Penalized)
+#     # ==========================================================
+#     elif REGIME_METHOD == 'JUMP':
+#         # Jump logic: Only switches if volatility crosses 80th/20th percentile
+#         # and stays there (Sticky regimes)
+#         df['vol_rolling'] = df['Close'].pct_change().rolling(20).std()
+#         thresh_hi = df['vol_rolling'].quantile(0.8)
+#         thresh_lo = df['vol_rolling'].quantile(0.2)
+        
+#         regimes = []
+#         curr = 'Normal Volatility'
+#         for v in df['vol_rolling']:
+#             if pd.isna(v): regimes.append(curr); continue
+#             if v > thresh_hi: curr = 'High Volatility'
+#             elif v < thresh_lo: curr = 'Low Volatility'
+#             # If in the middle, we don't 'jump' back to Normal immediately (Stickiness)
+#             regimes.append(curr)
+            
+#         df['Market_Regime'] = regimes
+#         df['ATR_Percentile'] = df['vol_rolling'].rank(pct=True)
+
+#     # ==========================================================
+#     # LEGACY: ORIGINAL ATR METHOD
+#     # ==========================================================
+#     else:
+#         # ATR logic exactly as you have it now
+#         df['ATR_20'] = ta.volatility.AverageTrueRange(high=df['High'], low=df['Low'], close=df['Close'], window=20).average_true_range()
+#         df['ATR_Pct'] = (df['ATR_20'] / df['Close']) * 100
+#         df['ATR_Percentile'] = df['ATR_Pct'].rolling(window=252, min_periods=60).rank(pct=True)
+        
+#         df['Market_Regime'] = 'Normal Volatility'
+#         df.loc[df['ATR_Percentile'] < 0.25, 'Market_Regime'] = 'Low Volatility'
+#         df.loc[df['ATR_Percentile'] > 0.75, 'Market_Regime'] = 'High Volatility'
+#         df.loc[df['ATR_Percentile'] > 0.90, 'Market_Regime'] = 'Extreme Volatility'
+
+
+#     return df

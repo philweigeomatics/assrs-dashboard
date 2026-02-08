@@ -115,10 +115,15 @@ def load_or_fetch_stock_name(ticker: str, pro) -> str:
     return name
 
 
-def get_stock_display_name(ticker: str, pro) -> str:
-    """Get display name: Chinese name (ticker)."""
-    name = load_or_fetch_stock_name(ticker, pro)
-    return f"{name} ({ticker})"
+def get_stock_display_name(ticker: str) -> str:
+    """Get display name from stock_basic table in database."""
+    name = data_manager.get_stock_name_from_db(ticker)
+    if name:
+        return f"{name} ({ticker})"
+    else:
+        return ticker
+
+
 
 
 # ==========================================
@@ -127,18 +132,11 @@ def get_stock_display_name(ticker: str, pro) -> str:
 
 @st.cache_data(ttl=600)
 def calculate_returns_covariance(tickers: list, lookback: int = 252):
-    """
-    Calculate returns and covariance matrix.
-    
-    Returns:
-        returns_df: DataFrame of daily returns
-        mean_returns: Annualized mean returns
-        cov_matrix: Annualized covariance matrix
-    """
+    """Calculate returns and covariance matrix using LIVE qfq-adjusted data."""
     price_data = {}
-    
     for ticker in tickers:
-        df = data_manager.get_single_stock_data(ticker, use_data_start_date=True)
+        # Use get_single_stock_data_live for qfq-adjusted prices
+        df = data_manager.get_single_stock_data_live(ticker, lookback_years=2)
         if df is not None and not df.empty:
             price_data[ticker] = df['Close']
     
@@ -147,11 +145,11 @@ def calculate_returns_covariance(tickers: list, lookback: int = 252):
     
     prices = pd.DataFrame(price_data).dropna()
     returns = prices.pct_change().dropna().tail(lookback)
-    
     mean_returns = returns.mean() * 252  # Annualize
     cov_matrix = returns.cov() * 252
     
     return returns, mean_returns, cov_matrix
+
 
 
 def portfolio_performance(weights, mean_returns, cov_matrix):
@@ -519,8 +517,8 @@ def generate_portfolio_assessment(optimal_return, optimal_vol, optimal_sharpe,
 # MAIN APP
 # ==========================================
 
-st.title("💼 Portfolio Optimization")
-st.markdown("**Mean-Variance Optimization** for A-share stocks (上交所/深交所) 北交所暂时不支持")
+st.header("💼 Portfolio Optimization")
+st.markdown("**Mean-Variance Optimization** for A-share stocks.")
 
 # Initialize Tushare API
 pro = get_tushare_api()
@@ -529,13 +527,11 @@ pro = get_tushare_api()
 # STOCK INPUT
 # ==========================================
 
-st.header("1️⃣ Select Stocks")
+st.subheader("1️⃣ Select Stocks")
 
 st.markdown("""
-Enter stock tickers (6-digit codes). Supports all exchanges:
-- **上海 (SH)**: 600xxx, 601xxx, 603xxx, 688xxx
-- **深圳 (SZ)**: 000xxx, 002xxx, 300xxx
-- **北京 (BJ)**: 43xxxx, 83xxxx, 87xxxx
+Enter stock tickers (6-digit codes). Supports all exchanges (Shanghai, Shenzhen, Beijing)
+
 """)
 
 # Stock input method
@@ -598,17 +594,14 @@ if len(selected_tickers) < 3:
 # FETCH STOCK NAMES
 # ==========================================
 
-st.header("2️⃣ Stock Information")
+st.subheader("2️⃣ Stock Information")
 
-with st.spinner(f"📡 Fetching company names for {len(selected_tickers)} stocks..."):
-    progress_bar = st.progress(0)
+
+with st.spinner(f"Loading company names for {len(selected_tickers)} stocks..."):
     stock_names = {}
-    
-    for idx, ticker in enumerate(selected_tickers):
-        stock_names[ticker] = load_or_fetch_stock_name(ticker, pro)
-        progress_bar.progress((idx + 1) / len(selected_tickers))
-    
-    progress_bar.empty()
+    for ticker in selected_tickers:
+        stock_names[ticker] = data_manager.get_stock_name_from_db(ticker) or ticker
+
 
 # Display stock table
 stock_display = []
@@ -649,7 +642,7 @@ if not tickers_to_use or len(tickers_to_use) < 3:
 # OPTIMIZATION PARAMETERS
 # ==========================================
 
-st.header("3️⃣ Optimization Parameters")
+st.subheader("3️⃣ Optimization Parameters")
 
 col1, col2, col3 = st.columns(3)
 
@@ -735,7 +728,7 @@ if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True
     # RESULTS
     # ==========================================
     
-    st.header("📊 Optimization Results")
+    st.subheader("📊 Optimization Results")
 
         # ==========================================
     # GENERATE PORTFOLIO ASSESSMENT
@@ -750,7 +743,7 @@ if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True
     # RESULTS - ASSESSMENT FIRST
     # ==========================================
     
-    st.header("🎯 Portfolio Assessment | 投资组合评估")
+    st.subheader("🎯 Portfolio Assessment | 投资组合评估")
     
     # Display verdict with appropriate styling
     if assessment['color'] == 'success':
@@ -797,7 +790,7 @@ if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True
     # ==========================================
     
     st.markdown("---")
-    st.header("⚠️ Advanced Risk Metrics | 高级风险指标")
+    st.subheader("⚠️ Advanced Risk Metrics | 高级风险指标")
     
     metrics = assessment['metrics']
     
@@ -866,7 +859,7 @@ if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True
     # ==========================================
     
     st.markdown("---")
-    st.header("📊 Portfolio Details | 投资组合详情")
+    st.subheader("📊 Portfolio Details | 投资组合详情")
     
     # Key metrics
     m1, m2, m3, m4 = st.columns(4)
@@ -924,6 +917,118 @@ if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True
         )
         st.plotly_chart(fig_bar, use_container_width=True)
     
+
+    # ==================== INDUSTRY EXPOSURE ANALYSIS ====================
+
+    st.markdown("---")
+    st.subheader("🏭 Industry Exposure")
+
+    def get_industry_exposure(tickers, weights):
+        """Calculate industry exposure from portfolio weights using db manager."""
+        from db_manager import db
+        
+        industry_data = []
+        
+        for ticker, weight in zip(tickers, weights):
+            ts_code = data_manager.get_tushare_ticker(ticker)
+            try:
+                # Use db manager's read_table method (works for both SQLite and Supabase)
+                df = db.read_table('stock_basic', 
+                                filters={'ts_code': ts_code}, 
+                                columns='name,industry')
+                if not df.empty:
+                    industry = df.iloc[0]['industry']
+                    name = df.iloc[0]['name']
+                    industry_data.append({
+                        'Ticker': ticker,
+                        'Name': name,
+                        'Industry': industry if pd.notna(industry) else '未分类',
+                        'Weight': weight
+                    })
+            except Exception as e:
+                # Fallback if stock_basic lookup fails
+                industry_data.append({
+                    'Ticker': ticker,
+                    'Name': ticker,
+                    'Industry': '未分类',
+                    'Weight': weight
+                })
+        
+        return pd.DataFrame(industry_data)
+
+    # Get industry breakdown
+    industry_df = get_industry_exposure(tickers_to_use, optimal_weights)
+
+    # Aggregate by industry
+    industry_summary = industry_df.groupby('Industry')['Weight'].sum().sort_values(ascending=False)
+    industry_summary_pct = industry_summary * 100
+
+    col1, col2 = st.columns([2, 3])
+
+    with col1:
+        # Industry exposure pie chart
+        import plotly.express as px
+        
+        fig_industry = go.Figure(data=[go.Pie(
+            labels=industry_summary.index,
+            values=industry_summary_pct.values,
+            hole=0.4,
+            textinfo='label+percent',
+            textposition='auto',
+            marker=dict(
+                colors=px.colors.qualitative.Set3[:len(industry_summary)]
+            )
+        )])
+        
+        fig_industry.update_layout(
+            title="Industry Allocation",
+            height=400,
+            showlegend=True,
+            legend=dict(
+                orientation="v",
+                yanchor="middle",
+                y=0.5,
+                xanchor="left",
+                x=1.02
+            )
+        )
+        
+        st.plotly_chart(fig_industry, use_container_width=True)
+
+    with col2:
+        # Detailed industry breakdown table
+        st.markdown("**Industry Breakdown**")
+        
+        industry_detail = []
+        for industry in industry_summary.index:
+            stocks_in_industry = industry_df[industry_df['Industry'] == industry]
+            stock_count = len(stocks_in_industry)
+            total_weight = stocks_in_industry['Weight'].sum()
+            stock_list = ', '.join(stocks_in_industry['Name'].head(3).tolist())
+            if stock_count > 3:
+                stock_list += f" (+{stock_count - 3} more)"
+            
+            industry_detail.append({
+                'Industry': industry,
+                'Stocks': stock_count,
+                'Weight': f"{total_weight * 100:.1f}%",
+                'Companies': stock_list
+            })
+        
+        industry_table = pd.DataFrame(industry_detail)
+        st.dataframe(industry_table, use_container_width=True, hide_index=True)
+        
+        # Risk concentration warning
+        max_industry_weight = industry_summary.max()
+        if max_industry_weight > 0.5:
+            st.error(f"⚠️ High concentration: {industry_summary.idxmax()} represents {max_industry_weight*100:.1f}% of portfolio")
+        elif max_industry_weight > 0.35:
+            st.warning(f"⚠️ Moderate concentration: {industry_summary.idxmax()} represents {max_industry_weight*100:.1f}% of portfolio")
+        else:
+            st.success(f"✅ Well diversified across {len(industry_summary)} industries")
+
+    # ==================== END INDUSTRY EXPOSURE ====================
+
     # Efficient Frontier
     st.subheader("📈 Efficient Frontier")
     

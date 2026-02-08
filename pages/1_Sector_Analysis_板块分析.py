@@ -10,6 +10,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 import data_manager
+from analysis_engine import detect_market_regime
+
 
 st.set_page_config(
     page_title="📊 Sector Analysis | 板块分析",
@@ -49,6 +51,26 @@ def load_v2_data():
     
     except Exception as e:
         return None, None, None, str(e)
+    
+@st.cache_data(ttl=600)
+def load_csi300_with_regime(freq_cn: str):
+    """
+    Fetch CSI300 with enough history to compute regimes, then return full df.
+    The caller can tail() it for display.
+    """
+    if freq_cn == "日线":
+        # fetch ~1y daily so HMM/JUMP/ATR all have enough bars
+        raw_df = data_manager.get_index_data_live("000300.SH", lookback_days=365, freq="daily")
+        if raw_df is None or raw_df.empty:
+            return raw_df
+        return detect_market_regime(raw_df, freq="daily")
+
+    # 周线: fetch ~5y to have enough weekly bars for HMM
+    raw_df = data_manager.get_index_data_live("000300.SH", lookback_days=1825, freq="weekly")
+    if raw_df is None or raw_df.empty:
+        return raw_df
+    return detect_market_regime(raw_df, freq="weekly")
+
 
 
 # ==========================================
@@ -681,19 +703,29 @@ with tab1:
         # Frequency selector (horizontal, compact)
         freq = st.radio("周期", ["日线", "周线"], key='csi300_freq', horizontal=True, label_visibility="collapsed")
         
-        # Fetch data based on frequency
-        if freq == "日线":
-            with st.spinner("📡 加载中..."):
-                chart_df = data_manager.get_index_data_live('000300.SH', lookback_days=180, freq='daily')
+
+        # Fetch CSI300 + compute regime (cached)
+        with st.spinner("📡 加载中..."):
+            raw_df = load_csi300_with_regime(freq)
+
+        if raw_df is not None and not raw_df.empty:
+            if freq == "日线":
+                chart_df = raw_df.tail(180).copy()
                 title = "CSI 300 - 日K线 (6个月)"
-        else:  # 周线
-            with st.spinner("📡 加载中..."):
-                chart_df = data_manager.get_index_data_live('000300.SH', lookback_days=365, freq='weekly')
+            else:
+                chart_df = raw_df.tail(52).copy()
                 title = "CSI 300 - 周K线 (1年)"
+        else:
+            chart_df = None
+
         
         if chart_df is not None and not chart_df.empty:
             import plotly.graph_objects as go
             from plotly.subplots import make_subplots
+
+            if "Market_Regime" in chart_df.columns and chart_df["Market_Regime"].notna().any():
+              st.caption(f"当前波动状态: **{chart_df['Market_Regime'].dropna().iloc[-1]}**")
+
             
             # Prepare dates as strings
             dates = chart_df.index.strftime('%Y-%m-%d').tolist()
@@ -712,6 +744,62 @@ with tab1:
                 row_heights=[0.7, 0.3]
             )
             
+            # ===== Regime shading =====
+            regime_colors = {
+                "Low Volatility":    "rgba(34, 197, 94, 0.08)",
+                "Normal Volatility": "rgba(59, 130, 246, 0.05)",
+                "High Volatility":   "rgba(255, 110, 0, 0.11)",
+                "Extreme Volatility":"rgba(220, 38, 38, 0.12)",  # in case ATR fallback produces this label
+            }
+
+            if "Market_Regime" in chart_df.columns and chart_df["Market_Regime"].notna().any():
+                df_clean = chart_df.dropna(subset=["Market_Regime"]).copy()
+
+                # segment by regime changes
+                changes = df_clean["Market_Regime"].ne(df_clean["Market_Regime"].shift(1))
+                change_indices = df_clean.index[changes].tolist()
+                if len(change_indices) == 0 or change_indices[0] != df_clean.index[0]:
+                    change_indices.insert(0, df_clean.index[0])
+
+                # y ranges for each subplot
+                y_min_price = df_clean["Low"].min() * 0.98
+                y_max_price = df_clean["High"].max() * 1.02
+                y_max_vol = df_clean["Volume"].max() * 1.05
+
+                for i in range(len(change_indices)):
+                    start_idx = change_indices[i]
+                    end_idx = change_indices[i + 1] if i + 1 < len(change_indices) else df_clean.index[-1]
+
+                    regime = df_clean.loc[start_idx, "Market_Regime"]
+                    if regime not in regime_colors:
+                        continue
+
+                    start_date = start_idx.strftime("%Y-%m-%d")
+                    end_date = end_idx.strftime("%Y-%m-%d")
+
+                    # Price panel shading
+                    fig.add_shape(
+                        type="rect",
+                        x0=start_date, x1=end_date,
+                        y0=y_min_price, y1=y_max_price,
+                        fillcolor=regime_colors[regime],
+                        line=dict(width=0),
+                        layer="below",
+                        row=1, col=1
+                    )
+
+                    # # Volume panel shading
+                    # fig.add_shape(
+                    #     type="rect",
+                    #     x0=start_date, x1=end_date,
+                    #     y0=0, y1=y_max_vol,
+                    #     fillcolor=regime_colors[regime],
+                    #     line=dict(width=0),
+                    #     layer="below",
+                    #     row=2, col=1
+                    # )
+            # ===== end shading =====
+
             # Candlestick
             fig.add_trace(go.Candlestick(
                 x=dates,
