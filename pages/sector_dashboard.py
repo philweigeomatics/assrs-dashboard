@@ -120,8 +120,8 @@ with col_right:
     
     if chart_df is not None and not chart_df.empty:
         # Show current regime
-        if 'MarketRegime' in chart_df.columns and chart_df['MarketRegime'].notna().any():
-            st.caption(f"🔹 {chart_df['MarketRegime'].dropna().iloc[-1]}")
+        if 'Market_Regime' in chart_df.columns and chart_df['Market_Regime'].notna().any():
+            st.caption(f"🔹 {chart_df['Market_Regime'].dropna().iloc[-1]}")
         
         # Prepare dates as strings
         dates = chart_df.index.strftime('%Y-%m-%d').tolist()
@@ -148,11 +148,11 @@ with col_right:
             'Extreme Volatility': 'rgba(220, 38, 38, 0.12)'
         }
         
-        if 'MarketRegime' in chart_df.columns and chart_df['MarketRegime'].notna().any():
-            df_clean = chart_df.dropna(subset=['MarketRegime']).copy()
+        if 'Market_Regime' in chart_df.columns and chart_df['Market_Regime'].notna().any():
+            df_clean = chart_df.dropna(subset=['Market_Regime']).copy()
             
             # Segment by regime changes
-            changes = df_clean['MarketRegime'].ne(df_clean['MarketRegime'].shift(1))
+            changes = df_clean['Market_Regime'].ne(df_clean['Market_Regime'].shift(1))
             change_indices = df_clean.index[changes].tolist()
             
             if len(change_indices) == 0 or change_indices[0] != df_clean.index[0]:
@@ -166,7 +166,7 @@ with col_right:
             for i in range(len(change_indices)):
                 start_idx = change_indices[i]
                 end_idx = change_indices[i + 1] if i + 1 < len(change_indices) else df_clean.index[-1]
-                regime = df_clean.loc[start_idx, 'MarketRegime']
+                regime = df_clean.loc[start_idx, 'Market_Regime']
                 
                 if regime not in regime_colors:
                     continue
@@ -331,16 +331,16 @@ else:
     
     styled = breadth_df.style.map(style_breadth_cell, subset=date_cols).format(format_breadth, subset=date_cols)
     
-    st.dataframe(styled, hide_index=True, use_container_width=True, height=500)
+    st.dataframe(styled, hide_index=True, use_container_width=True, height=600)
     st.caption("🟢 Green: <50% (Most stocks below MA20 = opportunity). 🔴 Red: >50% (Most stocks above MA20 = extended).")
 
-# Sector Deep Dive
-st.markdown("---")
-st.subheader("🔍 Sector Deep Dive")
+# # Sector Deep Dive
+# st.markdown("---")
+# st.subheader("🔍 Sector Deep Dive")
 
-sector = st.selectbox("Select Sector", sorted(v2hist['Sector'].unique()))
+# sector = st.selectbox("Select Sector", sorted(v2hist['Sector'].unique()))
 
-if sector:
-    data = v2hist[v2hist['Sector'] == sector]
-    fig = create_sector_chart(data)
-    st.plotly_chart(fig, use_container_width=True)
+# if sector:
+#     data = v2hist[v2hist['Sector'] == sector]
+#     fig = create_sector_chart(data)
+#     st.plotly_chart(fig, use_container_width=True)
