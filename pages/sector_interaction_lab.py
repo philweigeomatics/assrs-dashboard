@@ -14,7 +14,8 @@ from sector_utils import (
     predict_tomorrow,
     build_nextday_predictions,
     build_state_stats,
-    make_heatmap
+    make_heatmap,
+    compute_market_gate_with_context
 )
 from explanations import INTERACTION_LAB
 
@@ -38,24 +39,135 @@ if available_days < 30:
 
 max_lb = min(120, available_days)
 default_lb = min(60, max_lb)
-lookback = st.slider("Lookback days", 20, max_lb, default_lb, 5)
 
-# Market Gate
-gate = compute_market_gate(ret_panel, exret_panel, lookback=lookback)
+# Lookback slider
+lookback = st.slider("Lookback days", 5, max_lb, default_lb, 5)
+
+# Fixed history window (1 year)
+HISTORY_WINDOW = 252
+
+st.markdown(f"""
+**分析周期 Analysis Period:** 当前 {lookback} 天 vs 过去 {HISTORY_WINDOW} 天 (1年)  
+Current {lookback} days vs Past {HISTORY_WINDOW} days (1 year)
+""")
+
+# Market Gate with Context
+gate = compute_market_gate_with_context(
+    ret_panel, 
+    exret_panel, 
+    lookback=lookback,  # ✅ Use slider value
+    history_window=HISTORY_WINDOW
+)
 
 if gate:
-    g1, g2, g3, g4 = st.columns(4)
-    g1.metric("Market Return", f"{gate['market_return']*100:.2f}%")
-    g2.metric("Dispersion", f"{gate['dispersion']*100:.2f}%")
-    g3.metric("Breadth Down", f"{gate['breadth_down']*100:.0f}%")
-    g4.metric("Confidence", gate['confidence'])
+    # Regime banner with Chinese/English
+    if gate['regime_color'] == 'success':
+        st.success(f"""
+        {gate['regime_label']}  
+        百分位: {gate['dispersion_percentile']*100:.0f}% | 趋势: {gate['trend_label']} | 稳定性: {gate['regime_stability']}
+        """)
+    elif gate['regime_color'] == 'warning':
+        st.warning(f"""
+        {gate['regime_label']}  
+        百分位: {gate['dispersion_percentile']*100:.0f}% | 趋势: {gate['trend_label']} | 稳定性: {gate['regime_stability']}
+        """)
+    elif gate['regime_color'] == 'error':
+        st.error(f"""
+        {gate['regime_label']}  
+        百分位: {gate['dispersion_percentile']*100:.0f}% | 趋势: {gate['trend_label']} | 稳定性: {gate['regime_stability']}
+        """)
+    else:
+        st.info(f"""
+        {gate['regime_label']}  
+        百分位: {gate['dispersion_percentile']*100:.0f}% | 趋势: {gate['trend_label']} | 稳定性: {gate['regime_stability']}
+        """)
     
-    if gate['confidence'] == 'LOW':
-        st.warning(f"⚠️ Low rotation confidence today")
-    elif gate['confidence'] == 'HIGH':
-        st.success(f"✅ High dispersion - rotation signals meaningful")
-
-st.markdown("---")
+    # Metrics row
+    g1, g2, g3, g4 = st.columns(4)
+    g1.metric(
+        "市场收益 Market Return", 
+        f"{gate['market_return']*100:.2f}%"
+    )
+    g2.metric(
+        "离散度 Dispersion", 
+        f"{gate['dispersion']*100:.2f}%",
+        delta=f"{(gate['dispersion'] - gate['history_p50'])*100:+.2f}% vs 中位数"
+    )
+    g3.metric(
+        "下跌广度 Breadth Down", 
+        f"{gate['breadth_down']*100:.0f}%"
+    )
+    g4.metric(
+        "百分位排名 Percentile", 
+        f"{gate['dispersion_percentile']*100:.0f}%"
+    )
+    
+    # Trading advice based on regime
+    st.markdown("---")
+    st.subheader("📋 操作建议 Trading Recommendation")
+    
+    if gate['regime_state'] == "EXTREME_ROTATION":
+        st.success(f"""
+        **🔥 极端轮动市场 - 积极进行板块轮动**
+        - ✅ 当前{lookback}天离散度处于年内前15%，板块分化极大
+        - ✅ 强烈推荐使用转换矩阵和次日预测进行轮动交易
+        - ✅ 加大仓位于强势板块，快速切换
+        - ⚠️ 注意：极端轮动可能预示市场结构变化
+        """)
+    elif gate['regime_state'] == "STRONG_ROTATION":
+        st.success(f"""
+        **✅ 强势轮动市场 - 适合板块轮动**
+        - ✅ 当前{lookback}天离散度处于年内前30%，板块差异明显
+        - ✅ 推荐使用板块强度指标进行选股
+        - ⚪ 可进行中短期轮动操作
+        """)
+    elif gate['regime_state'] == "MODERATE_ROTATION":
+        st.info(f"""
+        **⚪ 温和轮动市场 - 谨慎轮动**
+        - ⚪ {lookback}天离散度处于中等水平
+        - ⚠️ 轮动信号可信度一般，需结合其他指标
+        - 建议持有强势板块，观察趋势变化
+        """)
+    elif gate['regime_state'] == "LOW_ROTATION":
+        st.warning(f"""
+        **⚠️ 弱势轮动市场 - 不建议轮动**
+        - ❌ 板块分化不明显，轮动效果差
+        - 建议降低换手率，持有核心仓位
+        - 关注市场整体方向，而非板块选择
+        """)
+    else:  # HIGH_CORRELATION
+        st.error(f"""
+        **❌ 板块共振市场 - 停止轮动**
+        - ❌ 所有板块高度相关，轮动无意义
+        - ❌ 当前{lookback}天离散度处于年内后30%
+        - 建议关注择时，暂停板块轮动策略
+        - 等待市场结构分化后再操作
+        """)
+    
+    # Historical context visualization
+    with st.expander("📊 历史对比 Historical Context", expanded=False):
+        st.markdown(f"""
+        **当前{lookback}天离散度: {gate['dispersion']*100:.2f}%** 在过去{HISTORY_WINDOW}天中排名 **第{gate['dispersion_percentile']*100:.0f}百分位**
+        
+        **历史分位数 (过去1年 {lookback}天滚动平均):**
+        - 25% 分位: {gate['history_p25']*100:.2f}%
+        - 50% 分位 (中位数): {gate['history_p50']*100:.2f}%
+        - 75% 分位: {gate['history_p75']*100:.2f}%
+        - 85% 分位: {gate['history_p85']*100:.2f}%
+        
+        **解读:**
+        - 当前值高于中位数 **{(gate['dispersion'] - gate['history_p50'])*100:+.2f}%**
+        - 趋势: {gate['trend_label']}
+        - 制度稳定性: {gate['regime_stability']}
+        
+        **如何使用滑块:**
+        - **20天**: 适合短线轮动，捕捉快速变化
+        - **40天**: 中线轮动，过滤短期噪音
+        - **60天**: 长线趋势，识别持久性制度
+        - **更长周期**: 战略性制度判断
+        """)
+    
+    st.markdown("---")
 
 # Create sub-tabs
 t1, t2, t3 = st.tabs(["🔄 Transition Matrix", "🎲 Next-Day Odds", "📋 Raw Panels"])

@@ -164,6 +164,114 @@ def compute_market_gate(ret_panel, exret_panel, market_sector="MARKET_PROXY", lo
     }
 
 
+def compute_market_gate_with_context(ret_panel, exret_panel, market_sector="MARKET_PROXY", 
+                                      lookback=20, history_window=252):
+    """
+    Compute market gate metrics with historical context.
+    Optimized for A-shares: 20-day period vs 252-day (1 year) history.
+    
+    Args:
+        lookback: Current period to evaluate (default 20 days = 1 month)
+        history_window: Historical comparison period (default 252 days = 1 year)
+    """
+    # Get current period
+    ret_lb = ret_panel.tail(lookback)
+    ex_lb = exret_panel.tail(lookback)
+    
+    # Get historical period for comparison (1 year)
+    ex_hist = exret_panel.tail(history_window)
+    
+    latest_dt = ret_lb.index.max()
+    if latest_dt is None or len(ex_lb) < lookback:
+        return None
+    
+    # === CURRENT 20-DAY PERIOD METRICS ===
+    mkt_ret = ret_lb[market_sector].mean() if market_sector in ret_lb.columns else ret_lb.mean(axis=1).mean()
+    
+    # Current 20-day average dispersion
+    dispersion_current = ex_lb.std(axis=1).mean()
+    
+    # Current 20-day average breadth
+    breadth_down_series = (ret_lb < 0).sum(axis=1) / ret_lb.count(axis=1)
+    breadth_down = breadth_down_series.mean()
+    
+    # === HISTORICAL CONTEXT (1 YEAR) ===
+    # Calculate dispersion for every day in the past year
+    dispersion_history = ex_hist.std(axis=1)
+    
+    # Calculate rolling 20-day averages for the entire year
+    dispersion_rolling = dispersion_history.rolling(lookback).mean().dropna()
+    
+    if len(dispersion_rolling) < 10:
+        return None
+    
+    # Percentile ranking: Where does current 20-day period rank vs past year?
+    dispersion_percentile = (dispersion_rolling < dispersion_current).sum() / len(dispersion_rolling)
+    
+    # === REGIME CLASSIFICATION (A-shares specific thresholds) ===
+    if dispersion_percentile >= 0.85:
+        regime_state = "EXTREME_ROTATION"
+        regime_label = "🔥 极端轮动 (Extreme Rotation)"
+        regime_color = "success"
+    elif dispersion_percentile >= 0.70:
+        regime_state = "STRONG_ROTATION"
+        regime_label = "✅ 强势轮动 (Strong Rotation)"
+        regime_color = "success"
+    elif dispersion_percentile >= 0.50:
+        regime_state = "MODERATE_ROTATION"
+        regime_label = "⚪ 温和轮动 (Moderate Rotation)"
+        regime_color = "info"
+    elif dispersion_percentile >= 0.30:
+        regime_state = "LOW_ROTATION"
+        regime_label = "⚠️ 弱势轮动 (Weak Rotation)"
+        regime_color = "warning"
+    else:
+        regime_state = "HIGH_CORRELATION"
+        regime_label = "❌ 板块共振 (High Correlation)"
+        regime_color = "error"
+    
+    # Traditional confidence
+    confidence = "HIGH" if dispersion_current > 0.015 else "LOW" if dispersion_current < 0.005 else "MODERATE"
+    
+    # Recent trend (last 10 days vs prior 10 days)
+    if len(dispersion_rolling) >= 20:
+        recent_10d = dispersion_rolling.tail(10).mean()
+        prior_10d = dispersion_rolling.tail(20).head(10).mean()
+        trend_change = (recent_10d - prior_10d) / prior_10d if prior_10d != 0 else 0
+        
+        if trend_change > 0.10:  # 10% increase
+            trend_label = "📈 加速轮动 (Accelerating)"
+        elif trend_change < -0.10:  # 10% decrease
+            trend_label = "📉 收敛中 (Converging)"
+        else:
+            trend_label = "➡️ 稳定 (Stable)"
+    else:
+        trend_label = "➡️ 数据不足"
+    
+    # Calculate volatility of dispersion (regime stability)
+    dispersion_volatility = dispersion_rolling.tail(60).std()
+    regime_stability = "稳定" if dispersion_volatility < dispersion_rolling.mean() * 0.3 else "波动"
+    
+    return {
+        'market_return': mkt_ret,
+        'dispersion': dispersion_current,
+        'dispersion_percentile': dispersion_percentile,
+        'breadth_down': breadth_down,
+        'confidence': confidence,
+        'regime_state': regime_state,
+        'regime_label': regime_label,
+        'regime_color': regime_color,
+        'trend_label': trend_label,
+        'regime_stability': regime_stability,
+        'history_p25': dispersion_rolling.quantile(0.25),
+        'history_p50': dispersion_rolling.quantile(0.50),
+        'history_p75': dispersion_rolling.quantile(0.75),
+        'history_p85': dispersion_rolling.quantile(0.85),
+        'days_in_current_regime': len(dispersion_rolling[dispersion_rolling >= dispersion_rolling.quantile(dispersion_percentile)].tail(60))
+    }
+
+
+
 def compute_transition_matrix(exret_panel, lookback=60, top_k=3, market_sector="MARKET_PROXY"):
     """Compute sector transition probabilities."""
     df = exret_panel.tail(lookback).copy()
