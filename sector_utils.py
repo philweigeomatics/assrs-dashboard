@@ -142,9 +142,13 @@ def compute_market_gate(ret_panel, exret_panel, market_sector="MARKET_PROXY", lo
     if latest_dt is None:
         return None
     
+    # Market return: AVERAGE over the lookback period (or last day if you prefer)
     mkt_ret = ret_lb[market_sector].iloc[-1] if market_sector in ret_lb.columns else ret_lb.mean(axis=1).iloc[-1]
-    ex_last = ex_lb.iloc[-1].dropna()
-    dispersion = ex_last.std()
+    
+    # Dispersion: AVERAGE standard deviation across the lookback period
+    dispersion = ex_lb.std(axis=1).mean()  # std across sectors for each day, then average
+    
+    # Latest day metrics (these should stay as last day)
     ret_last = ret_lb.iloc[-1].dropna()
     breadth_down = (ret_last < 0).sum() / len(ret_last) if len(ret_last) > 0 else 0
     
@@ -158,6 +162,7 @@ def compute_market_gate(ret_panel, exret_panel, market_sector="MARKET_PROXY", lo
         'regime': regime,
         'confidence': confidence
     }
+
 
 def compute_transition_matrix(exret_panel, lookback=60, top_k=3, market_sector="MARKET_PROXY"):
     """Compute sector transition probabilities."""

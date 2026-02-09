@@ -19,6 +19,7 @@ from sector_utils import (
 from explanations import INTERACTION_LAB
 
 st.title("🔬 Sector Interaction Lab")
+st.markdown("### Market Gate ###")
 
 # Load data
 v2latest, v2hist, v2date, v2error = load_v2_data()
