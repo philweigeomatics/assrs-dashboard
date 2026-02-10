@@ -251,8 +251,24 @@ st.dataframe(
     })        # ✅ More negative = Greener
     .background_gradient(subset=['Sharpe Ratio', 'Avg Return'], cmap='RdYlGn_r'), 
     use_container_width=True,
-    height=400
+    height=400,
 )
+
+# Add this RIGHT AFTER:
+st.markdown("---")
+st.markdown("### 🎯 Click to Analyze Individual Stock")
+
+# Create buttons in 4 columns
+num_cols = 4
+cols = st.columns(num_cols)
+
+for idx, row in risk_df.iterrows():
+    col_idx = idx % num_cols
+    with cols[col_idx]:
+        button_label = f"{row['Name'][:12]}...\n{row['Ticker']}"
+        if st.button(button_label, key=f"btn_{row['Ticker']}", use_container_width=True):
+            st.session_state.active_ticker = row['Ticker']
+            st.switch_page("pages/2_Single_Stock_Analysis_个股分析.py")
 
 # ============================================================================
 # SECTION 3: RISK-RETURN SCATTER PLOT

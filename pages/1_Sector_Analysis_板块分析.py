@@ -698,7 +698,7 @@ with tab1:
             s3.caption(", ".join(avoid['Sector'].head(3).tolist()))
     
     with col_right:
-        st.subheader("📈 CSI 300 指数")
+        st.subheader("📈 沪深300 ")
         
         # Frequency selector (horizontal, compact)
         freq = st.radio("周期", ["日线", "周线"], key='csi300_freq', horizontal=True, label_visibility="collapsed")

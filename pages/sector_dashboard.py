@@ -100,7 +100,7 @@ with col_left:
         s3.caption(", ".join(avoid['Sector'].head(3).tolist()))
 
 with col_right:
-    st.subheader("📈 CSI 300")
+    st.subheader("📈 沪深300指数")
     
     # Frequency selector (horizontal, compact)
     freq = st.radio("", ["日", "周"], key="csi300_freq", horizontal=True, label_visibility="collapsed")
