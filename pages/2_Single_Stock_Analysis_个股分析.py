@@ -2665,15 +2665,17 @@ if st.session_state.active_ticker:
         circ_mv_str = f"{latest_fund['Circ_MV_Yi']:.0f}" if isinstance(latest_fund.get('Circ_MV_Yi'), (int, float)) else 'N/A'
         turnover_str = f"{latest_fund['Turnover_Rate']:.2f}" if isinstance(latest_fund.get('Turnover_Rate'), (int, float)) else 'N/A'
 
-        # Run analysis
-        analysis_df = run_single_stock_analysis(stock_df)
+        with st.spinner("Running analysis...计算技术指标和交易信号"):
+            # Run analysis
+            analysis_df = run_single_stock_analysis(stock_df)
 
         
         if analysis_df.empty or len(analysis_df) < 50:
             st.error("Not enough data to compute signals.")
         else:
-            # Detect trading blocks
-            blocks = calculate_multiple_blocks(analysis_df, lookback=60)
+            with st.spinner("Calculating trading blocks...检测交易区间"):
+                # Detect trading blocks
+                blocks = calculate_multiple_blocks(analysis_df, lookback=60)
 
             # ==================== COMPANY INFO HEADER (NARROW) ====================
             st.markdown(f"""
@@ -2826,57 +2828,15 @@ if st.session_state.active_ticker:
                     st.caption("正常环境")
 
             st.caption(f"📈 ADX: **{adx_val:.1f}** | Pattern: **{adx_pattern if adx_pattern else 'None'}**")
-
-            st.markdown("---")
+            # st.markdown("---")
             # ==================== END MARKET STATUS ====================
             
-            # Display chart
-            fig_stock = create_single_stock_chart_analysis(analysis_df, fundamentals_df=fundamentals_df, blocks=blocks)
-            st.plotly_chart(fig_stock, use_container_width=True)
+            with st.spinner("Generating chart...生成分析图表"):
+                # Display chart
+                fig_stock = create_single_stock_chart_analysis(analysis_df, fundamentals_df=fundamentals_df, blocks=blocks)
+                st.plotly_chart(fig_stock, use_container_width=True)
             
-            # # Latest status cards
-            # latest_row = analysis_df.iloc[-1]
-            
-            # st.subheader("Latest Status")
-            # cola, colb, colc, cold = st.columns(4)
-            
-            # accum = bool(latest_row.get('Signal_Accumulation', False))
-            # squeeze = bool(latest_row.get('Signal_Squeeze', False))
-            # launch = bool(latest_row.get('Signal_Golden_Launch', False))
-            # adx_val = float(latest_row.get('ADX', 0.0))
-            
-            # with cola:
-            #     st.markdown("**Phase 1: Accumulation**")
-            #     st.markdown(f":{('orange' if accum else 'grey')}[{'ACTIVE' if accum else 'INACTIVE'}]")
-            
-            # with colb:
-            #     st.markdown("**Phase 2: Squeeze**")
-            #     st.markdown(f":{('grey')}[{'TIGHT' if squeeze else 'LOOSE'}]")
-            
-            # with colc:
-            #     st.markdown("**Phase 3: LAUNCH**")
-            #     st.markdown(f":{('red' if launch else 'grey')}[{'TRIGGERED' if launch else 'WAITING'}]")
-            
-            # with cold:
-            #     st.markdown("**Trading Block (Latest)**")
-            #     if blocks:
-            #         block = blocks[0]
-            #         status = block['status']
-            #         color = 'red' if status == 'BREAKOUT' else 'green' if status == 'BREAKDOWN' else 'grey'
-            #         st.markdown(f":{color}[{status}]")
-            #         st.caption(f"Range: {block['bot']:.2f} - {block['top']:.2f}")
-            #     else:
-            #         st.markdown(":grey[NO BLOCKS]")
-            
-            # # Metrics table
-            # st.markdown("---")
-            # st.subheader("Key Metrics")
-            
-            # table_cols = ['Close', 'EMA5','MA20', 'MA50', 'MA200', 'RSI_14', 'ADX',
-            #              'Signal_Accumulation', 'Signal_Squeeze', 'Signal_Golden_Launch']
-            
-            # metrics_df = analysis_df[table_cols].tail(5)
-            # st.dataframe(metrics_df, use_container_width=True)
+
 
 
             st.markdown("---")

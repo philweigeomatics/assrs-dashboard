@@ -114,6 +114,49 @@ def create_sector_chart(chart_data):
     
     return fig
 
+def create_rolling_correlation_chart(ret_panel, reference_sector, compare_sectors, window=20):
+    """
+    Show rolling correlations between one reference sector and multiple others.
+    
+    Args:
+        ret_panel: DataFrame with Date index and sector returns as columns
+        reference_sector: The base sector to compare against (e.g., "Technology")
+        compare_sectors: List of sectors to compare (e.g., ["Healthcare", "Finance", "Energy"])
+        window: Rolling window size in days
+    """
+    fig = go.Figure()
+    
+    for sector in compare_sectors:
+        if sector in ret_panel.columns and reference_sector in ret_panel.columns:
+            # Calculate rolling correlation
+            rolling_corr = ret_panel[reference_sector].rolling(window=window).corr(ret_panel[sector])
+            
+            fig.add_trace(go.Scatter(
+                x=rolling_corr.index,
+                y=rolling_corr.values,
+                name=f"{reference_sector} ↔ {sector}",
+                mode='lines',
+                line=dict(width=2)
+            ))
+    
+    # Add reference lines
+    fig.add_hline(y=0, line_dash='dash', line_color='gray', opacity=0.5)
+    fig.add_hline(y=0.7, line_dash='dot', line_color='green', opacity=0.3)
+    fig.add_hline(y=-0.7, line_dash='dot', line_color='red', opacity=0.3)
+    
+    fig.update_layout(
+        title=f'Rolling {window}-Day Correlation: {reference_sector} vs Other Sectors',
+        xaxis_title='Date',
+        yaxis_title='Correlation Coefficient',
+        yaxis_range=[-1, 1],
+        height=600,
+        template='plotly_white',
+        hovermode='x unified'
+    )
+    
+    return fig
+
+
 def pivot_sector_series(hist_df, value_col):
     """Pivot to Date x Sector."""
     df = hist_df[['Date', 'Sector', value_col]].dropna().copy()

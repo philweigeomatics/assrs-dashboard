@@ -12,7 +12,8 @@ from sector_utils import (
     load_v2_data,
     build_sector_panels,
     create_performance_comparison_chart,
-    create_sector_rotation_map
+    create_sector_rotation_map,
+    create_rolling_correlation_chart
 )
 
 st.title("📈 Performance & Rotation")
@@ -52,8 +53,29 @@ else:
 
 st.markdown("---")
 
+
+st.subheader("📊 Rolling Sector Correlations")
+
+col1, col2 = st.columns([1, 2])
+with col1:
+    reference_sector = st.selectbox("Reference Sector", all_sectors)
+    window = st.slider("Rolling Window (days)", 5, 60, 5, 5)
+with col2:
+    compare_sectors = st.multiselect(
+        "Compare Against",
+        [s for s in all_sectors if s != reference_sector],
+        default=[s for s in all_sectors if s != reference_sector][:4]
+    )
+
+if compare_sectors:
+    fig = create_rolling_correlation_chart(ret_panel, reference_sector, compare_sectors, window)
+    st.plotly_chart(fig, use_container_width=True)
+
+st.markdown("---")
+
 # Sector Rotation Map
 st.subheader("🔄 Sector Rotation Map")
+st.markdown("---")
 
 col1, col2 = st.columns(2)
 with col1:

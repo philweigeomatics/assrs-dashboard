@@ -103,8 +103,23 @@ class DatabaseManager:
         else:
             # SQLite
             with sqlite3.connect(self.dbname) as conn:
-                df = pd.DataFrame(records)
-                df.to_sql(table_name, conn, if_exists='append', index=False)
+                if upsert:
+                    # Use INSERT OR REPLACE for upsert to handle UNIQUE constraints
+                    df = pd.DataFrame(records)
+                    if df.empty:
+                        return
+
+                    columns = ', '.join([f'"{col}"' for col in df.columns])
+                    placeholders = ', '.join(['?'] * len(df.columns))
+                    sql = f'INSERT OR REPLACE INTO "{table_name}" ({columns}) VALUES ({placeholders})'
+
+                    for _, row in df.iterrows():
+                        conn.execute(sql, tuple(row))
+                    conn.commit()
+                else:
+                    # Regular insert
+                    df = pd.DataFrame(records)
+                    df.to_sql(table_name, conn, if_exists='append', index=False)
     
     def delete_records(self, table_name, filters):
         """Delete records from a table
