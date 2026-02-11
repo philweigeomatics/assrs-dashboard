@@ -49,6 +49,18 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     # ==================== ADX ====================
     adx = ta.trend.ADXIndicator(df_analysis['High'], df_analysis['Low'], df_analysis['Close'], window=14)
     df_analysis['ADX'] = adx.adx()
+    df_analysis['DI_Plus'] = adx.adx_pos()    # ← ADD THIS
+    df_analysis['DI_Minus'] = adx.adx_neg()   # ← ADD THIS
+
+    # DI Crossover signals
+    df_analysis['DI_Bullish_Cross'] = (
+        (df_analysis['DI_Plus'] > df_analysis['DI_Minus']) &
+        (df_analysis['DI_Plus'].shift(1) <= df_analysis['DI_Minus'].shift(1))
+    )
+    df_analysis['DI_Bearish_Cross'] = (
+        (df_analysis['DI_Minus'] > df_analysis['DI_Plus']) &
+        (df_analysis['DI_Minus'].shift(1) <= df_analysis['DI_Plus'].shift(1))
+    )
     
     # ADX LOWESS Smoothing
     try:

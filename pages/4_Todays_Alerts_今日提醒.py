@@ -95,19 +95,19 @@ BEARISH_SIGNALS = {
 # ADX PATTERN SIGNALS (WITH PRICE CONTEXT)
 # ==========================================
 
-# BULLISH: ADX patterns that signal BUY opportunities
-# Only reversal patterns after price decline
-ADX_BULLISH_PATTERNS = {
-    'Bottoming + Downtrend': 'ADX Bottoming (after decline)',
-    'Reversing Up + Downtrend': 'ADX Reversing Up (after decline)',
-}
+# # BULLISH: ADX patterns that signal BUY opportunities
+# # Only reversal patterns after price decline
+# ADX_BULLISH_PATTERNS = {
+#     'Bottoming + Downtrend': 'ADX Bottoming (after decline)',
+#     'Reversing Up + Downtrend': 'ADX Reversing Up (after decline)',
+# }
 
-# BEARISH: ADX patterns that signal SELL alerts
-# Only exhaustion patterns after price rally
-ADX_BEARISH_PATTERNS = {
-    'Peaking + Uptrend': 'ADX Peaking (after rally)',
-    'Reversing Down + Uptrend': 'ADX Reversing Down (after rally)',
-}
+# # BEARISH: ADX patterns that signal SELL alerts
+# # Only exhaustion patterns after price rally
+# ADX_BEARISH_PATTERNS = {
+#     'Peaking + Uptrend': 'ADX Peaking (after rally)',
+#     'Reversing Down + Uptrend': 'ADX Reversing Down (after rally)',
+# }
 
 def get_beijing_date():
     """Get current date in Beijing timezone"""
@@ -119,6 +119,52 @@ def init_signals_tables():
     """Initialize the signals cache tables"""
     data_manager.create_signals_tables()
 
+
+def check_adx_signals(latest, price_trend):
+    """
+    Check ADX pattern and return appropriate signal based on price trend context.
+
+    BULLISH (Downtrend + ANY turning point):
+    - ADX Bottoming + Downtrend → "ADX End (Bottoming) after decline"
+    - ADX Peaking + Downtrend → "ADX End (Peaking) after decline"
+    - ADX Reversing Up + Downtrend → "ADX Reversing after decline"
+    - ADX Reversing Down + Downtrend → "ADX Reversing after decline"
+
+    BEARISH (Uptrend + ANY turning point):
+    - ADX Bottoming + Uptrend → "ADX End (Bottoming) after rally"
+    - ADX Peaking + Uptrend → "ADX End (Peaking) after rally"
+    - ADX Reversing Up + Uptrend → "ADX Reversing after rally"
+    - ADX Reversing Down + Uptrend → "ADX Reversing after rally"
+
+    Returns: (signal_name, signal_type) or (None, None)
+    """
+    if 'ADX_Pattern' not in latest.index:
+        return None, None
+
+    adx_pattern = str(latest['ADX_Pattern'])
+
+    # Define ADX turning points (only these count as signals)
+    adx_extremes = ['Bottoming', 'Peaking']  # ADX at extremes
+    adx_reversals = ['Reversing Up', 'Reversing Down']  # ADX direction changes
+
+    # BULLISH: Downtrend + ANY ADX turning point
+    if price_trend == 'downtrend':
+        if adx_pattern in adx_extremes:
+            return f"ADX End ({adx_pattern}) after decline", 'bullish'
+        elif adx_pattern in adx_reversals:
+            return "ADX Reversing after decline", 'bullish'
+
+    # BEARISH: Uptrend + ANY ADX turning point
+    elif price_trend == 'uptrend':
+        if adx_pattern in adx_extremes:
+            return f"ADX End ({adx_pattern}) after rally", 'bearish'
+        elif adx_pattern in adx_reversals:
+            return "ADX Reversing after rally", 'bearish'
+
+    # Ignore all other patterns:
+    # - Neutral trends (no signal)
+    # - Non-turning-point patterns (Strong Trend, Losing Steam, Slowing Down, etc.)
+    return None, None
 
 
 
@@ -193,12 +239,10 @@ def scan_my_watchlist():
                 if signal_col in latest.index and latest[signal_col] == True:
                     bullish_signals_found.append(signal_name)
             
-            if 'ADX_Pattern' in latest.index:
-                adx_pattern = str(latest['ADX_Pattern'])
-                if adx_pattern == 'Bottoming' and price_trend == 'downtrend':
-                    bullish_signals_found.append(ADX_BULLISH_PATTERNS['Bottoming + Downtrend'])
-                elif adx_pattern == 'Reversing Up' and price_trend == 'downtrend':
-                    bullish_signals_found.append(ADX_BULLISH_PATTERNS['Reversing Up + Downtrend'])
+            # Check ADX signals (downtrend + turning point)
+            adx_signal, adx_type = check_adx_signals(latest, price_trend)
+            if adx_signal and adx_type == 'bullish':
+                bullish_signals_found.append(adx_signal)
             
             if bullish_signals_found:
                 results.append({
@@ -221,12 +265,9 @@ def scan_my_watchlist():
                 if signal_col in latest.index and latest[signal_col] == True:
                     bearish_signals_found.append(signal_name)
             
-            if 'ADX_Pattern' in latest.index:
-                adx_pattern = str(latest['ADX_Pattern'])
-                if adx_pattern == 'Peaking' and price_trend == 'uptrend':
-                    bearish_signals_found.append(ADX_BEARISH_PATTERNS['Peaking + Uptrend'])
-                elif adx_pattern == 'Reversing Down' and price_trend == 'uptrend':
-                    bearish_signals_found.append(ADX_BEARISH_PATTERNS['Reversing Down + Uptrend'])
+             # Check ADX signals (uptrend + turning point)
+            if adx_signal and adx_type == 'bearish':
+                bearish_signals_found.append(adx_signal)
             
             if bearish_signals_found:
                 results.append({
@@ -472,18 +513,26 @@ with col1:
     st.markdown("""
     - **MACD Bottoming** - MACD stopped falling, reversal detected
     - **MACD Positive Crossover** - MACD crossed above Signal line
-    - **ADX Bottoming** - Trend strength bottoming, reversal setup
     - **RSI Bottoming** - RSI in bottom 10%, oversold
+
+    **ADX Signals (Downtrend + Turning Point):**
+    - **ADX End (Bottoming) after decline** - Low ADX turning after downtrend
+    - **ADX End (Peaking) after decline** - High ADX peaking after downtrend
+    - **ADX Reversing after decline** - ADX direction change after downtrend
     """)
+
 
 with col2:
     st.markdown("**⚠️ Bearish Signals (Alerts)**")
     st.markdown("""
     - **MACD Peaking** - MACD stopped rising, exhaustion detected
     - **MACD Bearish Crossover** - MACD crossed below Signal line
-    - **ADX Peaking** - Trend strength peaking, momentum slowing
-    - **ADX Reversing** - Trend strength falling, trend breaking
     - **RSI Peaking** - RSI in top 10%, overbought
+
+    **ADX Signals (Uptrend + Turning Point):**
+    - **ADX End (Bottoming) after rally** - Low ADX turning after uptrend
+    - **ADX End (Peaking) after rally** - High ADX peaking after uptrend
+    - **ADX Reversing after rally** - ADX direction change after uptrend
     """)
 
 st.markdown("---")

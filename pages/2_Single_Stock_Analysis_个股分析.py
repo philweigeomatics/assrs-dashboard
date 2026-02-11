@@ -12,6 +12,9 @@ import ta
 import data_manager
 from datetime import date
 from scipy import stats
+from scipy.signal import find_peaks
+from streamlit_plotly_events import plotly_events
+
 from analysis_engine import run_single_stock_analysis
 
 # ==================== SIGNAL DEFINITIONS ( should be the same as Todays Alerts ) ====================
@@ -68,6 +71,7 @@ except ImportError:
 def load_single_stock(ticker, cache_date):
     """Load stock data LIVE from Tushare API (qfq adjusted, no database)."""
     return data_manager.get_single_stock_data_live(ticker, lookback_years=3)
+
 
 
 def backtest_signal_expectancy(analysis_df, buy_signal_type, sell_signal_type):
@@ -1025,6 +1029,29 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
         marker=dict(size=3, color='rgba(100,116,139,0.6)'),
         showlegend=True
     ), row=5, col=1)
+
+        # Add +DI line (green)
+    if 'DI_Plus' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=df['DI_Plus'],
+            name='+DI',
+            line=dict(color='green', width=1.5)
+        ), row=5, col=1)
+
+    # Add -DI line (red)
+    if 'DI_Minus' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=df['DI_Minus'],
+            name='-DI',
+            line=dict(color='red', width=1.5)
+        ), row=5, col=1)
+
+    # Add threshold line at 25
+    fig.add_hline(y=25, line_dash="dot", line_color="gray", 
+                annotation_text="Trend Threshold (25)", row=5, col=1)
+    
 
     # ADX LOWESS (smooth)
     if 'ADX_LOWESS' in df.columns:
@@ -2835,8 +2862,6 @@ if st.session_state.active_ticker:
                 # Display chart
                 fig_stock = create_single_stock_chart_analysis(analysis_df, fundamentals_df=fundamentals_df, blocks=blocks)
                 st.plotly_chart(fig_stock, use_container_width=True)
-            
-
 
 
             st.markdown("---")
