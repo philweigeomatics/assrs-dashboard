@@ -334,13 +334,346 @@ else:
     st.dataframe(styled, hide_index=True, use_container_width=True, height=600)
     st.caption("🟢 Green: <50% (Most stocks below MA20 = opportunity). 🔴 Red: >50% (Most stocks above MA20 = extended).")
 
-# # Sector Deep Dive
-# st.markdown("---")
-# st.subheader("🔍 Sector Deep Dive")
+# ============================================================================
+# SECTOR ROTATION DETECTION MODULE (DAILY + ADJUSTABLE ROLLING WINDOW)
+# Add this at the bottom of your sector_dashboard.py
+# ============================================================================
 
-# sector = st.selectbox("Select Sector", sorted(v2hist['Sector'].unique()))
+st.markdown("---")
+st.subheader("🔄 Sector Rotation Detection")
 
-# if sector:
-#     data = v2hist[v2hist['Sector'] == sector]
-#     fig = create_sector_chart(data)
-#     st.plotly_chart(fig, use_container_width=True)
+# Define rotation pairs
+ROTATION_PAIRS = {
+    'Cyclical vs Defensive': {
+        'cyclical': '399395.SZ',  # 国证消费 CNI Consumer
+        'defensive': '399396.SZ',  # 国证食品 CNI Food & Beverage
+        'cyclical_name': '消费',
+        'defensive_name': '食品饮料'
+    },
+    'Tech vs Utilities': {
+        'cyclical': '399932.SZ',  # 中证信息 CSI Info Tech
+        'defensive': '000991.SH',  # 全指公用 CSI Utilities
+        'cyclical_name': '信息技术',
+        'defensive_name': '公用事业'
+    },
+    'Financial vs Industrial': {
+        'cyclical': '399975.SZ',  # 证券公司 CSI Securities
+        'defensive': '000993.SH',  # 全指工业 CSI Industrials
+        'cyclical_name': '证券',
+        'defensive_name': '工业'
+    },
+    'Healthcare vs Energy': {
+        'cyclical': '399989.SZ',  # 中证医疗 CSI Healthcare
+        'defensive': '000992.SH',  # 全指能源 CSI Energy
+        'cyclical_name': '医疗',
+        'defensive_name': '能源'
+    }
+}
+
+# ============================================================================
+# ADJUSTABLE ROLLING WINDOW SELECTOR
+# ============================================================================
+col_select1, col_select2 = st.columns([1, 3])
+
+with col_select1:
+    rolling_window = st.selectbox(
+        "Rolling Window (Days):",
+        options=[5, 10, 15, 30],
+        index=1,  # Default to 10 days
+        key="rotation_rolling_window"
+    )
+
+with col_select2:
+    st.caption(f"Using {rolling_window}-day rolling correlation to measure sector rotation dynamics")
+
+def calculate_rotation_metrics_daily(ts_code1, ts_code2, rolling_days=10, lookback_days=400):
+    """
+    Calculate rotation metrics between two indices using DAILY data
+    Returns: correlation, ratio_change, status, correlation_history
+    """
+    import tushare as ts
+    from datetime import datetime, timedelta
+
+    try:
+        pro = ts.pro_api()
+
+        # Get daily data for both indices (1+ year)
+        end_date = datetime.now().strftime('%Y%m%d')
+        start_date = (datetime.now() - timedelta(days=lookback_days)).strftime('%Y%m%d')
+
+        df1 = pro.index_daily(ts_code=ts_code1, start_date=start_date, end_date=end_date)
+        df2 = pro.index_daily(ts_code=ts_code2, start_date=start_date, end_date=end_date)
+
+        if df1 is None or df2 is None or df1.empty or df2.empty:
+            return None, None, "数据不足", None
+
+        # Sort by date and calculate returns
+        df1 = df1.sort_values('trade_date')
+        df2 = df2.sort_values('trade_date')
+
+        df1['returns'] = df1['close'].pct_change()
+        df2['returns'] = df2['close'].pct_change()
+
+        # Merge data
+        merged = pd.merge(df1[['trade_date', 'returns', 'close']], 
+                         df2[['trade_date', 'returns', 'close']], 
+                         on='trade_date', 
+                         suffixes=('_1', '_2'))
+
+        if len(merged) < rolling_days:
+            return None, None, "数据不足", None
+
+        # Calculate rolling correlation
+        merged['correlation'] = merged['returns_1'].rolling(window=rolling_days).corr(merged['returns_2'])
+
+        # Get latest correlation
+        correlation = merged['returns_1'].tail(rolling_days).corr(merged['returns_2'].tail(rolling_days))
+
+        # Get correlation history for chart (last 252 days ~ 1 year of trading days)
+        correlation_history = merged[['trade_date', 'correlation']].tail(252).copy()
+
+        # Calculate relative strength ratio change (last 60 days)
+        ratio_start = merged['close_1'].iloc[-60] / merged['close_2'].iloc[-60] if len(merged) >= 60 else merged['close_1'].iloc[0] / merged['close_2'].iloc[0]
+        ratio_end = merged['close_1'].iloc[-1] / merged['close_2'].iloc[-1]
+        ratio_change = ((ratio_end - ratio_start) / ratio_start) * 100
+
+        # Determine rotation status
+        if correlation < 0.3:
+            status = "🔴 高度轮动"
+        elif correlation < 0.5:
+            status = "🟡 中度轮动"
+        elif correlation < 0.7:
+            status = "🟢 低度轮动"
+        else:
+            status = "⚪ 同步移动"
+
+        return correlation, ratio_change, status, correlation_history
+
+    except Exception as e:
+        return None, None, f"错误: {str(e)}", None
+
+
+# Calculate metrics for all pairs
+rotation_results = []
+correlation_histories = {}
+
+with st.spinner(f"计算板块轮动指标（{rolling_window}日滚动相关系数）..."):
+    for pair_name, pair_info in ROTATION_PAIRS.items():
+        correlation, ratio_change, status, corr_history = calculate_rotation_metrics_daily(
+            pair_info['cyclical'],
+            pair_info['defensive'],
+            rolling_days=rolling_window,
+            lookback_days=400  # Get ~1+ year of data
+        )
+
+        # Store correlation history for chart
+        if corr_history is not None:
+            correlation_histories[pair_name] = corr_history
+
+        # Determine which is leading
+        if ratio_change is not None:
+            if ratio_change > 5:
+                leader = f"➡️ {pair_info['cyclical_name']} 强"
+            elif ratio_change < -5:
+                leader = f"⬅️ {pair_info['defensive_name']} 强"
+            else:
+                leader = "⚖️ 均衡"
+        else:
+            leader = "N/A"
+
+        rotation_results.append({
+            '板块对': pair_name,
+            '周期/防御': f"{pair_info['cyclical_name']} vs {pair_info['defensive_name']}",
+            '相关系数': f"{correlation:.2f}" if correlation is not None else "N/A",
+            '轮动状态': status,
+            '相对强度': f"{ratio_change:+.1f}%" if ratio_change is not None else "N/A",
+            '领先板块': leader
+        })
+
+# Display results table
+rotation_df = pd.DataFrame(rotation_results)
+
+# Style the table
+def style_rotation_status(val):
+    if "高度轮动" in val:
+        return "color: #b91c1c; background-color: #fee2e2; font-weight: 600"
+    elif "中度轮动" in val:
+        return "color: #d97706; background-color: #fef3c7; font-weight: 600"
+    elif "低度轮动" in val:
+        return "color: #15803d; background-color: #dcfce7; font-weight: 600"
+    elif "同步移动" in val:
+        return "color: #6b7280; background-color: #f3f4f6; font-weight: 600"
+    return ""
+
+def style_correlation(val):
+    if val == "N/A":
+        return ""
+    try:
+        corr = float(val)
+        if corr < 0.3:
+            return "color: #b91c1c; font-weight: 600"
+        elif corr < 0.5:
+            return "color: #d97706; font-weight: 600"
+        elif corr < 0.7:
+            return "color: #15803d; font-weight: 600"
+        else:
+            return "color: #6b7280; font-weight: 600"
+    except:
+        return ""
+
+styled_rotation = rotation_df.style.map(style_rotation_status, subset=['轮动状态']).map(style_correlation, subset=['相关系数'])
+
+st.dataframe(styled_rotation, hide_index=True, use_container_width=True, height=220)
+
+# ============================================================================
+# CORRELATION CHART VISUALIZATION (4 pairs, 1 year of data)
+# ============================================================================
+
+if correlation_histories:
+    st.markdown("---")
+    st.subheader(f"📈 Correlation Trends ({rolling_window}-Day Rolling - Last Year)")
+
+    # Create plotly figure with 4 subplots (2x2 grid)
+    from plotly.subplots import make_subplots
+    import plotly.graph_objects as go
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=list(correlation_histories.keys()),
+        vertical_spacing=0.12,
+        horizontal_spacing=0.1
+    )
+
+    # Color mapping for correlation levels
+    def get_color(corr_val):
+        if pd.isna(corr_val):
+            return '#9ca3af'
+        if corr_val < 0.3:
+            return '#ef4444'  # Red - High rotation
+        elif corr_val < 0.5:
+            return '#f59e0b'  # Orange - Medium rotation
+        elif corr_val < 0.7:
+            return '#10b981'  # Green - Low rotation
+        else:
+            return '#6b7280'  # Gray - Moving together
+
+    # Plot each pair
+    positions = [(1, 1), (1, 2), (2, 1), (2, 2)]
+
+    for idx, (pair_name, corr_history) in enumerate(correlation_histories.items()):
+        row, col = positions[idx]
+
+        # Prepare data - show data every ~5 days to avoid overcrowding
+        total_points = len(corr_history)
+        step = max(1, total_points // 50)  # Show ~50 bars max
+
+        sampled_history = corr_history.iloc[::step].copy()
+
+        dates = pd.to_datetime(sampled_history['trade_date']).dt.strftime('%Y-%m-%d').tolist()
+        correlations = sampled_history['correlation'].tolist()
+
+        # Get colors for each bar
+        colors = [get_color(c) for c in correlations]
+
+        # Add bar chart
+        fig.add_trace(
+            go.Bar(
+                x=dates,
+                y=correlations,
+                marker_color=colors,
+                name=pair_name,
+                showlegend=False,
+                hovertemplate='<b>%{x}</b><br>Correlation: %{y:.2f}<extra></extra>'
+            ),
+            row=row, col=col
+        )
+
+        # Add horizontal reference lines
+        fig.add_hline(y=0.3, line_dash="dash", line_color="red", line_width=1, 
+                     opacity=0.3, row=row, col=col)
+        fig.add_hline(y=0.5, line_dash="dash", line_color="orange", line_width=1, 
+                     opacity=0.3, row=row, col=col)
+        fig.add_hline(y=0.7, line_dash="dash", line_color="green", line_width=1, 
+                     opacity=0.3, row=row, col=col)
+
+        # Update y-axis range
+        fig.update_yaxes(range=[-0.2, 1.0], row=row, col=col)
+
+    # Update layout
+    fig.update_layout(
+        height=600,
+        template='plotly_white',
+        showlegend=False,
+        margin=dict(l=20, r=20, t=60, b=20)
+    )
+
+    # Rotate x-axis labels and reduce font size
+    fig.update_xaxes(tickangle=-45, tickfont=dict(size=8))
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Legend
+    st.markdown(f"""
+    **📊 Correlation Levels ({rolling_window}-day rolling):**
+    🔴 < 0.3 = High Rotation | 🟡 0.3-0.5 = Medium Rotation | 🟢 0.5-0.7 = Low Rotation | ⚪ > 0.7 = Moving Together
+    """)
+
+# ============================================================================
+# MARKET CONCLUSION
+# ============================================================================
+
+# Calculate overall rotation intensity
+correlations = [float(r['相关系数']) for r in rotation_results if r['相关系数'] != "N/A"]
+if correlations:
+    avg_correlation = sum(correlations) / len(correlations)
+    high_rotation_count = sum(1 for c in correlations if c < 0.3)
+
+    st.markdown("---")
+
+    if avg_correlation < 0.4:
+        market_status = "🔴 **市场处于高轮动期**"
+        interpretation = "各板块走势分化明显，建议精选优势板块，避免弱势板块。"
+    elif avg_correlation < 0.6:
+        market_status = "🟡 **市场处于中度轮动期**"
+        interpretation = "板块有一定分化，存在轮动机会，可考虑配置多个板块。"
+    else:
+        market_status = "🟢 **市场同步移动**"
+        interpretation = "各板块走势趋同，市场趋势明确，建议跟随大盘方向。"
+
+    st.markdown(f"### {market_status}")
+    st.info(f"📊 **平均相关系数**: {avg_correlation:.2f} | **高轮动对数**: {high_rotation_count}/4\n\n{interpretation}")
+
+    # Additional insights
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("**💡 轮动状态说明**")
+        st.markdown("""
+        - 🔴 **高度轮动** (相关系数 < 0.3): 板块严重分化
+        - 🟡 **中度轮动** (0.3-0.5): 板块有所分化
+        - 🟢 **低度轮动** (0.5-0.7): 板块轻微分化
+        - ⚪ **同步移动** (> 0.7): 板块走势一致
+        """)
+
+    with col2:
+        st.markdown("**🎯 投资建议**")
+        if avg_correlation < 0.4:
+            st.markdown("""
+            - ✅ 精选领先板块，集中投资
+            - ✅ 避免落后板块
+            - ✅ 灵活调仓，跟随轮动节奏
+            """)
+        elif avg_correlation < 0.6:
+            st.markdown("""
+            - ✅ 均衡配置多个板块
+            - ✅ 关注轮动机会
+            - ✅ 适度分散风险
+            """)
+        else:
+            st.markdown("""
+            - ✅ 跟随市场整体方向
+            - ✅ 配置指数型基金
+            - ✅ 减少频繁调仓
+            """)
+
+st.caption(f"📅 数据基于过去一年日度数据 | 相关系数基于{rolling_window}日滚动计算 | 相对强度基于近60日变化")
