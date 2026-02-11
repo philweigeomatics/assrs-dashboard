@@ -5,6 +5,7 @@ plotly
 ta
 tushare
 scipy
+matplotlib
 statsmodels
 altair==4.2.2
 pytz
