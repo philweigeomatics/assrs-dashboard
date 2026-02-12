@@ -1418,3 +1418,219 @@ def get_scan_metadata(scan_date):
         }
     except:
         return None
+    
+
+# ==================== WATCHLIST MANAGEMENT ====================
+
+def create_watchlist_table():
+    """Creates watchlist table."""
+    if db_config.USE_SQLITE:
+        # SQLite - create table directly
+        schema = """CREATE TABLE IF NOT EXISTS watchlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL UNIQUE,
+            stock_name TEXT,
+            added_date TEXT NOT NULL
+        )"""
+        return db.create_table_sqlite(schema)
+    else:
+        # Supabase - table must be created in dashboard first
+        # Check if table exists
+        if not db.table_exists('watchlist'):
+            print("⚠️ Watchlist table must be created in Supabase dashboard")
+            print("Run this SQL in Supabase SQL Editor:")
+            print("""
+            CREATE TABLE watchlist (
+                id BIGSERIAL PRIMARY KEY,
+                ticker TEXT NOT NULL UNIQUE,
+                stock_name TEXT,
+                added_date TEXT NOT NULL
+            );
+            """)
+            return False
+        return True
+
+
+def add_to_watchlist(ticker, stock_name=None):
+    """Add a stock to the watchlist. Validates ticker exists in Tushare first."""
+    try:
+        # Check if already exists in watchlist
+        existing = db.read_table('watchlist', filters={'ticker': ticker})
+        if not existing.empty:
+            existing_name = existing.iloc[0]['stock_name']
+            return False, f"⚠️ {ticker} ({existing_name}) already in watchlist"
+        
+        # Get stock name if not provided - this also validates ticker exists
+        if not stock_name:
+            # First try from stock_basic table
+            stock_name = get_stock_name_from_db(ticker)
+            
+            # If not in stock_basic, try fetching from API (validates existence)
+            if not stock_name:
+                stock_name = get_company_name_from_api(ticker)
+            
+            # If still no name, ticker doesn't exist
+            if not stock_name:
+                return False, f"❌ Stock {ticker} not found. Please verify the ticker code."
+        
+        # Validate ticker actually has data by trying to fetch 1 day
+        try:
+            test_df = get_single_stock_data_live(ticker, lookback_years=0.01)  # ~3 days
+            if test_df is None or test_df.empty:
+                return False, f"❌ Stock {ticker} has no trading data. Please verify the ticker code."
+        except Exception as e:
+            return False, f"❌ Failed to validate {ticker}: Ticker may not exist or is delisted"
+        
+        # Get current date in Beijing time
+        from zoneinfo import ZoneInfo
+        CHINA_TZ = ZoneInfo("Asia/Shanghai")
+        added_date = datetime.now(CHINA_TZ).strftime('%Y-%m-%d')
+        
+        # Prepare record
+        record = {
+            'ticker': ticker,
+            'stock_name': stock_name,
+            'added_date': added_date
+        }
+        
+        # Insert new record
+        db.insert_records('watchlist', [record], upsert=False)
+        return True, f"✅ Added {ticker} ({stock_name}) to watchlist"
+    
+    except Exception as e:
+        error_msg = str(e)
+        if 'UNIQUE constraint failed' in error_msg or 'duplicate key' in error_msg.lower():
+            return False, f"⚠️ {ticker} already in watchlist"
+        return False, f"❌ Error: {error_msg}"
+
+
+
+
+def remove_from_watchlist(ticker):
+    """Remove a stock from the watchlist."""
+    try:
+        # Check if exists first
+        existing = db.read_table('watchlist', filters={'ticker': ticker})
+        if existing.empty:
+            return False, f"⚠️ {ticker} not found in watchlist"
+        
+        # Delete
+        db.delete_records('watchlist', {'ticker': ticker})
+        return True, f"✅ Removed {ticker} from watchlist"
+    
+    except Exception as e:
+        return False, f"❌ Error: {str(e)}"
+
+
+def get_watchlist():
+    """Get all stocks in the watchlist."""
+    try:
+        df = db.read_table('watchlist', 
+                          columns='ticker,stock_name,added_date',
+                          order_by='-added_date')
+        
+        if df.empty:
+            return []
+        
+        return df.to_dict('records')
+    
+    except Exception as e:
+        print(f"Error fetching watchlist: {e}")
+        return []
+
+
+def get_watchlist_tickers():
+    """Get just the ticker symbols from watchlist (for scanning)."""
+    try:
+        df = db.read_table('watchlist', 
+                          columns='ticker',
+                          order_by='ticker')
+        
+        if df.empty:
+            return []
+        
+        return df['ticker'].tolist()
+    
+    except Exception as e:
+        print(f"Error fetching watchlist tickers: {e}")
+        return []
+
+
+def update_watchlist_notes(ticker, notes):
+    """Update notes for a stock in the watchlist."""
+    try:
+        # Check if exists
+        existing = db.read_table('watchlist', filters={'ticker': ticker})
+        if existing.empty:
+            return False, f"⚠️ {ticker} not found in watchlist"
+        
+        # For SQLite, we need to use raw SQL for UPDATE
+        if db_config.USE_SQLITE:
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('UPDATE watchlist SET notes = ? WHERE ticker = ?', (notes, ticker))
+            conn.commit()
+            conn.close()
+        else:
+            # For Supabase, use update
+            from db_manager import supabase_client
+            supabase_client.table('watchlist').update({'notes': notes}).eq('ticker', ticker).execute()
+        
+        return True, f"✅ Updated notes for {ticker}"
+    
+    except Exception as e:
+        return False, f"❌ Error: {str(e)}"
+
+
+def is_in_watchlist(ticker):
+    """Check if a ticker is in the watchlist."""
+    try:
+        df = db.read_table('watchlist', filters={'ticker': ticker}, limit=1)
+        return not df.empty
+    except:
+        return False
+
+
+def bulk_add_to_watchlist(tickers_list):
+    """
+    Add multiple stocks to watchlist at once.
+    Retrieves stock names from stock_basic table.
+    
+    Args:
+        tickers_list: List of ticker strings (6-digit codes)
+        notes_prefix: Prefix for notes field
+        
+    Returns:
+        (success_count, failed_count, messages)
+    """
+    success_count = 0
+    failed_count = 0
+    messages = []
+    
+    for ticker in tickers_list:
+        # Get stock name from stock_basic table
+        stock_name = get_stock_name_from_db(ticker)
+        
+        if not stock_name:
+            # If not found in stock_basic, try to fetch from API
+            stock_name = get_company_name_from_api(ticker)
+            if not stock_name:
+                stock_name = ticker  # Fallback to ticker
+        
+        # Add to watchlist with retrieved name
+        success, msg = add_to_watchlist(
+            ticker, 
+            stock_name=stock_name
+        )
+        
+        if success:
+            success_count += 1
+            print(f"✅ {ticker} ({stock_name})")
+        else:
+            failed_count += 1
+            print(f"❌ {ticker}: {msg}")
+            messages.append(msg)
+    
+    return success_count, failed_count, messages
+
+
