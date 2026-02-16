@@ -2889,6 +2889,7 @@ if st.session_state.active_ticker:
                 vol_10d_avg_millions = vol_10d_avg / 1e6  # Convert to millions
                 vol_min = max(0.01, vol_10d_avg_millions * 0.1)  # Min: 10% of avg, or 0.01M
                 vol_max = vol_10d_avg_millions * 10  # Max: 10x average
+                vol_step = max(0.001, vol_10d_avg_millions * 0.05)  # Step: 5% of avg, floor at 0.001M
 
                 # Input section
                 col_input1, col_input2 = st.columns(2)
@@ -2916,8 +2917,8 @@ if st.session_state.active_ticker:
                         min_value=vol_min,
                         max_value=vol_max,
                         value=vol_10d_avg / 1e6,
-                        step=0.5,
-                        format="%.1f",
+                        step=vol_step,
+                        format="%.3f",
                         help="以百万为单位",
                         key="frag_sim_volume",
                         label_visibility="collapsed"
