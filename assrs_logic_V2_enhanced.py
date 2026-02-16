@@ -115,11 +115,11 @@ def get_adaptive_thresholds(recent_scores, lookback=60):
     }
 
 
-def assign_sector_action(sector_score, market_regime_info, is_market_proxy=False):
+def assign_sector_action(sector_score, market_regime_info, is_benchmark=False):
     """
     Assign action label based on sector score AND market context.
     """
-    if is_market_proxy:
+    if is_benchmark:
         return 'BENCHMARK', 0.0
     
     market_regime = market_regime_info['regime']
@@ -166,225 +166,281 @@ def assign_sector_action(sector_score, market_regime_info, is_market_proxy=False
             return '⚪ CASH / SHORT', 0.0
 
 
-# --- 3. MAIN SCORING FUNCTION (ENHANCED V2.5) ---
-
-def calculate_regime_scores(all_sector_ppi_data, as_of_date, historical_scores=None):
+def _score_single_series(df, as_of_date, sector_name, fit_lookback=FIT_LOOKBACK_DAYS):
     """
-    Enhanced V2.5: Calculates regime scores with:
-    - Market context awareness (MARKET_PROXY as reference)
-    - Volume confirmation adjustment
-    - Momentum adjustment
-    - Adaptive thresholds
-    - Cross-sector validation
-    
+    Internal helper to score a single time series (PPI or CSI300).
+
     Args:
-        all_sector_ppi_data: Dict of {sector: DataFrame}
+        df: DataFrame with OHLCV data (index = DatetimeIndex)
+        as_of_date: Date to score
+        sector_name: Name for logging
+        fit_lookback: Number of days to use for model fitting
+
+    Returns:
+        dict with score and metadata, or None if failed
+    """
+    # Filter data up to as_of_date
+    df_filtered = df.loc[df.index <= as_of_date].copy()
+
+    if len(df_filtered) < fit_lookback:
+        return None
+
+    # Calculate returns
+    df_filtered['returns'] = df_filtered['Close'].pct_change()
+    df_filtered['returns'] = df_filtered['returns'].replace(0.0, 0.000001)
+
+    # Prepare volume metric
+    if 'Volume_Metric' not in df_filtered.columns:
+        if 'Volume' in df_filtered.columns:
+            # Create volume metric from raw volume
+            df_filtered['Volume_Metric'] = (
+                df_filtered['Volume'] / df_filtered['Volume'].rolling(window=100).mean()
+            )
+        else:
+            # No volume available, use constant
+            df_filtered['Volume_Metric'] = 1.0
+
+    # Prepare model data
+    model_data = df_filtered[['returns', 'Volume_Metric']].iloc[-fit_lookback:].dropna()
+
+    if len(model_data) < (fit_lookback * 0.8):
+        return None
+
+    # Try to fit Markov model
+    res = None
+    fit_type = "Full (Ret+Vol+Var)"
+
+    try:
+        mod = sm.tsa.MarkovRegression(
+            endog=model_data['returns'],
+            k_regimes=K_REGIMES,
+            trend='c',
+            exog=model_data['Volume_Metric'],
+            switching_variance=True
+        )
+        res = _fit_model(mod)
+    except Exception as e1:
+        # Fallback: without volume
+        try:
+            fit_type = "Fallback (Ret+Var)"
+            mod_v21 = sm.tsa.MarkovRegression(
+                endog=model_data['returns'],
+                k_regimes=K_REGIMES,
+                trend='c',
+                switching_variance=True
+            )
+            res = _fit_model(mod_v21)
+        except Exception as e2:
+            return None
+
+    if res is None:
+        return None
+
+    # Identify bull regime
+    try:
+        bull_regime = 0 if res.params['const[0]'] > res.params['const[1]'] else 1
+        bear_regime = 1 - bull_regime
+    except (KeyError, ValueError, np.linalg.LinAlgError):
+        return None
+
+    # Extract bull probability
+    try:
+        bull_regime_probability = res.smoothed_marginal_probabilities[bull_regime].iloc[-1]
+    except Exception:
+        return None
+
+    # --- ENHANCEMENT 1: MOMENTUM ADJUSTMENT ---
+    total_score = bull_regime_probability
+
+    try:
+        recent_probs = res.smoothed_marginal_probabilities[bull_regime].iloc[-5:]
+        if len(recent_probs) >= 5:
+            prob_momentum = (recent_probs.iloc[-1] - recent_probs.iloc[0]) / 5
+            momentum_adj = np.clip(prob_momentum * 2, -0.10, 0.10)
+            total_score = total_score + momentum_adj
+    except:
+        pass  # Fallback to raw probability
+
+    # --- ENHANCEMENT 2: VOLUME CONFIRMATION ---
+    latest_volume_z = model_data['Volume_Metric'].iloc[-1]
+
+    # Penalize bull signals with declining volume (distribution)
+    if total_score > 0.7 and latest_volume_z < -0.5:
+        volume_penalty = min(0.15, abs(latest_volume_z) * 0.05)
+        total_score = total_score - volume_penalty
+
+    # Boost bull signals with surging volume (accumulation)
+    elif total_score > 0.7 and latest_volume_z > 2.0:
+        volume_boost = min(0.10, (latest_volume_z - 2) * 0.03)
+        total_score = total_score + volume_boost
+
+    # Ensure score stays in valid range
+    total_score = np.clip(total_score, 0, 1)
+
+    # Get latest OHLCV
+    last = df_filtered.iloc[-1]
+
+    return {
+        'Sector': sector_name,
+        'Date': as_of_date.strftime('%Y-%m-%d'),
+        'TOTAL_SCORE': total_score,
+        'Bull_Prob_Raw': bull_regime_probability,
+        'Volume_Z': latest_volume_z,
+        'Open': last.get('Open', np.nan),
+        'High': last.get('High', np.nan),
+        'Low': last.get('Low', np.nan),
+        'Close': last['Close'],
+        'Volume_Metric': last.get('Volume_Metric', 1.0),
+        'Fit_Type': fit_type
+    }
+
+# --- 3. MAIN SCORING FUNCTION (ENHANCED V3 WITH CSI300 SUPPORT) ---
+def calculate_regime_scores(all_sector_ppi_data, as_of_date, 
+                           historical_scores=None,
+                           market_index_df=None):
+    """
+    Enhanced V3: Calculates regime scores with CSI300 market benchmark.
+
+    Key improvements:
+    - Uses real CSI300 index for market regime (not synthetic MARKET_PROXY)
+    - CSI300 and PPIs both use returns (unit-agnostic)
+    - Fallback to sector median if CSI300 unavailable
+
+    Args:
+        all_sector_ppi_data: Dict of {sector: DataFrame} with PPI data
         as_of_date: datetime for point-in-time scoring
         historical_scores: Optional DataFrame with past scores for adaptive thresholds
-    
+        market_index_df: Optional CSI300 DataFrame (DatetimeIndex, OHLCV columns)
+
     Returns:
         DataFrame with scores + market context metadata
     """
-    
     sector_list = list(all_sector_ppi_data.keys())
     scorecard = []
     fit_errors = []
-    
-    # --- PHASE 1: Score All Sectors (Including MARKET_PROXY) ---
-    
+
+    # --- PHASE 1: Score All Sectors (PPI-based) ---
+    print(f"\n=== Scoring {len(sector_list)} sectors for {as_of_date.strftime('%Y-%m-%d')} ===")
+
     for sector, full_df in all_sector_ppi_data.items():
-        
-        df = full_df.loc[full_df.index <= as_of_date].copy()
+        result = _score_single_series(full_df, as_of_date, sector)
 
-        if len(df) < FIT_LOOKBACK_DAYS:
-            fit_errors.append((sector, 'Insufficient history'))
-            continue
-            
-        df['returns'] = df['Close'].pct_change()
-        df['returns'] = df['returns'].replace(0.0, 0.000001)
-        
-        model_data = df[['returns', 'Volume_Metric']].iloc[-FIT_LOOKBACK_DAYS:].dropna()
+        if result is not None:
+            scorecard.append(result)
+        else:
+            fit_errors.append((sector, 'Scoring failed'))
 
-        if len(model_data) < (FIT_LOOKBACK_DAYS * 0.8):
-            fit_errors.append((sector, 'Too many NaN rows'))
-            continue
-        
-        res = None
-        fit_type = "Full (Ret+Vol+Var)"
-        
-        try:
-            mod = sm.tsa.MarkovRegression(
-                endog=model_data['returns'], 
-                k_regimes=K_REGIMES, 
-                trend='c', 
-                exog=model_data['Volume_Metric'], 
-                switching_variance=True
-            )
-            res = _fit_model(mod)
-            
-        except Exception as e1:
-            try:
-                fit_type = "Fallback (Ret+Var)"
-                mod_v21 = sm.tsa.MarkovRegression(
-                    endog=model_data['returns'], 
-                    k_regimes=K_REGIMES, 
-                    trend='c', 
-                    switching_variance=True
-                )
-                res = _fit_model(mod_v21)
-            except Exception as e2:
-                fit_errors.append((sector, f'Model fit failed: {str(e2)[:50]}'))
-                continue
-
-        if res is None:
-            fit_errors.append((sector, 'Model returned None'))
-            continue
-
-        try:
-            bull_regime = 0 if res.params['const[0]'] > res.params['const[1]'] else 1
-            bear_regime = 1 - bull_regime
-        except (KeyError, ValueError, np.linalg.LinAlgError) as e:
-            fit_errors.append((sector, f'Regime detection failed: {str(e)[:30]}'))
-            continue
-
-        try:
-            bull_regime_probability = res.smoothed_marginal_probabilities[bull_regime].iloc[-1]
-        except Exception as e:
-            fit_errors.append((sector, f'Probability extraction failed: {str(e)[:30]}'))
-            continue
-        
-        # --- ENHANCEMENT 1: MOMENTUM ADJUSTMENT ---
-        total_score = bull_regime_probability
-        try:
-            recent_probs = res.smoothed_marginal_probabilities[bull_regime].iloc[-5:]
-            if len(recent_probs) >= 5:
-                prob_momentum = (recent_probs.iloc[-1] - recent_probs.iloc[0]) / 5
-                momentum_adj = np.clip(prob_momentum * 2, -0.10, 0.10)
-                total_score = total_score + momentum_adj
-        except:
-            pass  # Fallback to raw probability
-        
-        # --- ENHANCEMENT 2: VOLUME CONFIRMATION ---
-        latest_volume_z = model_data['Volume_Metric'].iloc[-1]
-        
-        # Penalize bull signals with declining volume (distribution)
-        if total_score > 0.7 and latest_volume_z < -0.5:
-            volume_penalty = min(0.15, abs(latest_volume_z) * 0.05)
-            total_score = total_score - volume_penalty
-        
-        # Boost bull signals with surging volume (accumulation)
-        elif total_score > 0.7 and latest_volume_z > 2.0:
-            volume_boost = min(0.10, (latest_volume_z - 2) * 0.03)
-            total_score = total_score + volume_boost
-        
-        # Ensure score stays in valid range
-        total_score = np.clip(total_score, 0, 1)
-        
-        # Store results (no ACTION yet, will be assigned in Phase 2)
-        last = df.iloc[-1]
-        scorecard.append({
-            'Sector': sector,
-            'Date': as_of_date.strftime('%Y-%m-%d'),
-            'TOTAL_SCORE': total_score,  # Float, not string!
-            'Bull_Prob_Raw': bull_regime_probability,
-            'Volume_Z': latest_volume_z,
-            'Open': last['Open'],
-            'High': last['High'],
-            'Low': last['Low'],
-            'Close': last['Close'],
-            'Volume_Metric': last['Volume_Metric'],
-            'Fit_Type': fit_type
-        })
-
-    # Convert to DataFrame for Phase 2
+    # Convert to DataFrame
     df_scores = pd.DataFrame(scorecard)
-    
+
     if df_scores.empty:
-        print("WARNING: All sectors failed to score!")
+        print("⚠️  WARNING: All sectors failed to score!")
         if fit_errors:
             print("Fit errors:")
-            for sector, error in fit_errors[:5]:  # Show first 5
+            for sector, error in fit_errors[:5]:
                 print(f"  {sector}: {error}")
         return pd.DataFrame()
-    
-    # --- PHASE 2: Extract Market Regime ---
-    
-    market_row = df_scores[df_scores['Sector'] == 'MARKET_PROXY']
-    if not market_row.empty:
-        market_score = float(market_row.iloc[0]['TOTAL_SCORE'])
-        market_regime_info = classify_market_regime(market_score)
-    else:
-        # Fallback: use median of all sectors
+
+    # --- PHASE 2: Calculate Market Score (CSI300 or Fallback) ---
+    market_score = None
+    market_source = None
+
+    # Try CSI300 first
+    if market_index_df is not None and not market_index_df.empty:
+        print("📊 Calculating market regime from CSI300 index...")
+
+        result = _score_single_series(market_index_df, as_of_date, 'CSI300')
+
+        if result is not None:
+            market_score = result['TOTAL_SCORE']
+            market_source = 'CSI300'
+            print(f"✓ Market score from CSI300: {market_score:.3f}")
+        else:
+            print("⚠️  CSI300 scoring failed, using fallback...")
+
+    # Fallback: use median of sector scores
+    if market_score is None:
         market_score = df_scores['TOTAL_SCORE'].median()
-        market_regime_info = classify_market_regime(market_score)
-        print(f"WARNING: MARKET_PROXY not found, using median score {market_score:.2f}")
-    
+        market_source = 'Sector Median'
+        print(f"✓ Market score from sector median: {market_score:.3f}")
+
+    # Classify market regime
+    market_regime_info = classify_market_regime(market_score)
+
     # --- PHASE 3: Calculate Adaptive Thresholds ---
-    
     if historical_scores is not None and 'TOTAL_SCORE' in historical_scores.columns:
         thresholds = get_adaptive_thresholds(historical_scores['TOTAL_SCORE'])
     else:
         thresholds = {'buy': 0.75, 'sell': 0.25, 'method': 'fallback'}
-    
+
     # --- PHASE 4: Assign Context-Aware Actions ---
-    
     def assign_action_row(row):
-        is_market = (row['Sector'] == 'MARKET_PROXY')
+        # No benchmark sector in this version (CSI300 is external)
         action, sizing = assign_sector_action(
             row['TOTAL_SCORE'],
             market_regime_info,
-            is_market_proxy=is_market
+            is_benchmark=False
         )
         return pd.Series({'ACTION': action, 'Position_Size': sizing})
-    
+
     actions = df_scores.apply(assign_action_row, axis=1)
     df_scores['ACTION'] = actions['ACTION']
     df_scores['Position_Size'] = actions['Position_Size']
-    
+
     # --- PHASE 5: Add Market Context Metadata ---
-    
     df_scores['Market_Score'] = market_score
     df_scores['Market_Regime'] = market_regime_info['label']
+    df_scores['Market_Source'] = market_source  # Track data source
     df_scores['Strategy'] = market_regime_info['strategy']
     df_scores['Threshold_Buy'] = thresholds['buy']
     df_scores['Threshold_Sell'] = thresholds['sell']
-    
+
     # --- PHASE 6: Calculate Excess Probability (Sector Alpha) ---
-    
-    df_scores['Excess_Prob'] = df_scores.apply(
-        lambda row: 0.0 if row['Sector'] == 'MARKET_PROXY' 
-        else row['TOTAL_SCORE'] - market_score,
-        axis=1
-    )
-    
+    df_scores['Excess_Prob'] = df_scores['TOTAL_SCORE'] - market_score
+
     # --- PHASE 7: Cross-Sector Validation Metrics ---
-    
     # Dispersion (rotation intensity)
-    non_market = df_scores[df_scores['Sector'] != 'MARKET_PROXY']['TOTAL_SCORE']
-    dispersion = non_market.std() if len(non_market) > 1 else 0.0
-    
+    dispersion = df_scores['TOTAL_SCORE'].std() if len(df_scores) > 1 else 0.0
+
     if dispersion > 0.35:
         rotation_status = "HIGH ROTATION"
     elif dispersion < 0.20:
         rotation_status = "LOW ROTATION"
     else:
         rotation_status = "MODERATE ROTATION"
-    
+
     df_scores['Rotation_Status'] = rotation_status
     df_scores['Dispersion'] = dispersion
-    
-    # Print summary for debugging
-    print(f"\n=== V2 Scoring Summary ({as_of_date.strftime('%Y-%m-%d')}) ===")
-    print(f"Market Regime: {market_regime_info['label']} (Score: {market_score:.2f})")
-    print(f"Rotation Status: {rotation_status} (Dispersion: {dispersion:.2f})")
-    print(f"Thresholds: BUY>{thresholds['buy']:.2f}, SELL<{thresholds['sell']:.2f} ({thresholds['method']})")
-    print(f"Sectors Scored: {len(df_scores)} | Errors: {len(fit_errors)}")
-    
-    if fit_errors:
-        print("\nFit Errors:")
-        for sector, error in fit_errors[:3]:
+
+    # --- Print Summary ---
+    print(f"\n{'='*60}")
+    print(f"SCORING SUMMARY - {as_of_date.strftime('%Y-%m-%d')}")
+    print(f"{'='*60}")
+    print(f"Market Source:    {market_source}")
+    print(f"Market Regime:    {market_regime_info['label']} (Score: {market_score:.3f})")
+    print(f"Rotation Status:  {rotation_status} (Dispersion: {dispersion:.3f})")
+    print(f"Thresholds:       BUY>{thresholds['buy']:.2f}, SELL<{thresholds['sell']:.2f} ({thresholds['method']})")
+    print(f"Sectors Scored:   {len(df_scores)} | Errors: {len(fit_errors)}")
+
+    if fit_errors and len(fit_errors) <= 3:
+        print(f"\nFit Errors:")
+        for sector, error in fit_errors:
             print(f"  {sector}: {error}")
-    
+
+    # Show top/bottom sectors
+    top3 = df_scores.nlargest(3, 'TOTAL_SCORE')[['Sector', 'TOTAL_SCORE', 'ACTION']]
+    bottom3 = df_scores.nsmallest(3, 'TOTAL_SCORE')[['Sector', 'TOTAL_SCORE', 'ACTION']]
+
+    print(f"\nTop 3 Sectors:")
+    for _, row in top3.iterrows():
+        print(f"  {row['Sector']:20s} {row['TOTAL_SCORE']:.3f}  {row['ACTION']}")
+
+    print(f"\nBottom 3 Sectors:")
+    for _, row in bottom3.iterrows():
+        print(f"  {row['Sector']:20s} {row['TOTAL_SCORE']:.3f}  {row['ACTION']}")
+
+    print(f"{'='*60}\n")
+
     return df_scores
 
 

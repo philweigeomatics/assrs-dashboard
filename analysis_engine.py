@@ -839,6 +839,174 @@ def detect_market_regime(
 
 
 
+def simulate_next_day_indicators(df, price_change_pct, volume):
+    """
+    Simulate what technical indicators would be tomorrow
+    Uses Volume_Scaled_OBV to match chart display
+
+    Args:
+        df: DataFrame with technical indicators (correct column names with underscores)
+        price_change_pct: Tomorrow's price change percentage
+        volume: Tomorrow's volume
+
+    Returns:
+        Dictionary with simulated indicator values
+    """
+    if len(df) < 30:
+        return None
+
+    latest = df.iloc[-1]
+
+    # Calculate tomorrow's price
+    close_today = latest['Close']
+    close_tomorrow = close_today * (1 + price_change_pct / 100)
+
+    # Get current EMA values for MACD calculation
+    ema12_today = df['Close'].ewm(span=12, adjust=False).mean().iloc[-1]
+    ema26_today = df['Close'].ewm(span=26, adjust=False).mean().iloc[-1]
+
+    # Calculate tomorrow's EMAs
+    alpha12 = 2 / (12 + 1)
+    alpha26 = 2 / (26 + 1)
+
+    ema12_tomorrow = alpha12 * close_tomorrow + (1 - alpha12) * ema12_today
+    ema26_tomorrow = alpha26 * close_tomorrow + (1 - alpha26) * ema26_today
+
+    # MACD
+    macd_tomorrow = ema12_tomorrow - ema26_tomorrow
+    macd_signal_today = latest['MACD_Signal']
+    alpha_signal = 2 / (9 + 1)
+    macd_signal_tomorrow = alpha_signal * macd_tomorrow + (1 - alpha_signal) * macd_signal_today
+    macd_hist_tomorrow = macd_tomorrow - macd_signal_tomorrow
+
+    # RSI
+    price_change = close_tomorrow - close_today
+    returns = df['Close'].diff()
+    gains = returns.where(returns > 0, 0)
+    losses = -returns.where(returns < 0, 0)
+
+    avg_gain_today = gains.rolling(14).mean().iloc[-1]
+    avg_loss_today = losses.rolling(14).mean().iloc[-1]
+
+    if price_change > 0:
+        avg_gain_tomorrow = (avg_gain_today * 13 + price_change) / 14
+        avg_loss_tomorrow = (avg_loss_today * 13) / 14
+    else:
+        avg_gain_tomorrow = (avg_gain_today * 13) / 14
+        avg_loss_tomorrow = (avg_loss_today * 13 + abs(price_change)) / 14
+
+    if avg_loss_tomorrow == 0:
+        rsi_tomorrow = 100
+    else:
+        rs = avg_gain_tomorrow / avg_loss_tomorrow
+        rsi_tomorrow = 100 - (100 / (1 + rs))
+
+    # OBV - use Volume_Scaled_OBV to match chart
+    obv_today = latest['OBV']
+    if close_tomorrow > close_today:
+        obv_tomorrow = obv_today + volume
+    elif close_tomorrow < close_today:
+        obv_tomorrow = obv_today - volume
+    else:
+        obv_tomorrow = obv_today
+
+    # Convert to Volume_Scaled_OBV (matches chart display)
+    vol_20d_avg = df['Volume'].rolling(20).mean().iloc[-1]
+    obv_scaled_today = latest.get('Volume_Scaled_OBV', obv_today / vol_20d_avg)
+    obv_scaled_tomorrow = obv_tomorrow / vol_20d_avg
+    obv_scaled_3d_ago = df['Volume_Scaled_OBV'].iloc[-4] if len(df) >= 4 and 'Volume_Scaled_OBV' in df.columns else obv_scaled_today
+
+    # ADX - simplified approximation
+    adx_today = latest['ADX']
+    price_move_magnitude = abs(price_change_pct)
+
+    if price_move_magnitude > 2.0:
+        adx_tomorrow = min(100, adx_today + 1.0)
+    elif price_move_magnitude > 1.0:
+        adx_tomorrow = adx_today + 0.3
+    else:
+        adx_tomorrow = max(0, adx_today - 0.3)
+
+    # Determine ADX pattern (only 4 patterns: Bottoming, Reversing Up, Peaking, Reversing Down)
+    adx_pattern = None
+    adx_slope_today = latest.get('ADX_Slope', 0)
+
+    if adx_tomorrow < 22:
+        adx_pattern = "Bottoming"
+    elif adx_today < 25 and adx_tomorrow >= adx_today and adx_slope_today <= 0:
+        adx_pattern = "Reversing Up"
+    elif adx_tomorrow > 30 and adx_tomorrow < adx_today and adx_slope_today > 0:
+        adx_pattern = "Peaking"
+    elif adx_today > 25 and adx_tomorrow < adx_today and adx_slope_today >= 0:
+        adx_pattern = "Reversing Down"
+
+    # Get thresholds
+    macd_10d_low = df['MACD'].rolling(10).min().iloc[-1]
+    macd_10d_high = df['MACD'].rolling(10).max().iloc[-1]
+    rsi_p10 = df['RSI_14'].rolling(60).quantile(0.10).iloc[-1] if 'RSI_14' in df.columns else 30
+    rsi_p90 = df['RSI_14'].rolling(60).quantile(0.90).iloc[-1] if 'RSI_14' in df.columns else 70
+
+    # Check signals
+    signals = {}
+
+    # MACD signals (directional)
+    macd_stopped_falling = macd_tomorrow >= latest['MACD']
+    macd_in_bottom_zone = macd_10d_low * 0.95 <= macd_tomorrow < 0
+    macd_gap_narrowing = (macd_tomorrow - macd_signal_tomorrow) > (latest['MACD'] - latest['MACD_Signal'])
+    obv_rising = obv_scaled_tomorrow > obv_scaled_3d_ago
+
+    conditions_met = sum([macd_stopped_falling, macd_in_bottom_zone, macd_gap_narrowing, obv_rising])
+    signals['MACD_Bottoming'] = macd_tomorrow < 0 and macd_in_bottom_zone and conditions_met >= 2
+    signals['MACD_Bullish_Cross'] = (latest['MACD'] < latest['MACD_Signal']) and (macd_tomorrow > macd_signal_tomorrow)
+    signals['MACD_Bearish_Cross'] = (latest['MACD'] > latest['MACD_Signal']) and (macd_tomorrow < macd_signal_tomorrow)
+
+    # RSI signals (directional)
+    signals['RSI_Bottoming'] = rsi_tomorrow < 30 and rsi_tomorrow <= rsi_p10
+    signals['RSI_Peaking'] = rsi_tomorrow > 70 and rsi_tomorrow >= rsi_p90
+
+    # ADX pattern (informational, not directional)
+    signals['ADX_Pattern'] = adx_pattern
+
+    return {
+        'input_price_change_pct': price_change_pct,
+        'input_volume': volume,
+        'close_today': close_today,
+        'close_tomorrow': close_tomorrow,
+
+        'macd_today': latest['MACD'],
+        'macd_tomorrow': macd_tomorrow,
+        'macd_signal_today': macd_signal_today,
+        'macd_signal_tomorrow': macd_signal_tomorrow,
+        'macd_hist_today': latest['MACD_Hist'],
+        'macd_hist_tomorrow': macd_hist_tomorrow,
+        'macd_gap_today': latest['MACD'] - latest['MACD_Signal'],
+        'macd_gap_tomorrow': macd_tomorrow - macd_signal_tomorrow,
+        'macd_10d_low': macd_10d_low,
+        'macd_10d_high': macd_10d_high,
+
+        'rsi_today': latest['RSI_14'],
+        'rsi_tomorrow': rsi_tomorrow,
+        'rsi_p10': rsi_p10,
+        'rsi_p90': rsi_p90,
+
+        'adx_today': adx_today,
+        'adx_tomorrow': adx_tomorrow,
+        'adx_pattern': adx_pattern,
+
+        'obv_scaled_today': obv_scaled_today,
+        'obv_scaled_tomorrow': obv_scaled_tomorrow,
+        'obv_scaled_3d_ago': obv_scaled_3d_ago,
+
+        'volume_today': latest['Volume'],
+        'volume_tomorrow': volume,
+        'volume_10d_avg': df['Volume'].rolling(10).mean().iloc[-1],
+        'volume_20d_avg': vol_20d_avg,
+
+        'signals': signals,
+        'conditions_met': conditions_met
+    }
+
+
 # def detect_market_regime(df):
 #     """
 #     Advanced Regime Detection with Noise Filtering.

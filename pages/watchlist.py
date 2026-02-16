@@ -188,7 +188,6 @@ else:
         st.write("")
         st.write("")
         if st.button("🔄 Clear Search", use_container_width=True):
-            st.session_state.search_input = ""
             st.rerun()
     
     # Filter dataframe based on search

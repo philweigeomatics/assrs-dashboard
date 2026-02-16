@@ -2857,14 +2857,224 @@ if st.session_state.active_ticker:
             st.caption(f"📈 ADX: **{adx_val:.1f}** | Pattern: **{adx_pattern if adx_pattern else 'None'}**")
             # st.markdown("---")
             # ==================== END MARKET STATUS ====================
+
             
             with st.spinner("Generating chart...生成分析图表"):
                 # Display chart
                 fig_stock = create_single_stock_chart_analysis(analysis_df, fundamentals_df=fundamentals_df, blocks=blocks)
                 st.plotly_chart(fig_stock, use_container_width=True)
 
+            # ================================
+            # CORRECT SIMULATOR - Proper column naming and only 4 ADX patterns
+
+            from analysis_engine import simulate_next_day_indicators
 
             st.markdown("---")
+
+            @st.fragment
+            def simulator_section():
+                """Isolated simulator - only this reruns on slider changes"""
+
+                st.subheader("🎮 What-If Simulator (明日指标模拟器)")
+                st.caption("输入明日价格变化和成交量，实时计算MACD、RSI、ADX指标值 | Input tomorrow's price change and volume to see indicator values")
+
+                # Get reference values from parent scope - CORRECT VARIABLE NAME: analysis_df
+                latest = analysis_df.iloc[-1]
+                vol_10d_avg = analysis_df['Volume'].rolling(10).mean().iloc[-1]
+                vol_yesterday = latest['Volume']
+                close_yesterday = latest['Close']
+
+                # Input section
+                col_input1, col_input2 = st.columns(2)
+
+                with col_input1:
+                    st.markdown("**📈 明日价格变化 (%)**")
+                    price_change = st.slider(
+                        "Price Change",
+                        min_value=-10.0,
+                        max_value=10.0,
+                        value=0.0,
+                        step=0.1,
+                        format="%.1f%%",
+                        help="正数=上涨，负数=下跌",
+                        key="frag_sim_price",
+                        label_visibility="collapsed"
+                    )
+                    target_price = close_yesterday * (1 + price_change / 100)
+                    st.caption(f"昨收: ¥{close_yesterday:.2f} → 明日: ¥{target_price:.2f}")
+
+                with col_input2:
+                    st.markdown("**📦 明日成交量 (M)**")
+                    vol_input_millions = st.number_input(
+                        "Volume",
+                        min_value=0.1,
+                        max_value=vol_10d_avg * 10 / 1e6,
+                        value=vol_10d_avg / 1e6,
+                        step=0.5,
+                        format="%.1f",
+                        help="以百万为单位",
+                        key="frag_sim_volume",
+                        label_visibility="collapsed"
+                    )
+                    volume_tomorrow = vol_input_millions * 1e6
+                    st.caption(f"昨日: {vol_yesterday/1e6:.1f}M | 10日均: {vol_10d_avg/1e6:.1f}M")
+
+                # Calculate simulation - uses analysis_df (not analysisdf)
+                sim_result = simulate_next_day_indicators(analysis_df, price_change, volume_tomorrow)
+
+                if sim_result:
+                    st.markdown("---")
+
+                    # Display results
+                    col_macd, col_rsi, col_adx, col_obv = st.columns(4)
+
+                    with col_macd:
+                        st.markdown("**📊 MACD**")
+                        macd_tmr = sim_result['macd_tomorrow']
+                        macd_delta = macd_tmr - sim_result['macd_today']
+
+                        st.metric("MACD Line", f"{macd_tmr:.4f}", delta=f"{macd_delta:.4f}", delta_color="normal")
+                        st.metric("MACD Signal", f"{sim_result['macd_signal_tomorrow']:.4f}", 
+                                delta=f"{sim_result['macd_signal_tomorrow'] - sim_result['macd_signal_today']:.4f}")
+                        st.metric("Gap", f"{sim_result['macd_gap_tomorrow']:.4f}", 
+                                delta=f"{sim_result['macd_gap_tomorrow'] - sim_result['macd_gap_today']:.4f}")
+
+                        if sim_result['signals']['MACD_Bottoming']:
+                            st.success("✅ MACD Bottoming")
+                        if sim_result['signals']['MACD_Bullish_Cross']:
+                            st.success("✅ 金叉 Bullish Cross")
+                        if sim_result['signals']['MACD_Bearish_Cross']:
+                            st.error("⚠️ 死叉 Bearish Cross")
+
+                        with st.expander("📊 MACD 参考区间"):
+                            st.caption(f"10日低点: {sim_result['macd_10d_low']:.4f}")
+                            st.caption(f"10日高点: {sim_result['macd_10d_high']:.4f}")
+                            st.caption(f"Bottoming区间: {sim_result['macd_10d_low']*0.95:.4f} ~ 0")
+
+                    with col_rsi:
+                        st.markdown("**📈 RSI**")
+                        rsi_tmr = sim_result['rsi_tomorrow']
+                        rsi_delta = rsi_tmr - sim_result['rsi_today']
+
+                        st.metric("RSI(14)", f"{rsi_tmr:.1f}", delta=f"{rsi_delta:.1f}", delta_color="normal")
+
+                        if rsi_tmr < 30:
+                            st.error("🔴 超卖 Oversold")
+                        elif rsi_tmr > 70:
+                            st.warning("🔴 超买 Overbought")
+                        elif 40 <= rsi_tmr <= 60:
+                            st.info("⚪ 中性 Neutral")
+                        else:
+                            st.success("🟢 正常 Normal")
+
+                        if sim_result['signals']['RSI_Bottoming']:
+                            st.success("✅ RSI Bottoming")
+                        if sim_result['signals']['RSI_Peaking']:
+                            st.error("⚠️ RSI Peaking")
+
+                        with st.expander("📈 RSI 参考线"):
+                            st.caption(f"底部10%线: {sim_result['rsi_p10']:.1f}")
+                            st.caption(f"顶部90%线: {sim_result['rsi_p90']:.1f}")
+
+                    with col_adx:
+                        st.markdown("**📉 ADX (趋势强度)**")
+                        adx_tmr = sim_result['adx_tomorrow']
+                        adx_delta = adx_tmr - sim_result['adx_today']
+
+                        st.metric("ADX", f"{adx_tmr:.1f}", delta=f"{adx_delta:.1f}", delta_color="normal")
+
+                        if adx_tmr < 20:
+                            st.info("📊 弱趋势 Weak")
+                        elif adx_tmr < 25:
+                            st.info("📊 无趋势 No Trend")
+                        elif adx_tmr < 40:
+                            st.success("📊 强趋势 Strong")
+                        else:
+                            st.warning("📊 极强趋势 Very Strong")
+
+                        # ADX Pattern - Only 4 patterns shown as informational
+                        adx_pattern = sim_result['adx_pattern']
+                        if adx_pattern:
+                            if adx_pattern == "Bottoming":
+                                st.info("ℹ️ **ADX Bottoming** 趋势即将启动")
+                            elif adx_pattern == "Reversing Up":
+                                st.success("📈 **ADX Reversing Up**趋势开始增强")
+                            elif adx_pattern == "Peaking":
+                                st.warning("⚠️ **ADX Peaking**趋势可能见顶")
+                            elif adx_pattern == "Reversing Down":
+                                st.error("📉 **ADX Reversing Down**趋势开始减弱")
+
+                        st.caption("*ADX仅为近似估算")
+
+                    with col_obv:
+                        st.markdown("**📦 OBV (Volume-Scaled)**")
+                        obv_scaled_tmr = sim_result['obv_scaled_tomorrow']
+                        obv_delta = obv_scaled_tmr - sim_result['obv_scaled_today']
+
+                        st.metric("Vol-Scaled OBV", f"{obv_scaled_tmr:.2f}", delta=f"{obv_delta:.2f}", delta_color="normal")
+
+                        obv_3d_scaled = sim_result['obv_scaled_3d_ago']
+                        if obv_scaled_tmr > obv_3d_scaled:
+                            st.success("✅ 高于3日前")
+                            st.caption(f"3日前: {obv_3d_scaled:.2f}")
+                        else:
+                            st.error("⚠️ 低于3日前")
+                            st.caption(f"需增加: {obv_3d_scaled - obv_scaled_tmr:.2f}")
+
+                        vol_ratio = volume_tomorrow / vol_10d_avg
+                        if vol_ratio > 1.5:
+                            st.warning("📦 放量 High")
+                        elif vol_ratio > 1.2:
+                            st.info("📦 温和放量")
+                        elif vol_ratio < 0.8:
+                            st.info("📦 缩量 Low")
+                        else:
+                            st.success("📦 正常量")
+
+                    # MACD Bottoming condition details
+                    with st.expander("🔍 MACD Bottoming 条件详情"):
+                        st.markdown(f"**需满足≥2个条件**: {sim_result['conditions_met']}/4")
+
+                        cond_col1, cond_col2 = st.columns(2)
+
+                        with cond_col1:
+                            macd_stopped = sim_result['macd_tomorrow'] >= sim_result['macd_today']
+                            macd_in_zone = (sim_result['macd_10d_low'] * 0.95 <= sim_result['macd_tomorrow'] < 0)
+
+                            st.markdown("**1. MACD停止下跌**")
+                            if macd_stopped:
+                                st.success(f"✅ {sim_result['macd_tomorrow']:.4f} ≥ {sim_result['macd_today']:.4f}")
+                            else:
+                                st.error(f"❌ {sim_result['macd_tomorrow']:.4f} < {sim_result['macd_today']:.4f}")
+
+                            st.markdown("**2. MACD在底部区间**")
+                            if macd_in_zone:
+                                st.success(f"✅ 在底部区间内")
+                            else:
+                                st.error(f"❌ 不在底部区间")
+
+                        with cond_col2:
+                            gap_narrowing = sim_result['macd_gap_tomorrow'] > sim_result['macd_gap_today']
+                            obv_rising = sim_result['obv_scaled_tomorrow'] > sim_result['obv_scaled_3d_ago']
+
+                            st.markdown("**3. MACD缺口收窄**")
+                            if gap_narrowing:
+                                st.success(f"✅ 缺口收窄")
+                            else:
+                                st.error(f"❌ 缺口未收窄")
+
+                            st.markdown("**4. OBV上升**")
+                            if obv_rising:
+                                st.success(f"✅ OBV上升")
+                            else:
+                                st.error(f"❌ OBV未上升")
+
+                else:
+                    st.error("无法计算模拟结果")
+
+            simulator_section()
+            st.markdown("---")
+
             st.subheader("🎯 Setup-Conditioned Expectancy")
             st.markdown("Test your strategy: Buy on bullish signals, sell on bearish signals.")
             

@@ -41,7 +41,7 @@ def load_v2_data():
 @st.cache_data(ttl=600)
 def load_csi300_with_regime(freq_cn: str):
     """Fetch CSI300 with enough history to compute regimes, then return full df."""
-    if freq_cn == "日":
+    if freq_cn == "日线":
         rawdf = data_manager.get_index_data_live('000300.SH', lookback_days=365, freq='daily')
         if rawdf is None or rawdf.empty:
             return rawdf

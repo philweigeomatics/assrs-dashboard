@@ -13,10 +13,12 @@ TUSHARE_API_TOKEN = '36838688c6455de2e3affca37060648de15b94b9707a43bb05a38312'
 DATA_START_DATE = '20240101'
 
 SECTOR_STOCK_MAP = {
-    'MARKET_PROXY':['601318','600519','300750','300308','600036','601899','300502','000333','300274','601166','600900'], # 中国平安, 贵州茅台, 宁德时代, 中际旭创, 招商银行, 紫金矿业, 新易盛, 美的集团, 阳光电源, 兴业银行，长江电力
     '银行': ['601398','601939','601288','600036','601998','000001'], # 工商银行, 建设银行, 农业银行, 招商银行, 中信银行, 平安银行     
     '非银金融':['600030','601318','601628','000750','000776','002736','002670'], # 中信证券, 中国平安, 中国人寿, 国海证券, 广发证券, 国信证券
-    '半导体': ['688981','688041','688256','002371','688347','001309','002049','603986'], # 中芯国际, 海光信息, 寒武纪，北方华创，华虹公司，德明利，紫光国微，兆易创新
+    '半导体设计':['301269','688206','301095','688521','688256','688041','688047','603986','300223','688123','600460','300661','688052','300782','688153','300327','300077'],
+    '半导体制造':['688981','688347','688469','688249','600584','002156','002185','603005','688362'],
+    '半导体设备':['688012','002371','688072','688082','688120','688361','688037','600641','688200','300604','300480'],
+    '半导体材料':['688126','605358','003026','688401','688138','300666','600206','688268','688106','300346','688019','300054','300655','603650','603931','300395','603688','688234'],
     '软件': ['688111','002230','600588','300033','601360','300339','600570'],   # 金山办公, 科大讯飞, 用友网络, 同花顺，三六零，润和软件，恒生电子
     '光模块中游': ['300308','300394','002281','603083','300620','300548'], # 中际旭创, 天孚通讯, 光迅科技，剑桥科技，光库科技，长兴博创
     '液冷':['002837','300499','301018','603019','000977','000938'],# 英维克，高澜股份，申菱环境，中科曙光，浪潮信息，紫光股份
@@ -30,8 +32,11 @@ SECTOR_STOCK_MAP = {
     '整车':['600104','601633','000625','601238','002594','600418'], # 上汽集团, 长城汽车, 长安汽车，广汽汽车，比亚迪，江淮汽车
     '有色金属':['000630','000878','601899','600362','601600','000426'], # 铜陵有色, 云铝股份, 紫金矿业, 江西铜业, 中国铝业，兴业银锡
     '能源':['601800','601857','601225','600028','600938','002353','600188'], # 中国交建, 中国石油, 陕西煤业, 中国石化, 中国海油, 杰瑞股份，兖创能源
-    '机器人': ['300124','601689','688777','002008','002472','688017'] # 汇川技术, 拓普集团, 中控技术, 大族激光，双环传动，绿的谐波
+    '机器人': ['300124','601689','688777','002008','002472','688017','002747','300607'], # 汇川技术, 拓普集团, 中控技术, 大族激光，双环传动，绿的谐波，埃斯顿，拓斯达
+    '专业设备制造':['600528','000157','600031','600980','601608','000425','601717'] # 中铁工业，中联重科，三一重工，北矿科技，中信重工，徐工机械，中创智领
 }
+
+# '半导体': ['688981','688041','688256','002371','688347','001309','002049','603986'], # 中芯国际, 海光信息, 寒武纪，北方华创，华虹公司，德明利，紫光国微，兆易创新
 
 
 ALL_STOCK_TICKERS = sorted(list(set(ticker for stocks in SECTOR_STOCK_MAP.values() for ticker in stocks)))
@@ -1025,7 +1030,7 @@ def aggregate_ppi_data(sector_start_dates=None):
             
             total_cap_today = 0
             weighted_return = 0
-            weighted_volume = 0
+            combined_dollar_volume = 0
             valid_stocks = 0
             
             # Calculate weighted return for this date
@@ -1051,14 +1056,19 @@ def aggregate_ppi_data(sector_start_dates=None):
                         continue
                     
                     stock_return = (close_today - close_prev) / close_prev
+
+                    # Calculate dollar volume (NEW LOGIC)
+                    high_today = stock_data[ticker].loc[date, 'High']
+                    low_today = stock_data[ticker].loc[date, 'Low']
                     volume_today = stock_data[ticker].loc[date, 'Volume']
+
+                    mid_price = (high_today + low_today) / 2 if pd.notna(high_today) and pd.notna(low_today) else close_today   
+                    dollar_volume = mid_price * volume_today if pd.notna(mid_price) and pd.notna(volume_today) else 0
                     
                     # Accumulate weighted values
                     total_cap_today += cap_today
                     weighted_return += stock_return * cap_today
-                    
-                    if pd.notna(volume_today):
-                        weighted_volume += volume_today * cap_today
+                    combined_dollar_volume += dollar_volume
                     
                     valid_stocks += 1
                     
@@ -1068,7 +1078,7 @@ def aggregate_ppi_data(sector_start_dates=None):
             # Only add date if we have at least 2 valid stocks
             if valid_stocks >= 2 and total_cap_today > 0:
                 daily_returns.append(weighted_return / total_cap_today)
-                daily_volumes.append(weighted_volume / total_cap_today)
+                daily_volumes.append(combined_dollar_volume)
                 valid_dates.append(date)
         
         if len(daily_returns) < 20:
@@ -1633,4 +1643,400 @@ def bulk_add_to_watchlist(tickers_list):
     
     return success_count, failed_count, messages
 
+# ==================== FINANCIAL INDICATORS ====================
+def get_financial_indicators(ticker, quarters=8):
+    """
+    Fetch financial indicators for the specified number of quarters and calculate YoY growth.
+    
+    Args:
+        ticker: 6-digit stock code
+        quarters: Number of quarters to fetch (default 8 = 2 years, minimum 5 for YoY calculation)
+    
+    Returns:
+        Dictionary with latest financial metrics and YoY growth rates, or None if failed
+    """
+    global TUSHARE_API
+    if TUSHARE_API is None:
+        ok = init_tushare()
+        if not ok:
+            print(f"[data_manager] ❌ Tushare initialization failed")
+            return None
+    
+    ts_code = get_tushare_ticker(ticker)
+    
+    try:
+        from datetime import datetime, timedelta
+        
+        # Convert quarters to days (90 days per quarter + 1 extra quarter buffer)
+        # Buffer ensures we get enough data even if fetching right before a new quarterly report
+        days_back = (quarters + 1) * 90
+        
+        end_date = datetime.now().strftime('%Y%m%d')
+        start_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y%m%d')
+        
+        df = TUSHARE_API.fina_indicator(
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+            fields='ts_code,end_date,roe,roa,q_netprofit_margin,basic_eps_yoy,fcff,fcfe'
+        )
+        
+        if df is None or df.empty:
+            print(f"[data_manager] ⚠️ No financial data for {ticker}")
+            return None
+        
+        # Sort by date descending (most recent first)
+        df = df.sort_values('end_date', ascending=False)
+        
+        if len(df) < 1:
+            print(f"[data_manager] ⚠️ Insufficient data for {ticker}")
+            return None
+        
+        # Get latest quarter (most recent)
+        latest = df.iloc[0]
+        
+        # Calculate FCFF/FCFE YoY growth
+        fcff_growth = None
+        fcfe_growth = None
+        
+        if len(df) >= 5:
+            # Use 5th quarter (4 quarters back = 1 year ago, same quarter)
+            yoy_quarter = df.iloc[4]
+            
+            current_fcff = latest.get('fcff')
+            current_fcfe = latest.get('fcfe')
+            yoy_fcff = yoy_quarter.get('fcff')
+            yoy_fcfe = yoy_quarter.get('fcfe')
+            
+            # Calculate growth (handle negative values and zeros)
+            if current_fcff is not None and yoy_fcff is not None and yoy_fcff != 0:
+                fcff_growth = ((current_fcff - yoy_fcff) / abs(yoy_fcff)) * 100
+            
+            if current_fcfe is not None and yoy_fcfe is not None and yoy_fcfe != 0:
+                fcfe_growth = ((current_fcfe - yoy_fcfe) / abs(yoy_fcfe)) * 100
+        else:
+            print(f"[data_manager] ⚠️ Not enough quarters ({len(df)}) for YoY growth calculation for {ticker}")
+        
+        return {
+            'ROE': latest.get('roe'),
+            'ROA': latest.get('roa'),
+            'Operating_Margin': latest.get('q_netprofit_margin'),
+            'EPS_Growth_YoY': latest.get('basic_eps_yoy'),  # Pre-calculated by Tushare
+            'FCFF_PS': latest.get('fcff_ps'),
+            'FCFE_PS': latest.get('fcfe_ps'),
+            'FCFF_Growth_YoY': fcff_growth,  # Manually calculated
+            'FCFE_Growth_YoY': fcfe_growth,  # Manually calculated
+            'Report_Date': latest.get('end_date'),
+            'Quarters_Available': len(df)  # For debugging
+        }
+        
+    except Exception as e:
+        print(f"[data_manager] ❌ Failed to fetch financial indicators for {ticker}: {e}")
+        return None
 
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# SINGLE WIDE TABLE IMPLEMENTATION - market_breadth
+# ═══════════════════════════════════════════════════════════════
+
+## Add these functions to data_manager.py (REPLACE the separate table versions)
+
+def save_market_breadth_to_db(breadth_data_by_date):
+    """
+    Save market breadth data for all sectors in a single wide table.
+    Works with both SQLite and Supabase via DatabaseManager.
+
+    Args:
+        breadth_data_by_date: Dict of {date: {sector: breadth_value}}
+
+    Example:
+        breadth_data_by_date = {
+            datetime(2025, 1, 15): {'消费': 0.65, '科技': 0.42, '医药': 0.58},
+            datetime(2025, 1, 16): {'消费': 0.67, '科技': 0.44, '医药': 0.60}
+        }
+    """
+    table_name = "market_breadth"
+
+    try:
+        # Supabase requires table to be created manually first
+        if not db.table_exists(table_name):
+            if db_config.USE_SUPABASE:
+                print(f"⚠️  Table '{table_name}' doesn't exist in Supabase.")
+                print(f"Please create it manually in Supabase dashboard with this schema:")
+                print(f"")
+                print(f"CREATE TABLE market_breadth (")
+                print(f'  "Date" TEXT PRIMARY KEY,')
+
+                # Get all sectors from SECTOR_STOCK_MAP
+                sectors = [s for s in SECTOR_STOCK_MAP.keys() if s != 'MARKET_PROXY']
+                for sector in sectors:
+                    # Replace Chinese characters with safe column names if needed
+                    print(f'  "{sector}" REAL,')
+                print(f");")
+                print(f"")
+                return
+            else:
+                # SQLite - create table automatically
+                columns = ['Date TEXT PRIMARY KEY']
+                sectors = [s for s in SECTOR_STOCK_MAP.keys() if s != 'MARKET_PROXY']
+                for sector in sectors:
+                    columns.append(f'"{sector}" REAL')
+
+                schema = f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(columns)})"
+                db.create_table_sqlite(schema)
+                print(f"✓ Created table: {table_name}")
+
+        # Prepare records for insertion
+        records = []
+        for date, breadth_dict in breadth_data_by_date.items():
+            record = {
+                'Date': date.strftime('%Y-%m-%d') if isinstance(date, (pd.Timestamp, datetime)) else date,
+                **breadth_dict  # Unpack all sector breadths
+            }
+            records.append(record)
+
+        # Batch insert with upsert (uses your db_manager)
+        if records:
+            db.insert_records(table_name, records, upsert=True)
+            print(f"✓ Saved {len(records)} breadth records to database")
+
+    except Exception as e:
+        print(f"Failed to save market breadth: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def load_market_breadth_from_db(start_date=None, end_date=None):
+    """
+    Load market breadth data from the single wide table.
+    Works with both SQLite and Supabase via DatabaseManager.
+
+    Args:
+        start_date: Optional start date filter (YYYY-MM-DD string)
+        end_date: Optional end date filter (YYYY-MM-DD string)
+
+    Returns:
+        DataFrame with Date index and sector columns, or None
+    """
+    table_name = "market_breadth"
+
+    try:
+        if not db.table_exists(table_name):
+            return None
+
+        # Use db_manager's read_table method
+        # Note: filters are for exact matches, so we need to get all and filter in pandas
+        df = db.read_table(table_name, order_by='Date')
+
+        if df.empty:
+            return None
+
+        # Convert Date column and set as index
+        df['Date'] = pd.to_datetime(df['Date'], format='mixed', errors='coerce')
+        df = df.set_index('Date').sort_index()
+
+        # Apply date filters if provided
+        if start_date:
+            df = df[df.index >= pd.to_datetime(start_date)]
+        if end_date:
+            df = df[df.index <= pd.to_datetime(end_date)]
+
+        return df
+
+    except Exception as e:
+        print(f"Failed to load market breadth: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+    
+
+def add_new_sector_breadth(new_sector_name, stock_list):
+    """
+    Add market breadth data for a new sector to the existing table.
+    Only calculates for dates that already exist in the table.
+    
+    IMPORTANT: For Supabase, you must manually add the column first:
+    ALTER TABLE market_breadth ADD COLUMN "{new_sector_name}" REAL;
+    
+    Args:
+        new_sector_name: Name of the new sector
+        stock_list: List of stock tickers in the sector
+    
+    Returns:
+        Number of rows updated, or None if failed
+    """
+    table_name = "market_breadth"
+    
+    try:
+        print(f"Adding breadth for new sector: {new_sector_name}")
+        
+        # Step 1: Check if table exists
+        if not db.table_exists(table_name):
+            print(f"❌ Table {table_name} doesn't exist. Please create it first.")
+            return None
+        
+        # Step 2: Add column (SQLite only)
+        if db_config.USE_SUPABASE:
+            print(f"⚠️  For Supabase, column must be added manually first:")
+            print(f'   ALTER TABLE {table_name} ADD COLUMN "{new_sector_name}" REAL;')
+            print()
+        else:
+            # SQLite - add column automatically
+            try:
+                conn = db.get_connection()
+                cursor = conn.cursor()
+                cursor.execute(f'ALTER TABLE {table_name} ADD COLUMN "{new_sector_name}" REAL')
+                conn.commit()
+                conn.close()
+                print(f"✓ Added column: {new_sector_name}")
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    print(f"✓ Column {new_sector_name} already exists")
+                else:
+                    raise
+        
+        # Step 3: Get all existing dates from the table
+        df_dates = db.read_table(table_name, columns='Date', order_by='Date')
+        if df_dates.empty:
+            print(f"⚠ No existing dates in {table_name}, nothing to update")
+            return 0
+        
+        existing_dates = pd.to_datetime(df_dates['Date']).sort_values().tolist()
+        print(f"Found {len(existing_dates)} existing dates")
+        
+        # Step 4: Fetch LIVE stock data for all tickers
+        print(f"📡 Fetching LIVE data for {len(stock_list)} stocks...")
+        all_stock_data = {}
+        
+        # Determine date range needed
+        start_date = existing_dates[0]
+        end_date = existing_dates[-1]
+        
+        for i, ticker in enumerate(stock_list, 1):
+            print(f"  [{i}/{len(stock_list)}] Fetching {ticker}...", end='\r')
+            
+            # Fetch live data with enough lookback for MA20 calculation
+            df = get_single_stock_data_live(
+                ticker,
+                start_date=(start_date - timedelta(days=30)).strftime('%Y%m%d'),  # Extra 30 days for MA20
+                end_date=end_date.strftime('%Y%m%d')
+            )
+            
+            if df is not None and not df.empty:
+                all_stock_data[ticker] = df
+            
+            time.sleep(0.35)  # Rate limit for Tushare API
+        
+        print()  # New line after progress
+        
+        if not all_stock_data:
+            print(f"❌ No stock data available for {new_sector_name}")
+            return 0
+        
+        print(f"✓ Loaded {len(all_stock_data)}/{len(stock_list)} stocks")
+        
+        # Step 5: Calculate breadth for all dates
+        print(f"🔄 Calculating breadth for {len(existing_dates)} dates...")
+        updates = []
+        success_count = 0
+        fail_count = 0
+        
+        for i, date in enumerate(existing_dates):
+            breadth = calculate_sector_market_breadth(
+                new_sector_name, date, all_stock_data
+            )
+            if breadth is not None:
+                updates.append({
+                    'Date': date.strftime('%Y-%m-%d'),
+                    new_sector_name: breadth
+                })
+                success_count += 1
+            else:
+                fail_count += 1
+            
+            # Progress indicator
+            if (i + 1) % 50 == 0 or (i + 1) == len(existing_dates):
+                print(f"  Progress: {i+1}/{len(existing_dates)} dates (✓ {success_count}, ✗ {fail_count})")
+        
+        if not updates:
+            print(f"❌ No valid breadth values calculated for {new_sector_name}")
+            return 0
+        
+        # Step 6: Batch update
+        print(f"💾 Updating {len(updates)} rows in database...")
+        db.insert_records(table_name, updates, upsert=True)
+        
+        print(f"✅ Successfully added {new_sector_name} breadth for {len(updates)} dates")
+        print(f"   Success rate: {success_count}/{len(existing_dates)} ({100*success_count/len(existing_dates):.1f}%)")
+        return len(updates)
+    
+    except Exception as e:
+        print(f"❌ Failed to add new sector breadth: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def calculate_sector_market_breadth(sector, current_date, all_stock_data=None):
+    """
+    Calculate market breadth for a sector: % of stocks above their MA20.
+
+    Args:
+        sector: Sector name
+        current_date: Date to calculate breadth for (datetime or Timestamp)
+        all_stock_data: Dict of {ticker: DataFrame} with stock data
+                       If None, will fetch from database
+
+    Returns:
+        float: Market breadth (0.0 to 1.0), or None if insufficient data
+    """
+    if sector not in SECTOR_STOCK_MAP:
+        return None
+
+    if sector == 'MARKET_PROXY':
+        return 0.5  # Neutral for market proxy
+
+    stock_list = SECTOR_STOCK_MAP[sector]
+
+    # Load stock data if not provided
+    if all_stock_data is None:
+        all_stock_data = {}
+        for ticker in stock_list:
+            df = get_single_stock_data_from_db(ticker)
+            if df is not None and not df.empty:
+                all_stock_data[ticker] = df
+
+    stocks_above_ma20 = 0
+    total_valid_stocks = 0
+
+    for ticker in stock_list:
+        if ticker not in all_stock_data:
+            continue
+
+        df = all_stock_data[ticker]
+
+        # Filter up to current date
+        df_filtered = df[df.index <= current_date]
+        if len(df_filtered) < 20:
+            continue
+
+        # Calculate MA20
+        ma20 = df_filtered['Close'].rolling(window=20).mean()
+
+        if current_date not in df_filtered.index:
+            continue
+
+        close_price = df_filtered.loc[current_date, 'Close']
+        ma20_price = ma20.loc[current_date]
+
+        if pd.notna(close_price) and pd.notna(ma20_price):
+            total_valid_stocks += 1
+            if close_price > ma20_price:
+                stocks_above_ma20 += 1
+
+    if total_valid_stocks == 0:
+        return None
+
+    return stocks_above_ma20 / total_valid_stocks
