@@ -2884,6 +2884,12 @@ if st.session_state.active_ticker:
                 vol_yesterday = latest['Volume']
                 close_yesterday = latest['Close']
 
+
+                # Calculate dynamic bounds
+                vol_10d_avg_millions = vol_10d_avg / 1e6  # Convert to millions
+                vol_min = max(0.01, vol_10d_avg_millions * 0.1)  # Min: 10% of avg, or 0.01M
+                vol_max = vol_10d_avg_millions * 10  # Max: 10x average
+
                 # Input section
                 col_input1, col_input2 = st.columns(2)
 
@@ -2907,8 +2913,8 @@ if st.session_state.active_ticker:
                     st.markdown("**📦 明日成交量 (M)**")
                     vol_input_millions = st.number_input(
                         "Volume",
-                        min_value=0.1,
-                        max_value=vol_10d_avg * 10 / 1e6,
+                        min_value=vol_min,
+                        max_value=vol_max,
                         value=vol_10d_avg / 1e6,
                         step=0.5,
                         format="%.1f",
