@@ -1,5 +1,5 @@
 import os
-from streamlit import st
+import streamlit as st
 
 # Simple binary detection: local or production
 IS_LOCAL = os.environ.get('USER') == "phil-" or os.environ.get('USERNAME') == "phil-"
