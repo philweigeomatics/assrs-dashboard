@@ -30,9 +30,12 @@ jobs:
           pip install -r requirements.txt
       
       # 4. Run main.py (will use Supabase since USER != "phil-fff")
-      - name: Run ASSRS V2 Backtest
+      - name: Run ASSRS PPI computing and regime switching backtest.
         env:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
         run: |
           python main.py
       
