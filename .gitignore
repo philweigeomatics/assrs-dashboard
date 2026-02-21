@@ -26,3 +26,6 @@ Thumbs.db
 
 # Environment variables
 .env
+
+# local secrets file, never commit
+.streamlit/secrets.toml 
