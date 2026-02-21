@@ -7,10 +7,10 @@ import sys
 import numpy as np
 from db_manager import db
 import db_config
-import streamlit as st
+import api_config
 
 TUSHARE_API = None
-TUSHARE_API_TOKEN = st.secrets["TUSHARE_TOKEN"]
+TUSHARE_API_TOKEN = api_config.TUSHARE_TOKEN
 DATA_START_DATE = '20240101'
 
 SECTOR_STOCK_MAP = {
@@ -52,7 +52,7 @@ def init_tushare(token=None):
         token = TUSHARE_API_TOKEN
 
     if TUSHARE_API_TOKEN is None:
-        token = st.secrets["TUSHARE_TOKEN"]
+        token = api_config.TUSHARE_TOKEN
     
     try:
         ts.set_token(token)

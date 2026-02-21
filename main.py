@@ -7,9 +7,10 @@ import time
 import sys
 import os
 import db_config
+import api_config
 
 # --- 1. CONFIGURATION ---
-TUSHARE_API_TOKEN = '36838688c6455de2e3affca37060648de15b94b9707a43bb05a38312'
+TUSHARE_API_TOKEN = api_config.TUSHARE_TOKEN
 
 # Dynamic production paths
 PROJECT_PATH = os.environ.get('GITHUB_WORKSPACE', os.path.dirname(os.path.abspath(__file__)))
