@@ -14,7 +14,7 @@ st.set_page_config(
 )
 
 # ── Always define login page ─────────────────────────────────────────
-login_page = st.Page("pages/login.py", title="Login 登录", icon="🔐")
+login_page = st.Page("pages/Login.py", title="Login 登录", icon="🔐")
 
 
 if not auth_manager.is_logged_in():
