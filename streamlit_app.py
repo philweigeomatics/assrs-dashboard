@@ -4,6 +4,7 @@ A-share Market Analysis Platform
 """
 
 import streamlit as st
+import auth_manager
 
 
 st.set_page_config(
@@ -12,7 +13,31 @@ st.set_page_config(
     layout="wide"
 )
 
-# Define page structure with collapsible sections
+# ── Always define login page ─────────────────────────────────────────
+login_page = st.Page("pages/login.py", title="Login 登录", icon="🔐")
+
+
+if not auth_manager.is_logged_in():
+    # Only login page available
+    pg = st.navigation([login_page])
+    pg.run()
+    st.stop()
+
+
+user = auth_manager.get_current_user();
+
+# ── Sidebar: user info + logout ──────────────────────────────────
+with st.sidebar:
+    st.markdown("---")
+    role_badge = "👑 Admin" if auth_manager.is_admin() else "👤 User"
+    st.caption(f"{role_badge} | **{user['username']}**")
+    if st.button("🚪 Logout", use_container_width=True):
+        auth_manager.logout()
+        st.rerun()
+
+    # ── Authenticated pages ──────────────────────────────────────────
+
+
 pages = {
     "📊 Sector 板块": [
         st.Page("pages/sector_dashboard.py", title="Dashboard"),

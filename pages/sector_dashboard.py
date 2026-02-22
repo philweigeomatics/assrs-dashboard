@@ -16,6 +16,9 @@ from sector_utils import (
     create_sector_chart
 )
 
+import auth_manager
+auth_manager.require_login()
+
 
 # Load data
 v2latest, v2hist, v2date, v2error = load_v2_data()

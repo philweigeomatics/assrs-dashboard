@@ -15,6 +15,10 @@ import os
 import time
 from scipy.optimize import minimize
 
+import auth_manager
+auth_manager.require_login()
+
+
 st.set_page_config(
     page_title="💼 Portfolio | 投资组合优化",
     page_icon="💼",

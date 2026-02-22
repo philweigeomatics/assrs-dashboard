@@ -13,6 +13,10 @@ import time
 
 st.title("📊 Sector Stock Selector 板块个股选择器")
 
+import auth_manager
+auth_manager.require_login()
+
+
 # Load sector map
 SECTOR_STOCK_MAP = data_manager.SECTOR_STOCK_MAP
 

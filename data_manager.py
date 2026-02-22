@@ -8,10 +8,12 @@ import numpy as np
 from db_manager import db
 import db_config
 import api_config
+import auth_manager
 
 TUSHARE_API = None
 TUSHARE_API_TOKEN = api_config.TUSHARE_TOKEN
 DATA_START_DATE = '20240101'
+WATCHLIST_MAX_STOCKS = 25
 
 SECTOR_STOCK_MAP = {
     '银行': ['601398','601939','601288','600036','601998','000001'], # 工商银行, 建设银行, 农业银行, 招商银行, 中信银行, 平安银行     
@@ -205,10 +207,11 @@ def create_history_table():
 def update_search_history(ticker):
     """Updates search history table with company name, keeps only last 10."""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    user_id   = auth_manager.get_current_user_id()
     print(f"[data_manager] 🔍 Updating search history for {ticker}...")
     
     create_history_table()
-    
+
     company_name = get_stock_name_from_db(ticker)
     if company_name is not None:
         print(f"[data_manager] 📦 Found in stock_basic DB: {company_name}")
@@ -223,16 +226,23 @@ def update_search_history(ticker):
         # Upsert record
         db.insert_records('search_history', [{
             'ticker': ticker,
+            'user_id':      user_id,
             'timestamp': timestamp,
             'company_name': company_name
         }], upsert=True)
         
-        # Keep only last 10
-        all_history = db.read_table('search_history', columns='ticker,timestamp', order_by='-timestamp')
+        # Trim to last 10 for this user only
+        all_history = db.read_table(
+            'search_history',
+            filters={'user_id': user_id},
+            columns='ticker, timestamp',
+            order_by='-timestamp'
+        )
+        
         if len(all_history) > 10:
             to_delete = all_history.iloc[10:]['ticker'].tolist()
             for t in to_delete:
-                db.delete_records('search_history', {'ticker': t})
+                db.delete_records('search_history', {'ticker': t, 'user_id': user_id})
         
         print(f"[data_manager] ✅ History saved: {ticker} - {company_name}")
         return company_name
@@ -241,26 +251,34 @@ def update_search_history(ticker):
         return ticker
 
 def get_search_history(limit=10):
-    """Returns list of last 10 searched stocks with display names."""
+    """Returns last 10 searches for current user, latest first."""
+    user_id = auth_manager.get_current_user_id()
+    if user_id is None:
+        return []
     try:
         create_history_table()
-        df = db.read_table('search_history', columns='ticker,company_name,timestamp', order_by='-timestamp', limit=limit)
-        
+        df = db.read_table(
+            'search_history',
+            filters={'user_id': user_id},
+            columns='ticker, company_name, timestamp',
+            order_by='-timestamp',
+            limit=limit
+        )
         if df.empty:
             return []
-        
         results = []
         for _, row in df.iterrows():
-            ticker = row['ticker']
+            ticker       = row['ticker']
             company_name = row.get('company_name', ticker)
             results.append({
-                'ticker': ticker,
+                'ticker':  ticker,
                 'display': f"{company_name} ({ticker})"
             })
         return results
     except Exception as e:
         print(f"[data_manager] ❌ Error fetching search history: {e}")
         return []
+
 
 def create_table(ticker):
     """Creates a table for a specific stock (only for SQLite)."""
@@ -1324,18 +1342,29 @@ def create_signals_tables():
 
 def get_cached_signals(scan_date):
     """Get cached signals for a specific date. Returns DataFrame if found, None otherwise."""
+    
+    user_id = auth_manager.get_current_user_id()
+    if user_id is None:
+        return None
+    
     try:
-        # Check if data exists for this date
-        check_df = db.read_table('daily_signals', filters={'scan_date': scan_date}, columns='*', limit=1)
-        
+        check_df = db.read_table(
+            'daily_signals',
+            filters={'scan_date': scan_date, 'user_id': user_id},
+            columns='*', limit=1
+        )
         if check_df.empty:
             return None
-        
-        # Load cached data
-        df = db.read_table('daily_signals', filters={'scan_date': scan_date}, columns='*', order_by='type, -signal_count')
-        
+
+        df = db.read_table(
+            'daily_signals',
+            filters={'scan_date': scan_date, 'user_id': user_id},
+            columns='*',
+            order_by='type, -signal_count'
+        )
+
         # Drop id and created_at columns
-        df = df.drop(columns=['id', 'scan_date', 'created_at'], errors='ignore')
+        df = df.drop(columns=['id', 'scan_date', 'created_at', 'user_id'], errors='ignore')
         
         # Rename columns to match expected format
         df = df.rename(columns={
@@ -1358,17 +1387,23 @@ def get_cached_signals(scan_date):
 
 def save_signals_to_cache(df, scan_date, scan_duration):
     """Save scanned signals to database cache."""
+
+    user_id = auth_manager.get_current_user_id()
+    if user_id is None:
+        return False
+    
     if df is None or df.empty:
         return False
     
     try:
-        # Delete old data for this date (in case of rescan)
-        db.delete_records('daily_signals', {'scan_date': scan_date})
-        db.delete_records('signals_scan_metadata', {'scan_date': scan_date})
+        # Delete only THIS user's snapshot for THIS date — other dates untouched
+        db.delete_records('daily_signals',         {'scan_date': scan_date, 'user_id': user_id})
+        db.delete_records('signals_scan_metadata', {'scan_date': scan_date, 'user_id': user_id})
         
         # Prepare data for insertion
         df_to_save = df.copy()
         df_to_save['scan_date'] = scan_date
+        df_to_save['user_id']    = user_id
         df_to_save['created_at'] = datetime.now().isoformat()
         
         # Rename columns to match database schema
@@ -1396,6 +1431,7 @@ def save_signals_to_cache(df, scan_date, scan_duration):
         
         metadata = {
             'scan_date': scan_date,
+            'user_id': user_id,
             'total_stocks_scanned': total_stocks,
             'opportunities_found': opportunities,
             'alerts_found': alerts,
@@ -1404,7 +1440,7 @@ def save_signals_to_cache(df, scan_date, scan_duration):
         }
         
         db.insert_records('signals_scan_metadata', [metadata], upsert=True)
-        
+        print(f"[data_manager] ✅ Saved {len(df)} signals for user {user_id} on {scan_date}")
         return True
     except Exception as e:
         print(f"Error saving signals to cache: {e}")
@@ -1412,8 +1448,12 @@ def save_signals_to_cache(df, scan_date, scan_duration):
 
 def get_scan_metadata(scan_date):
     """Get metadata about the last scan."""
+    user_id = auth_manager.get_current_user_id()
+    if user_id is None:
+        return None
+    
     try:
-        df = db.read_table('signals_scan_metadata', filters={'scan_date': scan_date})
+        df = db.read_table('signals_scan_metadata', filters={'scan_date': scan_date, 'user_id': user_id})
         
         if df.empty:
             return None
@@ -1463,51 +1503,56 @@ def create_watchlist_table():
 
 
 def add_to_watchlist(ticker, stock_name=None):
-    """Add a stock to the watchlist. Validates ticker exists in Tushare first."""
+    """Add a stock to the current user's watchlist. Validates ticker exists."""
+    user_id = auth_manager.get_current_user_id()
+    if user_id is None:
+        return False, "❌ Not logged in"
+
     try:
-        # Check if already exists in watchlist
-        existing = db.read_table('watchlist', filters={'ticker': ticker})
+        # Check if already exists for this user
+        existing = db.read_table('watchlist', filters={'ticker': ticker, 'user_id': user_id})
         if not existing.empty:
             existing_name = existing.iloc[0]['stock_name']
             return False, f"⚠️ {ticker} ({existing_name}) already in watchlist"
         
-        # Get stock name if not provided - this also validates ticker exists
+        # ── Enforce limit for non-admin users ───────────────────────
+        user = auth_manager.get_current_user()
+        if user.get('role') != 'admin':
+            current_count_df = db.read_table('watchlist', filters={'user_id': user_id}, columns='ticker')
+            current_count = len(current_count_df)
+            if current_count >= WATCHLIST_MAX_STOCKS:
+                return False, f"⚠️ Watchlist limit reached ({WATCHLIST_MAX_STOCKS} stocks max). Remove some stocks first."
+
+        # Get stock name — also validates ticker exists
         if not stock_name:
-            # First try from stock_basic table
             stock_name = get_stock_name_from_db(ticker)
-            
-            # If not in stock_basic, try fetching from API (validates existence)
             if not stock_name:
                 stock_name = get_company_name_from_api(ticker)
-            
-            # If still no name, ticker doesn't exist
             if not stock_name:
                 return False, f"❌ Stock {ticker} not found. Please verify the ticker code."
-        
-        # Validate ticker actually has data by trying to fetch 1 day
-        try:
-            test_df = get_single_stock_data_live(ticker, lookback_years=0.01)  # ~3 days
-            if test_df is None or test_df.empty:
-                return False, f"❌ Stock {ticker} has no trading data. Please verify the ticker code."
-        except Exception as e:
-            return False, f"❌ Failed to validate {ticker}: Ticker may not exist or is delisted"
-        
-        # Get current date in Beijing time
+
+        # # Validate ticker has actual trading data
+        # do not need this, as for long breaks, this will not work.
+        # try:
+        #     test_df = get_single_stock_data_live(ticker, lookback_years=0.01)  # ~3 days
+        #     if test_df is None or test_df.empty:
+        #         return False, f"❌ Stock {ticker} has no trading data. Please verify the ticker code."
+        # except Exception:
+        #     return False, f"❌ Failed to validate {ticker}: Ticker may not exist or is delisted"
+
+        # Use Beijing time for added_date
         from zoneinfo import ZoneInfo
         CHINA_TZ = ZoneInfo("Asia/Shanghai")
         added_date = datetime.now(CHINA_TZ).strftime('%Y-%m-%d')
-        
-        # Prepare record
-        record = {
-            'ticker': ticker,
+
+        db.insert_records('watchlist', [{
+            'ticker':     ticker,
             'stock_name': stock_name,
+            'user_id':    user_id,
             'added_date': added_date
-        }
-        
-        # Insert new record
-        db.insert_records('watchlist', [record], upsert=False)
+        }], upsert=False)
         return True, f"✅ Added {ticker} ({stock_name}) to watchlist"
-    
+
     except Exception as e:
         error_msg = str(e)
         if 'UNIQUE constraint failed' in error_msg or 'duplicate key' in error_msg.lower():
@@ -1516,124 +1561,134 @@ def add_to_watchlist(ticker, stock_name=None):
 
 
 
-
 def remove_from_watchlist(ticker):
-    """Remove a stock from the watchlist."""
+    """Remove a stock from the current user's watchlist."""
+    user_id = auth_manager.get_current_user_id()
+    if user_id is None:
+        return False, "❌ Not logged in"
+
     try:
-        # Check if exists first
-        existing = db.read_table('watchlist', filters={'ticker': ticker})
+        # Check exists for this user first
+        existing = db.read_table('watchlist', filters={'ticker': ticker, 'user_id': user_id})
         if existing.empty:
-            return False, f"⚠️ {ticker} not found in watchlist"
-        
-        # Delete
-        db.delete_records('watchlist', {'ticker': ticker})
+            return False, f"⚠️ {ticker} not found in your watchlist"
+
+        db.delete_records('watchlist', {'ticker': ticker, 'user_id': user_id})
         return True, f"✅ Removed {ticker} from watchlist"
-    
+
     except Exception as e:
         return False, f"❌ Error: {str(e)}"
 
 
 def get_watchlist():
-    """Get all stocks in the watchlist."""
+    """Get all stocks in the current user's watchlist."""
+    import auth_manager
+    user_id = auth_manager.get_current_user_id()
+    if user_id is None:
+        return []
     try:
-        df = db.read_table('watchlist', 
-                          columns='ticker,stock_name,added_date',
-                          order_by='-added_date')
-        
-        if df.empty:
-            return []
-        
-        return df.to_dict('records')
-    
+        df = db.read_table('watchlist',
+                            filters={'user_id': user_id},
+                            columns='ticker,stock_name,added_date',
+                            order_by='-added_date')
+        return df.to_dict('records') if not df.empty else []
     except Exception as e:
         print(f"Error fetching watchlist: {e}")
         return []
 
 
 def get_watchlist_tickers():
-    """Get just the ticker symbols from watchlist (for scanning)."""
+    """Get just the ticker symbols from current user's watchlist (for scanning)."""
+    user_id = auth_manager.get_current_user_id()
+    if user_id is None:
+        return []
     try:
-        df = db.read_table('watchlist', 
-                          columns='ticker',
-                          order_by='ticker')
-        
-        if df.empty:
-            return []
-        
-        return df['ticker'].tolist()
-    
+        df = db.read_table('watchlist',
+                            filters={'user_id': user_id},
+                            columns='ticker',
+                            order_by='ticker')
+        return df['ticker'].tolist() if not df.empty else []
     except Exception as e:
         print(f"Error fetching watchlist tickers: {e}")
         return []
 
 
 def update_watchlist_notes(ticker, notes):
-    """Update notes for a stock in the watchlist."""
+    """Update notes for a stock in the current user's watchlist."""
+    user_id = auth_manager.get_current_user_id()
+    if user_id is None:
+        return False, "❌ Not logged in"
+
     try:
-        # Check if exists
-        existing = db.read_table('watchlist', filters={'ticker': ticker})
+        existing = db.read_table('watchlist', filters={'ticker': ticker, 'user_id': user_id})
         if existing.empty:
-            return False, f"⚠️ {ticker} not found in watchlist"
-        
-        # For SQLite, we need to use raw SQL for UPDATE
+            return False, f"⚠️ {ticker} not found in your watchlist"
+
         if db_config.USE_SQLITE:
             conn = db.get_connection()
             cursor = conn.cursor()
-            cursor.execute('UPDATE watchlist SET notes = ? WHERE ticker = ?', (notes, ticker))
+            cursor.execute(
+                'UPDATE watchlist SET notes = ? WHERE ticker = ? AND user_id = ?',
+                (notes, ticker, user_id)
+            )
             conn.commit()
             conn.close()
         else:
-            # For Supabase, use update
             from db_manager import supabase_client
-            supabase_client.table('watchlist').update({'notes': notes}).eq('ticker', ticker).execute()
-        
+            supabase_client.table('watchlist').update({'notes': notes})\
+                .eq('ticker', ticker).eq('user_id', user_id).execute()
+
         return True, f"✅ Updated notes for {ticker}"
-    
+
     except Exception as e:
         return False, f"❌ Error: {str(e)}"
 
 
 def is_in_watchlist(ticker):
-    """Check if a ticker is in the watchlist."""
+    """Check if a ticker is in the current user's watchlist."""
+    user_id = auth_manager.get_current_user_id()
+    if user_id is None:
+        return False
     try:
-        df = db.read_table('watchlist', filters={'ticker': ticker}, limit=1)
+        df = db.read_table('watchlist',
+                            filters={'ticker': ticker, 'user_id': user_id},
+                            limit=1)
         return not df.empty
-    except:
+    except Exception:
         return False
 
 
 def bulk_add_to_watchlist(tickers_list):
     """
-    Add multiple stocks to watchlist at once.
-    Retrieves stock names from stock_basic table.
-    
-    Args:
-        tickers_list: List of ticker strings (6-digit codes)
-        notes_prefix: Prefix for notes field
-        
-    Returns:
-        (success_count, failed_count, messages)
+    Add multiple stocks to current user's watchlist at once.
+    Returns (success_count, failed_count, messages)
     """
+    user_id = auth_manager.get_current_user_id()
+    user    = auth_manager.get_current_user()
+
     success_count = 0
-    failed_count = 0
-    messages = []
-    
+    failed_count  = 0
+    messages      = []
+
+    # Pre-check remaining slots for non-admin
+    if user and user.get('role') != 'admin':
+        current_count_df = db.read_table('watchlist', filters={'user_id': user_id}, columns='ticker')
+        current_count    = len(current_count_df)
+        remaining_slots  = WATCHLIST_MAX_STOCKS - current_count
+        if remaining_slots <= 0:
+            return 0, len(tickers_list), [f"⚠️ Watchlist full ({WATCHLIST_MAX_STOCKS} stocks max)"]
+        if len(tickers_list) > remaining_slots:
+            messages.append(f"⚠️ Only {remaining_slots} slot(s) left — importing first {remaining_slots} tickers")
+            tickers_list = tickers_list[:remaining_slots]
+
     for ticker in tickers_list:
-        # Get stock name from stock_basic table
         stock_name = get_stock_name_from_db(ticker)
-        
         if not stock_name:
-            # If not found in stock_basic, try to fetch from API
             stock_name = get_company_name_from_api(ticker)
-            if not stock_name:
-                stock_name = ticker  # Fallback to ticker
-        
-        # Add to watchlist with retrieved name
-        success, msg = add_to_watchlist(
-            ticker, 
-            stock_name=stock_name
-        )
-        
+        if not stock_name:
+            stock_name = ticker
+
+        success, msg = add_to_watchlist(ticker, stock_name=stock_name)
         if success:
             success_count += 1
             print(f"✅ {ticker} ({stock_name})")
@@ -1641,7 +1696,7 @@ def bulk_add_to_watchlist(tickers_list):
             failed_count += 1
             print(f"❌ {ticker}: {msg}")
             messages.append(msg)
-    
+
     return success_count, failed_count, messages
 
 # ==================== FINANCIAL INDICATORS ====================

@@ -19,6 +19,10 @@ from sector_utils import (
 )
 from explanations import INTERACTION_LAB
 
+import auth_manager
+auth_manager.require_login()
+
+
 st.title("🔬 Sector Interaction Lab")
 st.markdown("### Market Gate ###")
 

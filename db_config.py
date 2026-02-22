@@ -32,7 +32,7 @@ def _get_secret(key: str, fallback_env: str = None) -> str:
 
 
 # Simple binary detection: local or production
-IS_LOCAL = os.environ.get('USER') == "phil-" or os.environ.get('USERNAME') == "phil-"
+IS_LOCAL = os.environ.get('USER') == "phil" or os.environ.get('USERNAME') == "phil"
 
 # Local = SQLite, Not Local = Supabase
 USE_SQLITE = IS_LOCAL

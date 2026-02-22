@@ -14,8 +14,8 @@ import data_manager
 # Import from shared engine
 from analysis_engine import run_single_stock_analysis
 
-
-
+import auth_manager
+auth_manager.require_login()
 
 # Initialize tables
 data_manager.create_watchlist_table()
@@ -256,7 +256,7 @@ st.set_page_config(page_title="Today's Alerts | 今日提醒", page_icon="🎯",
 st.title("🎯 Today's Opportunities & Alerts | 今日提醒")
 
 # Initialize tables in existing database
-init_signals_tables()
+# init_signals_tables()
 
 # Get today's date in Beijing time
 today_beijing = get_beijing_date()
@@ -310,30 +310,36 @@ if metadata:
 
 st.markdown("---")
 
+# ── Decide: use cache or scan ─────────────────────────────────────
 # Load or scan data
 if cached_df is not None:
     # Use cached data
     df = cached_df
-    st.info(f"📦 Loaded from cache (scanned earlier today)")
+    st.info(f"📦 Showing today's snapshot ({today_str})")
 else:
     # Need to scan
     st.info(f"🎯 Scanning your watchlist with ({len(MY_WATCHLIST)} stocks. )")
     with st.spinner("🔍 Scanning all stocks for signals... This may take a few minutes."):
         df, scan_duration = scan_my_watchlist()
         
-        if df is None:
-            st.error("❌ Scanning failed! ")
-            st.stop()
+    if df is None:
+        st.error("❌ Scanning failed! ")
+        st.stop()
+    
+    # Save as today's snapshot for this user
+    if not df.empty:
+        save_success = data_manager.save_signals_to_cache(df, today_str, scan_duration)
+        if save_success:
+            st.success(f"✅ Scan complete in {scan_duration:.1f}s — snapshot saved.")
+        else:
+            st.warning("⚠️ Scan complete but failed to save snapshot.")
+    else:
+        st.success("✨ No signals detected in your watchlist today.")
+        st.info("💡 Market may be consolidating, or no strong trends detected.")
+        st.stop()
         
-        # Save to cache
-        if not df.empty:
-            save_success = data_manager.save_signals_to_cache(df, today_str, scan_duration)
-            if save_success:
-                st.success(f"✅ Scan complete in {scan_duration:.1f}s. Results cached for today.")
-                st.session_state.force_rescan = False #reset flag
-                cached_df = df
-            else:
-                st.warning("⚠️ Scan complete but failed to cache results.")
+    # Reset flag after successful scan
+    st.session_state.force_rescan = False
 
 if df.empty:
     st.success("✨ No signals detected today. Market is quiet!")

@@ -17,6 +17,10 @@ from streamlit_plotly_events import plotly_events
 
 from analysis_engine import run_single_stock_analysis
 
+import auth_manager
+auth_manager.require_login()
+
+
 # ==================== SIGNAL DEFINITIONS ( should be the same as Todays Alerts ) ====================
 
 BULLISH_SIGNALS = {

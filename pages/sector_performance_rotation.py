@@ -16,6 +16,10 @@ from sector_utils import (
     create_rolling_correlation_chart
 )
 
+import auth_manager
+auth_manager.require_login()
+
+
 st.title("📈 Performance & Rotation")
 
 # Load data
