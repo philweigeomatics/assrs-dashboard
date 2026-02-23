@@ -227,7 +227,7 @@ def correlation_section():
         ))
         
         fig_corr.update_layout(
-            title=f"Average Rolling Correlation Matrix ({selected_sector})<br>" +
+            title=f"Average Rolling Correlation Matrix ({st.session_state.loaded_sector})<br>" +
                 f"<sub>{correlation_window}-day window averaged over {num_windows} periods (last {date_lookback} days)</sub>",
             height=600,
             template='plotly_white',
@@ -326,104 +326,119 @@ if risk_start_ts >= risk_end_ts:
     st.error("⚠️ Start date must be before end date!")
     st.stop()
 
-period_days = (risk_end_ts - risk_start_ts).days
-st.info(f"📊 Calculating risk metrics using data from **{risk_start_date}** to **{risk_end_date}** ({period_days} days)")
+# ── Only recompute if sector or date range changed ───────────────────
+risk_cache_key = f"{st.session_state.get('loaded_sector')}_{risk_start_date}_{risk_end_date}"
 
-# Calculate risk metrics for all stocks
-risk_metrics = []
-
-progress_placeholder = st.empty()
-with progress_placeholder.container():
-    # Add progress indicator for financial data fetching
-    st.info("📊 Fetching financial metrics from ...")
-    progress_bar_fin = st.progress(0)
-
-for idx, (ticker, df) in enumerate(sector_data.items()):
-    # Filter data by selected date range
-    df_filtered = df[(df.index >= risk_start_ts) & (df.index <= risk_end_ts)]
+if st.session_state.get('risk_cache_key') != risk_cache_key or 'risk_df' not in st.session_state:
     
-    if len(df_filtered) < 30:
-        continue
-    
-    returns = df_filtered['Close'].pct_change().dropna()
-    
-    if len(returns) < 20:
-        continue
-    
-    # Calculate existing metrics
-    volatility_daily = returns.std() * 100  # Daily volatility as percentage
-    volatility_annual = returns.std() * np.sqrt(252) * 100  # Annualized volatility as percentage
+    period_days = (risk_end_ts - risk_start_ts).days
+    st.info(f"📊 Calculating risk metrics using data from **{risk_start_date}** to **{risk_end_date}** ({period_days} days)")
 
-    sharpe = (returns.mean() * 252) / (returns.std() * np.sqrt(252)) if returns.std() > 0 else 0
-    max_drawdown = ((df_filtered['Close'] / df_filtered['Close'].cummax()) - 1).min()
-    avg_return = returns.mean() * 252
+    # Calculate risk metrics for all stocks
+    risk_metrics = []
+
+    progress_placeholder = st.empty()
+
+    with progress_placeholder.container():
+        # Add progress indicator for financial data fetching
+        st.info("📊 Fetching financial metrics from ...")
+        progress_bar_fin = st.progress(0)
+
+        for idx, (ticker, df) in enumerate(sector_data.items()):
+            # Filter data by selected date range
+            df_filtered = df[(df.index >= risk_start_ts) & (df.index <= risk_end_ts)]
+            
+            if len(df_filtered) < 30:
+                continue
+            
+            returns = df_filtered['Close'].pct_change().dropna()
+            
+            if len(returns) < 20:
+                continue
+            
+            # Calculate existing metrics
+            volatility_daily = returns.std() * 100  # Daily volatility as percentage
+            volatility_annual = returns.std() * np.sqrt(252) * 100  # Annualized volatility as percentage
+
+            sharpe = (returns.mean() * 252) / (returns.std() * np.sqrt(252)) if returns.std() > 0 else 0
+            max_drawdown = ((df_filtered['Close'] / df_filtered['Close'].cummax()) - 1).min()
+            avg_return = returns.mean() * 252
 
 
-    # Calculate beta using cap-weighted sector returns
-    cap_weighted_returns = st.session_state.cap_weighted_sector_returns
-    sector_avg_returns = cap_weighted_returns.loc[
-        (cap_weighted_returns.index >= risk_start_ts) & (cap_weighted_returns.index <= risk_end_ts)
-    ]
+            # Calculate beta using cap-weighted sector returns
+            cap_weighted_returns = st.session_state.cap_weighted_sector_returns
+            sector_avg_returns = cap_weighted_returns.loc[
+                (cap_weighted_returns.index >= risk_start_ts) & (cap_weighted_returns.index <= risk_end_ts)
+            ]
 
-    if len(sector_avg_returns) > 0 and len(returns) > 0:
-        common_idx = returns.index.intersection(sector_avg_returns.index)
-        if len(common_idx) > 20:
-            aligned_stock = returns.loc[common_idx]
-            aligned_sector = sector_avg_returns.loc[common_idx]
-            covariance = np.cov(aligned_stock, aligned_sector)[0][1]
-            sector_variance = aligned_sector.var()
-            beta = covariance / sector_variance if sector_variance > 0 else 1.0
-        else:
-            beta = 1.0
-    else:
-        beta = 1.0
+            if len(sector_avg_returns) > 0 and len(returns) > 0:
+                common_idx = returns.index.intersection(sector_avg_returns.index)
+                if len(common_idx) > 20:
+                    aligned_stock = returns.loc[common_idx]
+                    aligned_sector = sector_avg_returns.loc[common_idx]
+                    covariance = np.cov(aligned_stock, aligned_sector)[0][1]
+                    sector_variance = aligned_sector.var()
+                    beta = covariance / sector_variance if sector_variance > 0 else 1.0
+                else:
+                    beta = 1.0
+            else:
+                beta = 1.0
 
-    
-    # 🆕 Fetch financial indicators from Tushare
-    financial_data = data_manager.get_financial_indicators(ticker)
-    time.sleep(0.31)  # Respect API rate limit
-    
-    # Build metrics dictionary
-    metrics_dict = {
-        'Ticker': ticker,
-        'Name': data_manager.get_stock_name_from_db(ticker) or ticker,
-        'Daily Vol (%)': volatility_daily,      # Daily volatility
-        'Annual Vol (%)': volatility_annual,    # Annualized volatility
-        'Sharpe Ratio': sharpe,
-        'Max Drawdown': max_drawdown * 100,
-        'Avg Return': avg_return * 100,
-        'Beta': beta,
-        'Avg Correlation': avg_correlations.get(ticker, np.nan)
-    }
-    
-    # 🆕 Add financial metrics if available
-    if financial_data:
-        metrics_dict.update({
-            'ROE': financial_data.get('ROE'),
-            'ROA': financial_data.get('ROA'),
-            'Op. Margin': financial_data.get('Operating_Margin'),
-            'EPS Growth YoY': financial_data.get('EPS_Growth_YoY'),
-            'FCFF Growth YoY': financial_data.get('FCFF_Growth_YoY'),
-            'FCFE Growth YoY': financial_data.get('FCFE_Growth_YoY')
-        })
-    else:
-        # Add None values if data unavailable
-        metrics_dict.update({
-            'ROE': None,
-            'ROA': None,
-            'Op. Margin': None,
-            'EPS Growth YoY': None,
-            'FCFF Growth YoY': None,
-            'FCFE Growth YoY': None
-        })
-    
-    risk_metrics.append(metrics_dict)
-    progress_bar_fin.progress((idx + 1) / len(sector_data))
+            
+            # 🆕 Fetch financial indicators from Tushare
+            financial_data = data_manager.get_financial_indicators(ticker)
+            time.sleep(0.31)  # Respect API rate limit
+            
+            # Build metrics dictionary
+            metrics_dict = {
+                'Ticker': ticker,
+                'Name': data_manager.get_stock_name_from_db(ticker) or ticker,
+                'Daily Vol (%)': volatility_daily,      # Daily volatility
+                'Annual Vol (%)': volatility_annual,    # Annualized volatility
+                'Sharpe Ratio': sharpe,
+                'Max Drawdown': max_drawdown * 100,
+                'Avg Return': avg_return * 100,
+                'Beta': beta,
+                'Avg Correlation': avg_correlations.get(ticker, np.nan)
+            }
+            
+            # 🆕 Add financial metrics if available
+            if financial_data:
+                metrics_dict.update({
+                    'ROE': financial_data.get('ROE'),
+                    'ROA': financial_data.get('ROA'),
+                    'Op. Margin': financial_data.get('Operating_Margin'),
+                    'EPS Growth YoY': financial_data.get('EPS_Growth_YoY'),
+                    'FCFF Growth YoY': financial_data.get('FCFF_Growth_YoY'),
+                    'FCFE Growth YoY': financial_data.get('FCFE_Growth_YoY')
+                })
+            else:
+                # Add None values if data unavailable
+                metrics_dict.update({
+                    'ROE': None,
+                    'ROA': None,
+                    'Op. Margin': None,
+                    'EPS Growth YoY': None,
+                    'FCFF Growth YoY': None,
+                    'FCFE Growth YoY': None
+                })
+            
+            risk_metrics.append(metrics_dict)
+            progress_bar_fin.progress((idx + 1) / len(sector_data))
 
-# ✅ Clear the progress placeholder completely after loop
-progress_placeholder.empty()
+    # ✅ Clear the progress placeholder completely after loop
+    progress_placeholder.empty()
 
-risk_df = pd.DataFrame(risk_metrics)
+    risk_df = pd.DataFrame(risk_metrics)
+    # ✅ Cache results — won't recompute until sector or date range changes
+    st.session_state.risk_df        = risk_df
+    st.session_state.risk_cache_key = risk_cache_key
+else:
+    # ✅ Use cached results — no API calls, instant load
+    risk_df = st.session_state.risk_df
+    st.info(f"📦 Using cached risk metrics ({risk_start_date} to {risk_end_date})")
+
+#risk_df = pd.DataFrame(risk_metrics)
 
 if len(risk_df) == 0:
     st.error("❌ No stocks have sufficient data in the selected date range. Try a different period.")
@@ -756,7 +771,7 @@ fig_scatter.add_vline(x=median_vol, line_dash='dash', line_color='gray', opacity
 fig_scatter.add_hline(y=median_ret, line_dash='dash', line_color='gray', opacity=0.5)
 
 fig_scatter.update_layout(
-    title=f"Risk vs Return: {selected_sector} Stocks (Bubble Size = Beta) - {risk_start_date} to {risk_end_date}",
+    title=f"Risk vs Return: {st.session_state.loaded_sector} Stocks (Bubble Size = Beta) - {risk_start_date} to {risk_end_date}",
     xaxis_title="Volatility (Annualized %)",
     yaxis_title="Average Return (Annualized %)",
     height=600,
