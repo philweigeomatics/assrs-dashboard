@@ -986,9 +986,14 @@ def aggregate_ppi_data(sector_start_dates=None):
         print(f"   → Fetching {len(stock_list)} stocks...")
         
         for ticker in stock_list:
+
+            LOOKBACK_BUFFER_DAYS = 15
+            original_start = pd.to_datetime(start_date_str)
+            fetch_start_str = (original_start - pd.Timedelta(days=LOOKBACK_BUFFER_DAYS)).strftime('%Y%m%d')
+
             df_price = get_single_stock_data_live(
                 ticker, 
-                start_date=start_date_str,
+                start_date=fetch_start_str,
                 end_date=end_str
             )
             
@@ -998,7 +1003,7 @@ def aggregate_ppi_data(sector_start_dates=None):
             
             df_fundamentals = get_stock_fundamentals_live(
                 ticker,
-                start_date=start_date_str,
+                start_date=fetch_start_str,
                 end_date=end_str
             )
             
@@ -1046,6 +1051,10 @@ def aggregate_ppi_data(sector_start_dates=None):
                 continue
             
             prev_date = all_dates[i - 1]
+
+            # Skip buffer dates — don't write them, but use as prev_date anchor
+            if date < original_start:
+                continue
             
             total_cap_today = 0
             weighted_return = 0
