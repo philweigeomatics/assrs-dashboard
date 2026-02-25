@@ -16,3 +16,4 @@ hmmlearn>=0.3.0
 scikit-learn>=1.0.0
 streamlit-plotly-events
 bcrypt
+streamlit-aggrid
