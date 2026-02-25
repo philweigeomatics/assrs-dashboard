@@ -936,229 +936,478 @@ def get_single_stock_data_live(ticker, lookback_years=3, start_date=None, end_da
 
 def aggregate_ppi_data(sector_start_dates=None):
     """
-    Aggregates individual stock data into sector-level PPIs using MARKET CAP WEIGHTING.
-    
-    Uses RETURN-BASED calculation to handle sector composition changes correctly.
+    Builds sector-level PPIs using market-cap weighted returns.
+
+    FULL REBUILD  (sector_start_dates=None):
+        Fetches from DATA_START_DATE. PPI starts at 100.
+        Saves all dates.
+
+    INCREMENTAL   (sector_start_dates={sector: Timestamp}):
+        Fetches 150 calendar days of buffer before first_new_date.
+        150 cal days ≈ 100 trading days = full rolling window for Norm_Vol_Metric.
+        NOTE: Tushare rate-limits by number of calls, not data size,
+              so a larger date range costs the same as a smaller one.
+        Anchors PPI from the DB's last known Close so the series is
+        perfectly continuous. Saves only dates >= first_new_date.
     """
+
+    BUFFER_CALENDAR_DAYS = 150  # ≈100 trading days — fills rolling(100) window fully
+
     print("=" * 60)
-    print("📊 Aggregating Stock Data into Sector PPIs (Market Cap Weighted)")
+    print("📊 Aggregating Sector PPIs (Market Cap Weighted, Return-Based)")
     print("=" * 60)
-    
+
     all_sector_ppi_data = {}
-    
-    end_date = datetime.today()
-    end_str = end_date.strftime('%Y%m%d')
-    
+    end_str = datetime.today().strftime('%Y%m%d')
+
     if sector_start_dates is None:
-        sector_start_dates = {sector: DATA_START_DATE for sector in SECTOR_STOCK_MAP.keys()}
-    
+        sector_start_dates = {sector: None for sector in SECTOR_STOCK_MAP.keys()}
+
     for sector, stock_list in SECTOR_STOCK_MAP.items():
         if sector not in sector_start_dates:
             continue
-        
-        # ✅ FLEXIBLE DATE HANDLING - Accept any format
-        start_date_input = sector_start_dates[sector]
-        if start_date_input is None:
-            # Full aggregation
-            start_date_str = DATA_START_DATE
-        elif isinstance(start_date_input, str):
-            # Convert to YYYYMMDD format regardless of input format
-            if '-' in start_date_input:
-                # YYYY-MM-DD format
-                start_date_str = start_date_input.replace('-', '')
-            else:
-                # Already YYYYMMDD format
-                start_date_str = start_date_input
+
+        # ── 1. Determine fetch range ──────────────────────────────────────────
+        raw_start      = sector_start_dates[sector]
+        is_incremental = raw_start is not None
+
+        if is_incremental:
+            first_new_date   = pd.to_datetime(raw_start)
+            fetch_start_str  = (first_new_date - pd.Timedelta(days=BUFFER_CALENDAR_DAYS)).strftime('%Y%m%d')
         else:
-            # datetime or Timestamp object
-            try:
-                start_date_str = pd.to_datetime(start_date_input).strftime('%Y%m%d')
-            except:
-                print(f"   ⚠️ {sector}: Invalid start_date format, using DATA_START_DATE")
-                start_date_str = DATA_START_DATE
+            first_new_date   = pd.to_datetime(DATA_START_DATE)
+            fetch_start_str  = DATA_START_DATE
 
-        print(f"📊 {sector}: Aggregation from {start_date_str}")
-        
-        # ✅ STEP 1: Fetch OHLC data and market cap for all stocks in sector
-        stock_data = {}
+        print(f"\n📊 {sector}: {'Incremental from ' + first_new_date.strftime('%Y-%m-%d') if is_incremental else 'Full rebuild from ' + DATA_START_DATE}")
+        print(f"   Fetching stock data from {fetch_start_str} → {end_str}")
+
+        # ── 2. Fetch price + market cap for every stock in sector ─────────────
+        stock_data  = {}
         market_caps = {}
-        
-        print(f"   → Fetching {len(stock_list)} stocks...")
-        
+
         for ticker in stock_list:
-
-            LOOKBACK_BUFFER_DAYS = 15
-            original_start = pd.to_datetime(start_date_str)
-            fetch_start_str = (original_start - pd.Timedelta(days=LOOKBACK_BUFFER_DAYS)).strftime('%Y%m%d')
-
-            df_price = get_single_stock_data_live(
-                ticker, 
-                start_date=fetch_start_str,
-                end_date=end_str
-            )
-            
+            df_price = get_single_stock_data_live(ticker, start_date=fetch_start_str, end_date=end_str)
             if df_price is None or df_price.empty:
-                print(f"   ⚠️ {ticker}: No price data")
+                print(f"   ⚠️  {ticker}: no price data, skipping")
                 continue
-            
-            df_fundamentals = get_stock_fundamentals_live(
-                ticker,
-                start_date=fetch_start_str,
-                end_date=end_str
-            )
-            
-            if df_fundamentals is None or df_fundamentals.empty:
-                print(f"   ⚠️ {ticker}: No fundamental data")
+
+            df_fund = get_stock_fundamentals_live(ticker, start_date=fetch_start_str, end_date=end_str)
+            if df_fund is None or df_fund.empty:
+                print(f"   ⚠️  {ticker}: no fundamental data, skipping")
                 continue
-            
-            # ✅ Extract market cap (snake_case)
-            if 'Total_MV' in df_fundamentals.columns:
-                market_cap_col = 'Total_MV'
-            elif 'Total_MV_Yi' in df_fundamentals.columns:
-                market_cap_col = 'Total_MV_Yi'
-            else:
-                print(f"   ⚠️ {ticker}: No market cap column found. Available: {df_fundamentals.columns.tolist()}")
+
+            cap_col = next((c for c in ['Total_MV', 'Total_MV_Yi'] if c in df_fund.columns), None)
+            if cap_col is None:
+                print(f"   ⚠️  {ticker}: no market cap column, skipping")
                 continue
-            
-            stock_data[ticker] = df_price[['Open', 'High', 'Low', 'Close', 'Volume']]
-            market_caps[ticker] = df_fundamentals[market_cap_col]
-            
+
+            stock_data[ticker]  = df_price[['Open', 'High', 'Low', 'Close', 'Volume']]
+            market_caps[ticker] = df_fund[cap_col]
             time.sleep(0.35)
-        
+
         if len(stock_data) < 2:
-            print(f"   ❌ {sector}: Insufficient data ({len(stock_data)} stocks)")
+            print(f"   ❌ {sector}: only {len(stock_data)} stocks loaded, need ≥2 — skipping")
             continue
-        
-        print(f"   ✅ Loaded {len(stock_data)} stocks with market cap data")
-        
-        # ✅ STEP 2: Get union of all dates
-        all_dates = set()
-        for ticker in stock_data.keys():
-            ticker_dates = stock_data[ticker].index.intersection(market_caps[ticker].index)
-            all_dates.update(ticker_dates)
-        
-        all_dates = pd.DatetimeIndex(sorted(all_dates))
-        print(f"   → Total unique dates: {len(all_dates)}")
-        
-        # ✅ STEP 3: Calculate market-cap-weighted RETURNS for each date
+
+        print(f"   ✅ {len(stock_data)}/{len(stock_list)} stocks loaded")
+
+        # ── 3. Union of all dates across stocks ───────────────────────────────
+        all_dates = pd.DatetimeIndex(sorted(
+            set().union(*[
+                stock_data[t].index.intersection(market_caps[t].index)
+                for t in stock_data
+            ])
+        ))
+
+        if len(all_dates) < 2:
+            print(f"   ❌ {sector}: not enough shared dates — skipping")
+            continue
+
+        # ── 4. Market-cap weighted returns + dollar volumes ───────────────────
         daily_returns = []
-        valid_dates = []
         daily_volumes = []
-        
-        for i, date in enumerate(all_dates):
-            if i == 0:
-                # First day - no return to calculate yet
-                continue
-            
-            prev_date = all_dates[i - 1]
+        valid_dates   = []
 
-            # Skip buffer dates — don't write them, but use as prev_date anchor
-            if date < original_start:
-                continue
-            
-            total_cap_today = 0
-            weighted_return = 0
-            combined_dollar_volume = 0
+        for i in range(1, len(all_dates)):
+            date, prev_date = all_dates[i], all_dates[i - 1]
+            total_cap = weighted_return = combined_vol = 0
             valid_stocks = 0
-            
-            # Calculate weighted return for this date
-            for ticker in stock_data.keys():
+
+            for ticker in stock_data:
                 try:
-                    # Check if stock has data for both dates
-                    if date not in stock_data[ticker].index or prev_date not in stock_data[ticker].index:
+                    sd, mc = stock_data[ticker], market_caps[ticker]
+                    if date not in sd.index or prev_date not in sd.index or date not in mc.index:
                         continue
-                    if date not in market_caps[ticker].index or prev_date not in market_caps[ticker].index:
-                        continue
-                    
-                    # Use today's market cap for weighting
-                    cap_today = market_caps[ticker].loc[date]
-                    
-                    if pd.isna(cap_today) or cap_today <= 0:
-                        continue
-                    
-                    # Calculate return
-                    close_prev = stock_data[ticker].loc[prev_date, 'Close']
-                    close_today = stock_data[ticker].loc[date, 'Close']
-                    
-                    if pd.isna(close_prev) or pd.isna(close_today) or close_prev <= 0:
-                        continue
-                    
-                    stock_return = (close_today - close_prev) / close_prev
 
-                    # Calculate dollar volume (NEW LOGIC)
-                    high_today = stock_data[ticker].loc[date, 'High']
-                    low_today = stock_data[ticker].loc[date, 'Low']
-                    volume_today = stock_data[ticker].loc[date, 'Volume']
+                    cap = mc.loc[date]
+                    if pd.isna(cap) or cap <= 0:
+                        continue
 
-                    mid_price = (high_today + low_today) / 2 if pd.notna(high_today) and pd.notna(low_today) else close_today   
-                    dollar_volume = mid_price * volume_today if pd.notna(mid_price) and pd.notna(volume_today) else 0
-                    
-                    # Accumulate weighted values
-                    total_cap_today += cap_today
-                    weighted_return += stock_return * cap_today
-                    combined_dollar_volume += dollar_volume
-                    
-                    valid_stocks += 1
-                    
+                    c_prev, c_today = sd.loc[prev_date, 'Close'], sd.loc[date, 'Close']
+                    if pd.isna(c_prev) or pd.isna(c_today) or c_prev <= 0:
+                        continue
+
+                    high = sd.loc[date, 'High']
+                    low  = sd.loc[date, 'Low']
+                    vol  = sd.loc[date, 'Volume']
+                    mid  = (high + low) / 2 if pd.notna(high) and pd.notna(low) else c_today
+
+                    total_cap       += cap
+                    weighted_return += ((c_today - c_prev) / c_prev) * cap
+                    combined_vol    += mid * vol if pd.notna(vol) else 0
+                    valid_stocks    += 1
+
                 except (KeyError, IndexError, ZeroDivisionError):
                     continue
-            
-            # Only add date if we have at least 2 valid stocks
-            if valid_stocks >= 2 and total_cap_today > 0:
-                daily_returns.append(weighted_return / total_cap_today)
-                daily_volumes.append(combined_dollar_volume)
+
+            if valid_stocks >= 2 and total_cap > 0:
+                daily_returns.append(weighted_return / total_cap)
+                daily_volumes.append(combined_vol)
                 valid_dates.append(date)
-        
-        if len(daily_returns) < 20:
-            print(f"   ❌ {sector}: Insufficient valid dates ({len(daily_returns)})")
+
+        if not daily_returns:
+            print(f"   ❌ {sector}: no valid return dates calculated — skipping")
             continue
-        
-        # ✅ STEP 4: Build PPI by chaining returns (starting at 100)
-        ppi_values = [100.0]  # Base value
-        
+
+        valid_dates = pd.DatetimeIndex(valid_dates)
+
+        # ── 5. Anchor: find the correct PPI starting value ───────────────────
+        #
+        # Full rebuild  → anchor = 100  (no prior history)
+        #
+        # Incremental   → the DB already has correct PPI values inside our
+        #                 buffer range. Find the latest buffer date that is
+        #                 in both DB and valid_dates, then back-calculate
+        #                 what starting anchor produces that exact DB Close
+        #                 at that date when we chain all our returns forward.
+        #                 This guarantees perfect series continuity.
+        #
+        anchor_value = 100.0
+
+        if is_incremental:
+            table_name = f'PPI_{sector}'
+            try:
+                db_df = db.read_table(table_name, columns='Date,Close', order_by='Date')
+                if not db_df.empty:
+                    db_df['Date'] = pd.to_datetime(db_df['Date'])
+
+                    # Latest DB date that is also in our calculated valid_dates
+                    common = db_df[db_df['Date'].isin(valid_dates)]
+
+                    if not common.empty:
+                        ref_date  = common.iloc[-1]['Date']
+                        ref_close = common.iloc[-1]['Close']
+
+                        # Back-calculate: anchor × ∏(1+r) for all returns up
+                        # to and including ref_date must equal ref_close
+                        ref_idx          = valid_dates.get_loc(ref_date)
+                        forward_product  = float(np.prod([1.0 + r for r in daily_returns[:ref_idx + 1]]))
+                        anchor_value     = ref_close / forward_product
+
+                    else:
+                        # Buffer reaches before all DB history — rare edge case.
+                        # Use the last DB close before first_new_date as anchor.
+                        pre_new = db_df[db_df['Date'] < first_new_date]
+                        if not pre_new.empty:
+                            anchor_value = pre_new.iloc[-1]['Close']
+
+            except Exception as e:
+                print(f"   ⚠️  Could not load DB anchor for {sector}: {e} — using 100.0")
+
+        print(f"   📌 Anchor: {anchor_value:.4f}")
+
+        # ── 6. Chain returns → build full PPI series ──────────────────────────
+        ppi_values = [anchor_value]
         for ret in daily_returns:
-            ppi_values.append(ppi_values[-1] * (1 + ret))
-        
-        # Create DataFrame
+            ppi_values.append(ppi_values[-1] * (1.0 + ret))
+
+        # ppi_values[0]  = anchor (the virtual "day before" valid_dates[0])
+        # ppi_values[1:] = Close for each date in valid_dates
+
         ppi_df = pd.DataFrame({
-            'Close': ppi_values[1:],  # Skip first 100 base value
+            'Close':  ppi_values[1:],
             'Volume': daily_volumes
         }, index=valid_dates)
-        
-        # ✅ Generate OHLC from Close
-        ppi_df['Open'] = ppi_df['Close'].shift(1)  # Yesterday's close = today's open
-        ppi_df['High'] = ppi_df['Close']  # Conservative
-        ppi_df['Low'] = ppi_df['Close']   # Conservative
-        
-        # Drop first row (no previous close for Open)
-        ppi_df = ppi_df.dropna(subset=['Open'])
 
-        # Drop the remaining with NA values (if any)
-        ppi_df = ppi_df.dropna()
-        
-        # ✅ Calculate volume z-score (snake_case column name)
-        ppi_df['Vol_Mean'] = ppi_df['Volume'].rolling(window=VOL_ZSCORE_LOOKBACK, min_periods=20).mean()
-        ppi_df['Vol_Std'] = ppi_df['Volume'].rolling(window=VOL_ZSCORE_LOOKBACK, min_periods=20).std()
+        # Open = previous Close — anchor fills the NaN on the very first row
+        ppi_df['Open'] = [anchor_value] + list(ppi_values[1:-1])
+        ppi_df['High'] = ppi_df['Close']
+        ppi_df['Low']  = ppi_df['Close']
+
+        # ── 7. Norm_Vol_Metric over the FULL buffer window ────────────────────
+        #    150 cal days of buffer guarantees the rolling window has
+        #    ~100 trading days of data → fully accurate z-score on new rows
+        ppi_df['Vol_Mean']       = ppi_df['Volume'].rolling(window=VOL_ZSCORE_LOOKBACK, min_periods=20).mean()
+        ppi_df['Vol_Std']        = ppi_df['Volume'].rolling(window=VOL_ZSCORE_LOOKBACK, min_periods=20).std()
         ppi_df['Norm_Vol_Metric'] = (ppi_df['Volume'] - ppi_df['Vol_Mean']) / ppi_df['Vol_Std']
-        
-        # Clean up - use snake_case column name
+
+        # ── 8. Trim to only new dates before saving ───────────────────────────
+        ppi_df = ppi_df[ppi_df.index >= first_new_date].copy()
+
+        # ── 9. Final column selection and cleanup ─────────────────────────────
         ppi_df = ppi_df[['Open', 'High', 'Low', 'Close', 'Norm_Vol_Metric']]
-        ppi_df = ppi_df.dropna(subset=['Open', 'High', 'Low', 'Close'])
-        
-        if len(ppi_df) < MIN_HISTORY_DAYS:
-            print(f"   ❌ {sector}: Insufficient history ({len(ppi_df)} days)")
+        ppi_df = ppi_df.replace([np.inf, -np.inf], np.nan)
+        ppi_df = ppi_df.dropna()  # all 5 columns must be valid
+
+        if ppi_df.empty:
+            print(f"   ❌ {sector}: 0 valid rows after final cleanup — skipping")
             continue
-        
+
         all_sector_ppi_data[sector] = ppi_df
-        print(f"   ✅ {sector}: Aggregated {len(ppi_df)} dates (return-based PPI)")
-        print(f"      Date range: {ppi_df.index.min().strftime('%Y-%m-%d')} to {ppi_df.index.max().strftime('%Y-%m-%d')}")
-        print(f"      PPI range: {ppi_df['Close'].min():.2f} to {ppi_df['Close'].max():.2f}")
-    
+        print(f"   ✅ {sector}: {len(ppi_df)} date(s) ready to save")
+        print(f"      Range:     {ppi_df.index.min().strftime('%Y-%m-%d')} → {ppi_df.index.max().strftime('%Y-%m-%d')}")
+        print(f"      PPI Close: {ppi_df['Close'].min():.4f} – {ppi_df['Close'].max():.4f}")
+
+    print("\n" + "=" * 60)
+    print(f"✅ PPI Aggregation complete: {len(all_sector_ppi_data)}/{len(sector_start_dates)} sectors")
     print("=" * 60)
-    print(f"✅ PPI Aggregation Complete: {len(all_sector_ppi_data)} sectors")
-    print("=" * 60)
-    
     return all_sector_ppi_data
+
+
+# def aggregate_ppi_data(sector_start_dates=None):
+#     """
+#     Aggregates individual stock data into sector-level PPIs using MARKET CAP WEIGHTING.
+    
+#     Uses RETURN-BASED calculation to handle sector composition changes correctly.
+#     """
+#     print("=" * 60)
+#     print("📊 Aggregating Stock Data into Sector PPIs (Market Cap Weighted)")
+#     print("=" * 60)
+    
+#     all_sector_ppi_data = {}
+    
+#     end_date = datetime.today()
+#     end_str = end_date.strftime('%Y%m%d')
+    
+#     if sector_start_dates is None:
+#         sector_start_dates = {sector: DATA_START_DATE for sector in SECTOR_STOCK_MAP.keys()}
+    
+#     for sector, stock_list in SECTOR_STOCK_MAP.items():
+#         if sector not in sector_start_dates:
+#             continue
+        
+#         # ✅ FLEXIBLE DATE HANDLING - Accept any format
+#         start_date_input = sector_start_dates[sector]
+#         if start_date_input is None:
+#             # Full aggregation
+#             start_date_str = DATA_START_DATE
+#         elif isinstance(start_date_input, str):
+#             # Convert to YYYYMMDD format regardless of input format
+#             if '-' in start_date_input:
+#                 # YYYY-MM-DD format
+#                 start_date_str = start_date_input.replace('-', '')
+#             else:
+#                 # Already YYYYMMDD format
+#                 start_date_str = start_date_input
+#         else:
+#             # datetime or Timestamp object
+#             try:
+#                 start_date_str = pd.to_datetime(start_date_input).strftime('%Y%m%d')
+#             except:
+#                 print(f"   ⚠️ {sector}: Invalid start_date format, using DATA_START_DATE")
+#                 start_date_str = DATA_START_DATE
+
+#         print(f"📊 {sector}: Aggregation from {start_date_str}")
+        
+#         # ✅ STEP 1: Fetch OHLC data and market cap for all stocks in sector
+#         stock_data = {}
+#         market_caps = {}
+        
+#         print(f"   → Fetching {len(stock_list)} stocks...")
+        
+#         for ticker in stock_list:
+
+#             LOOKBACK_BUFFER_DAYS = 15
+#             original_start = pd.to_datetime(start_date_str)
+#             fetch_start_str = (original_start - pd.Timedelta(days=LOOKBACK_BUFFER_DAYS)).strftime('%Y%m%d')
+
+#             df_price = get_single_stock_data_live(
+#                 ticker, 
+#                 start_date=fetch_start_str,
+#                 end_date=end_str
+#             )
+            
+#             if df_price is None or df_price.empty:
+#                 print(f"   ⚠️ {ticker}: No price data")
+#                 continue
+            
+#             df_fundamentals = get_stock_fundamentals_live(
+#                 ticker,
+#                 start_date=fetch_start_str,
+#                 end_date=end_str
+#             )
+            
+#             if df_fundamentals is None or df_fundamentals.empty:
+#                 print(f"   ⚠️ {ticker}: No fundamental data")
+#                 continue
+            
+#             # ✅ Extract market cap (snake_case)
+#             if 'Total_MV' in df_fundamentals.columns:
+#                 market_cap_col = 'Total_MV'
+#             elif 'Total_MV_Yi' in df_fundamentals.columns:
+#                 market_cap_col = 'Total_MV_Yi'
+#             else:
+#                 print(f"   ⚠️ {ticker}: No market cap column found. Available: {df_fundamentals.columns.tolist()}")
+#                 continue
+            
+#             stock_data[ticker] = df_price[['Open', 'High', 'Low', 'Close', 'Volume']]
+#             market_caps[ticker] = df_fundamentals[market_cap_col]
+            
+#             time.sleep(0.35)
+        
+#         if len(stock_data) < 2:
+#             print(f"   ❌ {sector}: Insufficient data ({len(stock_data)} stocks)")
+#             continue
+        
+#         print(f"   ✅ Loaded {len(stock_data)} stocks with market cap data")
+        
+#         # ✅ STEP 2: Get union of all dates
+#         all_dates = set()
+#         for ticker in stock_data.keys():
+#             ticker_dates = stock_data[ticker].index.intersection(market_caps[ticker].index)
+#             all_dates.update(ticker_dates)
+        
+#         all_dates = pd.DatetimeIndex(sorted(all_dates))
+#         print(f"   → Total unique dates: {len(all_dates)}")
+        
+#         # ✅ STEP 3: Calculate market-cap-weighted RETURNS for each date
+#         daily_returns = []
+#         valid_dates = []
+#         daily_volumes = []
+        
+#         for i, date in enumerate(all_dates):
+#             if i == 0:
+#                 # First day - no return to calculate yet
+#                 continue
+            
+#             prev_date = all_dates[i - 1]
+
+#             # Skip buffer dates — don't write them, but use as prev_date anchor
+#             if date < original_start:
+#                 continue
+            
+#             total_cap_today = 0
+#             weighted_return = 0
+#             combined_dollar_volume = 0
+#             valid_stocks = 0
+            
+#             # Calculate weighted return for this date
+#             for ticker in stock_data.keys():
+#                 try:
+#                     # Check if stock has data for both dates
+#                     if date not in stock_data[ticker].index or prev_date not in stock_data[ticker].index:
+#                         continue
+#                     if date not in market_caps[ticker].index or prev_date not in market_caps[ticker].index:
+#                         continue
+                    
+#                     # Use today's market cap for weighting
+#                     cap_today = market_caps[ticker].loc[date]
+                    
+#                     if pd.isna(cap_today) or cap_today <= 0:
+#                         continue
+                    
+#                     # Calculate return
+#                     close_prev = stock_data[ticker].loc[prev_date, 'Close']
+#                     close_today = stock_data[ticker].loc[date, 'Close']
+                    
+#                     if pd.isna(close_prev) or pd.isna(close_today) or close_prev <= 0:
+#                         continue
+                    
+#                     stock_return = (close_today - close_prev) / close_prev
+
+#                     # Calculate dollar volume (NEW LOGIC)
+#                     high_today = stock_data[ticker].loc[date, 'High']
+#                     low_today = stock_data[ticker].loc[date, 'Low']
+#                     volume_today = stock_data[ticker].loc[date, 'Volume']
+
+#                     mid_price = (high_today + low_today) / 2 if pd.notna(high_today) and pd.notna(low_today) else close_today   
+#                     dollar_volume = mid_price * volume_today if pd.notna(mid_price) and pd.notna(volume_today) else 0
+                    
+#                     # Accumulate weighted values
+#                     total_cap_today += cap_today
+#                     weighted_return += stock_return * cap_today
+#                     combined_dollar_volume += dollar_volume
+                    
+#                     valid_stocks += 1
+                    
+#                 except (KeyError, IndexError, ZeroDivisionError):
+#                     continue
+            
+#             # Only add date if we have at least 2 valid stocks
+#             if valid_stocks >= 2 and total_cap_today > 0:
+#                 daily_returns.append(weighted_return / total_cap_today)
+#                 daily_volumes.append(combined_dollar_volume)
+#                 valid_dates.append(date)
+        
+#         # Replace with:
+#         is_incremental = sector_start_dates.get(sector) is not None  # None = full rebuild
+#         min_required = 20 if not is_incremental else 1
+
+#         if len(daily_returns) < min_required:
+#             print(f"   ❌ {sector}: Insufficient valid dates ({len(daily_returns)})")
+#             continue
+        
+#         # ✅ STEP 4: Build PPI by chaining returns (starting at 100)
+#         ppi_values = [100.0]  # Base value
+        
+#         for ret in daily_returns:
+#             ppi_values.append(ppi_values[-1] * (1 + ret))
+        
+#         # Create DataFrame
+#         ppi_df = pd.DataFrame({
+#             'Close': ppi_values[1:],  # Skip first 100 base value
+#             'Volume': daily_volumes
+#         }, index=valid_dates)
+        
+#         # ✅ Generate OHLC from Close
+#         ppi_df['Open'] = ppi_df['Close'].shift(1)  # Yesterday's close = today's open
+#         ppi_df['High'] = ppi_df['Close']  # Conservative
+#         ppi_df['Low'] = ppi_df['Close']   # Conservative
+        
+    
+#         if is_incremental and ppi_df['Open'].isna().any():
+#             # Get the last Close already stored in the DB for this sector
+#             try:
+#                 table_name = f'PPI_{sector}'
+#                 existing = db.read_table(table_name, columns='Date,Close', order_by='-Date', limit=1)
+#                 if not existing.empty:
+#                     last_close_in_db = existing['Close'].iloc[0]
+#                     ppi_df['Open'] = ppi_df['Open'].fillna(last_close_in_db)
+#                 else:
+#                     ppi_df['Open'] = ppi_df['Open'].fillna(ppi_df['Close'])  # fallback
+#             except:
+#                 ppi_df['Open'] = ppi_df['Open'].fillna(ppi_df['Close'])  # fallback
+#         else:
+#             ppi_df = ppi_df.dropna(subset=['Open'])
+
+
+#         # Drop the remaining with NA values (if any)
+#         ppi_df = ppi_df.dropna()
+        
+#         # ✅ Calculate volume z-score (snake_case column name)
+#         ppi_df['Vol_Mean'] = ppi_df['Volume'].rolling(window=VOL_ZSCORE_LOOKBACK, min_periods=20).mean()
+#         ppi_df['Vol_Std'] = ppi_df['Volume'].rolling(window=VOL_ZSCORE_LOOKBACK, min_periods=20).std()
+#         ppi_df['Norm_Vol_Metric'] = (ppi_df['Volume'] - ppi_df['Vol_Mean']) / ppi_df['Vol_Std']
+        
+#         # Clean up - use snake_case column name
+#         ppi_df = ppi_df[['Open', 'High', 'Low', 'Close', 'Norm_Vol_Metric']]
+#         ppi_df = ppi_df.dropna(subset=['Open', 'High', 'Low', 'Close'])
+        
+#         min_history = MIN_HISTORY_DAYS if not is_incremental else 1
+#         if len(ppi_df) < min_history:
+#             print(f" ❌ {sector}: Insufficient history ({len(ppi_df)} days)")
+#             continue
+        
+#         all_sector_ppi_data[sector] = ppi_df
+#         print(f"   ✅ {sector}: Aggregated {len(ppi_df)} dates (return-based PPI)")
+#         print(f"      Date range: {ppi_df.index.min().strftime('%Y-%m-%d')} to {ppi_df.index.max().strftime('%Y-%m-%d')}")
+#         print(f"      PPI range: {ppi_df['Close'].min():.2f} to {ppi_df['Close'].max():.2f}")
+    
+#     print("=" * 60)
+#     print(f"✅ PPI Aggregation Complete: {len(all_sector_ppi_data)} sectors")
+#     print("=" * 60)
+    
+#     return all_sector_ppi_data
 
 def save_ppi_data_to_db(all_ppi_data):
     """
@@ -2105,3 +2354,152 @@ def calculate_sector_market_breadth(sector, current_date, all_stock_data=None):
         return None
 
     return stocks_above_ma20 / total_valid_stocks
+
+
+
+# --------------- Stock Daily Baiscs ---------------- 
+def create_daily_basic_table():
+    """Creates daily_basic table (SQLite only — Supabase needs manual creation)."""
+    if db_config.USE_SQLITE:
+        schema = """CREATE TABLE IF NOT EXISTS daily_basic (
+            ts_code         TEXT,
+            trade_date      TEXT,
+            close           REAL,
+            turnover_rate   REAL,
+            turnover_rate_f REAL,
+            volume_ratio    REAL,
+            pe              REAL,
+            pe_ttm          REAL,
+            pb              REAL,
+            ps              REAL,
+            ps_ttm          REAL,
+            dv_ratio        REAL,
+            dv_ttm          REAL,
+            total_share     REAL,
+            float_share     REAL,
+            free_share      REAL,
+            total_mv        REAL,
+            circ_mv         REAL,
+            PRIMARY KEY (ts_code, trade_date)
+        )"""
+        db.create_table_sqlite(schema)
+
+
+def should_update_daily_basic():
+    """
+    Returns True if daily_basic needs updating.
+      - After 18:00 Beijing → update if latest date < today
+      - Before 18:00 Beijing → update if latest date < yesterday
+    """
+    from zoneinfo import ZoneInfo
+    CHINA_TZ = ZoneInfo("Asia/Shanghai")
+    now_beijing = datetime.now(CHINA_TZ)
+    today_beijing = now_beijing.date()
+    yesterday_beijing = today_beijing - timedelta(days=1)
+
+    threshold = today_beijing if now_beijing.hour >= 18 else yesterday_beijing
+
+    try:
+        if not db.table_exists('daily_basic'):
+            print("[data_manager] daily_basic table doesn't exist → needs load")
+            return True
+
+        df = db.read_table('daily_basic', columns='trade_date', order_by='-trade_date', limit=1)
+        if df.empty:
+            print("[data_manager] daily_basic is empty → needs load")
+            return True
+
+        latest_date = pd.to_datetime(df['trade_date'].iloc[0]).date()
+        needs_update = latest_date < threshold
+        print(f"[data_manager] daily_basic latest: {latest_date} | threshold: {threshold} | update needed: {needs_update}")
+        return needs_update
+
+    except Exception as e:
+        print(f"[data_manager] Error checking daily_basic: {e}")
+        return True
+
+
+def update_daily_basic():
+    """
+    Fetches latest daily_basic for ALL stocks from Tushare and upserts to DB.
+    Returns True if updated, False if skipped/no data, None if error.
+    """
+    global TUSHARE_API
+
+    if not should_update_daily_basic():
+        print("[data_manager] ✅ daily_basic already up-to-date, skipping.")
+        return False
+
+    if TUSHARE_API is None:
+        ok = init_tushare()
+        if not ok:
+            print("[data_manager] ❌ Tushare init failed")
+            return None
+        
+    from zoneinfo import ZoneInfo
+    CHINA_TZ = ZoneInfo("Asia/Shanghai")
+    now_beijing = datetime.now(CHINA_TZ)
+    today_beijing = now_beijing.date()
+
+    # ── Use the same threshold logic as should_update_daily_basic ──
+    if now_beijing.hour >= 18:
+        fetch_date = today_beijing
+    else:
+        fetch_date = today_beijing - timedelta(days=1)  # yesterday
+
+    fetch_date_str = fetch_date.strftime('%Y%m%d')
+
+    print(f"[data_manager] 📡 Fetching daily_basic (date: {fetch_date_str})...")
+
+    try:
+        create_daily_basic_table()
+
+        df = TUSHARE_API.daily_basic(
+            trade_date=fetch_date_str,
+            fields='ts_code,trade_date,close,turnover_rate,turnover_rate_f,'
+                   'volume_ratio,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,dv_ttm,'
+                   'total_share,float_share,free_share,total_mv,circ_mv'
+        )
+
+        if df is None or df.empty:
+            print(f"[data_manager] ℹ️ No data for {fetch_date_str} (weekend/holiday), skipping.")
+            return False
+
+        records = df.to_dict('records')
+        db.insert_records('daily_basic', records, upsert=True)
+        print(f"[data_manager] ✅ Saved {len(df)} daily_basic records (trade_date: {df['trade_date'].iloc[0]})")
+        return True
+
+    except Exception as e:
+        print(f"[data_manager] ❌ Failed to update daily_basic: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def get_daily_basic_for_tickers(tickers: list):
+    """
+    Returns latest daily_basic rows for the given list of 6-digit tickers.
+    """
+    try:
+        if not db.table_exists('daily_basic'):
+            return pd.DataFrame()
+
+        df_date = db.read_table('daily_basic', columns='trade_date', order_by='-trade_date', limit=1)
+        if df_date.empty:
+            return pd.DataFrame()
+
+        latest_date = df_date['trade_date'].iloc[0]
+        df = db.read_table('daily_basic', filters={'trade_date': latest_date})
+        if df.empty:
+            return pd.DataFrame()
+
+        df['ticker'] = df['ts_code'].str.split('.').str[0]
+        df = df[df['ticker'].isin(tickers)].copy()
+        df['total_mv_yi'] = df['total_mv'] / 10000
+        df['circ_mv_yi']  = df['circ_mv']  / 10000
+        return df
+
+    except Exception as e:
+        print(f"[data_manager] ❌ get_daily_basic_for_tickers failed: {e}")
+        return pd.DataFrame()

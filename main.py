@@ -118,6 +118,24 @@ def run_daily_ppi_and_market_breadth():
         print("Continuing with other updates...")
     print()
 
+
+    # STEP 1.7: Update daily_basic
+    print("=" * 60)
+    print("STEP 1.7: Updating daily_basic (latest market metrics)")
+    print("=" * 60)
+    try:
+        result = dm.update_daily_basic()
+        if result is True:
+            print("✓ daily_basic updated successfully")
+        elif result is False:
+            print("✓ daily_basic skipped (up-to-date or no market data today)")
+        else:
+            print("⚠ daily_basic update failed, continuing...")
+    except Exception as e:
+        print(f"⚠ WARNING: daily_basic update failed: {e}")
+        print("Continuing with other updates...")
+    print()
+
     # STEP 2: Aggregate PPIs (Incremental)
     print("=" * 60)
     print("STEP 2: Aggregating sector PPIs (incremental update)")

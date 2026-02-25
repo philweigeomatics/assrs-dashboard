@@ -6,13 +6,10 @@ import streamlit as st
 import pandas as pd
 import data_manager
 import auth_manager
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 # ==================== PAGE CONFIG ====================
-# Note: st.set_page_config is handled by streamlit_app.py
-
-# Any logged-in user can access this page
 auth_manager.require_login()
-
 user = auth_manager.get_current_user()
 
 st.title("📋 Watchlist Management | 观察列表管理")
@@ -21,7 +18,6 @@ st.markdown("---")
 
 # ==================== ADD STOCK SECTION ====================
 st.subheader("➕ Add Stock to Watchlist")
-
 col1, col2 = st.columns([3, 1])
 with col1:
     new_ticker = st.text_input(
@@ -85,14 +81,12 @@ st.markdown("---")
 
 # ==================== WATCHLIST DISPLAY ====================
 st.subheader("📋 Current Watchlist")
-
 watchlist_data = data_manager.get_watchlist()
 
 if not watchlist_data:
     st.info("📭 Your watchlist is empty. Add stocks above to get started.")
 else:
     st.write(f"**Total: {len(watchlist_data)} stocks**")
-
     df = pd.DataFrame(watchlist_data)
     df = df[['ticker', 'stock_name', 'added_date']]
     df = df.sort_values('added_date', ascending=False)
@@ -126,8 +120,8 @@ else:
 
     # ==================== PAGINATION ====================
     ITEMS_PER_PAGE = 10
-    total_items    = len(filtered_df)
-    total_pages    = (total_items - 1) // ITEMS_PER_PAGE + 1 if total_items > 0 else 1
+    total_items = len(filtered_df)
+    total_pages = (total_items - 1) // ITEMS_PER_PAGE + 1 if total_items > 0 else 1
 
     if 'watchlist_page' not in st.session_state:
         st.session_state.watchlist_page = 0
@@ -136,71 +130,79 @@ else:
 
     if search_term != st.session_state.last_search:
         st.session_state.watchlist_page = 0
-        st.session_state.last_search    = search_term
+        st.session_state.last_search = search_term
 
-    if st.session_state.watchlist_page >= total_pages:
-        st.session_state.watchlist_page = total_pages - 1
-    if st.session_state.watchlist_page < 0:
-        st.session_state.watchlist_page = 0
+    st.session_state.watchlist_page = max(0, min(st.session_state.watchlist_page, total_pages - 1))
 
     start_idx = st.session_state.watchlist_page * ITEMS_PER_PAGE
-    end_idx   = min(start_idx + ITEMS_PER_PAGE, total_items)
-    page_df   = filtered_df.iloc[start_idx:end_idx].copy()
-    page_df.insert(0, 'Remove', False)
+    end_idx = min(start_idx + ITEMS_PER_PAGE, total_items)
+    page_df = filtered_df.iloc[start_idx:end_idx].copy().reset_index(drop=True)
 
-    # ==================== DISPLAY TABLE ====================
-    edited_df = st.data_editor(
+    # ==================== DELETE CONFIRMATION ====================
+    if st.session_state.get('pending_delete'):
+        ticker_to_delete = st.session_state.pending_delete
+        st.warning(f"⚠️ Are you sure you want to remove **{ticker_to_delete}** from your watchlist?")
+        col_confirm, col_cancel, _ = st.columns([1, 1, 4])
+        if col_confirm.button("✅ Confirm Delete", type="primary"):
+            success, message = data_manager.remove_from_watchlist(ticker_to_delete)
+            st.success(message) if success else st.error(message)
+            st.session_state.pending_delete = None
+            st.rerun()
+        if col_cancel.button("❌ Cancel"):
+            st.session_state.pending_delete = None
+            st.rerun()
+        st.divider()
+
+    # ==================== AGGRID TABLE ====================
+    gb = GridOptionsBuilder.from_dataframe(page_df)
+    gb.configure_selection(selection_mode="single", use_checkbox=False)
+    gb.configure_column("ticker",      header_name="Stock Code 代码",   width=150)
+    gb.configure_column("stock_name",  header_name="Name 名称",          flex=1)
+    gb.configure_column("added_date",  header_name="Added Date 添加日期", width=160)
+    gb.configure_grid_options(rowHeight=40, suppressMovableColumns=True)
+    grid_options = gb.build()
+
+    grid_result = AgGrid(
         page_df,
-        column_config={
-            "Remove": st.column_config.CheckboxColumn(
-                "🗑️ Remove", help="Check to remove from watchlist",
-                default=False, width="small"
-            ),
-            "ticker": st.column_config.TextColumn(
-                "Stock Code 代码", disabled=True, width="medium"
-            ),
-            "stock_name": st.column_config.TextColumn(
-                "Name 名称", disabled=True, width="large"
-            ),
-            "added_date": st.column_config.TextColumn(
-                "Added Date 添加日期", disabled=True, width="medium"
-            ),
-        },
-        hide_index=True,
+        gridOptions=grid_options,
+        update_mode=GridUpdateMode.SELECTION_CHANGED,
+        data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
         use_container_width=True,
-        disabled=["ticker", "stock_name", "added_date"],
-        key=f"watchlist_editor_page_{st.session_state.watchlist_page}"
+        height=min(80 + len(page_df) * 40, 480),  # dynamic height
+        theme="streamlit",
     )
+
+    # ==================== ROW ACTION BUTTONS ====================
+    selected_rows = grid_result.get('selected_rows', [])
+    if selected_rows is not None and not selected_rows.empty:
+        selected_ticker = selected_rows.iloc[0]['ticker']
+        selected_name   = selected_rows.iloc[0]['stock_name']
+        st.info(f"Selected: **{selected_name} ({selected_ticker})**")
+        col_analyze, col_remove, _ = st.columns([1.2, 1.2, 5])
+        if col_analyze.button("🔍 Analyze", type="primary", use_container_width=True):
+            st.session_state.active_ticker = selected_ticker
+            st.switch_page("pages/2_Single_Stock_Analysis_个股分析.py")
+        if col_remove.button("🗑️ Remove", use_container_width=True):
+            st.session_state.pending_delete = selected_ticker
+            st.rerun()
+    else:
+        st.caption("💡 Click a row to select it, then Analyze or Remove")
 
     # ==================== PAGINATION CONTROLS ====================
     col1, col2, col3 = st.columns([1, 2, 1])
     with col1:
-        if st.button("⬅️ Previous",
-                      disabled=(st.session_state.watchlist_page == 0),
-                      use_container_width=True):
+        if st.button("⬅️ Previous", disabled=(st.session_state.watchlist_page == 0), use_container_width=True):
             st.session_state.watchlist_page -= 1
             st.rerun()
     with col2:
         st.markdown(
-            f"<div style='text-align: center; padding: 8px;'>"
-            f"Page {st.session_state.watchlist_page + 1} of {total_pages} "
-            f"({total_items} stocks)</div>",
+            f"<div style='text-align:center; padding-top:8px'>"
+            f"Page <b>{st.session_state.watchlist_page + 1}</b> of <b>{total_pages}</b> "
+            f"&nbsp;|&nbsp; Showing {start_idx + 1}–{end_idx} of {total_items}"
+            f"</div>",
             unsafe_allow_html=True
         )
     with col3:
-        if st.button("Next ➡️",
-                      disabled=(st.session_state.watchlist_page >= total_pages - 1),
-                      use_container_width=True):
+        if st.button("➡️ Next", disabled=(st.session_state.watchlist_page >= total_pages - 1), use_container_width=True):
             st.session_state.watchlist_page += 1
             st.rerun()
-
-    # ==================== HANDLE REMOVALS ====================
-    rows_to_remove = edited_df[edited_df['Remove'] == True]
-    if not rows_to_remove.empty:
-        for _, row in rows_to_remove.iterrows():
-            success, message = data_manager.remove_from_watchlist(row['ticker'])
-            if success:
-                st.success(message)
-            else:
-                st.error(message)
-        st.rerun()
