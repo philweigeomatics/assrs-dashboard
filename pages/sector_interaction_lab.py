@@ -15,9 +15,11 @@ from sector_utils import (
     build_nextday_predictions,
     build_state_stats,
     make_heatmap,
-    compute_market_gate_with_context
+    compute_market_gate_with_context,
+    load_csi300_with_regime
 )
 from explanations import INTERACTION_LAB
+import data_manager as dm
 
 import auth_manager
 auth_manager.require_login()
@@ -32,8 +34,11 @@ if v2latest is None:
     st.error(f"Error loading data: {v2error}")
     st.stop()
 
+# Load CSI300 once — already have load_csi300_with_regime() available
+csi300_df = load_csi300_with_regime('日线')
+
 # Build panels
-close_panel, ret_panel, vol_panel, exret_panel = build_sector_panels(v2hist)
+close_panel, ret_panel, vol_panel, exret_panel = build_sector_panels(v2hist, csi300_df=csi300_df)
 
 # Check available days
 available_days = int(exret_panel.dropna(how='all').shape[0])
@@ -59,6 +64,7 @@ Current {lookback} days vs Past {HISTORY_WINDOW} days (1 year)
 gate = compute_market_gate_with_context(
     ret_panel, 
     exret_panel, 
+    csi300_df=csi300_df,   # ← add this
     lookback=lookback,  # ✅ Use slider value
     history_window=HISTORY_WINDOW
 )

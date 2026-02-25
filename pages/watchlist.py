@@ -136,6 +136,14 @@ else:
 
     start_idx = st.session_state.watchlist_page * ITEMS_PER_PAGE
     end_idx = min(start_idx + ITEMS_PER_PAGE, total_items)
+
+    # ==================== ENRICH WITH DAILY BASIC ====================
+    all_tickers = filtered_df['ticker'].tolist()
+    daily_df = data_manager.get_daily_basic_latest(all_tickers)
+
+    if not daily_df.empty:
+        filtered_df = filtered_df.merge(daily_df, on='ticker', how='left')
+        
     page_df = filtered_df.iloc[start_idx:end_idx].copy().reset_index(drop=True)
 
     # ==================== DELETE CONFIRMATION ====================
@@ -156,9 +164,15 @@ else:
     # ==================== AGGRID TABLE ====================
     gb = GridOptionsBuilder.from_dataframe(page_df)
     gb.configure_selection(selection_mode="single", use_checkbox=False)
-    gb.configure_column("ticker",      header_name="Stock Code 代码",   width=150)
-    gb.configure_column("stock_name",  header_name="Name 名称",          flex=1)
-    gb.configure_column("added_date",  header_name="Added Date 添加日期", width=160)
+    gb.configure_column("ticker",        header_name="代码",       width=110)
+    gb.configure_column("stock_name",    header_name="名称",       flex=1)
+    gb.configure_column("close",         header_name="收盘价",     width=100)
+    gb.configure_column("pe_ttm",        header_name="PE(TTM)",    width=100)
+    gb.configure_column("pb",            header_name="PB",         width=90)
+    gb.configure_column("turnover_rate", header_name="换手率%",    width=100)
+    gb.configure_column("circ_mv_yi",    header_name="流通市值(亿)", width=130)
+    gb.configure_column("trade_date",    header_name="数据日期",   width=120)
+    gb.configure_column("added_date",    header_name="添加日期",   width=120)
     gb.configure_grid_options(rowHeight=40, suppressMovableColumns=True)
     grid_options = gb.build()
 

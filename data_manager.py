@@ -2503,3 +2503,35 @@ def get_daily_basic_for_tickers(tickers: list):
     except Exception as e:
         print(f"[data_manager] ❌ get_daily_basic_for_tickers failed: {e}")
         return pd.DataFrame()
+    
+def get_daily_basic_latest(tickers: list) -> pd.DataFrame:
+    """
+    Fetch the latest daily_basic row for a list of tickers from the DB.
+    Returns a DataFrame indexed by ticker with trading metrics.
+    """
+    if not tickers:
+        return pd.DataFrame()
+    try:
+        # Read all rows for these tickers, then keep only the latest per ticker
+        ts_codes = [get_tushare_ticker(t) for t in tickers]
+        placeholders = ','.join(['?' for _ in ts_codes])  # SQLite
+        df = db.read_table(
+            'daily_basic',
+            columns='ts_code, trade_date, close, pe_ttm, pb, turnover_rate, circ_mv',
+            order_by='-trade_date'
+        )
+        if df.empty:
+            return pd.DataFrame()
+        df = df[df['ts_code'].isin(ts_codes)]
+        # Keep latest row per ticker
+        df = df.sort_values('trade_date', ascending=False).drop_duplicates('ts_code')
+        # Normalize ticker back to 6-digit for merging
+        df['ticker'] = df['ts_code'].str[:6]
+        df['circ_mv_yi'] = (pd.to_numeric(df['circ_mv'], errors='coerce') / 10000).round(2)
+        df['pe_ttm'] = pd.to_numeric(df['pe_ttm'], errors='coerce').round(1)
+        df['pb'] = pd.to_numeric(df['pb'], errors='coerce').round(2)
+        df['turnover_rate'] = pd.to_numeric(df['turnover_rate'], errors='coerce').round(2)
+        return df[['ticker', 'close', 'pe_ttm', 'pb', 'turnover_rate', 'circ_mv_yi', 'trade_date']]
+    except Exception as e:
+        print(f"[data_manager] ❌ get_daily_basic_latest failed: {e}")
+        return pd.DataFrame()

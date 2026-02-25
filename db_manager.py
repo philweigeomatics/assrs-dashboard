@@ -251,5 +251,9 @@ class DatabaseManager:
         else:
             return sqlite3.connect(self.dbname)
 
+   
+    
+
+
 # Global instance
 db = DatabaseManager()

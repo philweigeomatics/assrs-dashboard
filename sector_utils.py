@@ -163,18 +163,35 @@ def pivot_sector_series(hist_df, value_col):
     wide = df.pivot_table(index='Date', columns='Sector', values=value_col, aggfunc='last')
     return wide.sort_index()
 
-def build_sector_panels(hist_df, market_sector="MARKET_PROXY"):
-    """Build close, ret, vol, exret panels."""
-    close_panel = pivot_sector_series(hist_df, 'Close')
-    vol_panel = pivot_sector_series(hist_df, 'Volume_Metric')
-    ret_panel = close_panel.pct_change()
+
+def build_sector_panels(hist_df, csi300_df=None, market_sector='MARKET_PROXY'):
+    """
+    Build close, ret, vol, exret panels.
     
+    If csi300_df provided: exret = sector_return - csi300_daily_return  ← CORRECT
+    If not:                exret = sector_return - MARKET_PROXY return  ← fallback only
+    """
+    close_panel = pivot_sector_series(hist_df, 'Close')
+    vol_panel   = pivot_sector_series(hist_df, 'Volume_Metric')
+    ret_panel   = close_panel.pct_change()
+
     exret_panel = ret_panel.copy()
-    if market_sector in ret_panel.columns:
+
+    if csi300_df is not None and 'Close' in csi300_df.columns:
+        # Use real CSI300 daily return as market benchmark
+        csi300_ret = csi300_df['Close'].pct_change()
+        # Align dates — only dates present in both
+        common_dates = exret_panel.index.intersection(csi300_ret.index)
+        exret_panel = exret_panel.loc[common_dates]
+        csi300_ret_aligned = csi300_ret.loc[common_dates]
+        exret_panel = exret_panel.sub(csi300_ret_aligned, axis=0)
+    elif market_sector in ret_panel.columns:
+        # Fallback: subtract MARKET_PROXY PPI return
         exret_panel = ret_panel.sub(ret_panel[market_sector], axis=0)
         exret_panel[market_sector] = 0.0
-    
+
     return close_panel, ret_panel, vol_panel, exret_panel
+
 
 def compute_market_gate(ret_panel, exret_panel, market_sector="MARKET_PROXY", lookback=60, mkt_down_thresh=-0.01):
     """Compute market gate metrics."""
@@ -207,7 +224,7 @@ def compute_market_gate(ret_panel, exret_panel, market_sector="MARKET_PROXY", lo
     }
 
 
-def compute_market_gate_with_context(ret_panel, exret_panel, market_sector="MARKET_PROXY", 
+def compute_market_gate_with_context(ret_panel, exret_panel, csi300_df=None,
                                       lookback=20, history_window=252):
     """
     Compute market gate metrics with historical context.
@@ -229,8 +246,15 @@ def compute_market_gate_with_context(ret_panel, exret_panel, market_sector="MARK
         return None
     
     # === CURRENT 20-DAY PERIOD METRICS ===
-    mkt_ret = ret_lb[market_sector].mean() if market_sector in ret_lb.columns else ret_lb.mean(axis=1).mean()
-    
+    # mkt_ret = ret_lb[market_sector].mean() if market_sector in ret_lb.columns else ret_lb.mean(axis=1).mean()
+    # Use real CSI300 return for market_return metric
+    if csi300_df is not None and 'Close' in csi300_df.columns:
+        csi300_ret = csi300_df['Close'].pct_change().tail(lookback)
+        mkt_ret = csi300_ret.mean()
+    else:
+        mkt_ret = ret_panel.tail(lookback).mean(axis=1).mean()  # fallback
+
+
     # Current 20-day average dispersion
     dispersion_current = ex_lb.std(axis=1).mean()
     
@@ -315,73 +339,108 @@ def compute_market_gate_with_context(ret_panel, exret_panel, market_sector="MARK
 
 
 
-def compute_transition_matrix(exret_panel, lookback=60, top_k=3, market_sector="MARKET_PROXY"):
-    """Compute sector transition probabilities."""
+def compute_transition_matrix(exret_panel, lookback=60, top_k=3):
     df = exret_panel.tail(lookback).copy()
-    if market_sector in df.columns:
-        df = df.drop(columns=[market_sector])
-    
+
     if len(df) < 10:
         return None, None
-    
-    def get_topk(row):
-        return set(row.nlargest(top_k).index.tolist())
-    
-    topk_sets = df.apply(get_topk, axis=1)
-    
+
+    def get_top_k(row):
+        valid = row.dropna()
+        if len(valid) < top_k:
+            return set()
+        return set(valid.nlargest(top_k).index.tolist())
+
+    top_k_sets = df.apply(get_top_k, axis=1)
     all_sectors = df.columns.tolist()
     counts = pd.DataFrame(0, index=all_sectors, columns=all_sectors)
-    
-    for i in range(len(topk_sets) - 1):
-        today = topk_sets.iloc[i]
-        tomorrow = topk_sets.iloc[i + 1]
+
+    for i in range(len(top_k_sets) - 1):
+        today    = top_k_sets.iloc[i]
+        tomorrow = top_k_sets.iloc[i + 1]
+        if not today or not tomorrow:
+            continue
         for leader in today:
             for follower in tomorrow:
                 counts.loc[leader, follower] += 1
-    
+
     probs = counts.div(counts.sum(axis=1), axis=0).fillna(0)
     return probs, counts
 
-def get_today_topk(exret_panel, top_k=3, market_sector="MARKET_PROXY"):
+
+def predict_tomorrow(probs, counts, today_leaders, top_n=8, min_samples=10):
+    """
+    Predict tomorrow's followers.
+    - min_samples raised to 10 (was 3) for statistical reliability
+    - Leaders weighted by their excess return magnitude, not equal weight
+    """
+    if probs is None or today_leaders.empty:
+        return pd.DataFrame()
+
+    follower_scores = pd.Series(0.0, index=probs.columns)
+    total_weight    = 0.0
+
+    for leader in today_leaders.index:
+        if leader not in probs.index:
+            continue
+        if counts.loc[leader].sum() < min_samples:
+            continue
+
+        # Weight by absolute excess return magnitude
+        weight = abs(today_leaders[leader])
+        if weight == 0:
+            weight = 1e-6  # avoid zero weight if return is exactly 0
+
+        follower_scores += probs.loc[leader] * weight
+        total_weight    += weight
+
+    if total_weight == 0:
+        return pd.DataFrame()
+
+    follower_scores /= total_weight
+
+    result = follower_scores.sort_values(ascending=False).head(top_n)
+    return pd.DataFrame({
+        'Sector':           result.index,
+        'P(NextDay in Top-K)': result.values,
+        'Min Samples Used': min_samples
+    }).reset_index(drop=True)
+
+
+def get_today_topk(exret_panel, top_k=3):
     """Get today's top leaders."""
     df = exret_panel.copy()
-    if market_sector in df.columns:
-        df = df.drop(columns=[market_sector])
     
     latest_dt = df.index.max()
     latest_row = df.loc[latest_dt].dropna().sort_values(ascending=False)
     return latest_dt, latest_row.head(top_k)
 
-def predict_tomorrow(probs, counts, today_leaders, top_n=8, min_samples=3):
-    """Predict tomorrow's followers."""
-    if probs is None or today_leaders.empty:
-        return pd.DataFrame()
+# def predict_tomorrow(probs, counts, today_leaders, top_n=8, min_samples=3):
+#     """Predict tomorrow's followers."""
+#     if probs is None or today_leaders.empty:
+#         return pd.DataFrame()
     
-    follower_scores = pd.Series(0.0, index=probs.columns)
+#     follower_scores = pd.Series(0.0, index=probs.columns)
     
-    for leader in today_leaders.index:
-        if leader in probs.index:
-            if counts.loc[leader].sum() >= min_samples:
-                follower_scores += probs.loc[leader]
+#     for leader in today_leaders.index:
+#         if leader in probs.index:
+#             if counts.loc[leader].sum() >= min_samples:
+#                 follower_scores += probs.loc[leader]
     
-    if follower_scores.sum() > 0:
-        follower_scores /= len(today_leaders)
+#     if follower_scores.sum() > 0:
+#         follower_scores /= len(today_leaders)
     
-    result = follower_scores.sort_values(ascending=False).head(top_n)
-    return pd.DataFrame({
-        'Sector': result.index,
-        'P(NextDay in Top-K)': result.values
-    }).reset_index(drop=True)
+#     result = follower_scores.sort_values(ascending=False).head(top_n)
+#     return pd.DataFrame({
+#         'Sector': result.index,
+#         'P(NextDay in Top-K)': result.values
+#     }).reset_index(drop=True)
 
-def build_nextday_predictions(exret_panel, vol_panel, z_window=20, lookback=60, market_sector="MARKET_PROXY"):
+def build_nextday_predictions(exret_panel, vol_panel, z_window=20, lookback=60):
     """Build state-based next-day predictions."""
     df_ex = exret_panel.tail(lookback).copy()
     df_vol = vol_panel.tail(lookback).copy()
     
-    if market_sector in df_ex.columns:
-        df_ex = df_ex.drop(columns=[market_sector])
-    if market_sector in df_vol.columns:
-        df_vol = df_vol.drop(columns=[market_sector])
     
     results = []
     
