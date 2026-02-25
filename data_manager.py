@@ -2465,7 +2465,16 @@ def update_daily_basic():
             print(f"[data_manager] ℹ️ No data for {fetch_date_str} (weekend/holiday), skipping.")
             return False
 
+        # Before converting to records and inserting:
+        df = df.replace([np.inf, -np.inf], np.nan)  # convert inf → NaN
         records = df.to_dict('records')
+
+        # Replace any remaining float NaN with None (JSON null, not NaN)
+        records = [
+            {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in row.items()}
+            for row in records
+        ]
+
         db.insert_records('daily_basic', records, upsert=True)
         print(f"[data_manager] ✅ Saved {len(df)} daily_basic records (trade_date: {df['trade_date'].iloc[0]})")
         return True
