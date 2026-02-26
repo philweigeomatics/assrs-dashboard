@@ -910,11 +910,25 @@ def simulate_next_day_indicators(df, price_change_pct, volume):
     else:
         obv_tomorrow = obv_today
 
+    # 1. FIX: Calculate tomorrow's true 20-day volume average
+    if len(df) >= 19:
+        vol_20d_avg_tomorrow = (df['Volume'].iloc[-19:].sum() + volume) / 20
+    else:
+        vol_20d_avg_tomorrow = (df['Volume'].sum() + volume) / (len(df) + 1)
+
+    vol_20d_avg_today = df['Volume'].rolling(20).mean().iloc[-1]
+
+    # Convert to Volume_Scaled_OBV
+    obv_scaled_today = latest.get('Volume_Scaled_OBV', obv_today / vol_20d_avg_today)
+    obv_scaled_tomorrow = obv_tomorrow / vol_20d_avg_tomorrow
+
     # Convert to Volume_Scaled_OBV (matches chart display)
     vol_20d_avg = df['Volume'].rolling(20).mean().iloc[-1]
     obv_scaled_today = latest.get('Volume_Scaled_OBV', obv_today / vol_20d_avg)
     obv_scaled_tomorrow = obv_tomorrow / vol_20d_avg
-    obv_scaled_3d_ago = df['Volume_Scaled_OBV'].iloc[-4] if len(df) >= 4 and 'Volume_Scaled_OBV' in df.columns else obv_scaled_today
+   # Fixed index to -3 (T-2 days ago relative to tomorrow)
+    obv_scaled_3d_ago = df['Volume_Scaled_OBV'].iloc[-3] if len(df) >= 3 and 'Volume_Scaled_OBV' in df.columns else obv_scaled_today
+    obv_3d_ago_raw = df['OBV'].iloc[-3] if len(df) >= 3 else obv_today
 
     # ADX - simplified approximation
     adx_today = latest['ADX']
@@ -940,6 +954,14 @@ def simulate_next_day_indicators(df, price_change_pct, volume):
     elif adx_today > 25 and adx_tomorrow < adx_today and adx_slope_today >= 0:
         adx_pattern = "Reversing Down"
 
+    # ==========================================
+    # THRESHOLDS & SIGNALS
+    # ==========================================
+    # Calculate tomorrow's TRUE 10-day low (including tomorrow's MACD)
+    macd_9d_low = df['MACD'].rolling(9).min().iloc[-1]
+    macd_10d_low_tomorrow = min(macd_9d_low, macd_tomorrow)
+    macd_10d_high = df['MACD'].rolling(10).max().iloc[-1]
+
     # Get thresholds
     macd_10d_low = df['MACD'].rolling(10).min().iloc[-1]
     macd_10d_high = df['MACD'].rolling(10).max().iloc[-1]
@@ -951,9 +973,10 @@ def simulate_next_day_indicators(df, price_change_pct, volume):
 
     # MACD signals (directional)
     macd_stopped_falling = macd_tomorrow >= latest['MACD']
-    macd_in_bottom_zone = macd_10d_low * 0.95 <= macd_tomorrow < 0
+    macd_in_bottom_zone = (macd_tomorrow >= macd_10d_low_tomorrow) and (macd_tomorrow <= macd_10d_low_tomorrow * 0.95)
     macd_gap_narrowing = (macd_tomorrow - macd_signal_tomorrow) > (latest['MACD'] - latest['MACD_Signal'])
-    obv_rising = obv_scaled_tomorrow > obv_scaled_3d_ago
+    # Use raw OBV to perfectly match the `df['OBV'] > df['OBV'].shift(3)` logic in the main engine
+    obv_rising = obv_tomorrow > obv_3d_ago_raw
 
     conditions_met = sum([macd_stopped_falling, macd_in_bottom_zone, macd_gap_narrowing, obv_rising])
     signals['MACD_Bottoming'] = macd_tomorrow < 0 and macd_in_bottom_zone and conditions_met >= 2
@@ -981,9 +1004,9 @@ def simulate_next_day_indicators(df, price_change_pct, volume):
         'macd_hist_tomorrow': macd_hist_tomorrow,
         'macd_gap_today': latest['MACD'] - latest['MACD_Signal'],
         'macd_gap_tomorrow': macd_tomorrow - macd_signal_tomorrow,
-        'macd_10d_low': macd_10d_low,
+        'macd_10d_low_tomorrow': macd_10d_low_tomorrow,
         'macd_10d_high': macd_10d_high,
-
+        'macd_10d_low': macd_10d_low,
         'rsi_today': latest['RSI_14'],
         'rsi_tomorrow': rsi_tomorrow,
         'rsi_p10': rsi_p10,
@@ -996,6 +1019,11 @@ def simulate_next_day_indicators(df, price_change_pct, volume):
         'obv_scaled_today': obv_scaled_today,
         'obv_scaled_tomorrow': obv_scaled_tomorrow,
         'obv_scaled_3d_ago': obv_scaled_3d_ago,
+        'obv_rising': obv_rising,
+
+        'obv_raw_today': obv_today,
+        'obv_raw_tomorrow': obv_tomorrow,
+        'obv_raw_3d_ago': obv_3d_ago_raw,
 
         'volume_today': latest['Volume'],
         'volume_tomorrow': volume,

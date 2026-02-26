@@ -70,7 +70,7 @@ def require_login():
     """Call at top of any protected page. Stops rendering if not logged in."""
     if not is_logged_in():
         st.warning("🔒 Please log in to access this page.")
-        st.page_link("0_Login.py", label="Go to Login", icon="🔐")
+        st.page_link("Login.py", label="Go to Login", icon="🔐")
         st.stop()
 
 

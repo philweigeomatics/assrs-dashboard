@@ -2958,9 +2958,14 @@ if st.session_state.active_ticker:
                             st.error("⚠️ 死叉 Bearish Cross")
 
                         with st.expander("📊 MACD 参考区间"):
-                            st.caption(f"10日低点: {sim_result['macd_10d_low']:.4f}")
+                            # Use the corrected 10-day low that includes the simulated tomorrow
+                            low_tmr = sim_result.get('macd_10d_low_tomorrow', sim_result['macd_10d_low'])
+                            
+                            st.caption(f"10日低点: {low_tmr:.4f}")
                             st.caption(f"10日高点: {sim_result['macd_10d_high']:.4f}")
-                            st.caption(f"Bottoming区间: {sim_result['macd_10d_low']*0.95:.4f} ~ 0")
+                            
+                            # Show the exact narrow band for the bottoming bounce
+                            st.caption(f"Bottoming区间: {low_tmr:.4f} ~ {low_tmr * 0.95:.4f}")
 
                     with col_rsi:
                         st.markdown("**📈 RSI**")
@@ -3050,7 +3055,10 @@ if st.session_state.active_ticker:
 
                         with cond_col1:
                             macd_stopped = sim_result['macd_tomorrow'] >= sim_result['macd_today']
-                            macd_in_zone = (sim_result['macd_10d_low'] * 0.95 <= sim_result['macd_tomorrow'] < 0)
+                            
+                            # Use the corrected 10d low that includes tomorrow's simulation
+                            macd_10d_low_tmr = sim_result['macd_10d_low_tomorrow']
+                            macd_in_zone = (sim_result['macd_tomorrow'] >= macd_10d_low_tmr) and (sim_result['macd_tomorrow'] <= macd_10d_low_tmr * 0.95)
 
                             st.markdown("**1. MACD停止下跌**")
                             if macd_stopped:
@@ -3063,10 +3071,13 @@ if st.session_state.active_ticker:
                                 st.success(f"✅ 在底部区间内")
                             else:
                                 st.error(f"❌ 不在底部区间")
+                                st.caption(f"目标区间: {macd_10d_low_tmr:.4f} ~ {macd_10d_low_tmr * 0.95:.4f}")
 
                         with cond_col2:
                             gap_narrowing = sim_result['macd_gap_tomorrow'] > sim_result['macd_gap_today']
-                            obv_rising = sim_result['obv_scaled_tomorrow'] > sim_result['obv_scaled_3d_ago']
+                            
+                            # Grab the raw boolean evaluated by the engine
+                            obv_rising = sim_result['obv_rising']
 
                             st.markdown("**3. MACD缺口收窄**")
                             if gap_narrowing:
@@ -3074,11 +3085,13 @@ if st.session_state.active_ticker:
                             else:
                                 st.error(f"❌ 缺口未收窄")
 
-                            st.markdown("**4. OBV上升**")
+                            st.markdown("**4. OBV上升 (Raw未缩放)**")
                             if obv_rising:
                                 st.success(f"✅ OBV上升")
+                                st.caption(f"{sim_result['obv_raw_tomorrow']:,.0f} > {sim_result['obv_raw_3d_ago']:,.0f}")
                             else:
                                 st.error(f"❌ OBV未上升")
+                                st.caption(f"需增加: {sim_result['obv_raw_3d_ago'] - sim_result['obv_raw_tomorrow']:,.0f}")
 
                 else:
                     st.error("无法计算模拟结果")
