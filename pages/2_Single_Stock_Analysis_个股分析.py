@@ -531,30 +531,52 @@ def calculate_trend_forecast(df: pd.DataFrame, lookback: int = 60, forecast_days
 
 
 def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.DataFrame = None, blocks: list = None) -> go.Figure:
+   
     """
     Create 5-panel chart with trading blocks.
     Blocks drawn as horizontal rectangles during their active period.
     """
-    df = analysis_df.tail(250).sort_index()
+    df = df.tail(250).sort_index()  # Make sure this is df, not analysis_df
     dates = df.index.strftime('%Y-%m-%d').tolist()
+    
+    # Extract the dynamic MACD parameters we saved in the engine
+    p_fast = int(df['MACD_Fast_Param'].iloc[-1]) if 'MACD_Fast_Param' in df.columns else 12
+    p_slow = int(df['MACD_Slow_Param'].iloc[-1]) if 'MACD_Slow_Param' in df.columns else 26
+    p_sign = int(df['MACD_Sign_Param'].iloc[-1]) if 'MACD_Sign_Param' in df.columns else 9
     
     # ==================== CHANGE: 4 rows -> 5 rows ====================
     fig = make_subplots(
-        rows=6, cols=1,  # Changed from 4 to 5
-        
+        rows=6, cols=1,  
         shared_xaxes=True,
         vertical_spacing=0.03,
         subplot_titles=(
             'Price & Trading Blocks + Signals',
             'Volume & OBV',
-            'MACD',
-            'RSI',  # No ADX here anymore
+            f'MACD ({p_fast}, {p_slow}, {p_sign})',  # <-- This will now display dynamically!
+            'RSI',  
             'ADX Trend Analysis',  
             'P/E Ratio'
         ),
-        row_heights=[0.45, 0.12, 0.22, 0.12, 0.22,0.10]  # Adjusted heights
+        row_heights=[0.45, 0.12, 0.22, 0.12, 0.22, 0.10] 
     )
 
+    # Create a custom hover string that reads the historical parameter columns
+    macd_hover_text = [
+        f"MACD ({fast}, {slow}, {sign}): {macd:.3f}" 
+        for fast, slow, sign, macd in zip(df['MACD_Fast_Param'], df['MACD_Slow_Param'], df['MACD_Sign_Param'], df['MACD'])
+    ]
+    
+    fig.add_trace(
+        go.Scatter(
+            x=dates, y=df['MACD'], 
+            name='MACD', 
+            line=dict(color='#2962FF', width=1.5),
+            hoverinfo='text',
+            hovertext=macd_hover_text  # <-- This adds the dynamic params to your tooltip!
+        ),
+        row=3, col=1
+    )
+    
     # ====== ADD REGIME SHADING HERE (right after make_subplots, before any traces) ======
     
     regime_colors = {

@@ -8,6 +8,8 @@ import numpy as np
 import ta
 from scipy import stats
 
+
+
 def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     """
     
@@ -22,7 +24,9 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     # Ensure datetime index
     if not isinstance(df_analysis.index, pd.DatetimeIndex):
         df_analysis.index = pd.to_datetime(df_analysis.index)
+
     df_analysis = df_analysis.sort_index()
+
     
     # ==================== MOVING AVERAGES ====================
     df_analysis['MA5'] = ta.trend.sma_indicator(df_analysis['Close'], window=5)
@@ -37,11 +41,56 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     df_analysis['BB_Lower'] = bb.bollinger_lband()
     df_analysis['BB_Width'] = (df_analysis['BB_Upper'] - df_analysis['BB_Lower']) / df_analysis['Close']
     
+
+
+    # ==================== MARKET REGIME DETECTION ====================
+    # MUST be called before MACD so we have historical regimes day-by-day
+    df_analysis = detect_market_regime(df_analysis)
+
+    # ==================== POINT-IN-TIME DYNAMIC MACD ====================
+    # 1. Calculate all three speeds for the entire history
+    macd_fast = ta.trend.MACD(df_analysis['Close'], window_fast=8, window_slow=21, window_sign=5)
+    macd_norm = ta.trend.MACD(df_analysis['Close'], window_fast=12, window_slow=26, window_sign=9)
+    macd_slow = ta.trend.MACD(df_analysis['Close'], window_fast=15, window_slow=30, window_sign=9)
+
+    # 2. Stitch them together day-by-day based on the historical regime
+    import numpy as np
+    
+    cond_high = df_analysis['Market_Regime'] == 'High Volatility'
+    cond_low = df_analysis['Market_Regime'] == 'Low Volatility'
+    
+    # Select MACD Line
+    df_analysis['MACD'] = np.where(cond_high, macd_fast.macd(),
+                          np.where(cond_low, macd_slow.macd(),
+                                   macd_norm.macd()))
+                                   
+    # Select Signal Line
+    df_analysis['MACD_Signal'] = np.where(cond_high, macd_fast.macd_signal(),
+                                 np.where(cond_low, macd_slow.macd_signal(),
+                                          macd_norm.macd_signal()))
+                                          
+    # Calculate final Histogram
+    df_analysis['MACD_Hist'] = df_analysis['MACD'] - df_analysis['MACD_Signal']
+    
+    # # Save today's active parameters for the UI Simulator to use
+    # latest_regime = df_analysis['Market_Regime'].iloc[-1]
+    # df_analysis['MACD_Fast_Param'] = 8 if latest_regime == 'High Volatility' else 15 if latest_regime == 'Low Volatility' else 12
+    # df_analysis['MACD_Slow_Param'] = 21 if latest_regime == 'High Volatility' else 30 if latest_regime == 'Low Volatility' else 26
+    # df_analysis['MACD_Sign_Param'] = 5 if latest_regime == 'High Volatility' else 9
+    # =========================================================
+    
     # ==================== MACD ====================
-    macd = ta.trend.MACD(df_analysis['Close'])
-    df_analysis['MACD'] = macd.macd()
-    df_analysis['MACD_Signal'] = macd.macd_signal()
-    df_analysis['MACD_Hist'] = macd.macd_diff()
+    # macd = ta.trend.MACD(df_analysis['Close'])
+    # df_analysis['MACD'] = macd.macd()
+    # df_analysis['MACD_Signal'] = macd.macd_signal()
+    # df_analysis['MACD_Hist'] = macd.macd_diff()
+
+    # 3. Save the active parameters day-by-day so the UI can prove the gears are shifting!
+    df_analysis['MACD_Fast_Param'] = np.where(cond_high, 8, np.where(cond_low, 15, 12))
+    df_analysis['MACD_Slow_Param'] = np.where(cond_high, 21, np.where(cond_low, 30, 26))
+    df_analysis['MACD_Sign_Param'] = np.where(cond_high, 5, np.where(cond_low, 9, 9))
+    
+    # (Do NOT put the standard ta.trend.MACD calculation here anymore!)
     
     # ==================== RSI ====================
     df_analysis['RSI_14'] = ta.momentum.RSIIndicator(df_analysis['Close'], window=14).rsi()
@@ -493,7 +542,8 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
 
     # ==================== MARKET REGIME DETECTION ====================
-    df_analysis = detect_market_regime(df_analysis)
+    # df_analysis = detect_market_regime(df_analysis)
+    # this was moved up so it detect regime before MACD.
     
     # ==================== SIGNAL SCORE ====================
     df_analysis['Signal_Score'] = 0
@@ -808,8 +858,8 @@ def detect_market_regime(
         vol_win = 10 if is_weekly else 20
         df["vol_rolling"] = df["Close"].pct_change().rolling(vol_win).std()
 
-        thresh_hi = df["vol_rolling"].quantile(0.8)
-        thresh_lo = df["vol_rolling"].quantile(0.2)
+        thresh_hi = df["vol_rolling"].rolling(252, min_periods=60).quantile(0.8)
+        thresh_lo = df["vol_rolling"].rolling(252, min_periods=60).quantile(0.2)
 
         regimes = []
         curr = "Normal Volatility"
@@ -861,23 +911,49 @@ def simulate_next_day_indicators(df, price_change_pct, volume):
     close_today = latest['Close']
     close_tomorrow = close_today * (1 + price_change_pct / 100)
 
-    # Get current EMA values for MACD calculation
-    ema12_today = df['Close'].ewm(span=12, adjust=False).mean().iloc[-1]
-    ema26_today = df['Close'].ewm(span=26, adjust=False).mean().iloc[-1]
+    # Old MACD calculator using static MACD parameters
+    # # Get current EMA values for MACD calculation
+    # ema12_today = df['Close'].ewm(span=12, adjust=False).mean().iloc[-1]
+    # ema26_today = df['Close'].ewm(span=26, adjust=False).mean().iloc[-1]
+
+    # # Calculate tomorrow's EMAs
+    # alpha12 = 2 / (12 + 1)
+    # alpha26 = 2 / (26 + 1)
+
+    # ema12_tomorrow = alpha12 * close_tomorrow + (1 - alpha12) * ema12_today
+    # ema26_tomorrow = alpha26 * close_tomorrow + (1 - alpha26) * ema26_today
+
+    # # MACD
+    # macd_tomorrow = ema12_tomorrow - ema26_tomorrow
+    # macd_signal_today = latest['MACD_Signal']
+    # alpha_signal = 2 / (9 + 1)
+    # macd_signal_tomorrow = alpha_signal * macd_tomorrow + (1 - alpha_signal) * macd_signal_today
+    # macd_hist_tomorrow = macd_tomorrow - macd_signal_tomorrow
+
+    # ==================== DYNAMIC SIMULATOR MACD ====================
+    # Grab today's active dynamic parameters
+    p_fast = int(latest.get('MACD_Fast_Param', 12))
+    p_slow = int(latest.get('MACD_Slow_Param', 26))
+    p_sign = int(latest.get('MACD_Sign_Param', 9))
+
+    # Get current EMA values USING DYNAMIC PARAMS
+    ema_fast_today = df['Close'].ewm(span=p_fast, adjust=False).mean().iloc[-1]
+    ema_slow_today = df['Close'].ewm(span=p_slow, adjust=False).mean().iloc[-1]
 
     # Calculate tomorrow's EMAs
-    alpha12 = 2 / (12 + 1)
-    alpha26 = 2 / (26 + 1)
+    alpha_fast = 2 / (p_fast + 1)
+    alpha_slow = 2 / (p_slow + 1)
 
-    ema12_tomorrow = alpha12 * close_tomorrow + (1 - alpha12) * ema12_today
-    ema26_tomorrow = alpha26 * close_tomorrow + (1 - alpha26) * ema26_today
+    ema_fast_tomorrow = alpha_fast * close_tomorrow + (1 - alpha_fast) * ema_fast_today
+    ema_slow_tomorrow = alpha_slow * close_tomorrow + (1 - alpha_slow) * ema_slow_today
 
-    # MACD
-    macd_tomorrow = ema12_tomorrow - ema26_tomorrow
+    # MACD Tomorrow
+    macd_tomorrow = ema_fast_tomorrow - ema_slow_tomorrow
     macd_signal_today = latest['MACD_Signal']
-    alpha_signal = 2 / (9 + 1)
+    alpha_signal = 2 / (p_sign + 1)
     macd_signal_tomorrow = alpha_signal * macd_tomorrow + (1 - alpha_signal) * macd_signal_today
     macd_hist_tomorrow = macd_tomorrow - macd_signal_tomorrow
+    # ================================================================
 
     # RSI
     price_change = close_tomorrow - close_today
