@@ -576,7 +576,7 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
         ),
         row=3, col=1
     )
-    
+
     # ====== ADD REGIME SHADING HERE (right after make_subplots, before any traces) ======
     
     regime_colors = {
@@ -711,6 +711,8 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
         line=dict(color='#374151', width=2.5),
         showlegend=True
     ), row=1, col=1)
+
+    
     
     # Trading Blocks
     if blocks:
@@ -769,6 +771,38 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
     #                    line=dict(width=2, color='black')),
     #         showlegend=True
     #     ), row=1, col=1)
+
+    ## ==================== VISUALIZE DI SCREAMING BREAKOUT ====================
+    # if 'DI_Screaming_Buy' in df.columns:
+    #     # Filter the dataframe for only the days where the signal fired
+    #     screaming_buys = df[df['DI_Screaming_Buy'] == True]
+        
+    #     if not screaming_buys.empty:
+    #         # Get the string formatted dates to match the x-axis
+    #         buy_dates = screaming_buys.index.strftime('%Y-%m-%d').tolist()
+            
+    #         # Place the marker 2% below the low of the candle so it doesn't overlap the wick
+    #         buy_prices = screaming_buys['Low'] * 0.98  
+            
+    #         fig.add_trace(
+    #             go.Scatter(
+    #                 x=buy_dates,
+    #                 y=buy_prices,
+    #                 mode='markers+text',
+    #                 marker=dict(
+    #                     symbol='triangle-up', 
+    #                     size=16,              
+    #                     color='#FFD700',      # Bright Gold color
+    #                     line=dict(color='black', width=1)
+    #                 ),
+    #                 name='DI Screaming Breakout',
+    #                 text='🚀',                # Optional: Adds a rocket emoji right next to the arrow
+    #                 textposition='bottom center',
+    #                 hovertext='🚀 DI Screaming Breakout (Violent Buyer Expansion)',
+    #                 hoverinfo='text'
+    #             ),
+    #             row=1, col=1
+    #         )
     
     exits = df[df['Exit_MACD_Lead']]
     if not exits.empty:
@@ -1062,7 +1096,7 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
             x=dates,
             y=df['DI_Plus'],
             name='+DI',
-            line=dict(color='green', width=1.5)
+            line=dict(color='red', width=1.5)
         ), row=5, col=1)
 
     # Add -DI line (red)
@@ -1071,8 +1105,38 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
             x=dates,
             y=df['DI_Minus'],
             name='-DI',
-            line=dict(color='red', width=1.5)
+            line=dict(color='green', width=1.5)
         ), row=5, col=1)
+
+    # ==================== VISUALIZE DI SCREAMING BREAKOUT ON ADX ====================
+    if 'DI_Screaming_Buy' in df.columns:
+        screaming_buys = df[df['DI_Screaming_Buy'] == True]
+        
+        if not screaming_buys.empty:
+            buy_dates = screaming_buys.index.strftime('%Y-%m-%d').tolist()
+            
+            # Place the marker exactly on the DI+ line so you see the buyer surge!
+            buy_di_plus = screaming_buys['DI_Plus'] 
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=buy_dates,
+                    y=buy_di_plus,
+                    mode='markers+text',
+                    marker=dict(
+                        symbol='star',        # Changed to a star to highlight the indicator 
+                        size=14,              
+                        color='#FFD700',      # Bright Gold
+                        line=dict(color='black', width=1)
+                    ),
+                    name='DI Screaming Breakout',
+                    text='🚀',                
+                    textposition='top center',
+                    hovertext='🚀 DI Screaming Breakout (Violent Buyer Expansion)',
+                    hoverinfo='text'
+                ),
+                row=5, col=1  # <--- Places it on the ADX panel!
+            )
 
     # Add threshold line at 25
     fig.add_hline(y=25, line_dash="dot", line_color="gray", 
@@ -1104,6 +1168,39 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
 
     # ==================== ADD PATTERN LABELS ====================
     if 'ADX_Pattern' in df.columns:
+        # Define specific colors for the continuous states
+        # Red/Orange = Trend is building/strong. Green = Trend is dying.
+        state_colors = {
+            'Accelerating Up': '#ef4444',     # Bright Red (Explosive momentum)
+            'Strong Trend': '#991b1b',        # Dark Red (Sustained momentum)
+            'Losing Steam': '#f59e0b',        # Orange (Warning)
+            'Accelerating Down': '#22c55e',   # Bright Green (Trend dying fast)
+            'Slowing Down': "#62C7F7"         # Dark Green (Dead trend)
+        }
+        
+        # Filter for only the continuous states
+        ribbon_df = df[df['ADX_Pattern'].isin(state_colors.keys())].copy()
+        
+        if not ribbon_df.empty:
+            ribbon_colors = [state_colors[val] for val in ribbon_df['ADX_Pattern']]
+            
+            fig.add_trace(go.Scatter(
+                x=ribbon_df.index.strftime('%Y-%m-%d'),
+                y=[2] * len(ribbon_df),  # Place firmly at the bottom (y=2) of the ADX panel
+                mode='markers',
+                marker=dict(
+                    symbol='square',
+                    size=8,              # Small, unobtrusive squares
+                    color=ribbon_colors,
+                    line=dict(width=0)
+                ),
+                name='Trend State Ribbon',
+                hoverinfo='text',
+                hovertext=[f"Trend State: {state}" for state in ribbon_df['ADX_Pattern']],
+                showlegend=False
+            ), row=5, col=1)
+
+
         # Mark Bottoming
         bottoming = df[df['ADX_Pattern'] == 'Bottoming']
         if not bottoming.empty:
@@ -1131,43 +1228,43 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
                 showlegend=True
             ), row=5, col=1)
         
-        # Mark Accelerating Up
-        accelerating_up = df[df['ADX_Pattern'] == 'Accelerating Up']
-        if not accelerating_up.empty:
-            fig.add_trace(go.Scatter(
-                x=accelerating_up.index.strftime('%Y-%m-%d'),
-                y=accelerating_up['ADX'] * 1.05,
-                mode='markers+text',
-                name='🚀 Accelerating',
-                marker=dict(color='#ef4444', size=10, symbol='triangle-up'),
-                text='🚀',
-                textposition='top center',
-                showlegend=True
-            ), row=5, col=1)
+        # # Mark Accelerating Up
+        # accelerating_up = df[df['ADX_Pattern'] == 'Accelerating Up']
+        # if not accelerating_up.empty:
+        #     fig.add_trace(go.Scatter(
+        #         x=accelerating_up.index.strftime('%Y-%m-%d'),
+        #         y=accelerating_up['ADX'] * 1.05,
+        #         mode='markers+text',
+        #         name='🚀 Accelerating',
+        #         marker=dict(color='#ef4444', size=10, symbol='triangle-up'),
+        #         text='🚀',
+        #         textposition='top center',
+        #         showlegend=True
+        #     ), row=5, col=1)
         
-        # Mark Strong Trend
-        strong = df[df['ADX_Pattern'] == 'Strong Trend']
-        if not strong.empty:
-            fig.add_trace(go.Scatter(
-                x=strong.index.strftime('%Y-%m-%d'),
-                y=strong['ADX'],
-                mode='markers',
-                name='💪 Strong',
-                marker=dict(color="#ff0000", size=9, symbol='diamond', opacity=0.5),
-                showlegend=True
-            ), row=5, col=1)
+        # # Mark Strong Trend
+        # strong = df[df['ADX_Pattern'] == 'Strong Trend']
+        # if not strong.empty:
+        #     fig.add_trace(go.Scatter(
+        #         x=strong.index.strftime('%Y-%m-%d'),
+        #         y=strong['ADX'],
+        #         mode='markers',
+        #         name='💪 Strong',
+        #         marker=dict(color="#ff0000", size=9, symbol='diamond', opacity=0.5),
+        #         showlegend=True
+        #     ), row=5, col=1)
 
-        # Losing Steam
-        losing_steam = df[df['ADX_Pattern'] == 'Losing Steam']
-        if not losing_steam.empty:
-            fig.add_trace(go.Scatter(
-                x=losing_steam.index.strftime('%Y-%m-%d'),
-                y=losing_steam['ADX'],
-                mode='markers',
-                name='⚠️ Losing Steam',
-                marker=dict(color='#f59e0b', size=9, symbol='diamond', opacity=0.5),
-                showlegend=True
-            ), row=5, col=1)
+        # # Losing Steam
+        # losing_steam = df[df['ADX_Pattern'] == 'Losing Steam']
+        # if not losing_steam.empty:
+        #     fig.add_trace(go.Scatter(
+        #         x=losing_steam.index.strftime('%Y-%m-%d'),
+        #         y=losing_steam['ADX'],
+        #         mode='markers',
+        #         name='⚠️ Losing Steam',
+        #         marker=dict(color='#f59e0b', size=9, symbol='diamond', opacity=0.5),
+        #         showlegend=True
+        #     ), row=5, col=1)
         
         # Mark Peaking (NEW - Warning!)
         peaking = df[df['ADX_Pattern'] == 'Peaking']
@@ -1197,31 +1294,31 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
                 showlegend=True
             ), row=5, col=1)
 
-        accelerating_down = df[df['ADX_Pattern'] == 'Accelerating Down']
-        if not accelerating_down.empty:
-            fig.add_trace(go.Scatter(
-                x=accelerating_down.index.strftime('%Y-%m-%d'),
-                y=accelerating_down['ADX'] * 1.05,
-                mode='markers+text',
-                name='📉 Accelerating Down',
-                marker=dict(color="#025721", size=14, symbol='triangle-down'),
-                text='📉',
-                textposition='top center',
-                showlegend=True
-            ), row=5, col=1)
+        # accelerating_down = df[df['ADX_Pattern'] == 'Accelerating Down']
+        # if not accelerating_down.empty:
+        #     fig.add_trace(go.Scatter(
+        #         x=accelerating_down.index.strftime('%Y-%m-%d'),
+        #         y=accelerating_down['ADX'] * 1.05,
+        #         mode='markers+text',
+        #         name='📉 Accelerating Down',
+        #         marker=dict(color="#025721", size=14, symbol='triangle-down'),
+        #         text='📉',
+        #         textposition='top center',
+        #         showlegend=True
+        #     ), row=5, col=1)
 
-        slowing_down = df[df['ADX_Pattern'] == 'Slowing Down']
-        if not slowing_down.empty:
-            fig.add_trace(go.Scatter(
-                x=slowing_down.index.strftime('%Y-%m-%d'),
-                y=slowing_down['ADX'] * 1.05,
-                mode='markers+text',
-                name='🔽 Slowing Down',
-                marker=dict(color="#3b82f6", size=14, symbol='triangle-down'),
-                text='🔽',
-                textposition='top center',
-                showlegend=True
-            ), row=5, col=1)
+        # slowing_down = df[df['ADX_Pattern'] == 'Slowing Down']
+        # if not slowing_down.empty:
+        #     fig.add_trace(go.Scatter(
+        #         x=slowing_down.index.strftime('%Y-%m-%d'),
+        #         y=slowing_down['ADX'] * 1.05,
+        #         mode='markers+text',
+        #         name='🔽 Slowing Down',
+        #         marker=dict(color="#3b82f6", size=14, symbol='triangle-down'),
+        #         text='🔽',
+        #         textposition='top center',
+        #         showlegend=True
+        #     ), row=5, col=1)
 
 
 

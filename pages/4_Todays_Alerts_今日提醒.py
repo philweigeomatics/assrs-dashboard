@@ -30,7 +30,8 @@ if 'force_rescan' not in st.session_state:
 BULLISH_SIGNALS = {
     'MACD_Bottoming': 'MACD Bottoming',
     'MACD_ClassicCrossover': 'MACD Positive Crossover',
-    'RSI_Bottoming': 'RSI Bottoming'
+    'RSI_Bottoming': 'RSI Bottoming',
+    'DI_Screaming_Buy': 'DI Screaming Breakout 🚀'  # <-- Add this line!
 }
 
 BEARISH_SIGNALS = {
@@ -468,6 +469,7 @@ with col1:
     - **MACD Bottoming** - MACD stopped falling, reversal detected
     - **MACD Positive Crossover** - MACD crossed above Signal line
     - **RSI Bottoming** - RSI in bottom 10%, oversold
+    - **DI Screaming Breakout** - Explosive surge in institutional buying pressure
 
     **ADX Signals (Downtrend + Turning Point):**
     - **ADX End (Bottoming) after decline** - Low ADX turning after downtrend

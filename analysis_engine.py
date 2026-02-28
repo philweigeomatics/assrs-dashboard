@@ -9,6 +9,89 @@ import ta
 from scipy import stats
 
 
+def apply_adx_patterns(df):
+    """
+    Isolated helper function to calculate the 9-phase ADX pattern.
+    Requires 'ADX', 'ADX_Slope', and 'ADX_Acceleration' columns to exist.
+    """
+    # Pattern 1: BOTTOMING 
+    adx_bottoming = (
+        (df['ADX'] < 22) &
+        (df['ADX_Slope'] < 0) &
+        (df['ADX_Slope'] > -0.15) & 
+        (df['ADX_Acceleration'] > 0.05)
+    )
+    
+    # Pattern 2: REVERSING UP 
+    adx_reversing_up = (
+        (df['ADX'] < 25 ) &
+        (df['ADX_Slope'] > 0) &
+        (df['ADX_Slope'].shift(1) <= 0)
+    )
+    
+    # Pattern 3: ACCELERATING UP
+    adx_accelerating_up = (
+        (df['ADX_Slope'] > 0.5) &
+        (df['ADX_Acceleration'] > 0.1)
+    )
+    
+    # Pattern 4: STRONG & STABLE
+    adx_strong_stable = (
+        (df['ADX'] >= 30) &
+        (df['ADX_Slope'] >= -0.3) &
+        (df['ADX_Slope'] <= 0.3)
+    )
+    
+    # Pattern 5: DECELERATING UP
+    adx_decelerating_up = (
+        (df['ADX'] > 25) &
+        (df['ADX_Slope'] > 0) &
+        (df['ADX_Acceleration'] < -0.1)
+    )
+    
+    # Pattern 6: PEAKING
+    adx_peaking = (
+        (df['ADX'] >= 30) &
+        (df['ADX_Slope'] > 0) &
+        (df['ADX_Acceleration'] < -0.15) &
+        (df['ADX_Slope'] < df['ADX_Slope'].shift(1))
+    )
+    
+    # Pattern 7: REVERSING DOWN
+    adx_reversing_down = (
+        (df['ADX'] >= 25) &
+        (df['ADX_Slope'] < 0) &
+        (df['ADX_Slope'].shift(1) > 0)
+    )
+    
+    # Pattern 8: ACCELERATING DOWN
+    adx_accelerating_down = (
+        (df['ADX_Slope'] < -0.5) &
+        (df['ADX_Acceleration'] < -0.1)
+    )
+    
+    # Pattern 9: DECELERATING DOWN
+    adx_decelerating_down = (
+        (df['ADX'] < 30) &
+        (df['ADX_Slope'] < -0.3 ) &
+        (df['ADX_Acceleration'] > 0.1)
+    )
+    
+    # Assign patterns to the dataframe
+    df['ADX_Pattern'] = 'Neutral'
+    df.loc[adx_bottoming, 'ADX_Pattern'] = 'Bottoming'
+    df.loc[adx_reversing_up, 'ADX_Pattern'] = 'Reversing Up'
+    df.loc[adx_accelerating_up, 'ADX_Pattern'] = 'Accelerating Up'
+    df.loc[adx_strong_stable, 'ADX_Pattern'] = 'Strong Trend'
+    df.loc[adx_decelerating_up, 'ADX_Pattern'] = 'Losing Steam'
+    df.loc[adx_peaking, 'ADX_Pattern'] = 'Peaking'
+    df.loc[adx_reversing_down, 'ADX_Pattern'] = 'Reversing Down'
+    df.loc[adx_accelerating_down, 'ADX_Pattern'] = 'Accelerating Down'
+    df.loc[adx_decelerating_down, 'ADX_Pattern'] = 'Slowing Down'
+    
+    return df
+
+
 
 def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -96,7 +179,7 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     df_analysis['RSI_14'] = ta.momentum.RSIIndicator(df_analysis['Close'], window=14).rsi()
     
     # ==================== ADX ====================
-    adx = ta.trend.ADXIndicator(df_analysis['High'], df_analysis['Low'], df_analysis['Close'], window=14)
+    adx = ta.trend.ADXIndicator(df_analysis['High'], df_analysis['Low'], df_analysis['Close'], window=10)
     df_analysis['ADX'] = adx.adx()
     df_analysis['DI_Plus'] = adx.adx_pos()    # ← ADD THIS
     df_analysis['DI_Minus'] = adx.adx_neg()   # ← ADD THIS
@@ -111,13 +194,14 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
         (df_analysis['DI_Minus'].shift(1) <= df_analysis['DI_Plus'].shift(1))
     )
     
+    
     # ADX LOWESS Smoothing
     try:
         from scipy.signal import savgol_filter
         df_analysis['ADX_LOWESS'] = savgol_filter(
             df_analysis['ADX'].fillna(method='ffill'),
-            window_length=11,
-            polyorder=3
+            window_length=7, # Reduced from 11 to 7
+            polyorder=2  # Reduced from 3 to 2
         )
     except:
         df_analysis['ADX_LOWESS'] = df_analysis['ADX'].ewm(span=9, adjust=False).mean()
@@ -191,7 +275,7 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     df_analysis['Min_Width_120d'] = df_analysis['BB_Width'].rolling(window=120, min_periods=20).min()
     
     # ==================== ADX TREND & ACCELERATION ====================
-    def calculate_adx_trend(series, window=5):
+    def calculate_adx_trend(series, window=3):  # Reduced default window to 3
         def get_slope(y):
             if len(y) < 3 or y.isna().any():
                 return 0
@@ -204,91 +288,8 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     df_analysis['ADX_Acceleration'] = df_analysis['ADX_Slope'] - df_analysis['ADX_Slope'].shift(1)
     
     # ==================== ADX PATTERN DETECTION (COMPLETE - 9 PATTERNS) ====================
-    
-    # Pattern 1: BOTTOMING (Low ADX, falling but slowing down)
-    adx_bottoming = (
-        (df_analysis['ADX'] < 22) &
-        (df_analysis['ADX_Slope'] < 0) &
-        (df_analysis['ADX_Slope'] > -0.15) &  # But BARELY falling (almost flat)
-        (df_analysis['ADX_Acceleration'] > 0.05)
-    )
-    
-    # Pattern 2: REVERSING UP (ADX just turned from down to up)
-    adx_reversing_up = (
-        (df_analysis['ADX'] < 25 ) &
-        (df_analysis['ADX_Slope'] > 0) &
-        (df_analysis['ADX_Slope'].shift(1) <= 0)
-    )
-    
-    # Pattern 3: ACCELERATING UP (ADX rising and speeding up)
-    adx_accelerating_up = (
-        (df_analysis['ADX_Slope'] > 0.5) &
-        (df_analysis['ADX_Acceleration'] > 0.1)
-    )
-    
-    # Pattern 4: STRONG & STABLE (High ADX, relatively stable)
-    adx_strong_stable = (
-        (df_analysis['ADX'] >= 30) &
-        (df_analysis['ADX_Slope'] >= -0.3) &
-        (df_analysis['ADX_Slope'] <= 0.3)
-    )
-    
-    # Pattern 5: DECELERATING UP (ADX rising but slowing down)
-    adx_decelerating_up = (
-        (df_analysis['ADX'] > 25) &
-        (df_analysis['ADX_Slope'] > 0) &
-        (df_analysis['ADX_Acceleration'] < -0.1)
-    )
-    
-    # Pattern 6: PEAKING (High ADX, still rising but losing steam)
-    adx_peaking = (
-        (df_analysis['ADX'] >= 30) &
-        (df_analysis['ADX_Slope'] > 0) &
-        (df_analysis['ADX_Acceleration'] < -0.15) &
-        (df_analysis['ADX_Slope'] < df_analysis['ADX_Slope'].shift(1))
-    )
-    
-    # Pattern 7: REVERSING DOWN (ADX just turned from up to down)
-    adx_reversing_down = (
-        (df_analysis['ADX'] >= 25) &
-        (df_analysis['ADX_Slope'] < 0) &
-        (df_analysis['ADX_Slope'].shift(1) > 0)
-    )
-    
-    # Pattern 8: ACCELERATING DOWN (ADX falling and speeding up downward)
-    adx_accelerating_down = (
-        (df_analysis['ADX_Slope'] < -0.5) &
-        (df_analysis['ADX_Acceleration'] < -0.1)
-    )
-    
-    # Pattern 9: DECELERATING DOWN (ADX falling but slowing)
-    adx_decelerating_down = (
-        (df_analysis['ADX'] < 30) &
-        (df_analysis['ADX_Slope'] < -0.3 ) &
-        (df_analysis['ADX_Acceleration'] > 0.1)
-    )
-    
-    # Assign patterns (priority order matters!)
-    df_analysis['ADX_Pattern'] = 'Neutral'
-    
-    # Low ADX states (potential trend starting)
-    df_analysis.loc[adx_bottoming, 'ADX_Pattern'] = 'Bottoming'
-    df_analysis.loc[adx_reversing_up, 'ADX_Pattern'] = 'Reversing Up'
-    df_analysis.loc[adx_accelerating_up, 'ADX_Pattern'] = 'Accelerating Up'
-    
-    # High ADX states (strong trend or exhaustion)
-    df_analysis.loc[adx_strong_stable, 'ADX_Pattern'] = 'Strong Trend'
-    df_analysis.loc[adx_decelerating_up, 'ADX_Pattern'] = 'Losing Steam'
-    df_analysis.loc[adx_peaking, 'ADX_Pattern'] = 'Peaking'
-    
-    # Falling ADX states (trend weakening)
-    df_analysis.loc[adx_reversing_down, 'ADX_Pattern'] = 'Reversing Down'
-    df_analysis.loc[adx_accelerating_down, 'ADX_Pattern'] = 'Accelerating Down'
-    df_analysis.loc[adx_decelerating_down, 'ADX_Pattern'] = 'Slowing Down'
-    
-    # Create flags for healthy vs warning conditions
-    adx_healthy = adx_bottoming | adx_reversing_up | adx_accelerating_up | adx_strong_stable
-    adx_warning = adx_peaking | adx_reversing_down | adx_accelerating_down
+    df_analysis = apply_adx_patterns(df_analysis)
+
     
     # ==================== MACD SCENARIOS ====================
     df_analysis['MACD_Gap'] = df_analysis['MACD'] - df_analysis['MACD_Signal']
@@ -1006,29 +1007,73 @@ def simulate_next_day_indicators(df, price_change_pct, volume):
     obv_scaled_3d_ago = df['Volume_Scaled_OBV'].iloc[-3] if len(df) >= 3 and 'Volume_Scaled_OBV' in df.columns else obv_scaled_today
     obv_3d_ago_raw = df['OBV'].iloc[-3] if len(df) >= 3 else obv_today
 
-    # ADX - simplified approximation
-    adx_today = latest['ADX']
-    price_move_magnitude = abs(price_change_pct)
-
-    if price_move_magnitude > 2.0:
-        adx_tomorrow = min(100, adx_today + 1.0)
-    elif price_move_magnitude > 1.0:
-        adx_tomorrow = adx_today + 0.3
-    else:
-        adx_tomorrow = max(0, adx_today - 0.3)
-
-    # Determine ADX pattern (only 4 patterns: Bottoming, Reversing Up, Peaking, Reversing Down)
-    adx_pattern = None
-    adx_slope_today = latest.get('ADX_Slope', 0)
-
-    if adx_tomorrow < 22:
-        adx_pattern = "Bottoming"
-    elif adx_today < 25 and adx_tomorrow >= adx_today and adx_slope_today <= 0:
-        adx_pattern = "Reversing Up"
-    elif adx_tomorrow > 30 and adx_tomorrow < adx_today and adx_slope_today > 0:
-        adx_pattern = "Peaking"
-    elif adx_today > 25 and adx_tomorrow < adx_today and adx_slope_today >= 0:
-        adx_pattern = "Reversing Down"
+    # ==========================================
+    # EXACT ADX, DI & PATTERN SIMULATION
+    # ==========================================
+    # 1. Create a mini-dataframe for the simulation (last 100 days for smoothing)
+    df_sim = df[['High', 'Low', 'Close']].tail(100).copy()
+    
+    # Estimate tomorrow's wicks
+    recent_tr = (df_sim['High'] - df_sim['Low']).mean()
+    high_tomorrow = max(close_today, close_tomorrow) + (recent_tr * 0.2)
+    low_tomorrow = min(close_today, close_tomorrow) - (recent_tr * 0.2)
+    
+    # Append tomorrow's simulated price
+    tomorrow_idx = df_sim.index[-1] + pd.Timedelta(days=1)
+    new_row = pd.DataFrame({
+        'High': [high_tomorrow], 
+        'Low': [low_tomorrow], 
+        'Close': [close_tomorrow]
+    }, index=[tomorrow_idx])
+    df_sim = pd.concat([df_sim, new_row])
+    
+    # 2. Run exact ADX calculation on the appended dataframe
+    adx_calculator = ta.trend.ADXIndicator(df_sim['High'], df_sim['Low'], df_sim['Close'], window=10)
+    df_sim['ADX'] = adx_calculator.adx()
+    df_sim['DI_Plus'] = adx_calculator.adx_pos()
+    df_sim['DI_Minus'] = adx_calculator.adx_neg()
+    
+    # 3. Apply your exact LOWESS and Slope math
+    try:
+        from scipy.signal import savgol_filter
+        df_sim['ADX_LOWESS'] = savgol_filter(df_sim['ADX'].fillna(method='ffill'), window_length=7, polyorder=2)
+    except:
+        df_sim['ADX_LOWESS'] = df_sim['ADX'].ewm(span=4, adjust=False).mean()
+        
+    def calculate_adx_trend(series, window=3):
+        def get_slope(y):
+            if len(y) < 3 or y.isna().any(): return 0
+            x = np.arange(len(y))
+            slope, _, _, _, _ = stats.linregress(x, y)
+            return slope
+        return series.rolling(window=window, min_periods=3).apply(get_slope, raw=False)
+        
+    df_sim['ADX_Slope'] = calculate_adx_trend(df_sim['ADX_LOWESS'], window=3)
+    df_sim['ADX_Acceleration'] = df_sim['ADX_Slope'] - df_sim['ADX_Slope'].shift(1)
+    
+    # 4. Apply the isolated 9-pattern logic!
+    df_sim = apply_adx_patterns(df_sim)
+    
+    # 5. Extract tomorrow's simulated values
+    tmr = df_sim.iloc[-1]
+    yest = df_sim.iloc[-2] # "Today" in the context of the simulation
+    
+    adx_today = yest['ADX']
+    adx_tomorrow = tmr['ADX']
+    adx_pattern = tmr['ADX_Pattern']
+    
+    di_plus_today = yest['DI_Plus']
+    di_minus_today = yest['DI_Minus']
+    di_plus_tmr = tmr['DI_Plus']
+    di_minus_tmr = tmr['DI_Minus']
+    
+    # 6. Calculate Screaming DI Logic
+    di_spread_today = di_plus_today - di_minus_today
+    di_spread_tmr = di_plus_tmr - di_minus_tmr
+    di_spread_momentum = di_spread_tmr - di_spread_today
+    
+    di_bullish_cross_tmr = (di_plus_tmr > di_minus_tmr) and (di_plus_today <= di_minus_today)
+    di_screaming_buy = di_bullish_cross_tmr and (di_spread_momentum > 15)
 
     # ==========================================
     # THRESHOLDS & SIGNALS
@@ -1065,6 +1110,7 @@ def simulate_next_day_indicators(df, price_change_pct, volume):
 
     # ADX pattern (informational, not directional)
     signals['ADX_Pattern'] = adx_pattern
+    signals['DI_Screaming_Buy'] = di_screaming_buy
 
     return {
         'input_price_change_pct': price_change_pct,
