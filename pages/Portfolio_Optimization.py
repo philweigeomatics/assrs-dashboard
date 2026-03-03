@@ -14,6 +14,7 @@ import json
 import os
 import time
 from scipy.optimize import minimize
+import api_config
 
 import auth_manager
 auth_manager.require_login()
@@ -30,7 +31,7 @@ st.set_page_config(
 # ==========================================
 
 STOCK_NAME_CACHE_FILE = 'stock_names_cache.json'
-TUSHARE_TOKEN = '36838688c6455de2e3affca37060648de15b94b9707a43bb05a38312'
+TUSHARE_TOKEN = api_config.TUSHARE_TOKEN
 
 # ==========================================
 # TUSHARE API
@@ -516,7 +517,6 @@ def generate_portfolio_assessment(optimal_return, optimal_vol, optimal_sharpe,
     return assessment
 
 
-
 # ==========================================
 # MAIN APP
 # ==========================================
@@ -531,69 +531,103 @@ pro = get_tushare_api()
 # STOCK INPUT
 # ==========================================
 
+# ==========================================
+# STOCK INPUT
+# ==========================================
+
+# ==========================================
+# STOCK INPUT
+# ==========================================
+
 st.subheader("1️⃣ Select Stocks")
+st.markdown("Load an existing mandate to re-optimize, or enter stock tickers manually.")
 
-st.markdown("""
-Enter stock tickers (6-digit codes). Supports all exchanges (Shanghai, Shenzhen, Beijing)
+import auth_manager
+from db_manager import db
+import pandas as pd
 
-""")
+# 1. Initialize session state for the text area
+if 'ticker_input_val' not in st.session_state:
+    st.session_state.ticker_input_val = ""
 
-# Stock input method
-input_method = st.radio(
-    "Input method:",
-    ["Manual entry", "Upload CSV"],
-    horizontal=True
+# 2. Callback function (with explicit type casting and error tracking)
+def load_fund_callback():
+    try:
+        selected_fund = st.session_state.fund_dropdown
+        if selected_fund != "-- Select an existing mandate --":
+            
+            # Fetch user ID cleanly inside the callback
+            uid = auth_manager.get_current_user_id()
+            user_funds = db.read_table('funds', filters={'user_id': uid})
+            
+            if not user_funds.empty:
+                match = user_funds[user_funds['fund_name'] == selected_fund]
+                if not match.empty:
+                    # CRITICAL FIX: Explicitly cast to Python int to prevent SQLite numpy errors
+                    fund_id = int(match.iloc[0]['id']) 
+                    pos_df = db.read_table('fund_positions', filters={'fund_id': fund_id})
+                    
+                    if not pos_df.empty:
+                        # Extract the 6-digit tickers
+                        tickers = pos_df['ts_code'].apply(lambda x: str(x).split('.')[0]).unique().tolist()
+                        # Push the tickers directly into the text area state
+                        st.session_state.ticker_input_val = ", ".join(tickers)
+                        # Visual confirmation
+                        st.toast(f"✅ Successfully loaded {len(tickers)} tickers from '{selected_fund}'")
+                    else:
+                        st.toast(f"⚠️ '{selected_fund}' has no saved positions.")
+                        st.session_state.ticker_input_val = ""
+        else:
+            # Clear the box if they select the default option
+            st.session_state.ticker_input_val = ""
+            st.toast("🧹 Cleared stock list.")
+            
+    except Exception as e:
+        # If it fails, show exactly why in the UI
+        st.toast(f"❌ Error loading fund: {str(e)}")
+
+# 3. Fetch funds for the dropdown options
+user_id = auth_manager.get_current_user_id()
+user_funds_df = db.read_table('funds', filters={'user_id': user_id})
+
+fund_names = ["-- Select an existing mandate --"]
+if not user_funds_df.empty:
+    fund_names += user_funds_df['fund_name'].tolist()
+
+# 4. The Vertical Dropdown (Triggering the callback)
+st.selectbox(
+    "Load from Mandate:", 
+    options=fund_names, 
+    key="fund_dropdown",
+    on_change=load_fund_callback
 )
 
+# 5. The Vertical Text Area
+ticker_input = st.text_area(
+    "Enter / Edit Tickers (comma-separated or one per line):", 
+    key="ticker_input_val",
+    height=100,
+    placeholder="e.g., 600519, 000858, 000001\nOr paste a list here..."
+)
+
+# 6. Process the inputs into a clean list
 selected_tickers = []
+if ticker_input:
+    # Handle both commas and newlines gracefully
+    tickers_raw = ticker_input.replace('\n', ',').split(',')
+    selected_tickers = [t.strip() for t in tickers_raw if t.strip() and t.strip().isdigit()]
 
-if input_method == "Manual entry":
-    # Text area for ticker input
-    ticker_input = st.text_area(
-        "Enter tickers (one per line or comma-separated):",
-        placeholder="600000\n000001\n300750\n688981\n430047",
-        height=150
-    )
-    
-    if ticker_input:
-        # Parse input
-        tickers_raw = ticker_input.replace(',', '\n').split('\n')
-        selected_tickers = [t.strip() for t in tickers_raw if t.strip() and t.strip().isdigit()]
-        
-        # Remove duplicates
-        selected_tickers = list(set(selected_tickers))
-        
-        if selected_tickers:
-            st.success(f"✅ Found {len(selected_tickers)} valid tickers")
-        else:
-            st.warning("⚠️ No valid tickers found. Please enter 6-digit codes.")
+# Remove duplicates
+selected_tickers = list(set(selected_tickers))
 
-else:  # Upload CSV
-    uploaded_file = st.file_uploader(
-        "Upload CSV with 'ticker' column:",
-        type=['csv']
-    )
-    
-    if uploaded_file:
-        df = pd.read_csv(uploaded_file)
-        
-        if 'ticker' in df.columns:
-            selected_tickers = df['ticker'].astype(str).str.strip().tolist()
-            selected_tickers = [t for t in selected_tickers if t.isdigit()]
-            selected_tickers = list(set(selected_tickers))
-            st.success(f"✅ Loaded {len(selected_tickers)} tickers from file")
-        else:
-            st.error("❌ CSV must have a 'ticker' column")
-
-# Stop if no tickers selected
+# 7. Validation
 if not selected_tickers:
-    st.info("👆 Enter at least 3 stock tickers to begin")
+    st.info("👆 Enter at least 3 stock tickers or load a mandate to begin")
     st.stop()
 
 if len(selected_tickers) < 3:
     st.warning("⚠️ Please enter at least 3 stocks for portfolio optimization")
     st.stop()
-
 # ==========================================
 # FETCH STOCK NAMES
 # ==========================================
@@ -682,6 +716,79 @@ with col3:
     )
     risk_free_rate = risk_free_rate_pct / 100  # Convert to decimal
 
+
+@st.fragment
+def create_mandate_ui(tickers_to_use, optimal_weights):
+    """
+    Segmented UI for creating a mandate. 
+    Interacting with the grid here will ONLY rerun this fragment, not the whole page!
+    """
+    st.markdown("---")
+    st.subheader("🏦 Create Institutional Fund Mandate")
+    st.info("Convert this optimized portfolio into a tracked fund. You can manually override the final weights or add/remove tickers before saving.")
+
+    # Match tickers to their optimized weights
+    weights_dict = dict(zip(tickers_to_use, optimal_weights))
+    
+    # Filter out near-zero weights (less than 0.1%)
+    clean_weights = {k: v for k, v in weights_dict.items() if v > 0.001}
+    
+    # Format for the interactive dataframe
+    df_weights = pd.DataFrame(list(clean_weights.items()), columns=['ticker', 'Suggested_Weight'])
+    df_weights['Final_Weight'] = df_weights['Suggested_Weight'].round(4)
+    
+    col_edit, col_save = st.columns([2, 1])
+    
+    with col_edit:
+        st.write("**Adjust Target Weights:**")
+        edited_portfolio = st.data_editor(
+            df_weights,
+            column_config={
+                "ticker": st.column_config.TextColumn("Ticker (e.g. 600519)", required=True),
+                "Suggested_Weight": st.column_config.NumberColumn("Model Output", disabled=True, format="%.4f"),
+                "Final_Weight": st.column_config.NumberColumn("Target Weight", required=True, min_value=0.0, max_value=1.0, format="%.4f")
+            },
+            num_rows="dynamic", # Enables the '+' icon to add new rows
+            use_container_width=True,
+            key="portfolio_editor" 
+        )
+        
+        # Real-time Mathematical Validation (Only reruns inside this fragment!)
+        total_weight = edited_portfolio['Final_Weight'].sum()
+        if not np.isclose(total_weight, 1.0, atol=0.001):
+            st.warning(f"⚖️ Current Total Weight: **{total_weight*100:.2f}%**. Please adjust to exactly 100%.")
+            is_valid = False
+        else:
+            st.success("✅ Allocation valid (100.00%).")
+            is_valid = True
+
+    with col_save:
+        st.write("**Fund Details:**")
+        fund_name = st.text_input("Fund Name", placeholder="e.g., Alpha Quant Q1")
+        benchmark = st.selectbox("Benchmark", ["000300.SH (CSI 300)", "000905.SH (CSI 500)", "000852.SH (CSI 1000)"])
+        benchmark_ticker = benchmark.split(" ")[0] 
+        
+        if st.button("💾 Save as Mandate", type="primary", use_container_width=True, disabled=not is_valid):
+            if not fund_name:
+                st.error("Please enter a Fund Name.")
+            else:
+                with st.spinner("Writing mandate to database..."):
+                    # Convert the edited grid back to a dictionary of valid ts_codes
+                    final_positions = {}
+                    for _, row in edited_portfolio.iterrows():
+                        ticker = str(row['ticker']).strip()
+                        if ticker:
+                            ts_code = ticker_to_ts_code(ticker) 
+                            final_positions[ts_code] = float(row['Final_Weight'])
+                    
+                    # Save to DB tied to the logged-in user
+                    success, msg = data_manager.save_fund_mandate(fund_name, benchmark_ticker, final_positions)
+                    
+                    if success:
+                        # st.balloons()
+                        st.success(msg)
+                    else:
+                        st.error(msg)
 
 # ==========================================
 # RUN OPTIMIZATION
@@ -1073,6 +1180,143 @@ if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True
         template='plotly_white'
     )
     st.plotly_chart(fig_corr, use_container_width=True)
+    
+    # ==========================================
+    # INTERACTIVE PRE-TRADE PANEL (FRAGMENT)
+    # ==========================================
+    @st.fragment
+    def interactive_pre_trade_panel(returns_data, base_weights):
+        
+        # --- 1. EDITABLE TABLE ---
+        st.markdown("---")
+        st.subheader("⚖️ Adjust Target Allocations")
+        st.write("Fine-tune the optimizer's suggested weights. Set a stock's weight to `0.0` to drop it. **Weights must sum to exactly 100% to save the mandate.**")
+        
+        weights_df = pd.DataFrame({
+            'Ticker': returns_data.columns,
+            'Weight': base_weights
+        })
+        
+        edited_df = st.data_editor(
+            weights_df,
+            column_config={
+                "Ticker": st.column_config.TextColumn("Ticker", disabled=True), 
+                "Weight": st.column_config.NumberColumn("Target Weight", min_value=0.0, max_value=1.0, format="%.4f", step=0.01)
+            },
+            hide_index=True,
+            num_rows="fixed", # Prevents adding/deleting rows to keep the matrix intact
+            use_container_width=True,
+            key="weight_editor"
+        )
+        
+        # Calculate live sum
+        edited_weights = edited_df['Weight'].values
+        total_weight = edited_weights.sum()
+        is_valid_weights = np.isclose(total_weight, 1.0, atol=0.001)
+        
+        if not is_valid_weights:
+            st.error(f"⚠️ Total Weight: **{total_weight*100:.2f}%**. Please adjust the values above so they equal exactly 100.00%.")
+        else:
+            st.success("✅ Total Weight: 100.00%. Allocation is mathematically valid.")
 
+        # --- 2. LIVE SIMULATION (Only renders if weights = 100%) ---
+        if is_valid_weights:
+            st.markdown("---")
+            st.subheader("📈 Historical Simulation vs Benchmark")
+            
+            col_bench, col_window = st.columns(2)
+            with col_bench:
+                bench_choice = st.selectbox("Benchmark for Simulation:", ["000300.SH", "000905.SH", "000852.SH"], index=0, key="sim_bench")
+            with col_window:
+                rolling_window = st.select_slider("Rolling Window (Days):", options=[5, 10, 20, 30, 60], value=30, key="sim_window")
+            
+            start_dt = returns_data.index.min().strftime('%Y%m%d')
+            end_dt = returns_data.index.max().strftime('%Y%m%d')
+            
+            with st.spinner(f"Fetching {bench_choice} data..."):
+                bench_df = data_manager.get_index_data_live(bench_choice, start_date=start_dt, end_date=end_dt)
+                
+            if bench_df is not None and not bench_df.empty:
+                # Apply the EDITED weights to the historical returns
+                port_returns = returns_data.dot(edited_weights)
+                port_returns.name = 'Portfolio'
+                
+                bench_returns = bench_df['Pct_Change'] / 100.0
+                bench_returns.index = pd.to_datetime(bench_returns.index)
+                
+                sim_df = pd.concat([port_returns, bench_returns.rename('Benchmark')], axis=1).dropna()
+                
+                sim_df['Port_Cum'] = (1 + sim_df['Portfolio']).cumprod() - 1
+                sim_df['Bench_Cum'] = (1 + sim_df['Benchmark']).cumprod() - 1
+                sim_df['Active_Spread'] = sim_df['Portfolio'] - sim_df['Benchmark']
+                
+                sim_df['Rolling_Corr'] = sim_df['Portfolio'].rolling(window=rolling_window).corr(sim_df['Benchmark'])
+                roll_cov = sim_df['Portfolio'].rolling(window=rolling_window).cov(sim_df['Benchmark'])
+                roll_var = sim_df['Benchmark'].rolling(window=rolling_window).var()
+                sim_df['Rolling_Beta'] = roll_cov / roll_var
+
+                fig_sim = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
+                fig_sim.add_trace(go.Scatter(x=sim_df.index, y=sim_df['Port_Cum'], mode='lines', name='Portfolio', line=dict(color='#3b82f6')), row=1, col=1)
+                fig_sim.add_trace(go.Scatter(x=sim_df.index, y=sim_df['Bench_Cum'], mode='lines', name='Benchmark', line=dict(color='#9ca3af', dash='dot')), row=1, col=1)
+                colors = np.where(sim_df['Active_Spread'] > 0, '#10b981', '#ef4444')
+                fig_sim.add_trace(go.Bar(x=sim_df.index, y=sim_df['Active_Spread'], name='Daily Active Spread', marker_color=colors), row=2, col=1)
+                
+                fig_sim.update_layout(height=500, title="Cumulative Return & Daily Active Spread", template='plotly_white', hovermode='x unified')
+                fig_sim.update_yaxes(tickformat=".1%", row=1, col=1)
+                fig_sim.update_yaxes(tickformat=".2%", title_text="Spread", row=2, col=1)
+                st.plotly_chart(fig_sim, use_container_width=True)
+                
+                col_corr, col_beta = st.columns(2)
+                with col_corr:
+                    fig_corr_roll = go.Figure()
+                    fig_corr_roll.add_trace(go.Scatter(x=sim_df.index, y=sim_df['Rolling_Corr'], mode='lines', fill='tozeroy', name='Correlation', line=dict(color='#8b5cf6')))
+                    fig_corr_roll.add_hline(y=0, line_dash="dash", line_color="gray")
+                    fig_corr_roll.update_layout(height=280, title=f"{rolling_window}-Day Rolling Correlation", template='plotly_white', hovermode='x unified', margin=dict(t=40, b=0, l=0, r=0))
+                    st.plotly_chart(fig_corr_roll, use_container_width=True)
+                with col_beta:
+                    fig_beta = go.Figure()
+                    fig_beta.add_trace(go.Scatter(x=sim_df.index, y=sim_df['Rolling_Beta'], mode='lines', name='Beta', line=dict(color='#f59e0b')))
+                    fig_beta.add_hline(y=1, line_dash="dash", line_color="gray")
+                    fig_beta.update_layout(height=280, title=f"{rolling_window}-Day Rolling Beta", template='plotly_white', hovermode='x unified', margin=dict(t=40, b=0, l=0, r=0))
+                    st.plotly_chart(fig_beta, use_container_width=True)
+
+        # --- 3. SAVE MANDATE UI (Tied to the Live Editor) ---
+        st.markdown("---")
+        st.subheader("💾 Create Institutional Fund")
+        
+        col_name, col_bench, col_btn = st.columns([2, 1, 1])
+        with col_name:
+            fund_name = st.text_input("Fund Mandate Name", placeholder="e.g., Alpha Quant Q1", key="mandate_name")
+        with col_bench:
+            save_bench_choice = st.selectbox("Assign Benchmark", ["000300.SH", "000905.SH", "000852.SH"], key="mandate_bench")
+        with col_btn:
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            # Button is disabled if weights don't equal 100% or if there is no name
+            if st.button("💾 Save Mandate", type="primary", disabled=not is_valid_weights or not fund_name, use_container_width=True):
+                with st.spinner("Locking in mandate..."):
+                    
+                    # Build the clean database entry from EDITED weights
+                    final_positions = {}
+                    for _, row in edited_df.iterrows():
+                        w = float(row['Weight'])
+                        if w > 0: # This elegantly drops any stock you set to 0.0
+                            try:
+                                formatted_ticker = ticker_to_ts_code(str(row['Ticker']))
+                            except:
+                                formatted_ticker = str(row['Ticker'])
+                            final_positions[formatted_ticker] = w
+                    
+                    success, msg = data_manager.save_fund_mandate(fund_name, save_bench_choice, final_positions)
+                    if success:
+                        st.balloons()
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+
+    # Call the panel to render it on the page
+    interactive_pre_trade_panel(returns_df, optimal_weights)
 else:
     st.info("👆 Click 'Optimize Portfolio' to run mean-variance optimization")
+
+

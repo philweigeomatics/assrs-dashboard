@@ -50,7 +50,8 @@ pages = {
         st.Page("pages/watchlist.py", title="Watchlist 观察名单"),
     ],
     "💼 Portfolio 组合": [
-        st.Page("pages/3_Portfolio_Optimization_组合优化.py", title="Optimization 组合优化"),
+        st.Page("pages/Portfolio_Optimization.py", title="Optimization 组合优化"),
+        st.Page("pages/Fund_Manager.py", title="Portfolio Management 组合管理")
     ],
     "🔔 Alerts 提示": [
         st.Page("pages/4_Todays_Alerts_今日提醒.py", title="Today's Alerts 今日提醒"),

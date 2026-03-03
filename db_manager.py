@@ -120,6 +120,52 @@ class DatabaseManager:
                     # Regular insert
                     df = pd.DataFrame(records)
                     df.to_sql(table_name, conn, if_exists='append', index=False)
+
+    def update_records(self, table_name, update_values, filters):
+        """Update records in a table based on filters.
+        
+        Args:
+            table_name: Name of the table
+            update_values: Dict of {column: new_value} to set
+            filters: Dict of {column: value} for WHERE conditions (supports None for IS NULL)
+        """
+        if self.use_supabase:
+            query = supabase_client.table(table_name).update(update_values)
+            
+            # Apply WHERE conditions
+            for key, value in filters.items():
+                if value is None:
+                    query = query.is_(key, "null")  # Supabase syntax for IS NULL
+                else:
+                    query = query.eq(key, value)
+                    
+            query.execute()
+            
+        else:
+            # SQLite Implementation
+            set_clause = ", ".join([f"{k} = ?" for k in update_values.keys()])
+            
+            # Handle IS NULL vs = ? for the WHERE clause
+            where_conditions = []
+            filter_values = []
+            for k, v in filters.items():
+                if v is None:
+                    where_conditions.append(f"{k} IS NULL")
+                else:
+                    where_conditions.append(f"{k} = ?")
+                    filter_values.append(v)
+                    
+            where_clause = " AND ".join(where_conditions)
+            
+            # Combine the values for SET and WHERE
+            values = list(update_values.values()) + filter_values
+            
+            query = f"UPDATE {table_name} SET {set_clause} WHERE {where_clause}"
+            
+            import sqlite3
+            with sqlite3.connect(self.dbname) as conn:
+                conn.execute(query, values)
+                conn.commit()
     
     def delete_records(self, table_name, filters):
         """Delete records from a table

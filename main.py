@@ -181,6 +181,17 @@ def run_daily_ppi_and_market_breadth():
         else:
             print("✓ No PPI updates needed.")
 
+    # STEP 2.5: rolll portfolio.
+    print("\n" + "="*50)
+    print("🕒 STEP 4: Institutional Portfolio NAV Roll-Forward")
+    print("="*50)
+    try:
+        dm.execute_daily_portfolio_rollup()
+    except Exception as e:
+        print(f"❌ Portfolio Roll-Forward failed: {e}")
+        import traceback
+        traceback.print_exc()
+
     # STEP 3: Load PPIs from DB
     print("=" * 60)
     print("STEP 3: Loading PPIs from database")

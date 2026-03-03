@@ -455,14 +455,16 @@ def migrate_to_qfq_data():
     return True
 
 
-def get_index_data_live(index_code='000300.SH', lookback_days=180, freq='daily'):
+def get_index_data_live(index_code='000300.SH', lookback_days=180, freq='daily', start_date=None, end_date=None):
     """
     Fetch index data from Tushare (e.g., CSI 300).
     
     Args:
         index_code: Index code in Tushare format (e.g., '000300.SH' for CSI 300)
-        lookback_days: Number of days of historical data
+        lookback_days: Number of days of historical data (used if start_date is None)
         freq: 'daily' or 'weekly' - determines which API to call
+        start_date: Optional start date in YYYY-MM-DD or YYYYMMDD format
+        end_date: Optional end date in YYYY-MM-DD or YYYYMMDD format
     
     Returns:
         DataFrame with index OHLC data
@@ -475,59 +477,78 @@ def get_index_data_live(index_code='000300.SH', lookback_days=180, freq='daily')
             print("[data_manager] ❌ Tushare initialization failed")
             return None
     
-    try:
-        from datetime import datetime, timedelta
+    import time
+    from datetime import datetime, timedelta
+    import pandas as pd
+    
+    # 1. Date formatting logic (Merges explicit dates with legacy lookback_days)
+    if end_date is None:
         end_date = datetime.now().strftime('%Y%m%d')
+    else:
+        end_date = end_date.replace('-', '')
+        
+    if start_date is None:
         start_date = (datetime.now() - timedelta(days=lookback_days + 30)).strftime('%Y%m%d')
+    else:
+        start_date = start_date.replace('-', '')
         
-        # Choose API based on frequency
-        if freq == 'weekly':
-            # Use index_weekly API
-            df = TUSHARE_API.index_weekly(
-                ts_code=index_code,
-                start_date=start_date,
-                end_date=end_date,
-                fields='ts_code,trade_date,close,open,high,low,pre_close,change,pct_chg,vol,amount'
-            )
-        else:  # daily
-            # Use index_daily API
-            df = TUSHARE_API.index_daily(
-                ts_code=index_code,
-                start_date=start_date,
-                end_date=end_date,
-                fields='ts_code,trade_date,close,open,high,low,pre_close,change,pct_chg,vol,amount'
-            )
-        
-        if df is None or df.empty:
-            print(f"[data_manager] ❌ No {freq} data for index {index_code}")
-            return None
-        
-        # Rename and format
-        df = df.rename(columns={
-            'trade_date': 'Date',
-            'close': 'Close',
-            'open': 'Open',
-            'high': 'High',
-            'low': 'Low',
-            'pre_close': 'Pre_Close',
-            'change': 'Change',
-            'pct_chg': 'Pct_Change',
-            'vol': 'Volume',
-            'amount': 'Amount'
-        })
-        
-        # Convert date and set index
-        df['Date'] = pd.to_datetime(df['Date'])
-        df.set_index('Date', inplace=True)
-        df.sort_index(inplace=True)
-        
-        print(f"[data_manager] ✅ Fetched {len(df)} {freq} periods of index data for {index_code}")
-        
-        return df
-        
-    except Exception as e:
-        print(f"[data_manager] ❌ Failed to fetch {freq} index {index_code}: {e}")
-        return None
+    # 2. Fetch with Retry Wrapper
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            time.sleep(0.35)  # Rate limit safety
+            
+            # Choose API based on frequency
+            if freq == 'weekly':
+                df = TUSHARE_API.index_weekly(
+                    ts_code=index_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                    fields='ts_code,trade_date,close,open,high,low,pre_close,change,pct_chg,vol,amount'
+                )
+            else:  # daily
+                df = TUSHARE_API.index_daily(
+                    ts_code=index_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                    fields='ts_code,trade_date,close,open,high,low,pre_close,change,pct_chg,vol,amount'
+                )
+            
+            if df is None or df.empty:
+                print(f"[data_manager] ⚠️ Attempt {attempt+1}: No {freq} data for index {index_code}")
+                continue
+            
+            # Rename and format
+            df = df.rename(columns={
+                'trade_date': 'Date',
+                'close': 'Close',
+                'open': 'Open',
+                'high': 'High',
+                'low': 'Low',
+                'pre_close': 'Pre_Close',
+                'change': 'Change',
+                'pct_chg': 'Pct_Change',
+                'vol': 'Volume',
+                'amount': 'Amount'
+            })
+            
+            # Convert date and set index
+            df['Date'] = pd.to_datetime(df['Date'])
+            df.set_index('Date', inplace=True)
+            df.sort_index(inplace=True)
+            
+            print(f"[data_manager] ✅ Fetched {len(df)} {freq} periods of index data for {index_code}")
+            
+            return df
+            
+        except OSError:
+            print(f"🔄 Tushare OSError on {index_code} (Attempt {attempt+1}). Retrying...")
+            time.sleep(1.5)
+        except Exception as e:
+            print(f"[data_manager] ❌ Failed to fetch {freq} index {index_code}: {e}")
+            break
+            
+    return None
 
 
 def get_stock_fundamentals_live(ticker, start_date, end_date):
@@ -931,6 +952,7 @@ def get_single_stock_data_live(ticker, lookback_years=3, start_date=None, end_da
         print(f"[data_manager] ❌ Failed to fetch {ticker}: {e}")
         import traceback
         traceback.print_exc()
+
         return None
 
 
@@ -2544,3 +2566,470 @@ def get_daily_basic_latest(tickers: list) -> pd.DataFrame:
     except Exception as e:
         print(f"[data_manager] ❌ get_daily_basic_latest failed: {e}")
         return pd.DataFrame()
+
+
+# --------------- New FUnd Management Feature -------------#
+def execute_daily_portfolio_rollup(target_date: str = None):
+    """
+    NIGHTLY CRON WRAPPER: Handles API constraints, halts, and pings Tushare.
+    Passes data to process_fund_nav() and update_fund_risk_metrics().
+    """
+    from datetime import timezone, timedelta, datetime
+    import time
+    import pandas as pd
+    
+    BJT = timezone(timedelta(hours=8))
+    now_bjt = datetime.now(BJT)
+    
+    if target_date is None:
+        if now_bjt.hour >= 18:
+            target_date = now_bjt.strftime('%Y%m%d')
+        else:
+            target_date = (now_bjt - timedelta(days=1)).strftime('%Y%m%d')
+            
+    target_date_sql = pd.to_datetime(target_date).strftime('%Y-%m-%d')
+    start_buffer_date = (datetime.strptime(target_date, '%Y%m%d') - timedelta(days=15)).strftime('%Y%m%d')
+
+    print(f"\n📊 --- Running Fund NAV Roll-Forward for {target_date_sql} ---")
+
+    # SAFEGUARD 1: THE MARKET READY PING
+    ping_df = get_single_stock_data_live('600519.SH', start_date=start_buffer_date, end_date=target_date)
+    is_market_open = False
+    
+    if ping_df is not None and not ping_df.empty:
+        latest_date_in_db = ping_df.index[-1].strftime('%Y%m%d')
+        if latest_date_in_db == target_date:
+            is_market_open = True
+            
+    if not is_market_open:
+        print(f"   😴 ABORTING: Tushare data for {target_date} is not yet available, or it was a weekend/holiday.")
+        return
+
+    # FETCH ALL ACTIVE TICKERS
+    funds_df = db.read_table('funds')
+    if funds_df.empty: return
+    
+    positions_df = db.read_table('fund_positions')
+    if positions_df.empty: return
+    
+    active_mask = (positions_df['effective_date'] <= target_date_sql) & \
+                  (positions_df['end_date'].isna() | (positions_df['end_date'] > target_date_sql))
+    active_positions = positions_df[active_mask]
+    
+    if active_positions.empty: return
+    unique_tickers = active_positions['ts_code'].unique().tolist()
+
+    # BUILD DAILY RETURNS DICTIONARY
+    print(f"   📡 Fetching live return data for {len(unique_tickers)} portfolio tickers...")
+    stock_returns = {}
+    for ticker in unique_tickers:
+        df = get_single_stock_data_live(ticker, start_date=start_buffer_date, end_date=target_date)
+        
+        if df is not None and not df.empty and len(df) >= 2:
+            latest_date_in_df = df.index[-1].strftime('%Y%m%d')
+            if latest_date_in_df == target_date:
+                recent_close = df['Close'].iloc[-1]
+                prev_close = df['Close'].iloc[-2]
+                stock_returns[ticker] = (recent_close - prev_close) / prev_close
+            else:
+                stock_returns[ticker] = 0.0 # Halted
+                print(f"   ⏸️ {ticker} halted on {target_date}. Assuming 0.0% return.")
+        else:
+            stock_returns[ticker] = 0.0
+            
+        time.sleep(0.35) 
+
+    # RUN THE MODULAR ENGINES
+    for _, fund in funds_df.iterrows():
+        fund_id = fund['id']
+        fund_name = fund['fund_name']
+        
+        # 1. Math & Accounting
+        success, new_aum, ret, flow = process_fund_nav(fund_id, target_date_sql, stock_returns)
+        
+        if success:
+            # 2. Advanced Risk
+            update_fund_risk_metrics(fund_id, target_date_sql)
+            print(f"   ✅ {fund_name}: AUM ¥{new_aum:,.2f} | Return: {ret*100:.2f}% | Flow: ¥{flow}")
+
+    print("📊 --- Fund NAV Roll-Forward Complete ---\n")
+
+# 
+# Notice that it sets the effective_date of the weights to tomorrow. 
+# This is standard institutional practice: if you lock in a mandate today, 
+# the backtest/tracking officially begins at tomorrow's market open using today's closing prices as the capital baseline.
+#
+def save_fund_mandate(fund_name, benchmark, positions_dict):
+    """
+    Saves a newly optimized fund and its initial target weights into the database,
+    tied securely to the active user.
+    """
+    import auth_manager
+    from zoneinfo import ZoneInfo
+    from datetime import datetime, timedelta
+    
+    try:
+        # Get the currently logged-in user
+        user_id = auth_manager.get_current_user_id()
+        if not user_id:
+            return False, "❌ Authentication error: Please log in to save a mandate."
+
+        CHINA_TZ = ZoneInfo("Asia/Shanghai")
+        now_bjt = datetime.now(CHINA_TZ)
+        
+        today_str = now_bjt.strftime('%Y-%m-%d')
+        # Target weights go live tomorrow to prevent look-ahead bias
+        tomorrow_str = (now_bjt + timedelta(days=1)).strftime('%Y-%m-%d')
+
+        # 1. Check for duplicates PER USER
+        existing_fund = db.read_table('funds', filters={'fund_name': fund_name, 'user_id': user_id})
+        if not existing_fund.empty:
+            return False, f"⚠️ You already have a fund named '{fund_name}'."
+
+        # 2. Insert the Mandate Header WITH user_id
+        fund_record = [{
+            'user_id': user_id,
+            'fund_name': fund_name,
+            'benchmark': benchmark,
+            'inception_date': today_str
+        }]
+        db.insert_records('funds', fund_record)
+
+        # 3. Retrieve the newly generated fund_id
+        new_fund_df = db.read_table('funds', filters={'fund_name': fund_name, 'user_id': user_id})
+        if new_fund_df.empty:
+            return False, "❌ Failed to retrieve the new fund ID from the database."
+        fund_id = int(new_fund_df.iloc[0]['id'])
+
+        # 4. Insert the Positions
+        position_records = []
+        for ts_code, weight in positions_dict.items():
+            if weight > 0: 
+                position_records.append({
+                    'fund_id': fund_id,
+                    'ts_code': ts_code,
+                    'weight': float(weight),
+                    'effective_date': tomorrow_str,
+                    'end_date': None 
+                })
+        
+        db.insert_records('fund_positions', position_records)
+        return True, f"✅ Successfully launched '{fund_name}' with {len(position_records)} active positions."
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return False, f"❌ Database error: {str(e)}"
+
+
+
+def process_fund_nav(fund_id: int, target_date_sql: str, daily_returns: dict):
+    """
+    CORE ENGINE 1: The Accounting Module.
+    Takes a dictionary of {ticker: pct_return} for a specific date, applies active weights,
+    calculates the new AUM, and preserves idempotency.
+    """
+    
+    # Fetch active holdings for this fund
+    positions_df = db.read_table('fund_positions', filters={'fund_id': fund_id})
+    if positions_df.empty:
+        return False, 0, 0, 0
+        
+    active_mask = (positions_df['effective_date'] <= target_date_sql) & \
+                  (positions_df['end_date'].isna() | (positions_df['end_date'] > target_date_sql))
+    fund_holdings = positions_df[active_mask]
+    
+    if fund_holdings.empty:
+        return False, 0, 0, 0
+
+    all_metrics = db.read_table('fund_daily_metrics', filters={'fund_id': fund_id})
+    
+    # SAFEGUARD 2: Preserve user-inputted net_flow if overwriting a failed/duplicate run
+    current_net_flow = 0.0
+    if not all_metrics.empty:
+        today_record = all_metrics[all_metrics['trade_date'] == target_date_sql]
+        if not today_record.empty:
+            current_net_flow = today_record.iloc[0].get('net_flow', 0.0)
+
+    # SAFEGUARD 3: Strictly grab yesterday's AUM to prevent double-compounding
+    starting_aum = 10000000.0  
+    if not all_metrics.empty:
+        past_metrics = all_metrics[all_metrics['trade_date'] < target_date_sql].sort_values(by='trade_date', ascending=False)
+        if not past_metrics.empty:
+            starting_aum = past_metrics.iloc[0]['total_aum']
+            
+    starting_capital = starting_aum + current_net_flow
+
+    # Apply Weights
+    portfolio_daily_return = 0.0
+    for _, pos in fund_holdings.iterrows():
+        ticker = pos['ts_code']
+        weight = pos['weight']
+        stock_ret = daily_returns.get(ticker, 0.0)
+        portfolio_daily_return += (weight * stock_ret)
+        
+    new_aum = starting_capital * (1 + portfolio_daily_return)
+    daily_pnl = new_aum - starting_capital
+    
+    # Save Accounting Data (Risk metrics default to None, updated by Risk Module next)
+    metric_record = {
+        'fund_id': fund_id,
+        'trade_date': target_date_sql,
+        'total_aum': new_aum,
+        'daily_pnl': daily_pnl,
+        'net_flow': current_net_flow,  
+        'beta_30d': None, 
+        'var_95': None,
+        'volatility_annualized': None
+    }
+    
+    db.insert_records('fund_daily_metrics', [metric_record], upsert=True)
+    return True, new_aum, portfolio_daily_return, current_net_flow
+
+
+def update_fund_risk_metrics(fund_id: int, target_date_sql: str, pre_fetched_bench_returns: dict = None):
+    """
+    CORE ENGINE 2: The Risk Module.
+    Calculates institutional risk (VaR, Volatility, and Beta) based on the last 30 days.
+    Accepts pre_fetched_bench_returns to prevent N+1 API calls during historical backfills.
+    """
+    import numpy as np
+    import pandas as pd
+    import db_config
+    from db_manager import db
+    
+    # 1. Look up the fund's specific benchmark
+    fund_df = db.read_table('funds', filters={'id': fund_id})
+    if fund_df.empty: return
+    benchmark = fund_df.iloc[0]['benchmark']
+    if benchmark and " " in benchmark:
+        benchmark = benchmark.split(" ")[0]
+
+    # 2. Get past 30 days of AUM metrics
+    metrics = db.read_table('fund_daily_metrics', filters={'fund_id': fund_id})
+    if metrics.empty: return
+        
+    past_30 = metrics[metrics['trade_date'] <= target_date_sql].sort_values('trade_date').tail(30)
+    if len(past_30) < 5: return 
+        
+    aum_series = past_30['total_aum'].values
+    flows_series = past_30['net_flow'].values
+    trade_dates = past_30['trade_date'].values
+    
+    fund_rets = []
+    valid_dates = []
+    for i in range(1, len(aum_series)):
+        prev_aum = aum_series[i-1]
+        curr_aum = aum_series[i]
+        flow = flows_series[i]
+        ret = (curr_aum - prev_aum - flow) / prev_aum if prev_aum > 0 else 0
+        fund_rets.append(ret)
+        valid_dates.append(trade_dates[i])
+        
+    if not fund_rets: return
+    fund_rets = np.array(fund_rets)
+    
+    # --- RISK MATH 1: Volatility & VaR ---
+    volatility_ann = np.std(fund_rets) * np.sqrt(252)
+    var_95 = np.percentile(fund_rets, 5) 
+    
+    # --- RISK MATH 2: Beta ---
+    beta_30d = None
+    if benchmark and len(valid_dates) > 2:
+        start_dt = valid_dates[0].replace('-', '')
+        end_dt = valid_dates[-1].replace('-', '')
+        
+        # USE INJECTED DATA IF AVAILABLE, OTHERWISE FETCH LIVE
+        if pre_fetched_bench_returns is not None:
+            bench_ret_dict = pre_fetched_bench_returns
+        else:
+            bench_df = get_index_data_live(benchmark, start_date=start_dt, end_date=end_dt)
+            if bench_df is not None and not bench_df.empty:
+                bench_df['date_str'] = bench_df.index.strftime('%Y-%m-%d')
+                bench_ret_dict = dict(zip(bench_df['date_str'], bench_df['Pct_Change'] / 100.0))
+            else:
+                bench_ret_dict = {}
+            
+        aligned_fund = []
+        aligned_bench = []
+        
+        for i, d in enumerate(valid_dates):
+            if d in bench_ret_dict:
+                aligned_fund.append(fund_rets[i])
+                aligned_bench.append(bench_ret_dict[d])
+                
+        if len(aligned_bench) > 2:
+            cov_matrix = np.cov(aligned_fund, aligned_bench)
+            if cov_matrix[1, 1] != 0:
+                beta_30d = cov_matrix[0, 1] / cov_matrix[1, 1]
+    
+    # 3. Update the database
+    if db_config.USE_SUPABASE:
+        from db_manager import supabase_client
+        update_data = {'volatility_annualized': float(volatility_ann), 'var_95': float(var_95)}
+        if beta_30d is not None: update_data['beta_30d'] = float(beta_30d)
+        
+        supabase_client.table('fund_daily_metrics')\
+            .update(update_data)\
+            .eq('fund_id', fund_id).eq('trade_date', target_date_sql).execute()
+    else:
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        if beta_30d is not None:
+            cursor.execute(
+                "UPDATE fund_daily_metrics SET volatility_annualized = ?, var_95 = ?, beta_30d = ? WHERE fund_id = ? AND trade_date = ?", 
+                (float(volatility_ann), float(var_95), float(beta_30d), fund_id, target_date_sql)
+            )
+        else:
+            cursor.execute(
+                "UPDATE fund_daily_metrics SET volatility_annualized = ?, var_95 = ? WHERE fund_id = ? AND trade_date = ?", 
+                (float(volatility_ann), float(var_95), fund_id, target_date_sql)
+            )
+        conn.commit()
+        conn.close()
+
+
+def execute_fund_rebalance(fund_id: int, new_positions: dict):
+    """
+    Executes a portfolio rebalance for an existing mandate.
+    Closes out the current active positions (sets end_date to China today) 
+    and inserts the new target weights (effective_date to China tomorrow).
+    """
+    from zoneinfo import ZoneInfo
+    from datetime import datetime, timedelta
+    from db_manager import db
+    
+    try:
+        # 1. Strictly define China Time
+        CHINA_TZ = ZoneInfo("Asia/Shanghai")
+        china_now = datetime.now(CHINA_TZ)
+        
+        # 2. Calculate Dates
+        china_today = china_now.strftime('%Y-%m-%d')
+        china_tomorrow = (china_now + timedelta(days=1)).strftime('%Y-%m-%d')
+        
+        # 3. Close out old positions (End date = Today)
+        db.update_records(
+            table_name='fund_positions',
+            update_values={'end_date': china_today},
+            filters={'fund_id': fund_id, 'end_date': None}
+        )
+        
+        # 4. Insert the new target weights (Effective date = Tomorrow)
+        insert_data = []
+        for ts_code, weight in new_positions.items():
+            insert_data.append({
+                'fund_id': fund_id,
+                'ts_code': ts_code,
+                'weight': float(weight),
+                'effective_date': china_tomorrow,
+                'end_date': None
+            })
+        
+        if insert_data:
+            db.insert_records('fund_positions', insert_data, upsert=False)
+            
+        return True, "Rebalance executed successfully. New mandate goes live at tomorrow's open."
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return False, f"Database error during rebalance: {str(e)}"
+    
+    
+def init_portfolio_tables():
+    """
+    Initialize tables for Institutional Portfolio Management.
+    
+    ====================================================================
+    DOCUMENTATION: TOTAL RETURN (TR) & DRIP ASSUMPTION
+    ====================================================================
+    This portfolio tracker operates as a Total Return Index using daily 
+    percentage changes (`pct_chg`), rather than absolute accounting of 
+    shares and cash. 
+    
+    Because Tushare adjusts the `pre_close` on ex-dividend dates, the 
+    `pct_chg` intrinsically captures the value of the distribution. By 
+    applying this `pct_chg` directly to the active AUM, the system 
+    mathematically assumes Automatic Dividend Reinvestment (DRIP) with 
+    zero cash drag. 
+    
+    Forward-adjusted prices (qfq) are EXPLICITLY NOT STORED to prevent 
+    historical database corruption during stock splits.
+    ====================================================================
+    """
+    
+    # 1. Funds Table (The Mandates) - UPDATED FOR MULTI-TENANT
+    funds_schema = """
+    CREATE TABLE IF NOT EXISTS funds (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        fund_name TEXT NOT NULL,
+        benchmark TEXT,
+        inception_date DATE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES app_user(id) ON DELETE CASCADE,
+        UNIQUE(user_id, fund_name)
+    );
+    """
+    
+    # 2. Fund Positions Table (Temporal tracking of weights)
+    positions_schema = """
+    CREATE TABLE IF NOT EXISTS fund_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fund_id INTEGER NOT NULL,
+        ts_code TEXT NOT NULL,
+        weight REAL NOT NULL,
+        effective_date DATE NOT NULL,
+        end_date DATE, 
+        FOREIGN KEY (fund_id) REFERENCES funds(id)
+    );
+    """
+    
+    # 3. Fund Daily Risk Metrics 
+    metrics_schema = """
+    CREATE TABLE IF NOT EXISTS fund_daily_metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fund_id INTEGER NOT NULL,
+        trade_date DATE NOT NULL,
+        total_aum REAL,
+        daily_pnl REAL,
+        net_flow REAL DEFAULT 0,
+        beta_30d REAL,
+        var_95 REAL,
+        volatility_annualized REAL,
+        FOREIGN KEY (fund_id) REFERENCES funds(id),
+        UNIQUE(fund_id, trade_date)
+    );
+    """
+    
+    # 4. Themes Mapping (Many-to-Many)
+    themes_schema = """
+    CREATE TABLE IF NOT EXISTS stock_themes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_code TEXT NOT NULL,
+        theme_name TEXT NOT NULL,
+        UNIQUE(ts_code, theme_name)
+    );
+    """
+
+    # 5. Local cache for Total Return architecture (Saves Tushare points)
+    cache_schema = """
+    CREATE TABLE IF NOT EXISTS stock_daily_cache (
+        ts_code TEXT NOT NULL,
+        trade_date DATE NOT NULL,
+        close REAL NOT NULL,
+        pct_chg REAL NOT NULL,
+        UNIQUE(ts_code, trade_date)
+    );
+    """
+
+    # Execute for local SQLite
+    if db_config.USE_SQLITE:
+        db.create_table_sqlite(funds_schema)
+        db.create_table_sqlite(positions_schema)
+        db.create_table_sqlite(metrics_schema)
+        db.create_table_sqlite(themes_schema)
+        db.create_table_sqlite(cache_schema)
+        print("✅ Portfolio & TR Cache tables initialized in SQLite.")
+
