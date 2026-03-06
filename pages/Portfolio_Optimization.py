@@ -136,7 +136,7 @@ def get_stock_display_name(ticker: str) -> str:
 # ==========================================
 
 @st.cache_data(ttl=600)
-def calculate_returns_covariance(tickers: list, lookback: int = 252):
+def calculate_returns_covariance(tickers: list, lookback: int = 252, return_duration: int = 1):
     """Calculate returns and covariance matrix using LIVE qfq-adjusted data."""
     price_data = {}
     for ticker in tickers:
@@ -149,9 +149,16 @@ def calculate_returns_covariance(tickers: list, lookback: int = 252):
         return None, None, None
     
     prices = pd.DataFrame(price_data).dropna()
-    returns = prices.pct_change().dropna().tail(lookback)
-    mean_returns = returns.mean() * 252  # Annualize
-    cov_matrix = returns.cov() * 252
+    
+    # 1. Calculate N-day overlapping returns
+    returns = prices.pct_change(periods=return_duration).dropna().tail(lookback)
+    
+    # 2. Dynamic Annualization Factor (e.g., 252 / 5 for weekly returns)
+    annualization_factor = 252 / return_duration
+    
+    # 3. Scale Expected Returns and Covariance
+    mean_returns = returns.mean() * annualization_factor
+    cov_matrix = returns.cov() * annualization_factor
     
     return returns, mean_returns, cov_matrix
 
@@ -682,7 +689,8 @@ if not tickers_to_use or len(tickers_to_use) < 3:
 
 st.subheader("3️⃣ Optimization Parameters")
 
-col1, col2, col3 = st.columns(3)
+# Expanded to 4 columns to fit the new Return Duration spinner
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
     lookback_days = st.selectbox(
@@ -693,6 +701,16 @@ with col1:
     )
 
 with col2:
+    return_duration = st.number_input(
+        "Return Duration (Days):", 
+        min_value=1, 
+        max_value=30, 
+        value=1, 
+        step=1, 
+        help="1 = Daily Returns, 5 = Weekly Returns, 20 = Monthly Returns."
+    )
+
+with col3:
     max_allocation_pct = st.slider(
         "Max allocation per stock (%):",
         min_value=5,
@@ -704,7 +722,7 @@ with col2:
     )
     max_allocation = max_allocation_pct / 100  # Convert to decimal
 
-with col3:
+with col4:
     risk_free_rate_pct = st.slider(
         "Risk-free rate (%):",
         min_value=0.0,
@@ -799,7 +817,8 @@ if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True
     with st.spinner("📊 Calculating returns and covariance..."):
         returns_df, mean_returns, cov_matrix = calculate_returns_covariance(
             tickers_to_use, 
-            lookback=lookback_days
+            lookback=lookback_days,
+            return_duration=return_duration  # Pass the newly added UI parameter
         )
     
     if returns_df is None or mean_returns is None:

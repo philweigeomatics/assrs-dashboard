@@ -2911,7 +2911,7 @@ def execute_fund_rebalance(fund_id: int, new_positions: dict):
         # 3. Close out old positions (End date = Today)
         db.update_records(
             table_name='fund_positions',
-            update_values={'end_date': china_today},
+            update_values={'end_date': china_tomorrow},
             filters={'fund_id': fund_id, 'end_date': None}
         )
         
@@ -2936,7 +2936,7 @@ def execute_fund_rebalance(fund_id: int, new_positions: dict):
         traceback.print_exc()
         return False, f"Database error during rebalance: {str(e)}"
     
-    
+
 def init_portfolio_tables():
     """
     Initialize tables for Institutional Portfolio Management.

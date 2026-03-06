@@ -242,12 +242,16 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     
     # ==================== PHASE 1: ACCUMULATION ====================
     df_analysis['PriceChg'] = df_analysis['Close'].pct_change(periods=lookback)
-    df_analysis[f'OBVChg{lookback}d'] = df_analysis['OBV'].pct_change(periods=lookback)
+    
+    # FIX: Use the Volume_Scaled_OBV difference instead of pct_change on raw OBV. 
+    # This prevents the negative-number math bug and normalizes the volume perfectly.
+    df_analysis[f'OBV_Scaled_Diff'] = df_analysis['Volume_Scaled_OBV'] - df_analysis['Volume_Scaled_OBV'].shift(lookback)
     
     accumulation = (
-        (df_analysis[f'OBVChg{lookback}d'] > params['obv_threshold']) &  # OBV up
-        (df_analysis['PriceChg'].abs() < params['price_flat_threshold']) &  # Price flat
-        (df_analysis['RSI_14'] < 60)  # Not overbought
+        (df_analysis[f'OBV_Scaled_Diff'] > 0.5) &  # Genuinely positive OBV momentum
+        (df_analysis['PriceChg'].abs() < params['price_flat_threshold']) &  # Price is trapped/flat
+        (df_analysis['RSI_14'] < 60) & # Not overbought
+        (df_analysis['Close'] > df_analysis['MA200']) # ADDED: Only look for accumulation in macro uptrends
     )
     df_analysis.loc[accumulation, 'Signal_Accumulation'] = True
     
@@ -270,6 +274,20 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     squeeze_groups = (df_analysis['Signal_Squeeze'] != df_analysis['Signal_Squeeze'].shift()).cumsum()
     df_analysis['Squeeze_Age'] = df_analysis.groupby(squeeze_groups)['Signal_Squeeze'].cumsum()
     df_analysis['Squeeze_Mature'] = (df_analysis['Signal_Squeeze']) & (df_analysis['Squeeze_Age'] >= 5)
+    
+    # NEW: Directional Squeeze Breakout Triggers
+    # A squeeze is just stored energy. These signals tell us which way the energy is releasing.
+    df_analysis['Squeeze_Fired_Bullish'] = (
+        df_analysis['Signal_Squeeze'].shift(1) &  # Was in a squeeze yesterday
+        (df_analysis['Close'] > df_analysis['BB_Upper']) & # Broke the upper band today
+        (df_analysis['MACD'] > df_analysis['MACD_Signal']) # Momentum is supporting the upside
+    )
+    
+    df_analysis['Squeeze_Fired_Bearish'] = (
+        df_analysis['Signal_Squeeze'].shift(1) &  
+        (df_analysis['Close'] < df_analysis['BB_Lower']) & 
+        (df_analysis['MACD'] < df_analysis['MACD_Signal']) 
+    )
     
     # Keep legacy column for backward compatibility
     df_analysis['Min_Width_120d'] = df_analysis['BB_Width'].rolling(window=120, min_periods=20).min()

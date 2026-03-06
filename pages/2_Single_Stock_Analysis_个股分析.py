@@ -26,13 +26,15 @@ auth_manager.require_login()
 BULLISH_SIGNALS = {
     'MACD_Bottoming': 'MACD Bottoming',
     'MACD_ClassicCrossover': 'MACD Positive Crossover',
-    'RSI_Bottoming': 'RSI Bottoming'
+    'RSI_Bottoming': 'RSI Bottoming',
+    'Squeeze_Fired_Bullish': 'Bullish Squeeze Breakout'  # <--- ADD THIS
 }
 
 BEARISH_SIGNALS = {
     'MACD_Peaking': 'MACD Peaking',
     'MACD_BearishCrossover': 'MACD Bearish Crossover',
-    'RSI_Peaking': 'RSI Peaking'
+    'RSI_Peaking': 'RSI Peaking',
+    'Squeeze_Fired_Bearish': 'Bearish Squeeze Drop'     # <--- ADD THIS
 }
 
 ADX_BULLISH_PATTERNS = {
@@ -759,6 +761,31 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
             x=sqz.index.strftime('%Y-%m-%d'), y=sqz['High'] * 1.02,
             mode='markers', name='Phase 2: Squeeze',
             marker=dict(color='#64748b', size=8, symbol='square'),
+            showlegend=True
+        ), row=1, col=1)
+
+
+    # NEW: Bullish Squeeze Breakout (Fired Up)
+    bull_sqz = df[df.get('Squeeze_Fired_Bullish', False)]
+    if not bull_sqz.empty:
+        fig.add_trace(go.Scatter(
+            x=bull_sqz.index.strftime('%Y-%m-%d'), 
+            y=bull_sqz['Low'] * 0.95,  # Placed slightly below the candle
+            mode='markers', 
+            name='🚀 Bullish Squeeze Breakout',
+            marker=dict(color='#10b981', size=14, symbol='triangle-up', line=dict(width=1, color='black')),
+            showlegend=True
+        ), row=1, col=1)
+
+    # NEW: Bearish Squeeze Drop (Fired Down)
+    bear_sqz = df[df.get('Squeeze_Fired_Bearish', False)]
+    if not bear_sqz.empty:
+        fig.add_trace(go.Scatter(
+            x=bear_sqz.index.strftime('%Y-%m-%d'), 
+            y=bear_sqz['High'] * 1.05,  # Placed slightly above the candle
+            mode='markers', 
+            name='🩸 Bearish Squeeze Drop',
+            marker=dict(color='#ef4444', size=14, symbol='triangle-down', line=dict(width=1, color='black')),
             showlegend=True
         ), row=1, col=1)
     
@@ -1846,104 +1873,76 @@ def analyze_conditional_entry_signals(df, ticker_name="Stock"):
     # Calculate daily returns
     df_analysis = df.copy()
     df_analysis['Return'] = df_analysis['Close'].pct_change()
-    df_analysis['Next_Return'] = df_analysis['Return'].shift(-1)  # Tomorrow's return
-
-    # Drop last row (no next day data) and NaNs
+    df_analysis['Next_Return'] = df_analysis['Return'].shift(-1)
+    
+    # FIX: Filter out limit-down days (-9.5% or worse) as they lack liquidity to buy at close
+    df_analysis = df_analysis[df_analysis['Return'] > -0.095]
     df_analysis = df_analysis[['Close', 'Return', 'Next_Return']].dropna()
-
+    
     if len(df_analysis) < 50:
         return None, None, None
 
-    # ========================================
-    # CATEGORIZE TODAY'S DROPS INTO BUCKETS
-    # ========================================
-
-    # Define drop thresholds
+    # Adjusted bucket floor to align with the liquidity filter
     drop_buckets = [
-        (-0.01, 0.00, "0% to -1%"),      # Tiny dip
-        (-0.02, -0.01, "-1% to -2%"),    # Small dip
-        (-0.03, -0.02, "-2% to -3%"),    # Medium dip
-        (-0.04, -0.03, "-3% to -4%"),    # Large dip
-        (-0.05, -0.04, "-4% to -5%"),    # Very large dip
-        (-1.00, -0.05, "< -5%"),         # Extreme drop
+        (-0.01, 0.00, "0% to -1%"),
+        (-0.02, -0.01, "-1% to -2%"),
+        (-0.03, -0.02, "-2% to -3%"),
+        (-0.04, -0.03, "-3% to -4%"),
+        (-0.05, -0.04, "-4% to -5%"),
+        (-0.095, -0.05, "-5% to -9.5%"), 
     ]
 
     results = []
 
     for lower, upper, label in drop_buckets:
-        # Filter days where today's return is in this bucket
         mask = (df_analysis['Return'] >= lower) & (df_analysis['Return'] < upper)
         bucket_data = df_analysis[mask]
-
-        if len(bucket_data) < 3:  # Not enough samples
+        if len(bucket_data) < 3:
             continue
-
-        # Tomorrow's return statistics
+            
         next_returns = bucket_data['Next_Return']
-
-        win_rate = (next_returns > 0).sum() / len(next_returns)
-        avg_return = next_returns.mean()
-        median_return = next_returns.median()
-        best_return = next_returns.max()
-        worst_return = next_returns.min()
-
-        # Risk metrics
+        win_rate      = (next_returns > 0).sum() / len(next_returns)
+        avg_return    = next_returns.mean()
+        
         losing_trades = next_returns[next_returns < 0]
-        avg_loss = losing_trades.mean() if len(losing_trades) > 0 else 0
-
-        # Expected value per trade
-        expected_value = avg_return
-
-        # Risk-reward ratio (avg win / avg loss)
+        avg_loss  = losing_trades.mean() if len(losing_trades) > 0 else 0
+        
         winning_trades = next_returns[next_returns > 0]
-        avg_win = winning_trades.mean() if len(winning_trades) > 0 else 0
-        risk_reward = abs(avg_win / avg_loss) if avg_loss != 0 else 0
-
-        # Recommendation score (higher is better)
-        # Score = Win Rate * Avg Return * Sample Size factor
-        confidence_factor = min(1.0, len(bucket_data) / 20)  # Penalize small samples
-        score = win_rate * avg_return * 100 * confidence_factor
-
+        avg_win   = winning_trades.mean() if len(winning_trades) > 0 else 0
+        
+        # FIX: Assign a high ratio for perfect setups instead of 0
+        risk_reward = abs(avg_win / avg_loss) if avg_loss != 0 else 99.0 
+        
+        confidence_factor = min(1.0, len(bucket_data) / 20)
+        
+        # FIX: Score is now pure weighted Expectancy
+        score = avg_return * 100 * confidence_factor
+        
         results.append({
-            'Entry Signal': label,
-            'Sample Size': len(bucket_data),
-            'Win Rate': win_rate,
-            'Avg T+1 Return': avg_return,
-            'Median T+1 Return': median_return,
-            'Best Case': best_return,
-            'Worst Case': worst_return,
-            'Avg Win': avg_win,
-            'Avg Loss': avg_loss,
-            'Risk/Reward': risk_reward,
-            'Expected Value': expected_value,
-            'Score': score
+            'Entry Signal': label, 'Sample Size': len(bucket_data),
+            'Win Rate': win_rate, 'Avg T+1 Return': avg_return,
+            'Median T+1 Return': next_returns.median(),
+            'Best Case': next_returns.max(), 'Worst Case': next_returns.min(),
+            'Avg Win': avg_win, 'Avg Loss': avg_loss,
+            'Risk/Reward': risk_reward, 'Expected Value': avg_return, 'Score': score
         })
 
     if not results:
         return None, None, None
 
-    # Create DataFrame
-    entry_df = pd.DataFrame(results)
-    entry_df = entry_df.sort_values('Score', ascending=False)
-
-    # ========================================
-    # IDENTIFY BEST ENTRY POINTS
-    # ========================================
-
-    # Best entry = highest score with reasonable sample size
+    entry_df = pd.DataFrame(results).sort_values('Score', ascending=False)
     best_entries = entry_df[
-        (entry_df['Sample Size'] >= 5) &  # At least 5 historical examples
-        (entry_df['Win Rate'] > 0.5) &    # Positive win rate
-        (entry_df['Expected Value'] > 0)  # Positive expected value
+        (entry_df['Sample Size'] >= 5) &
+        (entry_df['Win Rate'] > 0.5) &
+        (entry_df['Expected Value'] > 0)
     ]
-
-    # Summary statistics
+    
     summary_stats = {
-        'total_samples': len(df_analysis),
-        'best_entry': best_entries.iloc[0]['Entry Signal'] if len(best_entries) > 0 else 'None',
-        'best_win_rate': best_entries.iloc[0]['Win Rate'] if len(best_entries) > 0 else 0,
-        'best_avg_return': best_entries.iloc[0]['Avg T+1 Return'] if len(best_entries) > 0 else 0,
-        'profitable_entries': len(best_entries)
+        'total_samples':       len(df_analysis),
+        'best_entry':          best_entries.iloc[0]['Entry Signal'] if len(best_entries) > 0 else 'None',
+        'best_win_rate':       best_entries.iloc[0]['Win Rate']     if len(best_entries) > 0 else 0,
+        'best_avg_return':     best_entries.iloc[0]['Avg T+1 Return'] if len(best_entries) > 0 else 0,
+        'profitable_entries':  len(best_entries)
     }
 
     # ========================================
