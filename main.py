@@ -136,6 +136,17 @@ def run_daily_ppi_and_market_breadth():
         print("Continuing with other updates...")
     print()
 
+    # STEP 1.8: Update Margin Data
+    print("=" * 60)
+    print("STEP 1.8: Updating Margin Data (融资融券)")
+    print("=" * 60)
+    try:
+        dm.update_daily_margin_data()
+    except Exception as e:
+        print(f"⚠ WARNING: margin data update failed: {e}")
+        print("Continuing with other updates...")
+    print()
+
     # STEP 2: Aggregate PPIs (Incremental)
     print("=" * 60)
     print("STEP 2: Aggregating sector PPIs (incremental update)")

@@ -72,6 +72,8 @@ else:
     active_positions = pd.DataFrame()
 
 
+
+
 # ==========================================
 # 4. TOP LEVEL KPIs
 # ==========================================
@@ -203,18 +205,63 @@ with tab_perf:
         
         fig_curve = go.Figure()
         
-        # 1. Plot Portfolio Cumulative Return
-        # Rebase to 0% at inception
+        # 1. Rebase to 0% at inception
         metrics_df['cum_return'] = ((metrics_df['total_aum'] / inception_aum) - 1) * 100
         
-        fig_curve.add_trace(go.Scatter(
-            x=metrics_df['trade_date'], 
-            y=metrics_df['cum_return'],
-            mode='lines',
-            name='Portfolio',
-            fill='tozeroy',
-            line=dict(color='#3b82f6', width=2)
-        ))
+        # 2. Identify inception date to split the dataframe
+        # Fallback to today if missing to prevent errors
+        inc_date_val = fund_details.get('inception_date') or fund_details.get('created_at')
+        if pd.isna(inc_date_val):
+            inc_date_val = datetime.now(ZoneInfo("Asia/Shanghai")).strftime('%Y-%m-%d')
+        inception_date = pd.to_datetime(inc_date_val).date()
+        
+        # Format dates for safe comparison
+        metrics_df['trade_date_dt'] = pd.to_datetime(metrics_df['trade_date']).dt.date
+        
+        # Split DataFrames
+        backtest_df = metrics_df[metrics_df['trade_date_dt'] <= inception_date]
+        live_df = metrics_df[metrics_df['trade_date_dt'] >= inception_date]
+        
+        # Add Backtest Trace (Dashed Grey)
+        if not backtest_df.empty:
+            fig_curve.add_trace(go.Scatter(
+                x=backtest_df['trade_date'], 
+                y=backtest_df['cum_return'],
+                mode='lines',
+                name='Historical Backtest',
+                line=dict(color='rgba(156, 163, 175, 0.8)', width=2, dash='dash')
+            ))
+
+        # Add Live Trace (Solid Blue)
+        if not live_df.empty:
+            fig_curve.add_trace(go.Scatter(
+                x=live_df['trade_date'], 
+                y=live_df['cum_return'],
+                mode='lines',
+                name='Live Mandate',
+                fill='tozeroy',
+                line=dict(color='#3b82f6', width=2)
+            ))
+            
+        # 1. Draw the vertical line (Plotly handles the pure line just fine)
+        fig_curve.add_vline(
+            x=inception_date.strftime('%Y-%m-%d'), 
+            line_width=2, 
+            line_dash="dot", 
+            line_color="red"
+        )
+        
+        # 2. Manually add the text to bypass the 'annotation_position' bug
+        fig_curve.add_annotation(
+            x=inception_date.strftime('%Y-%m-%d'),
+            y=1.02,          # Places it just above the top of the chart
+            yref="paper",    # Anchors to the chart boundaries, not the AUM values
+            text="Mandate Created",
+            showarrow=False,
+            xanchor="right",
+            yanchor="bottom",
+            font=dict(color="red")
+        )
         
         # 2. Plot Benchmark Cumulative Return
         if bench_df is not None and not bench_df.empty:

@@ -1328,8 +1328,18 @@ if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True
                     
                     success, msg = data_manager.save_fund_mandate(fund_name, save_bench_choice, final_positions)
                     if success:
+                        # Fetch the newly created fund's ID so we can backfill it
+                        # (Assuming the fund was just created by this user)
+                        user_id = auth_manager.get_current_user_id()
+                        latest_fund = data_manager.db.read_table('funds', filters={'user_id': user_id, 'fund_name': fund_name}, order_by='-id', limit=1)
+                        
+                        if not latest_fund.empty:
+                            new_fund_id = int(latest_fund.iloc[0]['id'])
+                            # TRIGGER BACKFILL
+                            data_manager.backfill_fund_history(new_fund_id, final_positions, initial_aum=10000000)
+                        
                         st.balloons()
-                        st.success(msg)
+                        st.success(f"{msg} Backtest data generated successfully!")
                     else:
                         st.error(msg)
 

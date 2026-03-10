@@ -2935,7 +2935,109 @@ def execute_fund_rebalance(fund_id: int, new_positions: dict):
         import traceback
         traceback.print_exc()
         return False, f"Database error during rebalance: {str(e)}"
+
+
+def backfill_fund_history(fund_id, positions, initial_aum=10000000.0, lookback_days=180):
+    """
+    No-compromise backfill. Calculates base NAV instantly, then brute-forces
+    the institutional risk metrics (Beta, VaR, Vol) for EVERY SINGLE historical day.
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    import pandas as pd
+    import numpy as np
     
+    CHINA_TZ = ZoneInfo("Asia/Shanghai")
+    end_date = datetime.now(CHINA_TZ).date()
+    
+    # Add 30 extra days of lookback buffer so the first day of the 180-day window 
+    # has enough history to calculate the 30-day rolling risk metrics!
+    start_date = end_date - timedelta(days=lookback_days + 30)
+    
+    print(f"[data_manager] ⚙️ Starting COMPLETE historical backfill for Fund ID {fund_id}...")
+    
+    # 1. Fetch historical data for all stocks in the mandate
+    ts_codes = list(positions.keys())
+    historical_data = {}
+    
+    for ticker in ts_codes:
+        clean_ticker = ticker.split('.')[0] 
+        df = get_single_stock_data(clean_ticker)
+        
+        if df is not None and not df.empty:
+            df.index = pd.to_datetime(df.index)
+            df_window = df.loc[(df.index >= pd.to_datetime(start_date)) & (df.index <= pd.to_datetime(end_date))].copy()
+            
+            if not df_window.empty:
+                df_window['pct_chg'] = df_window['Close'].pct_change().fillna(0)
+                historical_data[ticker] = df_window['pct_chg']
+    
+    if not historical_data:
+        print("[data_manager] ⚠️ No historical data found for backfill.")
+        return False
+        
+    # 2. Combine all stock returns into a single DataFrame
+    pivot_df = pd.DataFrame(historical_data).fillna(0)
+    for code in ts_codes:
+        if code not in pivot_df.columns:
+            pivot_df[code] = 0.0
+            
+    # 3. Calculate Portfolio Daily Return & AUM
+    weights = pd.Series(positions)
+    weights = weights.reindex(pivot_df.columns).fillna(0)
+    pivot_df['portfolio_return'] = pivot_df.dot(weights)
+    pivot_df['cumulative_return'] = (1 + pivot_df['portfolio_return']).cumprod()
+    pivot_df['total_aum'] = initial_aum * pivot_df['cumulative_return']
+    
+    # 4. Insert Base AUM Records into Database (Risk metrics temporarily None)
+    records = []
+    for date, row in pivot_df.iterrows():
+        records.append({
+            'fund_id': fund_id,
+            'trade_date': date.strftime('%Y-%m-%d'),
+            'total_aum': float(row['total_aum']),
+            'daily_pnl': float(row['total_aum'] - (row['total_aum'] / (1 + row['portfolio_return'])) if row['portfolio_return'] != 0 else 0),
+            'net_flow': 0.0,
+            'beta_30d': None,
+            'var_95': None,
+            'volatility_annualized': None
+        })
+        
+    if not records:
+        return False
+        
+    db.insert_records('fund_daily_metrics', records, upsert=True)
+    print(f"[data_manager] ✅ Base AUM inserted for {len(records)} days. Starting Risk Engine...")
+
+    # 5. Pre-fetch Benchmark for the Risk Engine 
+    # (We fetch this once and pass it down so Tushare doesn't block you for duplicate calls)
+    fund_df = db.read_table('funds', filters={'id': fund_id})
+    benchmark = fund_df.iloc[0]['benchmark'] if not fund_df.empty else '000300.SH'
+    if benchmark and " " in benchmark:
+        benchmark = benchmark.split(" ")[0]
+        
+    bench_start = start_date.strftime('%Y%m%d')
+    bench_end = end_date.strftime('%Y%m%d')
+    bench_df = get_index_data_live(benchmark, start_date=bench_start, end_date=bench_end)
+    
+    pre_fetched_bench = {}
+    if bench_df is not None and not bench_df.empty:
+        bench_df['date_str'] = bench_df.index.strftime('%Y-%m-%d')
+        pre_fetched_bench = dict(zip(bench_df['date_str'], bench_df['Pct_Change'] / 100.0))
+
+    # 6. BRUTE FORCE: Calculate Risk Metrics for EVERY SINGLE DAY
+    # We only loop through the days in the actual lookback_window (ignoring the 30-day buffer)
+    actual_start_date = end_date - timedelta(days=lookback_days)
+    target_dates = [r['trade_date'] for r in records if pd.to_datetime(r['trade_date']).date() >= actual_start_date]
+    
+    print(f"[data_manager] 🧮 Calculating historical risk metrics for {len(target_dates)} days...")
+    for date_sql in target_dates:
+        # This will securely calculate the stats and UPDATE the database row for each specific day
+        update_fund_risk_metrics(fund_id, date_sql, pre_fetched_bench_returns=pre_fetched_bench)
+        
+    print(f"[data_manager] ✅ 100% COMPLETE. All historical data and risk metrics filled.")
+    return True
+
 
 def init_portfolio_tables():
     """
@@ -3032,4 +3134,128 @@ def init_portfolio_tables():
         db.create_table_sqlite(themes_schema)
         db.create_table_sqlite(cache_schema)
         print("✅ Portfolio & TR Cache tables initialized in SQLite.")
+
+
+
+def create_margin_tables():
+    """Creates margin tables (SQLite only — Supabase needs manual creation)."""
+    if db_config.USE_SQLITE:
+        # Detail table has rqchl, Market table does NOT.
+        schema_detail = """CREATE TABLE IF NOT EXISTS margin_detail (
+            ts_code TEXT, trade_date TEXT, rzye REAL, rqye REAL, rzmre REAL, 
+            rqyl REAL, rzche REAL, rqchl REAL, rqmcl REAL, rzrqye REAL,
+            PRIMARY KEY (ts_code, trade_date)
+        )"""
+        
+        # EXACT match to Tushare 'margin' API
+        schema_market = """CREATE TABLE IF NOT EXISTS margin_market (
+            exchange_id TEXT, trade_date TEXT, rzye REAL, rzmre REAL, 
+            rzche REAL, rqye REAL, rqmcl REAL, rzrqye REAL, rqyl REAL,
+            PRIMARY KEY (exchange_id, trade_date)
+        )"""
+        db.create_table_sqlite(schema_detail)
+        db.create_table_sqlite(schema_market)
+
+
+def update_daily_margin_data():
+    """
+    Fetches latest margin_detail and margin (market) data from Tushare.
+    Checks the database first to avoid duplicate API calls for the same day.
+    """
+    global TUSHARE_API
+    if TUSHARE_API is None:
+        if not init_tushare():
+            return False
+
+    from zoneinfo import ZoneInfo
+    from datetime import datetime, timedelta
+    import numpy as np
+    
+    # 1. Determine the correct target date based on Beijing Time
+    CHINA_TZ = ZoneInfo("Asia/Shanghai")
+    now_beijing = datetime.now(CHINA_TZ)
+    
+    # If running at 1 AM, fetch yesterday's data. If running manually in the evening, fetch today's.
+    if now_beijing.hour < 12:
+        fetch_date = now_beijing.date() - timedelta(days=1)
+    else:
+        fetch_date = now_beijing.date()
+        
+    fetch_date_str = fetch_date.strftime('%Y%m%d')
+    
+    create_margin_tables()
+
+    # 2. Check if data for the CORRECT fetch_date already exists in the database
+    try:
+        if db.table_exists('margin_market'):
+            existing_df = db.read_table('margin_market', filters={'trade_date': fetch_date_str}, limit=1)
+            if not existing_df.empty:
+                print(f"[data_manager] ℹ️ Margin data for {fetch_date_str} already exists in DB. Skipping API call.")
+                return False
+    except Exception as e:
+        print(f"[data_manager] ⚠️ Error checking existing margin data: {e}")
+
+    print(f"[data_manager] 📡 Fetching Margin Data for {fetch_date_str}...")
+
+    try:
+        # 3. Fetch Market-wide Margin (Exchange level)
+        df_market = TUSHARE_API.margin(trade_date=fetch_date_str)
+        if df_market is not None and not df_market.empty:
+            df_market = df_market.replace([np.inf, -np.inf], np.nan)
+            records_market = [
+                {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in row.items()} 
+                for row in df_market.to_dict('records')
+            ]
+            db.insert_records('margin_market', records_market, upsert=True)
+            print(f"[data_manager] ✅ Saved Market Margin: {len(df_market)} records.")
+        else:
+            print(f"[data_manager] ℹ️ No market margin data available for {fetch_date_str} yet. (Likely delayed or weekend)")
+            return False
+
+        # 4. Fetch Individual Stock Margin Details
+        df_detail = TUSHARE_API.margin_detail(trade_date=fetch_date_str)
+        if df_detail is not None and not df_detail.empty:
+            df_detail = df_detail.replace([np.inf, -np.inf], np.nan)
+            records_detail = [
+                {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in row.items()} 
+                for row in df_detail.to_dict('records')
+            ]
+            
+            db.insert_records('margin_detail', records_detail, upsert=True)
+            print(f"[data_manager] ✅ Saved Stock Margin Detail: {len(df_detail)} records.")
+            return True
+        else:
+            print(f"[data_manager] ℹ️ No margin detail data for {fetch_date_str}.")
+            return False
+
+    except Exception as e:
+        print(f"[data_manager] ❌ Failed to update margin data: {e}")
+        return False
+      
+def get_stock_margin_history(ticker, limit=250):
+    """Retrieves margin history for a single stock."""
+    ts_code = get_tushare_ticker(ticker)
+    if not db.table_exists('margin_detail'):
+        return pd.DataFrame()
+        
+    df = db.read_table('margin_detail', filters={'ts_code': ts_code}, order_by='-trade_date', limit=limit)
+    if not df.empty:
+        df['trade_date'] = pd.to_datetime(df['trade_date'])
+        df = df.set_index('trade_date').sort_index()
+    return df
+
+def get_market_margin_history(limit=250):
+    """Retrieves aggregated market margin history."""
+    if not db.table_exists('margin_market'):
+        return pd.DataFrame()
+        
+    df = db.read_table('margin_market', order_by='-trade_date', limit=limit * 3) # *3 for SSE, SZSE, BSE
+    if not df.empty:
+        df['trade_date'] = pd.to_datetime(df['trade_date'])
+        
+        # ADDED 'rqyl' to the list of columns to sum below!
+        df_agg = df.groupby('trade_date')[['rzye', 'rzmre', 'rzche', 'rqye', 'rqmcl', 'rzrqye', 'rqyl']].sum()
+        
+        return df_agg.sort_index().tail(limit)
+    return pd.DataFrame()
 
