@@ -955,6 +955,104 @@ def get_single_stock_data_live(ticker, lookback_years=3, start_date=None, end_da
 
         return None
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WAVE TRADER — helper functions
+# Uses existing get_single_stock_data_live() (pro_bar qfq) — 0 extra Tushare points
+# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# WAVE TRADER — helper functions
+# Uses existing get_single_stock_data_live() (pro_bar qfq) — 0 extra Tushare points
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_stock_name_wave(ticker: str) -> str:
+    """
+    Return Chinese company name for the Wave Trader UI.
+    Falls back to the ticker code if lookup fails.
+    """
+    try:
+        name = get_stock_name_from_db(ticker)
+        return name if name else ticker
+    except Exception:
+        return ticker
+
+
+def get_ohlcv_for_wave(ticker: str, granularity: str = "Weekly", start_date: str = None) -> "pd.DataFrame | None":
+    """
+    Unified OHLCV fetcher for the Wave Trader page.
+    Uses pro_bar directly with freq='D'/'W'/'M' and adj='qfq' — so Weekly and
+    Monthly bars are native Tushare-computed (not resampled from daily), and all
+    three granularities are forward-adjusted for dividends and splits.
+
+    pro_bar is the same endpoint used elsewhere in data_manager — 0 extra
+    Tushare points consumed beyond what the app already uses.
+
+    Args:
+        ticker      : 6-digit A-share code, e.g. '002080'
+        granularity : "Daily" | "Weekly" | "Monthly"
+        start_date  : "YYYYMMDD" string. If None, defaults to 2 years back.
+
+    Returns:
+        DataFrame with columns [Open, High, Low, Close, Volume],
+        indexed by period-end dates, sorted oldest-first.
+        Returns None on failure.
+    """
+    import pandas as pd
+    from datetime import datetime, timedelta
+
+    global TUSHARE_API
+    if TUSHARE_API is None:
+        ok = init_tushare()
+        if not ok:
+            return None
+
+    if start_date is None:
+        start_date = (datetime.today() - timedelta(days=730)).strftime("%Y%m%d")
+    end_date = datetime.today().strftime("%Y%m%d")
+
+    freq_map = {"Daily": "D", "Weekly": "W", "Monthly": "M"}
+    freq = freq_map.get(granularity, "W")
+    ts_code = get_tushare_ticker(ticker)
+
+    try:
+        df = ts.pro_bar(
+            ts_code=ts_code,
+            adj="qfq",
+            freq=freq,
+            start_date=start_date,
+            end_date=end_date,
+            asset="E",
+        )
+    except Exception as e:
+        print(f"[data_manager] ❌ get_ohlcv_for_wave({ticker}, {granularity}): {e}")
+        return None
+
+    if df is None or df.empty:
+        return None
+
+    df = df.rename(columns={
+        "trade_date": "Date",
+        "open": "Open", "high": "High",
+        "low": "Low",  "close": "Close",
+        "vol": "Volume",
+    })
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.set_index("Date").sort_index()
+    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+
+    # Drop current incomplete bar (Tushare may include a partial bar for today)
+    today = pd.Timestamp.today().normalize()
+    if granularity == "Daily":
+        df = df[df.index < today]
+    elif granularity == "Weekly":
+        # Keep only weeks whose bar date (Friday) is before today's week-start
+        week_start = today - pd.Timedelta(days=today.dayofweek)
+        df = df[df.index < week_start]
+    elif granularity == "Monthly":
+        month_start = today.replace(day=1)
+        df = df[df.index < month_start]
+
+    return df if not df.empty else None
+
 
 def aggregate_ppi_data(sector_start_dates=None):
     """
@@ -3160,7 +3258,7 @@ def create_margin_tables():
 def update_daily_margin_data():
     """
     Fetches latest margin_detail and margin (market) data from Tushare.
-    Checks the database first to avoid duplicate API calls for the same day.
+    Includes a "Catch-Up" loop to patch any missing days caused by exchange delays.
     """
     global TUSHARE_API
     if TUSHARE_API is None:
@@ -3171,66 +3269,77 @@ def update_daily_margin_data():
     from datetime import datetime, timedelta
     import numpy as np
     
-    # 1. Determine the correct target date based on Beijing Time
     CHINA_TZ = ZoneInfo("Asia/Shanghai")
     now_beijing = datetime.now(CHINA_TZ)
     
-    # If running at 1 AM, fetch yesterday's data. If running manually in the evening, fetch today's.
+    # Determine the absolute latest date we expect to have
     if now_beijing.hour < 12:
-        fetch_date = now_beijing.date() - timedelta(days=1)
+        target_date = now_beijing.date() - timedelta(days=1)
     else:
-        fetch_date = now_beijing.date()
+        target_date = now_beijing.date()
         
-    fetch_date_str = fetch_date.strftime('%Y%m%d')
-    
     create_margin_tables()
+    
+    # We look back up to 4 days. 
+    # If a day is missing (due to 1 AM delays or weekends), we try to fetch it.
+    success_any = False
+    
+    for i in range(4, -1, -1):
+        fetch_date = target_date - timedelta(days=i)
+        fetch_date_str = fetch_date.strftime('%Y%m%d')
+        
+        # 1. Check if we already have this date
+        try:
+            if db.table_exists('margin_market'):
+                existing_df = db.read_table('margin_market', filters={'trade_date': fetch_date_str}, limit=1)
+                if not existing_df.empty:
+                    # We already have this day, silently skip
+                    continue
+        except Exception as e:
+            print(f"[data_manager] ⚠️ Error checking existing margin data: {e}")
 
-    # 2. Check if data for the CORRECT fetch_date already exists in the database
-    try:
-        if db.table_exists('margin_market'):
-            existing_df = db.read_table('margin_market', filters={'trade_date': fetch_date_str}, limit=1)
-            if not existing_df.empty:
-                print(f"[data_manager] ℹ️ Margin data for {fetch_date_str} already exists in DB. Skipping API call.")
-                return False
-    except Exception as e:
-        print(f"[data_manager] ⚠️ Error checking existing margin data: {e}")
+        # 2. If we reach here, the date is missing in the DB. Try to fetch it.
+        print(f"[data_manager] 📡 Attempting to fetch missing Margin Data for {fetch_date_str}...")
 
-    print(f"[data_manager] 📡 Fetching Margin Data for {fetch_date_str}...")
-
-    try:
-        # 3. Fetch Market-wide Margin (Exchange level)
-        df_market = TUSHARE_API.margin(trade_date=fetch_date_str)
-        if df_market is not None and not df_market.empty:
+        try:
+            # Fetch Market-wide Margin
+            df_market = TUSHARE_API.margin(trade_date=fetch_date_str)
+            
+            # If empty, it's either a weekend, a holiday, or still delayed. 
+            # We just move on to the next date in the loop.
+            if df_market is None or df_market.empty:
+                print(f"[data_manager] ℹ️ No market margin data available for {fetch_date_str}. (Likely weekend/holiday)")
+                continue
+                
+            # Clean and Insert Market Data
             df_market = df_market.replace([np.inf, -np.inf], np.nan)
             records_market = [
                 {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in row.items()} 
                 for row in df_market.to_dict('records')
             ]
             db.insert_records('margin_market', records_market, upsert=True)
-            print(f"[data_manager] ✅ Saved Market Margin: {len(df_market)} records.")
-        else:
-            print(f"[data_manager] ℹ️ No market margin data available for {fetch_date_str} yet. (Likely delayed or weekend)")
-            return False
+            print(f"[data_manager] ✅ Saved Market Margin for {fetch_date_str}: {len(df_market)} records.")
 
-        # 4. Fetch Individual Stock Margin Details
-        df_detail = TUSHARE_API.margin_detail(trade_date=fetch_date_str)
-        if df_detail is not None and not df_detail.empty:
-            df_detail = df_detail.replace([np.inf, -np.inf], np.nan)
-            records_detail = [
-                {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in row.items()} 
-                for row in df_detail.to_dict('records')
-            ]
+            # Fetch Individual Stock Margin Details
+            df_detail = TUSHARE_API.margin_detail(trade_date=fetch_date_str)
+            if df_detail is not None and not df_detail.empty:
+                df_detail = df_detail.replace([np.inf, -np.inf], np.nan)
+                records_detail = [
+                    {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in row.items()} 
+                    for row in df_detail.to_dict('records')
+                ]
+                db.insert_records('margin_detail', records_detail, upsert=True)
+                print(f"[data_manager] ✅ Saved Stock Margin Detail for {fetch_date_str}: {len(df_detail)} records.")
+                success_any = True
             
-            db.insert_records('margin_detail', records_detail, upsert=True)
-            print(f"[data_manager] ✅ Saved Stock Margin Detail: {len(df_detail)} records.")
-            return True
-        else:
-            print(f"[data_manager] ℹ️ No margin detail data for {fetch_date_str}.")
-            return False
+        except Exception as e:
+            print(f"[data_manager] ❌ Failed to update margin data for {fetch_date_str}: {e}")
+            
+        # Quick sleep to respect Tushare API limits inside the loop
+        import time
+        time.sleep(1.0)
 
-    except Exception as e:
-        print(f"[data_manager] ❌ Failed to update margin data: {e}")
-        return False
+    return success_any
       
 def get_stock_margin_history(ticker, limit=250):
     """Retrieves margin history for a single stock."""

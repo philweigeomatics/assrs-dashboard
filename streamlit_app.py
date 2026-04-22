@@ -53,6 +53,11 @@ pages = {
         st.Page("pages/Portfolio_Optimization.py", title="Optimization 组合优化"),
         st.Page("pages/Fund_Manager.py", title="Portfolio Management 组合管理")
     ],
+
+    "🌊 Strategy 策略": [
+        st.Page("pages/wave_trader.py", title="Wave Trader 波段交易"),
+        st.Page("pages/pair_trader.py", title="Pair Trader 配对交易"),
+    ],
     "🔔 Alerts 提示": [
         st.Page("pages/4_Todays_Alerts_今日提醒.py", title="Today's Alerts 今日提醒"),
     ],

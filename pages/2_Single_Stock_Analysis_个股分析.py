@@ -453,6 +453,156 @@ def calculate_multiple_blocks(df, lookback=60):
     return blocks
 
 
+def analyze_stock_personality(df: pd.DataFrame) -> dict:
+    """
+    Compute stock personality metrics:
+      - Hurst Exponent (mean-reverting vs trending vs random walk)
+      - Monthly seasonality: 10-day forward return by calendar month
+      - Optimal dip-reversal setup: best drop threshold + avoid-months, ranked by Sharpe
+    Expects df with columns: close, vol (Tushare naming).
+    """
+    import itertools
+
+    results = {}
+
+    # ── 1. Hurst Exponent (DFA — Detrended Fluctuation Analysis) ───────────────
+    # DFA on price levels is the correct method for financial time series.
+    # R/S on raw price levels (common mistake) always returns H≈1.0 regardless
+    # of the true personality. DFA detrends each window before measuring fluctuation.
+    prices = df['Close'].dropna().values
+    min_lag, max_lag, n_lags = 10, max(20, len(prices) // 4), 20
+    dfa_lags = np.unique(
+        np.logspace(np.log10(min_lag), np.log10(max_lag), n_lags).astype(int)
+    )
+    dfa_lags = dfa_lags[dfa_lags >= min_lag]
+    flucts, valid_lags = [], []
+    for lag in dfa_lags:
+        n_chunks = len(prices) // lag
+        if n_chunks < 2:
+            continue
+        f_list = []
+        for j in range(n_chunks):
+            chunk = prices[j * lag:(j + 1) * lag]
+            x = np.arange(len(chunk))
+            trend = np.polyval(np.polyfit(x, chunk, 1), x)
+            resid = chunk - trend
+            f_list.append(np.sqrt(np.mean(resid ** 2)))
+        flucts.append(np.mean(f_list))
+        valid_lags.append(lag)
+    if len(valid_lags) >= 4:
+        hurst = float(np.polyfit(np.log(valid_lags), np.log(flucts), 1)[0])
+    else:
+        hurst = 0.5
+    results['hurst'] = round(hurst, 4)
+    if hurst < 0.45:
+        results['hurst_label'] = 'Mean-Reverting'
+        results['hurst_color'] = '#22c55e'
+        results['hurst_advice'] = 'Dip-reversal strategies work best. Avoid trend-following.'
+    elif hurst > 0.55:
+        results['hurst_label'] = 'Trending / Momentum'
+        results['hurst_color'] = '#3b82f6'
+        results['hurst_advice'] = 'Momentum & breakout strategies work best. Avoid mean-reversion fades.'
+    else:
+        results['hurst_label'] = 'Random Walk'
+        results['hurst_color'] = '#f59e0b'
+        results['hurst_advice'] = 'Mixed personality — use tight risk controls. Both reversal and momentum have limited edge.'
+
+    # ── 2. Monthly Seasonality (10-day forward return) ─────────────────────────
+    df2 = df.copy()
+    df2.index = pd.to_datetime(df2.index)
+    df2['fwd10'] = df2['Close'].shift(-10) / df2['Close'] - 1
+    df2['month'] = df2.index.month
+    monthly = df2.groupby('month')['fwd10'].mean().dropna()
+    month_names = {1:'Jan',2:'Feb',3:'Mar',4:'Apr',5:'May',6:'Jun',
+                   7:'Jul',8:'Aug',9:'Sep',10:'Oct',11:'Nov',12:'Dec'}
+    results['monthly_fwd'] = {month_names[m]: round(v * 100, 2) for m, v in monthly.items()}
+    avoid_months_nums = monthly[monthly < 0].index.tolist()
+    results['avoid_months'] = [month_names[m] for m in avoid_months_nums]
+    strong_months_nums = monthly.nlargest(3).index.tolist()
+    results['strong_months'] = [month_names[m] for m in strong_months_nums]
+
+    # ── 3. Grid Search: best dip threshold + seasonal filter ───────────────────
+    df3 = df.copy()
+    df3.index = pd.to_datetime(df3.index)
+    df3['ret']    = df3['Close'].pct_change()
+    df3['month']  = df3.index.month
+
+    # RSI-14 helper
+    delta  = df3['Close'].diff()
+    gain   = delta.clip(lower=0).rolling(14).mean()
+    loss   = (-delta.clip(upper=0)).rolling(14).mean()
+    rs_    = gain / loss.replace(0, np.nan)
+    df3['rsi'] = 100 - 100 / (1 + rs_)
+
+    best_sharpe = -np.inf
+    best_params = {}
+    best_trades = []
+
+    drop_thresholds = [-0.02, -0.025, -0.03, -0.035, -0.04]
+    avoid_combos    = [avoid_months_nums]  # use the negative-seasonality months
+
+    for drop_thr, avoid_m in itertools.product(drop_thresholds, avoid_combos):
+        trades = []
+        in_trade = False
+        entry_price = 0.0
+        entry_idx   = 0
+        commission  = 0.001
+        slippage    = 0.002
+
+        for i in range(20, len(df3) - 11):
+            row = df3.iloc[i]
+            if not in_trade:
+                if (row['ret'] <= drop_thr and
+                        row['rsi'] > 20 and
+                        row['month'] not in avoid_m):
+                    entry_price = row['Close'] * (1 + slippage)
+                    in_trade    = True
+                    entry_idx   = i
+            else:
+                days_held = i - entry_idx
+                pnl = (row['Close'] / entry_price) - 1
+                exit_reason = None
+                if pnl >= 0.08:
+                    exit_reason = 'profit'
+                elif pnl <= -0.05:
+                    exit_reason = 'stop'
+                elif days_held >= 10:
+                    exit_reason = 'time'
+                elif row.get('rsi', 50) > 68:
+                    exit_reason = 'rsi_exit'
+                if exit_reason:
+                    net = pnl - commission * 2 - slippage
+                    trades.append(net)
+                    in_trade = False
+
+        if len(trades) >= 8:
+            arr    = np.array(trades)
+            sharpe = arr.mean() / arr.std() * np.sqrt(252 / 10) if arr.std() > 0 else 0
+            if sharpe > best_sharpe:
+                best_sharpe = sharpe
+                best_params = {'drop_threshold': drop_thr, 'avoid_months': [month_names[m] for m in avoid_m]}
+                best_trades = trades
+
+    if best_trades:
+        arr = np.array(best_trades)
+        n   = len(arr)
+        total_days = (df3.index[-1] - df3.index[0]).days
+        years = total_days / 365.25
+        cagr  = (1 + arr.sum()) ** (1 / years) - 1 if years > 0 else 0
+        results['best_strategy'] = {
+            **best_params,
+            'sharpe':   round(best_sharpe, 2),
+            'cagr_pct': round(cagr * 100, 1),
+            'win_rate': round(np.sum(arr > 0) / n * 100, 1),
+            'n_trades': n,
+            'max_dd':   round(float(np.min(arr)) * 100, 1),
+        }
+    else:
+        results['best_strategy'] = None
+
+    return results
+
+
 def calculate_trend_forecast(df: pd.DataFrame, lookback: int = 60, forecast_days: int = 30, 
                              degree: int = 1, model_type: str = 'Linear') -> tuple:
     """
@@ -3778,62 +3928,114 @@ if st.session_state.active_ticker:
             else:
                 st.warning("Not enough data for down day bounce analysis (need 50+ days with 20+ down days)")
 
+
+            # ── Stock Personality & Strategy Analysis ─────────────────────────────
             st.markdown("---")
-
-
-
-            
-            # Trend Forecast Section
-            st.markdown("---")
-            st.subheader("Trend Forecast (30 Days)")
-            
-            col_model, col_lookback, col_info = st.columns([1, 1, 2])
-            
-            with col_lookback:
-                lookback_option = st.selectbox("Lookback Period:", [30, 60, 90, 120], index=1)
-            
-            with col_model:
-                model_options = ['Linear (Straight)', 'Quadratic (Curved)']
-                if HAS_STATSMODELS:
-                    model_options.extend(['Holt-Winters (Exp. Smoothing)', 'ARIMA (AutoRegressive)'])
-                model_option = st.radio("Trend Model:", model_options, index=0)
-            
-            with col_info:
-                degree = 1
-                if 'Linear' in model_option:
-                    st.info(f"Linear Regression: Projects trend as straight line based on last {lookback_option} days.")
-                elif 'Quadratic' in model_option:
-                    st.info(f"Polynomial: Fits curve to detect acceleration/deceleration.")
-                    degree = 2
-                elif 'Holt-Winters' in model_option:
-                    st.info(f"Exponential Smoothing: Weights recent data heavily.")
-                elif 'ARIMA' in model_option:
-                    st.info(f"ARIMA: Uses volume as exogenous variable to weight predictions.")
-            
-            # Calculate forecast
-            model_key = model_option.split()[0]  # Extract: Linear, Quadratic, Holt-Winters, ARIMA
-            
-            forecast, upper, lower = calculate_trend_forecast(
-                analysis_df,
-                lookback=lookback_option,
-                forecast_days=30,
-                degree=degree,
-                model_type=model_key
+            st.subheader("股票个性 & 策略分析 | Stock Personality & Strategy Analysis")
+            st.caption(
+                "Analyses this stock's unique behaviour to discover which strategy fits it best "
+                "— not copied from another stock. | 探索本股独有个性，发现最适合的交易策略。"
             )
-            
-            if forecast is not None:
-                fig_fc = create_forecast_chart(analysis_df, forecast, upper, lower, model_name=model_key)
-                st.plotly_chart(fig_fc, use_container_width=True)
-                
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.metric("Projected Target (30d)", f"{forecast[-1]:.2f}")
-                with c2:
-                    st.metric("Upside Resistance", f"{upper[-1]:.2f}")
-                with c3:
-                    st.metric("Downside Support", f"{lower[-1]:.2f}")
+
+            with st.spinner("计算中… Hurst / seasonality / grid search..."):
+                personality = analyze_stock_personality(analysis_df)
+
+            # ── Hurst Exponent ────────────────────────────────────────────
+            hurst_val    = personality['hurst']
+            hurst_label  = personality['hurst_label']
+            hurst_color  = personality['hurst_color']
+            hurst_advice = personality['hurst_advice']
+
+            st.markdown("#### 🧬 Hurst Exponent — What Kind of Stock Is This? | \u8fd9\u652f\u80a1\u7968\u662f\u4ec0\u4e48\u4e2a\u6027\uff1f")
+            h1, h2, h3 = st.columns([1, 2, 3])
+            with h1:
+                st.metric("Hurst Exponent", f"{hurst_val:.4f}")
+            with h2:
+                st.markdown(
+                    f"<span style='font-size:18px; font-weight:bold; color:{hurst_color}'>"
+                    f"{hurst_label}</span>",
+                    unsafe_allow_html=True
+                )
+            with h3:
+                st.info(hurst_advice)
+
+            st.markdown(
+                """
+| Range | Personality | Best Strategy |
+|-------|-------------|---------------|
+| H < 0.45 | 🟢 Mean-Reverting 均值回归 | Dip-buy on drops, fade extremes |
+| H ≈ 0.5  | 🟡 Random Walk 随机游走 | No strong directional edge |
+| H > 0.55 | 🔵 Trending / Momentum 趋势 | Follow breakouts & MACD crossovers |
+                """
+            )
+
+            # ── Monthly Seasonality ──────────────────────────────────
+            st.markdown("#### 📅 Monthly Seasonality — 10-Day Forward Return by Month | 月度季节性")
+            monthly_fwd  = personality['monthly_fwd']
+            month_order  = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+            months_p     = [m for m in month_order if m in monthly_fwd]
+            fwd_vals     = [monthly_fwd[m] for m in months_p]
+            bar_colors   = ['#22c55e' if v >= 0 else '#ef4444' for v in fwd_vals]
+
+            fig_season = go.Figure(go.Bar(
+                x=months_p,
+                y=fwd_vals,
+                marker_color=bar_colors,
+                text=[f"{v:+.2f}%" for v in fwd_vals],
+                textposition='outside'
+            ))
+            fig_season.update_layout(
+                title="各月\u5165\u573a\u540e10\u4ea4\u6613\u65e5\u5e73\u5747\u6536\u76ca | Avg 10-Day Return by Entry Month",
+                yaxis_title="Avg 10d Return (%)",
+                height=320,
+                template='plotly_white',
+                yaxis=dict(zeroline=True, zerolinewidth=2, zerolinecolor='black'),
+                margin=dict(t=40, b=20)
+            )
+            st.plotly_chart(fig_season, use_container_width=True)
+
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                strong_m = personality.get('strong_months', [])
+                st.success(f"🟢 Best months to enter: **{', '.join(strong_m)}**")
+            with sc2:
+                avoid_m = personality.get('avoid_months', [])
+                if avoid_m:
+                    st.error(f"🔴 Avoid entering in: **{', '.join(avoid_m)}**")
+                else:
+                    st.info("No consistently negative months found.")
+
+            # ── Auto-Discovered Optimal Setup ───────────────────────────
+            st.markdown("#### 🎯 Optimal Dip-Reversal Setup (Auto-Discovered) | 自动发现最优参数")
+            best = personality.get('best_strategy')
+            if best:
+                b1, b2, b3, b4, b5 = st.columns(5)
+                b1.metric("跌幅闽值 | Drop Thr.",  f"{best['drop_threshold']*100:.1f}%")
+                b2.metric("CAGR",             f"{best['cagr_pct']:.1f}%")
+                b3.metric("Sharpe",           f"{best['sharpe']:.2f}")
+                b4.metric("胜率 | Win Rate",  f"{best['win_rate']:.1f}%")
+                b5.metric("交易次数 | Trades", str(best['n_trades']))
+
+                avoid_str = ', '.join(best['avoid_months']) if best['avoid_months'] else 'None'
+                st.markdown(
+                    f"""
+**入场条件 Entry rule:** Daily return \u2264 `{best['drop_threshold']*100:.1f}%` AND RSI > 20  
+**外场条件 Exit rules:** +8% profit target / \u22125% stop loss / 10-day time stop / RSI > 68  
+**过滤月份 Seasonal filter (skip in):** `{avoid_str}`  
+**单笔最大亏损 Max single-trade loss:** `{best['max_dd']:.1f}%`
+                    """
+                )
+                st.caption(
+                    "⚠\ufe0f 以上为历史数据回测\u7ed3\u679c\uff0c\u4e0d\u4ee3\u8868\u672a\u6765\u8868\u73b0\u3002"
+                    " Commission 0.1% + slippage 0.2% included. Past performance \u2260 future results."
+                )
             else:
-                st.warning("Not enough data or model failed to converge.")
+                st.warning("未找到足够交易次数 (need 8+ trades) to auto-discover a reliable setup.")
+                st.info(
+                    f"个性\u5df2\u8bc6\u522b: Hurst = {hurst_val:.3f} \u2192 {hurst_label}. "
+                    "数据窗口可能\u8fc7\u77ed\uff0c\u5efa\u8bae\u83b7\u53d6\u66f4\u591a\u5386\u53f2\u6570\u636e\u518d\u8fd0\u884c\u3002"
+                )
+
 
 else:
     st.info("👆 Enter a stock code above to begin analysis")

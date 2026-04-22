@@ -647,3 +647,177 @@ if correlations:
             """)
 
 st.caption(f"📅 数据基于过去一年日度数据 | 相关系数基于{rolling_window}日滚动计算 | 相对强度基于近60日变化")
+
+
+# ============================================================================
+# STATISTICAL WYCKOFF PHASE DETECTION (CSI 300)
+# Append this to the bottom of sector_dashboard.py
+# ============================================================================
+
+st.markdown("---")
+st.subheader("📊 Statistical Wyckoff Phase Detection (CSI 300)")
+st.caption("A pure quantitative approach using 120-day rolling channels, return volatility, and volume Z-scores to mathematically define market regimes without moving average lag.")
+import numpy as np
+
+with st.spinner("Calculating Statistical Wyckoff Phases..."):
+    # Fetch 500 days to ensure enough history for 120-day rolling windows and means
+    wyckoff_stat_df = dm.get_index_data_live('000300.SH', lookback_days=500, freq='daily')
+
+    if wyckoff_stat_df is not None and not wyckoff_stat_df.empty:
+        df = wyckoff_stat_df.copy()
+        
+        lookback = 120 # Approx 6 months of trading days
+        
+        # 1. Market Structure: Donchian Channels & Range Positioning
+        df['Max_120'] = df['High'].rolling(window=lookback).max()
+        df['Min_120'] = df['Low'].rolling(window=lookback).min()
+        df['Range_120'] = df['Max_120'] - df['Min_120']
+        # Where is the price currently sitting within its 6-month range? (0.0 to 1.0)
+        df['Position_120'] = (df['Close'] - df['Min_120']) / df['Range_120']
+        
+        # 2. Volatility: Rolling 20-day standard deviation vs historical baseline
+        df['Returns'] = df['Close'].pct_change()
+        df['Volat_20'] = df['Returns'].rolling(window=20).std()
+        df['Volat_Baseline'] = df['Volat_20'].rolling(window=lookback).mean()
+        
+        # 3. Clean Volume Metric (Isolated for this module)
+        df['Vol_Mean_60'] = df['Volume'].rolling(window=60).mean()
+        df['Vol_Std_60'] = df['Volume'].rolling(window=60).std()
+        df['Vol_Z'] = (df['Volume'] - df['Vol_Mean_60']) / df['Vol_Std_60']
+        
+        # 4. Statistical Phase Conditions
+        conditions = [
+            # MARKUP: Upper quartile of 6-month range, trending up (Close > 20-day mean)
+            (df['Position_120'] > 0.75) & (df['Close'] > df['Close'].rolling(20).mean()),
+            
+            # MARKDOWN: Lower quartile of 6-month range, trending down
+            (df['Position_120'] < 0.25) & (df['Close'] < df['Close'].rolling(20).mean()),
+            
+            # DISTRIBUTION: Upper half of range, but high volatility (churn) and failing to push new highs
+            (df['Position_120'] >= 0.5) & (df['Volat_20'] > df['Volat_Baseline']),
+            
+            # ACCUMULATION: Lower half of range, low volatility (quiet absorption)
+            (df['Position_120'] < 0.5) & (df['Volat_20'] <= df['Volat_Baseline'])
+        ]
+        
+        choices = ['Markup', 'Markdown', 'Distribution', 'Accumulation']
+        df['Wyckoff_Phase'] = np.select(conditions, choices, default='Transition')
+        
+        # Drop rows where our longest baseline hasn't calculated yet
+        plot_df = df.dropna(subset=['Volat_Baseline']).copy()
+        
+        # Focus chart on the last 180 trading days
+        plot_df = plot_df.tail(180)
+
+        if not plot_df.empty:
+            current_phase = plot_df['Wyckoff_Phase'].iloc[-1]
+            current_pos = plot_df['Position_120'].iloc[-1]
+            current_vol_z = plot_df['Vol_Z'].iloc[-1]
+            
+            # Display current metrics
+            col_s1, col_s2, col_s3 = st.columns([1.5, 1, 1])
+            with col_s1:
+                st.metric("Current Phase (Statistical)", current_phase)
+            with col_s2:
+                st.metric("Range Position (120d)", f"{current_pos * 100:.1f}%")
+            with col_s3:
+                st.metric("Volume Z-Score", f"{current_vol_z:.2f}")
+
+            # Contextual explainer
+            if current_phase == 'Accumulation':
+                st.info("🟦 **Accumulation:** Price is compressed in the lower half of its 6-month range. Volatility is below average, indicating quiet institutional absorption.")
+            elif current_phase == 'Markup':
+                st.success("🟩 **Markup:** Price has broken into the top 25% of its 6-month range. Upward momentum is statistically confirmed.")
+            elif current_phase == 'Distribution':
+                st.warning("🟧 **Distribution:** Price is high, but volatility is spiking above baseline. High churn indicates potential institutional selling.")
+            elif current_phase == 'Markdown':
+                st.error("🟥 **Markdown:** Price has collapsed into the bottom 25% of its range. Downward momentum is dominating.")
+            else:
+                st.info("⬜ **Transition:** The market is caught between defined statistical states.")
+
+            # Create Plotly Chart
+            fig_stat = go.Figure()
+
+            # Phase colors
+            phase_colors = {
+                'Accumulation': 'rgba(59, 130, 246, 0.1)',
+                'Markup': 'rgba(34, 197, 94, 0.1)',
+                'Distribution': 'rgba(245, 158, 11, 0.1)',
+                'Markdown': 'rgba(239, 68, 68, 0.1)',
+                'Transition': 'rgba(156, 163, 175, 0.1)'
+            }
+
+            # Add background shading
+            changes = plot_df['Wyckoff_Phase'].ne(plot_df['Wyckoff_Phase'].shift())
+            change_indices = plot_df.index[changes].tolist()
+            
+            if len(change_indices) == 0 or change_indices[0] != plot_df.index[0]:
+                change_indices.insert(0, plot_df.index[0])
+
+            ymin = plot_df['Low'].min() * 0.95
+            ymax = plot_df['High'].max() * 1.05
+
+            dates_str = plot_df.index.strftime('%Y-%m-%d').tolist()
+
+            for i in range(len(change_indices)):
+                start_idx = change_indices[i]
+                end_idx = change_indices[i + 1] if i + 1 < len(change_indices) else plot_df.index[-1]
+                phase = plot_df.loc[start_idx, 'Wyckoff_Phase']
+
+                if phase in phase_colors:
+                    fig_stat.add_shape(
+                        type="rect",
+                        x0=start_idx.strftime('%Y-%m-%d'), 
+                        x1=end_idx.strftime('%Y-%m-%d'),
+                        y0=ymin, y1=ymax,
+                        fillcolor=phase_colors[phase],
+                        line=dict(width=0),
+                        layer="below"
+                    )
+
+            # Candlestick Trace
+            fig_stat.add_trace(go.Candlestick(
+                x=dates_str,
+                open=plot_df['Open'], high=plot_df['High'],
+                low=plot_df['Low'], close=plot_df['Close'],
+                name='CSI 300',
+                increasing_line_color='#ef4444', decreasing_line_color='#22c55e'
+            ))
+
+            # 120-Day Donchian Channels (Max/Min)
+            fig_stat.add_trace(go.Scatter(
+                x=dates_str, y=plot_df['Max_120'],
+                mode='lines', name='120d High',
+                line=dict(color='rgba(156, 163, 175, 0.6)', width=1, dash='dash')
+            ))
+            
+            fig_stat.add_trace(go.Scatter(
+                x=dates_str, y=plot_df['Min_120'],
+                mode='lines', name='120d Low',
+                line=dict(color='rgba(156, 163, 175, 0.6)', width=1, dash='dash')
+            ))
+
+            # Layout updates
+            fig_stat.update_layout(
+                title='CSI 300 - Statistical Regimes & 120-Day Channels',
+                height=500,
+                template='plotly_white',
+                xaxis_rangeslider_visible=False,
+                hovermode='x unified',
+                margin=dict(l=10, r=10, t=40, b=10),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+
+            # Fix x-axis categorical spacing for weekends
+            tick_interval = max(1, len(dates_str) // 6)
+            fig_stat.update_xaxes(
+                type='category',
+                tickmode='array',
+                tickvals=dates_str[::tick_interval],
+                ticktext=dates_str[::tick_interval]
+            )
+
+            st.plotly_chart(fig_stat, use_container_width=True)
+
+    else:
+        st.error("Failed to load sufficient data for Statistical Wyckoff calculation.")
