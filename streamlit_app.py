@@ -51,7 +51,8 @@ pages = {
     ],
     "💼 Portfolio 组合": [
         st.Page("pages/Portfolio_Optimization.py", title="Optimization 组合优化"),
-        st.Page("pages/Fund_Manager.py", title="Portfolio Management 组合管理")
+        st.Page("pages/Fund_Manager.py", title="Portfolio Management 组合管理"),
+        st.Page("pages/ai_supply_chain.py", title="AI Supply Chain AI供应链"),
     ],
 
     "🌊 Strategy 策略": [
