@@ -1007,7 +1007,13 @@ def get_ohlcv_for_wave(ticker: str, granularity: str = "Weekly", start_date: str
 
     if start_date is None:
         start_date = (datetime.today() - timedelta(days=730)).strftime("%Y%m%d")
-    end_date = datetime.today().strftime("%Y%m%d")
+
+    from zoneinfo import ZoneInfo
+    CHINA_TZ = ZoneInfo("Asia/Shanghai")
+    now_beijing = datetime.now(CHINA_TZ)
+    today_beijing = now_beijing.date()
+
+    end_date = today_beijing.strftime("%Y%m%d")
 
     freq_map = {"Daily": "D", "Weekly": "W", "Monthly": "M"}
     freq = freq_map.get(granularity, "W")
