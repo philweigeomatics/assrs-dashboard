@@ -1008,13 +1008,17 @@ def colour_p(val):
         pass
     return ""
 
-styled = (df_table.style
-          .apply(colour_row, axis=1)
-          .applymap(colour_z,  subset=["Z now"])
-          .applymap(colour_p,  subset=["EG p", "ADF p"])
-          .format({"EG p": "{:.4f}", "ADF p": "{:.4f}",
-                   "Hurst": "{:.3f}", "HL (d)": "{:.1f}",
-                   "Z now": "{:+.2f}", "Corr": "{:.3f}", "Score": "{:.1f}"}))
+styled = (
+    df_table.style
+        .apply(colour_row, axis=1)
+        .map(colour_z, subset=["Z now"])
+        .map(colour_p, subset=["EG p", "ADF p"])
+        .format({
+            "EG p": "{:.4f}", "ADF p": "{:.4f}",
+            "Hurst": "{:.3f}", "HL (d)": "{:.1f}",
+            "Z now": "{:.2f}", "Corr": "{:.3f}", "Score": "{:.1f}"
+        })
+)
 
 st.dataframe(styled, use_container_width=True, height=min(400, 60 + 35 * len(pairs)))
 
