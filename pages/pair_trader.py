@@ -596,11 +596,11 @@ def render_trade_table(trades: list, name_a: str, name_b: str,
 
     styled = (df.style
               .apply(colour_row, axis=1)
-              .applymap(colour_pnl, subset=["P&L %"])
+              .map(colour_pnl, subset=["P&L %"])
               .hide(axis="index"))
 
     st.dataframe(styled, use_container_width=True,
-                 height=min(500, 45 + 36 * len(rows)))
+             height=min(500, 45 + 36 * len(rows)))
 
     # ── Summary stats ──────────────────────────────────────────────────────
     closed = [t for t in trades if not t.get("open") and t.get("pnl_pct") is not None]
