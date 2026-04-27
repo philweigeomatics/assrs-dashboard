@@ -10,12 +10,10 @@ from plotly.subplots import make_subplots
 import data_manager
 import time
 
-
 st.title("📊 Sector Stock Selector 板块个股选择器")
 
 import auth_manager
 auth_manager.require_login()
-
 
 # Load sector map
 SECTOR_STOCK_MAP = data_manager.SECTOR_STOCK_MAP
@@ -26,7 +24,7 @@ available_sectors = [s for s in SECTOR_STOCK_MAP.keys() if s != "MARKET_PROXY"]
 selected_sector = st.sidebar.selectbox(
     "Choose a sector to analyze",
     available_sectors,
-    index=0
+    index=0,
 )
 
 # Get stocks in selected sector
@@ -41,7 +39,6 @@ if st.sidebar.button("🔄 Load Data (3 Years)", type="primary"):
         st.session_state.sector_returns = {}
         st.session_state.stock_market_caps = {}  # ✅ Add this
 
-
         # ✅ Clear derived calculations from previous sector
         if 'cap_weighted_sector_returns' in st.session_state:
             del st.session_state.cap_weighted_sector_returns
@@ -51,6 +48,10 @@ if st.sidebar.button("🔄 Load Data (3 Years)", type="primary"):
             del st.session_state.returns_df
         if 'avg_correlations' in st.session_state:
             del st.session_state.avg_correlations
+        if 'risk_df' in st.session_state:
+            del st.session_state.risk_df
+        if 'risk_cache_key' in st.session_state:
+            del st.session_state.risk_cache_key
 
         # ✅ Store which sector was loaded
         st.session_state.loaded_sector = selected_sector
@@ -70,7 +71,7 @@ if st.sidebar.button("🔄 Load Data (3 Years)", type="primary"):
                 fundamentals = data_manager.get_stock_fundamentals_live(
                     ticker,
                     start_date=latest_date,
-                    end_date=latest_date
+                    end_date=latest_date,
                 )
 
                 if fundamentals is not None and not fundamentals.empty:
@@ -78,8 +79,8 @@ if st.sidebar.button("🔄 Load Data (3 Years)", type="primary"):
                     st.session_state.stock_market_caps[ticker] = fundamentals['Total_MV'].iloc[-1]
                 else:
                     st.session_state.stock_market_caps[ticker] = None
-                
-                # time.sleep(0.31)  # Rate limit
+
+            # time.sleep(0.31)  # Rate limit
 
             progress_bar.progress((idx + 1) / len(stock_list))
 
@@ -92,29 +93,29 @@ if 'sector_data' not in st.session_state or not st.session_state.sector_data:
     st.stop()
 
 # Data is loaded - show analysis
-sector_data = st.session_state.sector_data
-sector_returns = st.session_state.sector_returns
+sector_data       = st.session_state.sector_data
+sector_returns    = st.session_state.sector_returns
 stock_market_caps = st.session_state.get('stock_market_caps', {})
 
 # ✅ Calculate cap-weighted sector returns (only once, not in fragment)
 if 'cap_weighted_sector_returns' not in st.session_state:
     # Build returns DataFrame
     returns_df_full = pd.DataFrame(sector_returns)
-    
+
     # Filter stocks with valid market cap
     valid_tickers = [t for t in returns_df_full.columns if stock_market_caps.get(t) is not None]
-    
+
     if len(valid_tickers) > 0:
         # Calculate weights
         total_cap = sum([stock_market_caps[t] for t in valid_tickers])
-        weights = pd.Series({t: stock_market_caps[t] / total_cap for t in valid_tickers})
-        
+        weights   = pd.Series({t: stock_market_caps[t] / total_cap for t in valid_tickers})
+
         # Calculate weighted returns for each date
         cap_weighted_returns = returns_df_full[valid_tickers].mul(weights, axis=1).sum(axis=1)
-        
+
         st.session_state.cap_weighted_sector_returns = cap_weighted_returns
         st.session_state.sector_weights = weights  # Store weights for display
-        
+
         st.success(f"✅ Calculated cap-weighted sector benchmark using {len(valid_tickers)} stocks")
     else:
         # Fallback to equal-weighted
@@ -124,9 +125,6 @@ if 'cap_weighted_sector_returns' not in st.session_state:
 
 st.markdown("---")
 
-
-
-
 # ============================================================================
 # SECTION 1: ROLLING CORRELATION MATRIX
 # ============================================================================
@@ -134,7 +132,6 @@ st.markdown("---")
 def correlation_section():
     st.header("1️⃣ Rolling Correlation Matrix")
     st.markdown("See how stocks move together within the sector")
-
 
     # Initialize ONLY if not exists (first run only)
     if 'correlation_window' not in st.session_state:
@@ -146,40 +143,38 @@ def correlation_section():
 
     with col1:
         correlation_window = st.slider(
-            "Correlation Window (days)", 
-            5, 
-            60, 
-            10,
-            5,
-            key = 'corr_window'
+            "Correlation Window (days)",
+            5, 60, 10, 5,
+            key='corr_window',
         )
 
     with col2:
         date_lookback = st.slider(
-            "Date Range (days)", 
-            30, 
-            252, 
-            30,
-            30,
-            key='date_lookback_key'
+            "Date Range (days)",
+            30, 252, 30, 30,
+            key='date_lookback_key',
         )
 
     # Validate: Date range must be at least 2x correlation window
     if date_lookback < correlation_window * 2:
-        st.error(f"❌ Invalid configuration: Date range ({date_lookback} days) must be at least twice the correlation window ({correlation_window} days). Minimum required: {correlation_window * 2} days.")
+        st.error(
+            f"❌ Invalid configuration: Date range ({date_lookback} days) must be at least "
+            f"twice the correlation window ({correlation_window} days). "
+            f"Minimum required: {correlation_window * 2} days."
+        )
         st.warning("⚠️ Please increase Date Range or decrease Correlation Window.")
-        
+
         # Use last valid values from session state
         if 'last_valid_corr_window' in st.session_state and 'last_valid_date_lookback' in st.session_state:
             correlation_window = st.session_state.last_valid_corr_window
-            date_lookback = st.session_state.last_valid_date_lookback
+            date_lookback      = st.session_state.last_valid_date_lookback
             st.info(f"💡 Using previous valid values: Window={correlation_window}, Range={date_lookback}")
         else:
             # First time invalid, just stop
             return
     else:
-        # Valid - save for future invalid states
-        st.session_state.last_valid_corr_window = correlation_window
+        # Valid — save for future invalid states
+        st.session_state.last_valid_corr_window  = correlation_window
         st.session_state.last_valid_date_lookback = date_lookback
 
     # Build returns dataframe
@@ -190,11 +185,13 @@ def correlation_section():
     # Calculate AVERAGE rolling correlation over the entire date range
     if len(returns_df) >= correlation_window:
         # Calculate rolling correlation for each pair of stocks
-        n_stocks = len(returns_df.columns)
-        avg_corr_matrix = pd.DataFrame(np.zeros((n_stocks, n_stocks)), 
-                                        index=returns_df.columns, 
-                                        columns=returns_df.columns)
-        
+        n_stocks     = len(returns_df.columns)
+        avg_corr_matrix = pd.DataFrame(
+            np.zeros((n_stocks, n_stocks)),
+            index=returns_df.columns,
+            columns=returns_df.columns,
+        )
+
         # For each pair of stocks, calculate average rolling correlation
         for i, stock1 in enumerate(returns_df.columns):
             for j, stock2 in enumerate(returns_df.columns):
@@ -207,10 +204,10 @@ def correlation_section():
                     avg_corr = rolling_corr.dropna().mean()
                     avg_corr_matrix.iloc[i, j] = avg_corr
                     avg_corr_matrix.iloc[j, i] = avg_corr  # Mirror to lower triangle
-        
+
         # Calculate how many rolling windows were averaged
         num_windows = len(returns_df) - correlation_window + 1
-        
+
         # Create heatmap
         fig_corr = go.Figure(data=go.Heatmap(
             z=avg_corr_matrix.values,
@@ -223,42 +220,45 @@ def correlation_section():
             text=avg_corr_matrix.values.round(2),
             texttemplate='%{text}',
             textfont=dict(size=10),
-            colorbar=dict(title='Avg Correlation')
+            colorbar=dict(title='Avg Correlation'),
         ))
-        
+
         fig_corr.update_layout(
-            title=f"Average Rolling Correlation Matrix ({st.session_state.loaded_sector})<br>" +
-                f"<sub>{correlation_window}-day window averaged over {num_windows} periods (last {date_lookback} days)</sub>",
+            title=(
+                f"Average Rolling Correlation Matrix ({st.session_state.loaded_sector}) — "
+                f"{correlation_window}-day window averaged over {num_windows} periods "
+                f"(last {date_lookback} days)"
+            ),
             height=600,
             template='plotly_white',
             xaxis={'tickangle': -45},
-            yaxis={'tickangle': 0}
+            yaxis={'tickangle': 0},
         )
-        
+
         st.plotly_chart(fig_corr, use_container_width=True)
-        
+
         # Show average correlation for each stock
         st.subheader("📊 Average Correlation with Sector")
         avg_correlations = avg_corr_matrix.mean(axis=1).sort_values(ascending=False)
 
         # ✅ Store avg_correlations in session state for other sections
         st.session_state.avg_correlations = avg_correlations
-        
+
         col1, col2, col3 = st.columns(3)
-        
+
         with col1:
             st.markdown("**🔴 Lowest Correlation (Most Independent)**")
             for ticker in avg_correlations.tail(3).index:
                 name = data_manager.get_stock_name_from_db(ticker) or ticker
                 st.metric(name, f"{avg_correlations[ticker]:.3f}")
-        
+
         with col2:
             st.markdown("**🟡 Moderate Correlation**")
             median_idx = len(avg_correlations) // 2
-            for ticker in avg_correlations.iloc[median_idx-1:median_idx+2].index:
+            for ticker in avg_correlations.iloc[median_idx - 1:median_idx + 2].index:
                 name = data_manager.get_stock_name_from_db(ticker) or ticker
                 st.metric(name, f"{avg_correlations[ticker]:.3f}")
-        
+
         with col3:
             st.markdown("**🟢 Highest Correlation (Most Sector-Like)**")
             for ticker in avg_correlations.head(3).index:
@@ -266,14 +266,14 @@ def correlation_section():
                 st.metric(name, f"{avg_correlations[ticker]:.3f}")
 
     else:
-        st.error(f"❌ Insufficient data in the selected date range. Please try a longer period.")
+        st.error("❌ Insufficient data in the selected date range. Please try a longer period.")
+
 
 # Store selected_sector in session state before calling fragment
 st.session_state.selected_sector = selected_sector
 # Call the fragment
 correlation_section()
 st.markdown("---")
-
 
 # ============================================================================
 # SECTION 2: INDIVIDUAL RISK METRICS
@@ -286,7 +286,7 @@ if 'returns_df' not in st.session_state or 'avg_correlations' not in st.session_
     st.error("❌ Please calculate correlation matrix first.")
     st.stop()
 
-returns_df = st.session_state.returns_df
+returns_df       = st.session_state.returns_df
 avg_correlations = st.session_state.avg_correlations
 
 # Date range selector for risk metrics
@@ -306,7 +306,7 @@ with col1:
         value=max_date - pd.Timedelta(days=365),  # Default: 1 year ago
         min_value=min_date,
         max_value=max_date,
-        key='risk_start'
+        key='risk_start',
     )
 
 with col2:
@@ -315,22 +315,22 @@ with col2:
         value=max_date,
         min_value=min_date,
         max_value=max_date,
-        key='risk_end'
+        key='risk_end',
     )
 
 # Convert to pandas Timestamp for filtering
 risk_start_ts = pd.Timestamp(risk_start_date)
-risk_end_ts = pd.Timestamp(risk_end_date)
+risk_end_ts   = pd.Timestamp(risk_end_date)
 
 if risk_start_ts >= risk_end_ts:
     st.error("⚠️ Start date must be before end date!")
     st.stop()
 
-# ── Only recompute if sector or date range changed ───────────────────
+# ── Only recompute if sector or date range changed ────────────────────────────
 risk_cache_key = f"{st.session_state.get('loaded_sector')}_{risk_start_date}_{risk_end_date}"
 
 if st.session_state.get('risk_cache_key') != risk_cache_key or 'risk_df' not in st.session_state:
-    
+
     period_days = (risk_end_ts - risk_start_ts).days
     st.info(f"📊 Calculating risk metrics using data from **{risk_start_date}** to **{risk_end_date}** ({period_days} days)")
 
@@ -341,42 +341,42 @@ if st.session_state.get('risk_cache_key') != risk_cache_key or 'risk_df' not in 
 
     with progress_placeholder.container():
         # Add progress indicator for financial data fetching
-        st.info("📊 Fetching financial metrics from ...")
+        st.info("📊 Fetching financial metrics...")
         progress_bar_fin = st.progress(0)
 
         for idx, (ticker, df) in enumerate(sector_data.items()):
             # Filter data by selected date range
             df_filtered = df[(df.index >= risk_start_ts) & (df.index <= risk_end_ts)]
-            
+
             if len(df_filtered) < 30:
                 continue
-            
+
             returns = df_filtered['Close'].pct_change().dropna()
-            
+
             if len(returns) < 20:
                 continue
-            
+
             # Calculate existing metrics
-            volatility_daily = returns.std() * 100  # Daily volatility as percentage
+            volatility_daily  = returns.std() * 100          # Daily volatility as percentage
             volatility_annual = returns.std() * np.sqrt(252) * 100  # Annualized volatility as percentage
 
-            sharpe = (returns.mean() * 252) / (returns.std() * np.sqrt(252)) if returns.std() > 0 else 0
+            sharpe       = (returns.mean() * 252) / (returns.std() * np.sqrt(252)) if returns.std() > 0 else 0
             max_drawdown = ((df_filtered['Close'] / df_filtered['Close'].cummax()) - 1).min()
-            avg_return = returns.mean() * 252
-
+            avg_return   = returns.mean() * 252
 
             # Calculate beta using cap-weighted sector returns
             cap_weighted_returns = st.session_state.cap_weighted_sector_returns
-            sector_avg_returns = cap_weighted_returns.loc[
-                (cap_weighted_returns.index >= risk_start_ts) & (cap_weighted_returns.index <= risk_end_ts)
+            sector_avg_returns   = cap_weighted_returns.loc[
+                (cap_weighted_returns.index >= risk_start_ts) &
+                (cap_weighted_returns.index <= risk_end_ts)
             ]
 
             if len(sector_avg_returns) > 0 and len(returns) > 0:
                 common_idx = returns.index.intersection(sector_avg_returns.index)
                 if len(common_idx) > 20:
-                    aligned_stock = returns.loc[common_idx]
+                    aligned_stock  = returns.loc[common_idx]
                     aligned_sector = sector_avg_returns.loc[common_idx]
-                    covariance = np.cov(aligned_stock, aligned_sector)[0][1]
+                    covariance      = np.cov(aligned_stock, aligned_sector)[0][1]
                     sector_variance = aligned_sector.var()
                     beta = covariance / sector_variance if sector_variance > 0 else 1.0
                 else:
@@ -384,45 +384,40 @@ if st.session_state.get('risk_cache_key') != risk_cache_key or 'risk_df' not in 
             else:
                 beta = 1.0
 
-            
             # 🆕 Fetch financial indicators from Tushare
             financial_data = data_manager.get_financial_indicators(ticker)
             time.sleep(0.31)  # Respect API rate limit
-            
+
             # Build metrics dictionary
             metrics_dict = {
-                'Ticker': ticker,
-                'Name': data_manager.get_stock_name_from_db(ticker) or ticker,
-                'Daily Vol (%)': volatility_daily,      # Daily volatility
-                'Annual Vol (%)': volatility_annual,    # Annualized volatility
-                'Sharpe Ratio': sharpe,
-                'Max Drawdown': max_drawdown * 100,
-                'Avg Return': avg_return * 100,
-                'Beta': beta,
-                'Avg Correlation': avg_correlations.get(ticker, np.nan)
+                'Ticker':          ticker,
+                'Name':            data_manager.get_stock_name_from_db(ticker) or ticker,
+                'Daily Vol (%)':   volatility_daily,   # Daily volatility
+                'Annual Vol (%)':  volatility_annual,  # Annualized volatility
+                'Sharpe Ratio':    sharpe,
+                'Max Drawdown':    max_drawdown * 100,
+                'Avg Return':      avg_return * 100,
+                'Beta':            beta,
+                'Avg Correlation': avg_correlations.get(ticker, np.nan),
             }
-            
+
             # 🆕 Add financial metrics if available
             if financial_data:
                 metrics_dict.update({
-                    'ROE': financial_data.get('ROE'),
-                    'ROA': financial_data.get('ROA'),
-                    'Op. Margin': financial_data.get('Operating_Margin'),
+                    'ROE':            financial_data.get('ROE'),
+                    'ROA':            financial_data.get('ROA'),
+                    'Op. Margin':     financial_data.get('Operating_Margin'),
                     'EPS Growth YoY': financial_data.get('EPS_Growth_YoY'),
                     'FCFF Growth YoY': financial_data.get('FCFF_Growth_YoY'),
-                    'FCFE Growth YoY': financial_data.get('FCFE_Growth_YoY')
+                    'FCFE Growth YoY': financial_data.get('FCFE_Growth_YoY'),
                 })
             else:
                 # Add None values if data unavailable
                 metrics_dict.update({
-                    'ROE': None,
-                    'ROA': None,
-                    'Op. Margin': None,
-                    'EPS Growth YoY': None,
-                    'FCFF Growth YoY': None,
-                    'FCFE Growth YoY': None
+                    'ROE': None, 'ROA': None, 'Op. Margin': None,
+                    'EPS Growth YoY': None, 'FCFF Growth YoY': None, 'FCFE Growth YoY': None,
                 })
-            
+
             risk_metrics.append(metrics_dict)
             progress_bar_fin.progress((idx + 1) / len(sector_data))
 
@@ -433,40 +428,99 @@ if st.session_state.get('risk_cache_key') != risk_cache_key or 'risk_df' not in 
     # ✅ Cache results — won't recompute until sector or date range changes
     st.session_state.risk_df        = risk_df
     st.session_state.risk_cache_key = risk_cache_key
+
 else:
     # ✅ Use cached results — no API calls, instant load
     risk_df = st.session_state.risk_df
     st.info(f"📦 Using cached risk metrics ({risk_start_date} to {risk_end_date})")
 
-#risk_df = pd.DataFrame(risk_metrics)
-
 if len(risk_df) == 0:
     st.error("❌ No stocks have sufficient data in the selected date range. Try a different period.")
     st.stop()
 
-# Display metrics table with enhanced formatting
+# ============================================================================
+# 📋 RISK & FINANCIAL METRICS TABLE  — with multi-select for Pair Trader
+# ============================================================================
 st.subheader("📋 Risk & Financial Metrics Table")
-st.dataframe(
-    risk_df.style.format({
-        'Daily Vol (%)': '{:.2f}%',       # Daily volatility (2-3% typical)
-        'Annual Vol (%)': '{:.1f}%',      # Annual volatility (30-50% typical)
-        'Sharpe Ratio': '{:.3f}',
-        'Max Drawdown': '{:.2f}%',
-        'Avg Return': '{:.2f}%',
-        'Beta': '{:.2f}',
-        'Avg Correlation': '{:.3f}',
-        'ROE': '{:.2f}%',
-        'ROA': '{:.2f}%',
-        'Op. Margin': '{:.2f}%',
-        'EPS Growth YoY': '{:.2f}%',
-        'FCFF Growth YoY': '{:.2f}%',
-        'FCFE Growth YoY': '{:.2f}%'
-    }, na_rep='N/A')
-    .background_gradient(subset=['Sharpe Ratio', 'Avg Return'], cmap='RdYlGn_r'),
-    # .background_gradient(subset=['ROE (%)', 'ROA (%)', 'EPS Growth YoY (%)'], cmap='RdYlGn'),
-    use_container_width=True,
-    height=400,
+st.caption(
+    "Tick the **✅** column to select stocks, then click **→ Pair Trader** to analyse pairs. "
+    "Pair Trader supports a maximum of **10 stocks**."
 )
+
+# Prepend a boolean "Select" column at position 0
+_sel_df = risk_df.copy()
+_sel_df.insert(0, "Select", False)
+
+_edited = st.data_editor(
+    _sel_df,
+    column_config={
+        "Select": st.column_config.CheckboxColumn(
+            "✅",
+            help="Tick to include this stock in Pair Trader",
+            default=False,
+            width="small",
+        ),
+        "Ticker":          st.column_config.TextColumn("Ticker",       width="small"),
+        "Name":            st.column_config.TextColumn("Name",         width="medium"),
+        "Daily Vol (%)":   st.column_config.NumberColumn("Daily Vol",  format="%.2f%%"),
+        "Annual Vol (%)":  st.column_config.NumberColumn("Annual Vol", format="%.1f%%"),
+        "Sharpe Ratio":    st.column_config.NumberColumn("Sharpe",     format="%.3f"),
+        "Max Drawdown":    st.column_config.NumberColumn("Max DD",     format="%.2f%%"),
+        "Avg Return":      st.column_config.NumberColumn("Avg Ret",    format="%.2f%%"),
+        "Beta":            st.column_config.NumberColumn("Beta",       format="%.2f"),
+        "Avg Correlation": st.column_config.NumberColumn("Avg Corr",   format="%.3f"),
+        "ROE":             st.column_config.NumberColumn("ROE",        format="%.2f%%"),
+        "ROA":             st.column_config.NumberColumn("ROA",        format="%.2f%%"),
+        "Op. Margin":      st.column_config.NumberColumn("Op. Margin", format="%.2f%%"),
+        "EPS Growth YoY":  st.column_config.NumberColumn("EPS YoY",   format="%.2f%%"),
+        "FCFF Growth YoY": st.column_config.NumberColumn("FCFF YoY",  format="%.2f%%"),
+        "FCFE Growth YoY": st.column_config.NumberColumn("FCFE YoY",  format="%.2f%%"),
+    },
+    # Every column except "Select" is read-only — user only ticks checkboxes
+    disabled=[c for c in _sel_df.columns if c != "Select"],
+    hide_index=True,
+    use_container_width=True,
+    height=min(400, 45 + 36 * len(risk_df)),
+    key="risk_metrics_editor",
+)
+
+# ── Pair Trader launch bar ────────────────────────────────────────────────────
+_selected_tickers = _edited[_edited["Select"] == True]["Ticker"].tolist()
+_n_sel = len(_selected_tickers)
+
+_btn_col, _info_col = st.columns([1, 2])
+
+with _btn_col:
+    _btn_label = (
+        "🔗 Select stocks above…"
+        if _n_sel == 0
+        else f"🔗 Send {_n_sel} stock{'s' if _n_sel != 1 else ''} → Pair Trader"
+    )
+    if st.button(
+        _btn_label,
+        disabled=(_n_sel == 0),
+        type="primary",
+        use_container_width=True,
+        key="send_to_pair_trader_btn",
+        help="Tick at least 2 stocks in the ✅ column to enable",
+    ):
+        st.session_state["pt_preload_tickers"]   = "\n".join(_selected_tickers)
+        st.session_state["pt_from_sector"]       = True
+        st.session_state["pt_from_sector_name"]  = st.session_state.get("loaded_sector", "Sector Selector")
+        # ⚠️  Adjust this path to match your actual Pair Trader page filename
+        st.switch_page("pages/pair_trader.py")
+
+with _info_col:
+    if _n_sel == 0:
+        st.info("☝️ Tick the **✅** column on one or more rows to enable the button")
+    elif _n_sel == 1:
+        _nm = data_manager.get_stock_name_from_db(_selected_tickers[0]) or _selected_tickers[0]
+        st.warning(f"⚠️ Only **{_nm}** selected — pick **≥ 2** stocks for pair analysis")
+    elif _n_sel > 10:
+        st.error(f"❌ **{_n_sel} stocks** selected — Pair Trader supports a maximum of **10**")
+    else:
+        _names = [data_manager.get_stock_name_from_db(t) or t for t in _selected_tickers]
+        st.success(f"✅ **{_n_sel} stocks ready:** {' · '.join(_names)}")
 
 # ============================================================================
 # SECTION 2.5: ROLLING BETA DECOUPLING ANALYSIS
@@ -476,19 +530,22 @@ st.markdown("---")
 @st.fragment  # ✅ Isolate this section
 def rolling_beta_section():
     st.subheader("📉 Rolling Beta Analysis - Detect Sector Decoupling")
-    st.caption("💡 **Decoupling Signal**: When rolling beta drops sharply, the stock is breaking away from sector moves (idiosyncratic risk > systematic risk)")
-    
+    st.caption(
+        "💡 **Decoupling Signal**: When rolling beta drops sharply, the stock is breaking away "
+        "from sector moves (idiosyncratic risk > systematic risk)"
+    )
+
     # Stock selector for beta analysis
     col1, col2 = st.columns([3, 1])
-    
+
     with col1:
         selected_stock_for_beta = st.selectbox(
             "Select stock to analyze rolling beta",
             options=st.session_state.risk_df['Ticker'].tolist(),  # ✅ Access from session state
             format_func=lambda x: f"{data_manager.get_stock_name_from_db(x)} ({x})",
-            key='beta_stock_selector'
+            key='beta_stock_selector',
         )
-    
+
     with col2:
         beta_window = st.slider(
             "Rolling Window (days)",
@@ -496,43 +553,44 @@ def rolling_beta_section():
             max_value=120,
             value=60,
             step=10,
-            key='beta_rolling_window'
+            key='beta_rolling_window',
         )
-    
+
     # Calculate rolling beta for selected stock
     if selected_stock_for_beta:
         ticker = selected_stock_for_beta
-        
+
         # Get stock returns from session state
         if ticker in st.session_state.sector_data:
-            df_stock = st.session_state.sector_data[ticker]
+            df_stock      = st.session_state.sector_data[ticker]
             stock_returns = df_stock['Close'].pct_change().dropna()
-            
+
             # Get cap-weighted sector returns
             sector_returns_series = st.session_state.cap_weighted_sector_returns
-            
+
             # Align dates
-            common_dates = stock_returns.index.intersection(sector_returns_series.index)
-            stock_returns_aligned = stock_returns.loc[common_dates]
+            common_dates           = stock_returns.index.intersection(sector_returns_series.index)
+            stock_returns_aligned  = stock_returns.loc[common_dates]
             sector_returns_aligned = sector_returns_series.loc[common_dates]
-            
+
             # Calculate rolling beta
             def calculate_rolling_beta(stock_ret, sector_ret, window):
                 """Calculate rolling beta using covariance / variance"""
-                rolling_cov = stock_ret.rolling(window).cov(sector_ret)
-                rolling_var = sector_ret.rolling(window).var()
-                rolling_beta = rolling_cov / rolling_var
-                return rolling_beta
-            
-            rolling_beta = calculate_rolling_beta(stock_returns_aligned, sector_returns_aligned, beta_window)
-            
+                rolling_cov  = stock_ret.rolling(window).cov(sector_ret)
+                rolling_var  = sector_ret.rolling(window).var()
+                return rolling_cov / rolling_var
+
+            rolling_beta = calculate_rolling_beta(
+                stock_returns_aligned, sector_returns_aligned, beta_window
+            )
+
             # Calculate beta change (derivative) to detect sharp drops
             beta_change = rolling_beta.diff()
-            
+
             # Identify decoupling events (beta drop > 0.3 in one period)
             decoupling_threshold = -0.3
-            decoupling_events = beta_change[beta_change < decoupling_threshold]
-            
+            decoupling_events    = beta_change[beta_change < decoupling_threshold]
+
             # Create multi-panel chart
             fig = make_subplots(
                 rows=3, cols=1,
@@ -541,22 +599,22 @@ def rolling_beta_section():
                 subplot_titles=(
                     f"{data_manager.get_stock_name_from_db(ticker)} Price",
                     f"Rolling Beta ({beta_window}-day) vs Sector",
-                    "Beta Change (Decoupling Indicator)"
+                    "Beta Change (Decoupling Indicator)",
                 ),
-                row_heights=[0.4, 0.35, 0.25]
+                row_heights=[0.4, 0.35, 0.25],
             )
-            
+
             # Panel 1: Stock Price
             fig.add_trace(
                 go.Scatter(
                     x=df_stock.index,
                     y=df_stock['Close'],
                     name='Price',
-                    line=dict(color='#3b82f6', width=2)
+                    line=dict(color='#3b82f6', width=2),
                 ),
-                row=1, col=1
+                row=1, col=1,
             )
-            
+
             # Panel 2: Rolling Beta
             fig.add_trace(
                 go.Scatter(
@@ -565,34 +623,29 @@ def rolling_beta_section():
                     name=f'{beta_window}d Beta',
                     line=dict(color='#10b981', width=2),
                     fill='tozeroy',
-                    fillcolor='rgba(16, 185, 129, 0.1)'
+                    fillcolor='rgba(16, 185, 129, 0.1)',
                 ),
-                row=2, col=1
+                row=2, col=1,
             )
-            
+
             # Add beta = 1.0 reference line
             fig.add_hline(
-                y=1.0,
-                line_dash='dash',
-                line_color='gray',
-                opacity=0.5,
+                y=1.0, line_dash='dash', line_color='gray', opacity=0.5,
                 row=2, col=1,
-                annotation_text="Beta = 1.0",
-                annotation_position="right"
+                annotation_text="Beta = 1.0", annotation_position="right",
             )
-            
+
             # Add current static beta from risk metrics
-            current_static_beta = st.session_state.risk_df[st.session_state.risk_df['Ticker'] == ticker]['Beta'].iloc[0]
+            current_static_beta = st.session_state.risk_df[
+                st.session_state.risk_df['Ticker'] == ticker
+            ]['Beta'].iloc[0]
             fig.add_hline(
-                y=current_static_beta,
-                line_dash='dot',
-                line_color='orange',
-                opacity=0.7,
+                y=current_static_beta, line_dash='dot', line_color='orange', opacity=0.7,
                 row=2, col=1,
                 annotation_text=f"Period Avg: {current_static_beta:.2f}",
-                annotation_position="left"
+                annotation_position="left",
             )
-            
+
             # Panel 3: Beta Change (Derivative)
             fig.add_trace(
                 go.Scatter(
@@ -600,11 +653,11 @@ def rolling_beta_section():
                     y=beta_change.values,
                     name='Beta Change',
                     line=dict(color='#ef4444', width=1.5),
-                    fill='tozeroy'
+                    fill='tozeroy',
                 ),
-                row=3, col=1
+                row=3, col=1,
             )
-            
+
             # Highlight decoupling events
             if len(decoupling_events) > 0:
                 fig.add_trace(
@@ -617,66 +670,64 @@ def rolling_beta_section():
                             size=12,
                             color='red',
                             symbol='x',
-                            line=dict(width=2)
-                        )
+                            line=dict(width=2),
+                        ),
                     ),
-                    row=3, col=1
+                    row=3, col=1,
                 )
-            
+
             # Add threshold line
             fig.add_hline(
-                y=decoupling_threshold,
-                line_dash='dash',
-                line_color='red',
-                opacity=0.5,
+                y=decoupling_threshold, line_dash='dash', line_color='red', opacity=0.5,
                 row=3, col=1,
-                annotation_text=f"Decoupling Threshold",
-                annotation_position="right"
+                annotation_text="Decoupling Threshold", annotation_position="right",
             )
-            
+
             # Update layout
             fig.update_layout(
                 height=800,
                 template='plotly_white',
                 showlegend=True,
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="right",
-                    x=1
-                ),
-                hovermode='x unified'
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                hovermode='x unified',
             )
-            
-            fig.update_xaxes(title_text="Date", row=3, col=1)
+
+            fig.update_xaxes(title_text="Date",     row=3, col=1)
             fig.update_yaxes(title_text="Price (¥)", row=1, col=1)
-            fig.update_yaxes(title_text="Beta", row=2, col=1)
-            fig.update_yaxes(title_text="Δ Beta", row=3, col=1)
-            
+            fig.update_yaxes(title_text="Beta",      row=2, col=1)
+            fig.update_yaxes(title_text="Δ Beta",    row=3, col=1)
+
             st.plotly_chart(fig, use_container_width=True)
-            
+
             # Interpretation and insights
             col1, col2, col3 = st.columns(3)
-            
+
             with col1:
-                current_beta = rolling_beta.iloc[-1] if not pd.isna(rolling_beta.iloc[-1]) else current_static_beta
-                beta_trend = "📈 Increasing" if rolling_beta.iloc[-20:].mean() > rolling_beta.iloc[-40:-20].mean() else "📉 Decreasing"
+                current_beta = (
+                    rolling_beta.iloc[-1]
+                    if not pd.isna(rolling_beta.iloc[-1])
+                    else current_static_beta
+                )
+                beta_trend = (
+                    "📈 Increasing"
+                    if rolling_beta.iloc[-20:].mean() > rolling_beta.iloc[-40:-20].mean()
+                    else "📉 Decreasing"
+                )
                 st.metric(
                     "Current Rolling Beta",
                     f"{current_beta:.2f}",
                     delta=f"{beta_trend}",
-                    delta_color="off"
+                    delta_color="off",
                 )
-            
+
             with col2:
                 decoupling_count = len(decoupling_events)
                 st.metric(
                     f"Decoupling Events ({len(rolling_beta)} days)",
                     f"{decoupling_count}",
-                    delta="🔴 High idiosyncratic risk" if decoupling_count > 3 else "🟢 Sector-driven"
+                    delta="🔴 High idiosyncratic risk" if decoupling_count > 3 else "🟢 Sector-driven",
                 )
-            
+
             with col3:
                 beta_volatility = rolling_beta.std()
                 stability = "Stable" if beta_volatility < 0.3 else "Volatile"
@@ -684,33 +735,34 @@ def rolling_beta_section():
                     "Beta Stability",
                     f"{stability}",
                     delta=f"σ = {beta_volatility:.2f}",
-                    delta_color="off"
+                    delta_color="off",
                 )
-            
+
             # Interpretation guide
             with st.expander("📖 How to Interpret Rolling Beta Decoupling"):
                 st.markdown("""
-                **What is Beta Decoupling?**
-                - **Normal Beta (~1.0)**: Stock moves in sync with sector (systematic risk dominates)
-                - **Rising Beta (>1.2)**: Stock amplifies sector movements (high systematic risk)
-                - **Falling Beta (<0.7)**: Stock decouples from sector (idiosyncratic risk dominates)
-                
-                **Decoupling Signals (Sharp Beta Drops)**:
-                - 🔴 **Sudden drop in beta** (>0.3 decrease): Company-specific news is driving the stock
-                - 📰 **Potential causes**: Earnings surprise, regulatory action, management change, M&A rumors
-                - 💡 **Trading insight**: Stock is responding to its own story, not sector trends
-                
-                **Trading Implications**:
-                - **High beta (>1.2)**: Use sector ETF hedges, trade sector momentum
-                - **Low/falling beta**: Analyze company fundamentals, ignore sector noise
-                - **Multiple decoupling events**: Stock has strong idiosyncratic drivers
-                
-                **Example**:
-                - If 贵州茅台's beta drops from 1.1 to 0.6 → Check for Moutai-specific news (not sector-wide issues)
-                - If beta stays near 1.0 → Stock moves with sector, use sector analysis for trading decisions
-                """)
+**What is Beta Decoupling?**
+- **Normal Beta (~1.0)**: Stock moves in sync with sector (systematic risk dominates)
+- **Rising Beta (>1.2)**: Stock amplifies sector movements (high systematic risk)
+- **Falling Beta (<0.7)**: Stock decouples from sector (idiosyncratic risk dominates)
+
+**Decoupling Signals (Sharp Beta Drops)**:
+- 🔴 **Sudden drop in beta** (>0.3 decrease): Company-specific news is driving the stock
+- 📰 **Potential causes**: Earnings surprise, regulatory action, management change, M&A rumors
+- 💡 **Trading insight**: Stock is responding to its own story, not sector trends
+
+**Trading Implications**:
+- **High beta (>1.2)**: Use sector ETF hedges, trade sector momentum
+- **Low/falling beta**: Analyze company fundamentals, ignore sector noise
+- **Multiple decoupling events**: Stock has strong idiosyncratic drivers
+
+**Example**:
+- If 贵州茅台's beta drops from 1.1 to 0.6 → Check for Moutai-specific news (not sector-wide issues)
+- If beta stays near 1.0 → Stock moves with sector, use sector analysis for trading decisions
+""")
         else:
             st.error(f"❌ No data available for {ticker}")
+
 
 # Store risk_df in session state before calling fragment
 st.session_state.risk_df = risk_df
@@ -720,7 +772,6 @@ rolling_beta_section()
 
 st.markdown("---")
 st.markdown("### 🎯 Click to Analyze Individual Stock")
-
 
 # Create buttons in 4 columns
 num_cols = 4
@@ -752,15 +803,12 @@ fig_scatter.add_trace(go.Scatter(
         colorscale='Viridis',
         showscale=True,
         colorbar=dict(title='Avg Correlation'),
-        line=dict(width=1, color='white')
+        line=dict(width=1, color='white'),
     ),
     text=risk_df['Name'],
     textposition='top center',
     textfont=dict(size=9),
-    hovertemplate='<b>%{text}</b><br>' +
-                  'Annual Vol (%): %{x:.2f}%<br>' +
-                  'Return: %{y:.2f}%<br>' +
-                  '<extra></extra>'
+    hovertemplate='%{text}<br>Annual Vol (%): %{x:.2f}%<br>Return: %{y:.2f}%<extra></extra>',
 ))
 
 # Add quadrant lines
@@ -771,12 +819,15 @@ fig_scatter.add_vline(x=median_vol, line_dash='dash', line_color='gray', opacity
 fig_scatter.add_hline(y=median_ret, line_dash='dash', line_color='gray', opacity=0.5)
 
 fig_scatter.update_layout(
-    title=f"Risk vs Return: {st.session_state.loaded_sector} Stocks (Bubble Size = Beta) - {risk_start_date} to {risk_end_date}",
+    title=(
+        f"Risk vs Return: {st.session_state.loaded_sector} Stocks "
+        f"(Bubble Size = Beta) - {risk_start_date} to {risk_end_date}"
+    ),
     xaxis_title="Volatility (Annualized %)",
     yaxis_title="Average Return (Annualized %)",
     height=600,
     template='plotly_white',
-    hovermode='closest'
+    hovermode='closest',
 )
 
 st.plotly_chart(fig_scatter, use_container_width=True)
@@ -797,7 +848,7 @@ with col1:
         float(risk_df['Annual Vol (%)'].min()),
         float(risk_df['Annual Vol (%)'].max()),
         (float(risk_df['Annual Vol (%)'].quantile(0.25)),
-         float(risk_df['Annual Vol (%)'].quantile(0.75)))
+         float(risk_df['Annual Vol (%)'].quantile(0.75))),
     )
 
 with col2:
@@ -806,7 +857,7 @@ with col2:
         "Beta (vs Sector)",
         float(risk_df['Beta'].min()),
         float(risk_df['Beta'].max()),
-        (0.8, 1.2)
+        (0.8, 1.2),
     )
 
 with col3:
@@ -815,7 +866,7 @@ with col3:
         "Avg Correlation",
         float(risk_df['Avg Correlation'].min()),
         float(risk_df['Avg Correlation'].max()),
-        (0.3, 0.8)
+        (0.3, 0.8),
     )
 
 # Filter stocks
@@ -832,13 +883,13 @@ if len(filtered_df) > 0:
     st.dataframe(
         filtered_df.style.format({
             'Annual Vol (%)': '{:.2f}%',
-            'Sharpe Ratio': '{:.3f}',
-            'Max Drawdown': '{:.2f}%',
-            'Avg Return': '{:.2f}%',
-            'Beta': '{:.2f}',
-            'Avg Correlation': '{:.3f}'
+            'Sharpe Ratio':   '{:.3f}',
+            'Max Drawdown':   '{:.2f}%',
+            'Avg Return':     '{:.2f}%',
+            'Beta':           '{:.2f}',
+            'Avg Correlation': '{:.3f}',
         }),
-        use_container_width=True
+        use_container_width=True,
     )
 
     # Show recommendations
@@ -864,4 +915,7 @@ else:
     st.warning("⚠️ No stocks match your criteria. Try adjusting the filters.")
 
 st.markdown("---")
-st.caption(f"💡 Tip: Adjust the date range above to focus on recent performance or analyze specific time periods (e.g., during market crashes)")
+st.caption(
+    "💡 Tip: Adjust the date range above to focus on recent performance or "
+    "analyze specific time periods (e.g., during market crashes)"
+)
