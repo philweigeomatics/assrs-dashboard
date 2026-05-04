@@ -127,18 +127,13 @@ _D3_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <style>
-  *  { box-sizing: border-box; margin: 0; padding: 0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     background: #0e1117;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     overflow: hidden;
   }
   svg { display: block; width: 100vw; height: 100vh; }
-  .link {
-    stroke: #374151;
-    stroke-width: 2px;
-    stroke-opacity: 0.75;
-  }
   #tooltip {
     position: fixed;
     background: #1f2937;
@@ -148,9 +143,9 @@ _D3_TEMPLATE = r"""<!DOCTYPE html>
     font-size: 12px;
     pointer-events: none;
     display: none;
-    max-width: 240px;
+    max-width: 260px;
     border: 1px solid #374151;
-    line-height: 1.5;
+    line-height: 1.6;
     z-index: 100;
   }
 </style>
@@ -159,11 +154,15 @@ _D3_TEMPLATE = r"""<!DOCTYPE html>
 <div id="tooltip"></div>
 <svg id="graph">
   <defs>
-    <marker id="arrow" viewBox="0 -4 10 8"
-            refX="30" refY="0"
-            markerWidth="6" markerHeight="6"
-            orient="auto">
-      <path d="M0,-4L10,0L0,4" fill="#6b7280"/>
+    <!-- Arrow for hub→product spokes -->
+    <marker id="arrow-hub" viewBox="0 -4 10 8" refX="52" refY="0"
+            markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,-4L10,0L0,4" fill="#a16207"/>
+    </marker>
+    <!-- Arrow for product→sector links -->
+    <marker id="arrow-sector" viewBox="0 -4 10 8" refX="55" refY="0"
+            markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,-4L10,0L0,4" fill="#374151"/>
     </marker>
   </defs>
 </svg>
@@ -178,38 +177,56 @@ const g   = svg.append("g");
 
 // ── Zoom / pan ──────────────────────────────────────────────────────────────
 svg.call(
-  d3.zoom()
-    .scaleExtent([0.2, 5])
+  d3.zoom().scaleExtent([0.15, 5])
     .on("zoom", e => g.attr("transform", e.transform))
 );
 
-// ── Build node / link arrays ────────────────────────────────────────────────
+// ── Build nodes ─────────────────────────────────────────────────────────────
+// Company hub is pinned to centre; products and sectors orbit around it.
+const COMPANY_ID = DATA.company_name;
+
 const nodes = [
+  { id: COMPANY_ID, type: "company", fx: W / 2, fy: H / 2 },
   ...DATA.products.map(id      => ({ id, type: "product" })),
   ...DATA.macro_sectors.map(id => ({ id, type: "sector"  })),
 ];
-const links = DATA.links.map(l => ({ source: l.source, target: l.target }));
+
+// Hub → product spokes  +  product → sector links
+const links = [
+  ...DATA.products.map(p  => ({ source: COMPANY_ID, target: p,        kind: "hub"    })),
+  ...DATA.links.map(l     => ({ source: l.source,   target: l.target, kind: "sector" })),
+];
 
 // ── Force simulation ────────────────────────────────────────────────────────
 const sim = d3.forceSimulation(nodes)
-  .force("link",      d3.forceLink(links).id(d => d.id).distance(210))
-  .force("charge",    d3.forceManyBody().strength(-520))
-  .force("center",    d3.forceCenter(W / 2, H / 2))
-  .force("collision", d3.forceCollide().radius(72));
+  .force("link",      d3.forceLink(links).id(d => d.id)
+                        .distance(d => d.kind === "hub" ? 200 : 220))
+  .force("charge",    d3.forceManyBody().strength(-600))
+  .force("collision", d3.forceCollide().radius(d => d.type === "company" ? 70 : 75));
 
 // ── Links ───────────────────────────────────────────────────────────────────
 const linkEl = g.selectAll(".link")
   .data(links)
   .join("line")
-  .attr("class", "link")
-  .attr("marker-end", "url(#arrow)");
+  .attr("stroke",         d => d.kind === "hub" ? "#92400e" : "#374151")
+  .attr("stroke-width",   d => d.kind === "hub" ? 1.5 : 2)
+  .attr("stroke-opacity", d => d.kind === "hub" ? 0.6  : 0.8)
+  .attr("marker-end",     d => d.kind === "hub" ? "url(#arrow-hub)" : "url(#arrow-sector)");
 
-// ── Nodes ───────────────────────────────────────────────────────────────────
+// ── Drag (company hub stays draggable but re-pins after release) ─────────────
 const drag = d3.drag()
-  .on("start", (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+  .on("start", (e, d) => {
+    if (!e.active) sim.alphaTarget(0.3).restart();
+    d.fx = d.x; d.fy = d.y;
+  })
   .on("drag",  (e, d) => { d.fx = e.x; d.fy = e.y; })
-  .on("end",   (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; });
+  .on("end",   (e, d) => {
+    if (!e.active) sim.alphaTarget(0);
+    // Re-pin company to wherever the user dropped it; free the others
+    if (d.type !== "company") { d.fx = null; d.fy = null; }
+  });
 
+// ── Node groups ─────────────────────────────────────────────────────────────
 const nodeEl = g.selectAll(".node")
   .data(nodes)
   .join("g")
@@ -217,7 +234,15 @@ const nodeEl = g.selectAll(".node")
   .style("cursor", "grab")
   .call(drag);
 
-// Product → rounded rectangle
+// Company hub — large gold circle
+nodeEl.filter(d => d.type === "company")
+  .append("circle")
+  .attr("r", 58)
+  .attr("fill", "#78350f")
+  .attr("stroke", "#fbbf24")
+  .attr("stroke-width", 2.5);
+
+// Product — rounded rectangle (blue)
 nodeEl.filter(d => d.type === "product")
   .append("rect")
   .attr("width", 152).attr("height", 46)
@@ -227,7 +252,7 @@ nodeEl.filter(d => d.type === "product")
   .attr("stroke", "#60a5fa")
   .attr("stroke-width", 1.5);
 
-// Sector → circle
+// Sector — circle (orange-red)
 nodeEl.filter(d => d.type === "sector")
   .append("circle")
   .attr("r", 50)
@@ -235,77 +260,91 @@ nodeEl.filter(d => d.type === "sector")
   .attr("stroke", "#fb923c")
   .attr("stroke-width", 1.5);
 
-// ── Bilingual labels ────────────────────────────────────────────────────────
-// Split on " / " → line 1 = English, line 2 = Chinese
+// ── Labels ──────────────────────────────────────────────────────────────────
 function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
 nodeEl.each(function(d) {
-  const el  = d3.select(this);
+  const el = d3.select(this);
+
+  if (d.type === "company") {
+    // Company: show ticker on top line, short name below
+    const sep = d.id.indexOf(" / ");
+    const en  = truncate(sep >= 0 ? d.id.slice(0, sep) : d.id, 14);
+    const zh  = sep >= 0 ? truncate(d.id.slice(sep + 3), 7) : "";
+    el.append("text")
+      .attr("text-anchor", "middle").attr("y", zh ? -8 : 2)
+      .attr("dominant-baseline", "middle")
+      .style("fill", "#fef3c7").style("font-size", "11px").style("font-weight", "700")
+      .style("pointer-events", "none").text(DATA.ticker);
+    el.append("text")
+      .attr("text-anchor", "middle").attr("y", 7)
+      .attr("dominant-baseline", "middle")
+      .style("fill", "#fde68a").style("font-size", "10px").style("font-weight", "600")
+      .style("pointer-events", "none").text(en);
+    if (zh) {
+      el.append("text")
+        .attr("text-anchor", "middle").attr("y", 21)
+        .attr("dominant-baseline", "middle")
+        .style("fill", "#fcd34d").style("font-size", "9px")
+        .style("pointer-events", "none").text(zh);
+    }
+    return;
+  }
+
+  // Products & sectors: bilingual split
   const sep = d.id.indexOf(" / ");
   const en  = truncate(sep >= 0 ? d.id.slice(0, sep)    : d.id, 18);
   const zh  = sep >= 0          ? truncate(d.id.slice(sep + 3), 8) : "";
 
   el.append("text")
     .attr("text-anchor", "middle")
-    .attr("y",  zh ? -5 : 1)
+    .attr("y", zh ? -5 : 1)
     .attr("dominant-baseline", "middle")
-    .style("fill", "#f1f5f9")
-    .style("font-size", "10.5px")
-    .style("font-weight", "600")
-    .style("pointer-events", "none")
-    .text(en);
-
+    .style("fill", "#f1f5f9").style("font-size", "10.5px").style("font-weight", "600")
+    .style("pointer-events", "none").text(en);
   if (zh) {
     el.append("text")
-      .attr("text-anchor", "middle")
-      .attr("y", 10)
+      .attr("text-anchor", "middle").attr("y", 10)
       .attr("dominant-baseline", "middle")
-      .style("fill", "#94a3b8")
-      .style("font-size", "9.5px")
-      .style("pointer-events", "none")
-      .text(zh);
+      .style("fill", "#94a3b8").style("font-size", "9.5px")
+      .style("pointer-events", "none").text(zh);
   }
 });
 
 // ── Tooltip ─────────────────────────────────────────────────────────────────
 const tip = d3.select("#tooltip");
+const KIND_LABEL = { company: "🏢 Company 公司", product: "📦 Product 产品", sector: "🏭 Macro Sector 行业" };
 
 nodeEl
   .on("mouseover", (e, d) => {
-    const kind = d.type === "product" ? "📦 Product 产品" : "🏭 Macro Sector 行业";
     tip.style("display", "block")
-       .html(`<strong>${d.id}</strong><br><em style="color:#9ca3af">${kind}</em>`);
+       .html(`<strong>${d.id}</strong><br><em style="color:#9ca3af">${KIND_LABEL[d.type]}</em>`);
   })
   .on("mousemove", e => {
-    tip.style("left", (e.clientX + 14) + "px")
-       .style("top",  (e.clientY - 32) + "px");
+    tip.style("left", (e.clientX + 14) + "px").style("top", (e.clientY - 36) + "px");
   })
   .on("mouseleave", () => tip.style("display", "none"));
 
 // ── Legend ──────────────────────────────────────────────────────────────────
 const lg = svg.append("g").attr("transform", "translate(16,16)");
 
-lg.append("rect")
-  .attr("width", 14).attr("height", 14).attr("rx", 3)
-  .attr("fill", "#1e40af").attr("stroke", "#60a5fa").attr("stroke-width", 1);
+lg.append("circle").attr("cx", 7).attr("cy", 7).attr("r", 7)
+  .attr("fill", "#78350f").attr("stroke", "#fbbf24").attr("stroke-width", 1.5);
 lg.append("text").attr("x", 22).attr("y", 11)
+  .style("fill", "#fde68a").style("font-size", "12px").text("Company 公司");
+
+lg.append("rect").attr("x", 0).attr("y", 24).attr("width", 14).attr("height", 14).attr("rx", 3)
+  .attr("fill", "#1e40af").attr("stroke", "#60a5fa").attr("stroke-width", 1);
+lg.append("text").attr("x", 22).attr("y", 35)
   .style("fill", "#d1d5db").style("font-size", "12px").text("Product 产品");
 
-lg.append("circle").attr("cx", 7).attr("cy", 34).attr("r", 7)
+lg.append("circle").attr("cx", 7).attr("cy", 56).attr("r", 7)
   .attr("fill", "#7c2d12").attr("stroke", "#fb923c").attr("stroke-width", 1);
-lg.append("text").attr("x", 22).attr("y", 38)
+lg.append("text").attr("x", 22).attr("y", 60)
   .style("fill", "#d1d5db").style("font-size", "12px").text("Macro Sector 行业");
 
-lg.append("text").attr("x", 0).attr("y", 58)
-  .style("fill", "#4b5563").style("font-size", "10px")
-  .text("Drag · Scroll to zoom");
-
-// ── Title ───────────────────────────────────────────────────────────────────
-svg.append("text")
-  .attr("x", W / 2).attr("y", 24)
-  .attr("text-anchor", "middle")
-  .style("fill", "#e2e8f0").style("font-size", "14px").style("font-weight", "700")
-  .text(DATA.company_name + "  ·  " + DATA.ticker);
+lg.append("text").attr("x", 0).attr("y", 78)
+  .style("fill", "#4b5563").style("font-size", "10px").text("Drag nodes · Scroll to zoom");
 
 // ── Tick ────────────────────────────────────────────────────────────────────
 sim.on("tick", () => {

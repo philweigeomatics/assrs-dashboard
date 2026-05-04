@@ -20,23 +20,8 @@ user = auth_manager.get_current_user()
 @st.dialog("Supply Chain Graph 供应链图谱", width="large")
 def _show_graph_dialog(ticker: str, graph_data: dict) -> None:
     company = graph_data.get("company_name", ticker)
-    st.caption(f"**{company}**  ·  {ticker}  ·  last updated from DeepSeek")
-
-    products      = graph_data.get("products", [])
-    macro_sectors = graph_data.get("macro_sectors", [])
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**📦 Products 产品**")
-        for p in products:
-            st.markdown(f"- {p}")
-    with c2:
-        st.markdown("**🏭 Macro Sectors 行业**")
-        for s in macro_sectors:
-            st.markdown(f"- {s}")
-
-    st.divider()
-    supply_chain_ui.render_supply_chain_graph(graph_data, height=520)
+    st.caption(f"**{company}** · {ticker} · Drag nodes · Scroll to zoom")
+    supply_chain_ui.render_supply_chain_graph(graph_data, height=640)
 
 # ── Page Header ────────────────────────────────────────────────────────────────
 st.title("📋 Watchlist Management | 观察列表管理")
