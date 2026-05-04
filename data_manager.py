@@ -3363,14 +3363,104 @@ def get_market_margin_history(limit=250):
     """Retrieves aggregated market margin history."""
     if not db.table_exists('margin_market'):
         return pd.DataFrame()
-        
+
     df = db.read_table('margin_market', order_by='-trade_date', limit=limit * 3) # *3 for SSE, SZSE, BSE
     if not df.empty:
         df['trade_date'] = pd.to_datetime(df['trade_date'])
-        
+
         # ADDED 'rqyl' to the list of columns to sum below!
         df_agg = df.groupby('trade_date')[['rzye', 'rzmre', 'rzche', 'rqye', 'rqmcl', 'rzrqye', 'rqyl']].sum()
-        
+
         return df_agg.sort_index().tail(limit)
     return pd.DataFrame()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SUPPLY CHAIN GRAPH FUNCTIONS
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# SQLite — table is auto-created on first upsert.
+#
+# Supabase — run this DDL once in the Supabase SQL editor:
+#
+#   CREATE TABLE IF NOT EXISTS supply_chain_graphs (
+#       ticker       TEXT PRIMARY KEY,
+#       company_name TEXT,
+#       graph_json   JSONB,
+#       last_updated TIMESTAMPTZ DEFAULT NOW()
+#   );
+#
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _create_supply_chain_table():
+    """Create supply_chain_graphs table in SQLite (no-op for Supabase)."""
+    db.create_table_sqlite("""
+        CREATE TABLE IF NOT EXISTS supply_chain_graphs (
+            ticker       TEXT PRIMARY KEY,
+            company_name TEXT,
+            graph_json   TEXT,
+            last_updated TEXT
+        )
+    """)
+
+
+def supply_chain_graph_exists(ticker: str) -> bool:
+    """Return True if a cached graph exists for this ticker."""
+    if not db.table_exists('supply_chain_graphs'):
+        return False
+    result = db.read_table(
+        'supply_chain_graphs',
+        filters={'ticker': ticker},
+        columns='ticker',
+        limit=1,
+    )
+    return not result.empty
+
+
+def get_supply_chain_graph(ticker: str):
+    """Return the cached graph as a dict, or None if not found."""
+    import json as _json
+    if not db.table_exists('supply_chain_graphs'):
+        return None
+    df = db.read_table('supply_chain_graphs', filters={'ticker': ticker}, limit=1)
+    if df.empty:
+        return None
+    raw = df.iloc[0].get('graph_json')
+    if not raw:
+        return None
+    try:
+        return _json.loads(raw)
+    except Exception:
+        return None
+
+
+def upsert_supply_chain_graph(ticker: str, company_name: str, graph_data: dict) -> bool:
+    """Insert or update the supply chain graph for a ticker. Returns True on success."""
+    import json as _json
+    from datetime import datetime as _dt
+    if not db.table_exists('supply_chain_graphs'):
+        _create_supply_chain_table()
+    try:
+        db.insert_records(
+            'supply_chain_graphs',
+            {
+                'ticker':       ticker,
+                'company_name': company_name,
+                'graph_json':   _json.dumps(graph_data, ensure_ascii=False),
+                'last_updated': _dt.now().strftime('%Y-%m-%d %H:%M:%S'),
+            },
+            upsert=True,
+        )
+        return True
+    except Exception as e:
+        print(f"[data_manager] ❌ upsert_supply_chain_graph({ticker}): {e}")
+        return False
+
+
+def get_all_supply_chain_tickers() -> set:
+    """Return the set of tickers that already have a cached supply chain graph."""
+    if not db.table_exists('supply_chain_graphs'):
+        return set()
+    df = db.read_table('supply_chain_graphs', columns='ticker')
+    return set(df['ticker'].tolist()) if not df.empty else set()
 
