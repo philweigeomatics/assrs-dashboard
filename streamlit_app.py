@@ -48,6 +48,7 @@ pages = {
         st.Page("pages/2_Single_Stock_Analysis_个股分析.py", title="Stock Analysis 个股分析"),
         st.Page("pages/sector_stock_selector.py", title="Stock Selector 选股器"),
         st.Page("pages/watchlist.py", title="Watchlist 观察名单"),
+        st.Page("pages/watchlist_earnings_calendar.py", title="Earnings Calendar 财报日历"),
     ],
     "💼 Portfolio 组合": [
         st.Page("pages/Portfolio_Optimization.py", title="Optimization 组合优化"),
