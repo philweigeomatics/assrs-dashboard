@@ -32,7 +32,7 @@ explanations, or markdown code fences. Start your response directly with { and e
 Follow this exact schema:
 {
   "ticker": "String — the ticker provided",
-  "company_name": "String — official English or Pinyin name / 公司中文名称  (separated by ' / ')",
+  "company_name": "String — 公司中文名称 / Official English or Pinyin name  (Chinese first, then ' / ', then English)",
   "products": [
     "Array of 3–6 strings, each formatted as: 'English Name / 中文名称'",
     "Example: 'Glass Fiber / 玻璃纤维'"
@@ -46,12 +46,24 @@ Follow this exact schema:
   ]
 }
 
-Rules:
+Base rules:
 1. products must be specific, tangible items or services the company manufactures.
 2. macro_sectors must be broad downstream industries that consume those products.
 3. links may only connect a product to a macro_sector — never product→product.
 4. source and target values must be spelled exactly as they appear in their arrays.
 5. Every value (not key) must contain both English and Chinese separated by ' / '.
+
+CRITICAL RULES (strictly enforced):
+1. Every macro_sector in the "macro_sectors" array MUST appear as a "target" in at \
+least one link. Do not list a sector unless it is linked to at least one product.
+2. Every product in the "products" array SHOULD appear as a "source" in at least one \
+link. Prefer to map every product; only omit a product if it has absolutely no clear \
+downstream sector connection.
+3. Base the mapping on the company's ACTUAL downstream customers — if a sector appears \
+in the company's annual report segment revenue breakdown, investor Q&A on cninfo.com.cn, \
+or industry association reports, include it. If not verified, exclude it.
+4. For A-share companies, consult: annual report segment revenue breakdown, investor \
+Q&A on cninfo.com.cn, or industry association reports as your primary source of truth.
 """
 
 
@@ -143,7 +155,7 @@ _D3_TEMPLATE = r"""<!DOCTYPE html>
     font-size: 12px;
     pointer-events: none;
     display: none;
-    max-width: 260px;
+    max-width: 280px;
     border: 1px solid #374151;
     line-height: 1.6;
     z-index: 100;
@@ -154,15 +166,15 @@ _D3_TEMPLATE = r"""<!DOCTYPE html>
 <div id="tooltip"></div>
 <svg id="graph">
   <defs>
-    <!-- Arrow for hub→product spokes -->
-    <marker id="arrow-hub" viewBox="0 -4 10 8" refX="52" refY="0"
-            markerWidth="6" markerHeight="6" orient="auto">
+    <!-- Arrowhead for company → product spokes (target = rect, ~80px half-width) -->
+    <marker id="arr-hub" viewBox="0 -4 10 8" refX="82" refY="0"
+            markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0,-4L10,0L0,4" fill="#a16207"/>
     </marker>
-    <!-- Arrow for product→sector links -->
-    <marker id="arrow-sector" viewBox="0 -4 10 8" refX="55" refY="0"
-            markerWidth="6" markerHeight="6" orient="auto">
-      <path d="M0,-4L10,0L0,4" fill="#374151"/>
+    <!-- Arrowhead for product → sector links (target = circle r=50) -->
+    <marker id="arr-sec" viewBox="0 -4 10 8" refX="55" refY="0"
+            markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,-4L10,0L0,4" fill="#6b7280"/>
     </marker>
   </defs>
 </svg>
@@ -181,8 +193,8 @@ svg.call(
     .on("zoom", e => g.attr("transform", e.transform))
 );
 
-// ── Build nodes ─────────────────────────────────────────────────────────────
-// Company hub is pinned to centre; products and sectors orbit around it.
+// ── Nodes & links ───────────────────────────────────────────────────────────
+// Layout: Company (centre, pinned) → Products (inner ring) → Sectors (outer ring)
 const COMPANY_ID = DATA.company_name;
 
 const nodes = [
@@ -191,38 +203,43 @@ const nodes = [
   ...DATA.macro_sectors.map(id => ({ id, type: "sector"  })),
 ];
 
-// Hub → product spokes  +  product → sector links
 const links = [
-  ...DATA.products.map(p  => ({ source: COMPANY_ID, target: p,        kind: "hub"    })),
-  ...DATA.links.map(l     => ({ source: l.source,   target: l.target, kind: "sector" })),
+  ...DATA.products.map(p => ({ source: COMPANY_ID, target: p,        kind: "hub" })),
+  ...DATA.links.map(l    => ({ source: l.source,   target: l.target, kind: "sec" })),
 ];
 
-// ── Force simulation ────────────────────────────────────────────────────────
+// ── Force simulation — radial forces enforce the 3-ring hierarchy ────────────
+const INNER_R = Math.min(W, H) * 0.27;   // products ring
+const OUTER_R = Math.min(W, H) * 0.47;   // sectors ring
+
 const sim = d3.forceSimulation(nodes)
-  .force("link",      d3.forceLink(links).id(d => d.id)
-                        .distance(d => d.kind === "hub" ? 200 : 220))
-  .force("charge",    d3.forceManyBody().strength(-600))
-  .force("collision", d3.forceCollide().radius(d => d.type === "company" ? 70 : 75));
+  .force("link",         d3.forceLink(links).id(d => d.id).strength(0.4)
+                           .distance(d => d.kind === "hub" ? INNER_R * 0.9 : OUTER_R * 0.55))
+  .force("charge",       d3.forceManyBody().strength(-400))
+  .force("collision",    d3.forceCollide().radius(d => d.type === "sector" ? 60 : 50))
+  // Radial forces pull products to inner ring and sectors to outer ring
+  .force("radial-prod",  d3.forceRadial(INNER_R, W / 2, H / 2)
+                           .strength(d => d.type === "product" ? 0.9 : 0))
+  .force("radial-sec",   d3.forceRadial(OUTER_R, W / 2, H / 2)
+                           .strength(d => d.type === "sector"  ? 0.9 : 0));
 
 // ── Links ───────────────────────────────────────────────────────────────────
 const linkEl = g.selectAll(".link")
   .data(links)
   .join("line")
-  .attr("stroke",         d => d.kind === "hub" ? "#92400e" : "#374151")
-  .attr("stroke-width",   d => d.kind === "hub" ? 1.5 : 2)
-  .attr("stroke-opacity", d => d.kind === "hub" ? 0.6  : 0.8)
-  .attr("marker-end",     d => d.kind === "hub" ? "url(#arrow-hub)" : "url(#arrow-sector)");
+  .attr("stroke",         d => d.kind === "hub" ? "#92400e" : "#4b5563")
+  .attr("stroke-width",   d => d.kind === "hub" ? 1.5 : 1.5)
+  .attr("stroke-opacity", d => d.kind === "hub" ? 0.7  : 0.7)
+  .attr("stroke-dasharray", d => d.kind === "hub" ? "5,3" : null)
+  .attr("marker-end",     d => d.kind === "hub" ? "url(#arr-hub)" : "url(#arr-sec)");
 
-// ── Drag (company hub stays draggable but re-pins after release) ─────────────
+// ── Drag ────────────────────────────────────────────────────────────────────
+// Company re-pins where dropped; products & sectors float freely after drag.
 const drag = d3.drag()
-  .on("start", (e, d) => {
-    if (!e.active) sim.alphaTarget(0.3).restart();
-    d.fx = d.x; d.fy = d.y;
-  })
+  .on("start", (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
   .on("drag",  (e, d) => { d.fx = e.x; d.fy = e.y; })
   .on("end",   (e, d) => {
     if (!e.active) sim.alphaTarget(0);
-    // Re-pin company to wherever the user dropped it; free the others
     if (d.type !== "company") { d.fx = null; d.fy = null; }
   });
 
@@ -234,91 +251,80 @@ const nodeEl = g.selectAll(".node")
   .style("cursor", "grab")
   .call(drag);
 
-// Company hub — large gold circle
+// Company — large gold circle
 nodeEl.filter(d => d.type === "company")
   .append("circle")
-  .attr("r", 58)
-  .attr("fill", "#78350f")
-  .attr("stroke", "#fbbf24")
-  .attr("stroke-width", 2.5);
+  .attr("r", 60)
+  .attr("fill", "#78350f").attr("stroke", "#fbbf24").attr("stroke-width", 2.5);
 
-// Product — rounded rectangle (blue)
+// Product — blue rounded rectangle
 nodeEl.filter(d => d.type === "product")
   .append("rect")
-  .attr("width", 152).attr("height", 46)
-  .attr("x", -76).attr("y", -23)
-  .attr("rx", 9)
-  .attr("fill", "#1e40af")
-  .attr("stroke", "#60a5fa")
-  .attr("stroke-width", 1.5);
+  .attr("width", 156).attr("height", 46)
+  .attr("x", -78).attr("y", -23).attr("rx", 9)
+  .attr("fill", "#1e40af").attr("stroke", "#60a5fa").attr("stroke-width", 1.5);
 
-// Sector — circle (orange-red)
+// Sector — orange circle
 nodeEl.filter(d => d.type === "sector")
   .append("circle")
   .attr("r", 50)
-  .attr("fill", "#7c2d12")
-  .attr("stroke", "#fb923c")
-  .attr("stroke-width", 1.5);
+  .attr("fill", "#7c2d12").attr("stroke", "#fb923c").attr("stroke-width", 1.5);
 
 // ── Labels ──────────────────────────────────────────────────────────────────
-function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+function trunc(s, n) { return s && s.length > n ? s.slice(0, n - 1) + "…" : s || ""; }
+
+// Split "Part A / Part B" → [partA, partB], works regardless of CN/EN order
+function splitBilingual(str) {
+  const i = str.indexOf(" / ");
+  return i >= 0 ? [str.slice(0, i), str.slice(i + 3)] : [str, ""];
+}
 
 nodeEl.each(function(d) {
   const el = d3.select(this);
 
   if (d.type === "company") {
-    // Company: show ticker on top line, short name below
-    const sep = d.id.indexOf(" / ");
-    const en  = truncate(sep >= 0 ? d.id.slice(0, sep) : d.id, 14);
-    const zh  = sep >= 0 ? truncate(d.id.slice(sep + 3), 7) : "";
-    el.append("text")
-      .attr("text-anchor", "middle").attr("y", zh ? -8 : 2)
+    // Line 1: ticker  Line 2+3: both parts of company_name
+    const [p1, p2] = splitBilingual(d.id);
+    const yBase = p2 ? -10 : -4;
+    el.append("text").attr("text-anchor", "middle").attr("y", yBase)
       .attr("dominant-baseline", "middle")
-      .style("fill", "#fef3c7").style("font-size", "11px").style("font-weight", "700")
+      .style("fill", "#fef3c7").style("font-size", "13px").style("font-weight", "800")
       .style("pointer-events", "none").text(DATA.ticker);
-    el.append("text")
-      .attr("text-anchor", "middle").attr("y", 7)
+    el.append("text").attr("text-anchor", "middle").attr("y", yBase + 16)
       .attr("dominant-baseline", "middle")
-      .style("fill", "#fde68a").style("font-size", "10px").style("font-weight", "600")
-      .style("pointer-events", "none").text(en);
-    if (zh) {
-      el.append("text")
-        .attr("text-anchor", "middle").attr("y", 21)
+      .style("fill", "#fde68a").style("font-size", "9.5px").style("font-weight", "600")
+      .style("pointer-events", "none").text(trunc(p1, 10));
+    if (p2) {
+      el.append("text").attr("text-anchor", "middle").attr("y", yBase + 29)
         .attr("dominant-baseline", "middle")
         .style("fill", "#fcd34d").style("font-size", "9px")
-        .style("pointer-events", "none").text(zh);
+        .style("pointer-events", "none").text(trunc(p2, 10));
     }
     return;
   }
 
-  // Products & sectors: bilingual split
-  const sep = d.id.indexOf(" / ");
-  const en  = truncate(sep >= 0 ? d.id.slice(0, sep)    : d.id, 18);
-  const zh  = sep >= 0          ? truncate(d.id.slice(sep + 3), 8) : "";
-
-  el.append("text")
-    .attr("text-anchor", "middle")
-    .attr("y", zh ? -5 : 1)
+  // Products & sectors: line 1 = part before " / ", line 2 = part after
+  const [p1, p2] = splitBilingual(d.id);
+  el.append("text").attr("text-anchor", "middle").attr("y", p2 ? -5 : 1)
     .attr("dominant-baseline", "middle")
     .style("fill", "#f1f5f9").style("font-size", "10.5px").style("font-weight", "600")
-    .style("pointer-events", "none").text(en);
-  if (zh) {
-    el.append("text")
-      .attr("text-anchor", "middle").attr("y", 10)
+    .style("pointer-events", "none").text(trunc(p1, 17));
+  if (p2) {
+    el.append("text").attr("text-anchor", "middle").attr("y", 10)
       .attr("dominant-baseline", "middle")
       .style("fill", "#94a3b8").style("font-size", "9.5px")
-      .style("pointer-events", "none").text(zh);
+      .style("pointer-events", "none").text(trunc(p2, 8));
   }
 });
 
 // ── Tooltip ─────────────────────────────────────────────────────────────────
 const tip = d3.select("#tooltip");
-const KIND_LABEL = { company: "🏢 Company 公司", product: "📦 Product 产品", sector: "🏭 Macro Sector 行业" };
+const KIND = { company: "🏢 Company 公司", product: "📦 Product 产品", sector: "🏭 Macro Sector 行业" };
 
 nodeEl
   .on("mouseover", (e, d) => {
     tip.style("display", "block")
-       .html(`<strong>${d.id}</strong><br><em style="color:#9ca3af">${KIND_LABEL[d.type]}</em>`);
+       .html(`<strong>${d.id}</strong><br><em style="color:#9ca3af">${KIND[d.type]}</em>`);
   })
   .on("mousemove", e => {
     tip.style("left", (e.clientX + 14) + "px").style("top", (e.clientY - 36) + "px");
@@ -326,25 +332,24 @@ nodeEl
   .on("mouseleave", () => tip.style("display", "none"));
 
 // ── Legend ──────────────────────────────────────────────────────────────────
-const lg = svg.append("g").attr("transform", "translate(16,16)");
-
-lg.append("circle").attr("cx", 7).attr("cy", 7).attr("r", 7)
+const lg = svg.append("g").attr("transform", "translate(14,14)");
+lg.append("circle").attr("cx", 8).attr("cy", 8).attr("r", 8)
   .attr("fill", "#78350f").attr("stroke", "#fbbf24").attr("stroke-width", 1.5);
-lg.append("text").attr("x", 22).attr("y", 11)
-  .style("fill", "#fde68a").style("font-size", "12px").text("Company 公司");
+lg.append("text").attr("x", 22).attr("y", 12)
+  .style("fill", "#fde68a").style("font-size", "11px").text("Company 公司");
 
-lg.append("rect").attr("x", 0).attr("y", 24).attr("width", 14).attr("height", 14).attr("rx", 3)
+lg.append("rect").attr("x", 1).attr("y", 25).attr("width", 14).attr("height", 12).attr("rx", 3)
   .attr("fill", "#1e40af").attr("stroke", "#60a5fa").attr("stroke-width", 1);
 lg.append("text").attr("x", 22).attr("y", 35)
-  .style("fill", "#d1d5db").style("font-size", "12px").text("Product 产品");
+  .style("fill", "#d1d5db").style("font-size", "11px").text("Product 产品");
 
-lg.append("circle").attr("cx", 7).attr("cy", 56).attr("r", 7)
+lg.append("circle").attr("cx", 8).attr("cy", 54).attr("r", 8)
   .attr("fill", "#7c2d12").attr("stroke", "#fb923c").attr("stroke-width", 1);
-lg.append("text").attr("x", 22).attr("y", 60)
-  .style("fill", "#d1d5db").style("font-size", "12px").text("Macro Sector 行业");
+lg.append("text").attr("x", 22).attr("y", 58)
+  .style("fill", "#d1d5db").style("font-size", "11px").text("Macro Sector 行业");
 
-lg.append("text").attr("x", 0).attr("y", 78)
-  .style("fill", "#4b5563").style("font-size", "10px").text("Drag nodes · Scroll to zoom");
+lg.append("text").attr("x", 0).attr("y", 76)
+  .style("fill", "#4b5563").style("font-size", "10px").text("Drag · Scroll to zoom");
 
 // ── Tick ────────────────────────────────────────────────────────────────────
 sim.on("tick", () => {
