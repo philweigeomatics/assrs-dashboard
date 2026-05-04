@@ -3342,7 +3342,9 @@ if st.session_state.active_ticker:
                                 st.caption(f"目标区间: {macd_10d_low_tmr:.4f} ~ {macd_10d_low_tmr * 0.95:.4f}")
 
                         with cond_col2:
-                            gap_narrowing = sim_result['macd_gap_tomorrow'] > sim_result['macd_gap_today']
+                            # gap_narrowing = sim_result['macd_gap_tomorrow'] > sim_result['macd_gap_today']
+
+                            gap_narrowing = abs(sim_result['macd_gap_tomorrow']) < abs(sim_result['macd_gap_today'])
                             
                             # Grab the raw boolean evaluated by the engine
                             obv_rising = sim_result['obv_rising']

@@ -1,326 +1,385 @@
 """
 Shared Technical Analysis Engine
-Contains core analysis functions used across multiple pages
+Contains core analysis functions used across multiple pages.
+
+All indicator parameters are centralised in the CONSTANTS block below.
+Change a value once here and it propagates to every page automatically.
 """
 
 import pandas as pd
 import numpy as np
 import ta
 from scipy import stats
+from hmmlearn.hmm import GaussianHMM
+from sklearn.preprocessing import StandardScaler
 
 
-def apply_adx_patterns(df):
+# ============================================================
+#  INDICATOR CONSTANTS  — edit here, nowhere else
+# ============================================================
+
+# ── Moving Averages ─────────────────────────────────────────
+MA_SHORT   = 5
+MA_MID     = 20
+MA_LONG    = 50
+MA_MACRO   = 200
+
+# ── Bollinger Bands ──────────────────────────────────────────
+BB_WINDOW  = 20
+BB_STD     = 2
+
+# ── RSI ──────────────────────────────────────────────────────
+RSI_WINDOW      = 14
+RSI_OVERSOLD    = 30
+RSI_OVERBOUGHT  = 70
+RSI_LOOKBACK    = 252   # rolling window for dynamic percentile bands
+
+# ── ADX / DMI ────────────────────────────────────────────────
+ADX_WINDOW          = 14   # standard Wilder period  (was 10 – too noisy)
+ADX_SG_WINDOW       = 7    # Savitzky-Golay window length (must be odd)
+ADX_SG_POLYORDER    = 2    # Savitzky-Golay polynomial order
+ADX_EWM_SPAN        = 9    # EWM fallback span when SG is unavailable
+ADX_SLOPE_WINDOW    = 5    # linear-regression window for slope
+ADX_BB_WINDOW       = 20   # Bollinger-Band window on ADX itself
+ADX_BB_STD          = 2
+
+# ADX level thresholds (calibrated for window=14)
+ADX_WEAK        = 20
+ADX_EMERGING    = 25
+ADX_STRONG      = 30
+ADX_VERY_STRONG = 40
+
+# ADX slope / acceleration thresholds
+ADX_SLOPE_FLAT_LO = -0.15
+ADX_SLOPE_FLAT_HI =  0.15
+ADX_SLOPE_ACCEL   =  0.05
+ADX_SLOPE_FAST    =  0.50
+ADX_ACCEL_FAST    =  0.10
+ADX_ACCEL_SLOW    = -0.10
+ADX_ACCEL_PEAK    = -0.15
+
+# DI Screaming Buy: crossover AND one-day spread widening > this value
+DI_SCREAMING_BUY_MOMENTUM = 15
+
+# ── MACD (three-speed dynamic set) ───────────────────────────
+MACD_FAST_F, MACD_FAST_S, MACD_FAST_SIGN =  8, 21,  5
+MACD_NORM_F, MACD_NORM_S, MACD_NORM_SIGN = 12, 26,  9
+MACD_SLOW_F, MACD_SLOW_S, MACD_SLOW_SIGN = 15, 30,  9
+
+# ── Volume ───────────────────────────────────────────────────
+VOL_LOOKBACK    = 100
+VOL_OBV_WINDOW  = 20
+
+# ── Market Regime (HMM) ──────────────────────────────────────
+REGIME_METHOD = 'HMM'   # 'HMM', 'JUMP', or 'ATR'
+
+
+# ============================================================
+#  ADX PATTERN DETECTION  (9 phases)
+# ============================================================
+
+def apply_adx_patterns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Isolated helper function to calculate the 9-phase ADX pattern.
-    Requires 'ADX', 'ADX_Slope', and 'ADX_Acceleration' columns to exist.
+    Classify every bar into one of 9 ADX lifecycle phases.
+    Requires: ADX, ADX_Slope, ADX_Acceleration columns.
+    All thresholds reference the CONSTANTS block above.
     """
-    # Pattern 1: BOTTOMING 
-    adx_bottoming = (
-        (df['ADX'] < 22) &
-        (df['ADX_Slope'] < 0) &
-        (df['ADX_Slope'] > -0.15) & 
-        (df['ADX_Acceleration'] > 0.05)
+    adx  = df['ADX']
+    sl   = df['ADX_Slope']
+    acc  = df['ADX_Acceleration']
+    sl_1 = sl.shift(1)
+
+    p_bottoming = (
+        (adx < ADX_EMERGING) &
+        (sl  < 0) &
+        (sl  > ADX_SLOPE_FLAT_LO) &
+        (acc > ADX_SLOPE_ACCEL)
     )
-    
-    # Pattern 2: REVERSING UP 
-    adx_reversing_up = (
-        (df['ADX'] < 25 ) &
-        (df['ADX_Slope'] > 0) &
-        (df['ADX_Slope'].shift(1) <= 0)
+    p_reversing_up = (
+        (adx < ADX_EMERGING) &
+        (sl  > 0) &
+        (sl_1 <= 0)
     )
-    
-    # Pattern 3: ACCELERATING UP
-    adx_accelerating_up = (
-        (df['ADX_Slope'] > 0.5) &
-        (df['ADX_Acceleration'] > 0.1)
+    p_accel_up = (
+        (sl  > ADX_SLOPE_FAST) &
+        (acc > ADX_ACCEL_FAST)
     )
-    
-    # Pattern 4: STRONG & STABLE
-    adx_strong_stable = (
-        (df['ADX'] >= 30) &
-        (df['ADX_Slope'] >= -0.3) &
-        (df['ADX_Slope'] <= 0.3)
+    p_strong_stable = (
+        (adx >= ADX_STRONG) &
+        (sl  >= ADX_SLOPE_FLAT_LO) &
+        (sl  <=  ADX_SLOPE_FLAT_HI)
     )
-    
-    # Pattern 5: DECELERATING UP
-    adx_decelerating_up = (
-        (df['ADX'] > 25) &
-        (df['ADX_Slope'] > 0) &
-        (df['ADX_Acceleration'] < -0.1)
+    p_decelerating_up = (
+        (adx > ADX_EMERGING) &
+        (sl  > 0) &
+        (acc < ADX_ACCEL_SLOW)
     )
-    
-    # Pattern 6: PEAKING
-    adx_peaking = (
-        (df['ADX'] >= 30) &
-        (df['ADX_Slope'] > 0) &
-        (df['ADX_Acceleration'] < -0.15) &
-        (df['ADX_Slope'] < df['ADX_Slope'].shift(1))
+    p_peaking = (
+        (adx >= ADX_STRONG) &
+        (sl  > 0) &
+        (acc < ADX_ACCEL_PEAK) &
+        (sl  < sl_1)
     )
-    
-    # Pattern 7: REVERSING DOWN
-    adx_reversing_down = (
-        (df['ADX'] >= 25) &
-        (df['ADX_Slope'] < 0) &
-        (df['ADX_Slope'].shift(1) > 0)
+    p_reversing_down = (
+        (adx >= ADX_EMERGING) &
+        (sl  < 0) &
+        (sl_1 > 0)
     )
-    
-    # Pattern 8: ACCELERATING DOWN
-    adx_accelerating_down = (
-        (df['ADX_Slope'] < -0.5) &
-        (df['ADX_Acceleration'] < -0.1)
+    p_accel_down = (
+        (sl  < -ADX_SLOPE_FAST) &
+        (acc < ADX_ACCEL_SLOW)
     )
-    
-    # Pattern 9: DECELERATING DOWN
-    adx_decelerating_down = (
-        (df['ADX'] < 30) &
-        (df['ADX_Slope'] < -0.3 ) &
-        (df['ADX_Acceleration'] > 0.1)
+    p_decel_down = (
+        (adx < ADX_STRONG) &
+        (sl  < -ADX_SLOPE_FLAT_HI) &
+        (acc > ADX_ACCEL_FAST)
     )
-    
-    # Assign patterns to the dataframe
+
+    # Assign in PRIORITY ORDER — Peaking overwrites Losing Steam
     df['ADX_Pattern'] = 'Neutral'
-    df.loc[adx_bottoming, 'ADX_Pattern'] = 'Bottoming'
-    df.loc[adx_reversing_up, 'ADX_Pattern'] = 'Reversing Up'
-    df.loc[adx_accelerating_up, 'ADX_Pattern'] = 'Accelerating Up'
-    df.loc[adx_strong_stable, 'ADX_Pattern'] = 'Strong Trend'
-    df.loc[adx_decelerating_up, 'ADX_Pattern'] = 'Losing Steam'
-    df.loc[adx_peaking, 'ADX_Pattern'] = 'Peaking'
-    df.loc[adx_reversing_down, 'ADX_Pattern'] = 'Reversing Down'
-    df.loc[adx_accelerating_down, 'ADX_Pattern'] = 'Accelerating Down'
-    df.loc[adx_decelerating_down, 'ADX_Pattern'] = 'Slowing Down'
-    
+    df.loc[p_bottoming,       'ADX_Pattern'] = 'Bottoming'
+    df.loc[p_reversing_up,    'ADX_Pattern'] = 'Reversing Up'
+    df.loc[p_accel_up,        'ADX_Pattern'] = 'Accelerating Up'
+    df.loc[p_strong_stable,   'ADX_Pattern'] = 'Strong Trend'
+    df.loc[p_decelerating_up, 'ADX_Pattern'] = 'Losing Steam'
+    df.loc[p_decel_down,      'ADX_Pattern'] = 'Slowing Down'
+    df.loc[p_accel_down,      'ADX_Pattern'] = 'Accelerating Down'
+    df.loc[p_reversing_down,  'ADX_Pattern'] = 'Reversing Down'
+    df.loc[p_peaking,         'ADX_Pattern'] = 'Peaking'   # highest priority
+
     return df
 
 
+# ============================================================
+#  MAIN ANALYSIS ENGINE
+# ============================================================
 
 def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     """
-    
+    Compute all technical indicators and signals for one stock.
+
     Args:
-        df: DataFrame with OHLC data (columns: Open, High, Low, Close, Volume)
-    
+        df: OHLCV DataFrame with columns: Open, High, Low, Close, Volume
+
     Returns:
-        DataFrame with all technical indicators and signal columns
+        DataFrame with all indicator and signal columns appended.
     """
     df_analysis = df.copy()
-    
-    # Ensure datetime index
+
     if not isinstance(df_analysis.index, pd.DatetimeIndex):
         df_analysis.index = pd.to_datetime(df_analysis.index)
-
     df_analysis = df_analysis.sort_index()
 
-    
-    # ==================== MOVING AVERAGES ====================
-    df_analysis['MA5'] = ta.trend.sma_indicator(df_analysis['Close'], window=5)
-    df_analysis['EMA5'] = ta.trend.ema_indicator(df_analysis['Close'], window=5)
-    df_analysis['MA20'] = ta.trend.sma_indicator(df_analysis['Close'], window=20)
-    df_analysis['MA50'] = ta.trend.sma_indicator(df_analysis['Close'], window=50)
-    df_analysis['MA200'] = ta.trend.sma_indicator(df_analysis['Close'], window=200)
-    
-    # ==================== BOLLINGER BANDS ====================
-    bb = ta.volatility.BollingerBands(df_analysis['Close'], window=20, window_dev=2)
+    # ── Moving Averages ──────────────────────────────────────
+    df_analysis['MA5']   = ta.trend.sma_indicator(df_analysis['Close'], window=MA_SHORT)
+    df_analysis['EMA5']  = ta.trend.ema_indicator(df_analysis['Close'], window=MA_SHORT)
+    df_analysis['MA20']  = ta.trend.sma_indicator(df_analysis['Close'], window=MA_MID)
+    df_analysis['MA50']  = ta.trend.sma_indicator(df_analysis['Close'], window=MA_LONG)
+    df_analysis['MA200'] = ta.trend.sma_indicator(df_analysis['Close'], window=MA_MACRO)
+
+    # ── Bollinger Bands ──────────────────────────────────────
+    bb = ta.volatility.BollingerBands(df_analysis['Close'], window=BB_WINDOW, window_dev=BB_STD)
     df_analysis['BB_Upper'] = bb.bollinger_hband()
     df_analysis['BB_Lower'] = bb.bollinger_lband()
     df_analysis['BB_Width'] = (df_analysis['BB_Upper'] - df_analysis['BB_Lower']) / df_analysis['Close']
-    
 
-
-    # ==================== MARKET REGIME DETECTION ====================
-    # MUST be called before MACD so we have historical regimes day-by-day
+    # ── Market Regime (must run before dynamic MACD) ─────────
     df_analysis = detect_market_regime(df_analysis)
 
-    # ==================== POINT-IN-TIME DYNAMIC MACD ====================
-    # 1. Calculate all three speeds for the entire history
-    macd_fast = ta.trend.MACD(df_analysis['Close'], window_fast=8, window_slow=21, window_sign=5)
-    macd_norm = ta.trend.MACD(df_analysis['Close'], window_fast=12, window_slow=26, window_sign=9)
-    macd_slow = ta.trend.MACD(df_analysis['Close'], window_fast=15, window_slow=30, window_sign=9)
+    # ── Dynamic MACD (three-speed, regime-switched) ──────────
+    macd_fast = ta.trend.MACD(df_analysis['Close'],
+                               window_fast=MACD_FAST_F, window_slow=MACD_FAST_S, window_sign=MACD_FAST_SIGN)
+    macd_norm = ta.trend.MACD(df_analysis['Close'],
+                               window_fast=MACD_NORM_F, window_slow=MACD_NORM_S, window_sign=MACD_NORM_SIGN)
+    macd_slow = ta.trend.MACD(df_analysis['Close'],
+                               window_fast=MACD_SLOW_F, window_slow=MACD_SLOW_S, window_sign=MACD_SLOW_SIGN)
 
-    # 2. Stitch them together day-by-day based on the historical regime
-    import numpy as np
-    
     cond_high = df_analysis['Market_Regime'] == 'High Volatility'
-    cond_low = df_analysis['Market_Regime'] == 'Low Volatility'
-    
-    # Select MACD Line
-    df_analysis['MACD'] = np.where(cond_high, macd_fast.macd(),
-                          np.where(cond_low, macd_slow.macd(),
-                                   macd_norm.macd()))
-                                   
-    # Select Signal Line
+    cond_low  = df_analysis['Market_Regime'] == 'Low Volatility'
+
+    df_analysis['MACD']        = np.where(cond_high, macd_fast.macd(),
+                                  np.where(cond_low,  macd_slow.macd(),
+                                                      macd_norm.macd()))
     df_analysis['MACD_Signal'] = np.where(cond_high, macd_fast.macd_signal(),
-                                 np.where(cond_low, macd_slow.macd_signal(),
-                                          macd_norm.macd_signal()))
-                                          
-    # Calculate final Histogram
-    df_analysis['MACD_Hist'] = df_analysis['MACD'] - df_analysis['MACD_Signal']
-    
-    # # Save today's active parameters for the UI Simulator to use
-    # latest_regime = df_analysis['Market_Regime'].iloc[-1]
-    # df_analysis['MACD_Fast_Param'] = 8 if latest_regime == 'High Volatility' else 15 if latest_regime == 'Low Volatility' else 12
-    # df_analysis['MACD_Slow_Param'] = 21 if latest_regime == 'High Volatility' else 30 if latest_regime == 'Low Volatility' else 26
-    # df_analysis['MACD_Sign_Param'] = 5 if latest_regime == 'High Volatility' else 9
-    # =========================================================
-    
-    # ==================== MACD ====================
-    # macd = ta.trend.MACD(df_analysis['Close'])
-    # df_analysis['MACD'] = macd.macd()
-    # df_analysis['MACD_Signal'] = macd.macd_signal()
-    # df_analysis['MACD_Hist'] = macd.macd_diff()
+                                  np.where(cond_low,  macd_slow.macd_signal(),
+                                                      macd_norm.macd_signal()))
+    df_analysis['MACD_Hist']   = df_analysis['MACD'] - df_analysis['MACD_Signal']
 
-    # 3. Save the active parameters day-by-day so the UI can prove the gears are shifting!
-    df_analysis['MACD_Fast_Param'] = np.where(cond_high, 8, np.where(cond_low, 15, 12))
-    df_analysis['MACD_Slow_Param'] = np.where(cond_high, 21, np.where(cond_low, 30, 26))
-    df_analysis['MACD_Sign_Param'] = np.where(cond_high, 5, np.where(cond_low, 9, 9))
-    
-    # (Do NOT put the standard ta.trend.MACD calculation here anymore!)
-    
-    # ==================== RSI ====================
-    df_analysis['RSI_14'] = ta.momentum.RSIIndicator(df_analysis['Close'], window=14).rsi()
-    
-    # ==================== ADX ====================
-    adx = ta.trend.ADXIndicator(df_analysis['High'], df_analysis['Low'], df_analysis['Close'], window=10)
-    df_analysis['ADX'] = adx.adx()
-    df_analysis['DI_Plus'] = adx.adx_pos()    # ← ADD THIS
-    df_analysis['DI_Minus'] = adx.adx_neg()   # ← ADD THIS
+    # Day-by-day active parameters (so UI simulator can read the correct gear)
+    df_analysis['MACD_Fast_Param'] = np.where(cond_high, MACD_FAST_F, np.where(cond_low, MACD_SLOW_F, MACD_NORM_F))
+    df_analysis['MACD_Slow_Param'] = np.where(cond_high, MACD_FAST_S, np.where(cond_low, MACD_SLOW_S, MACD_NORM_S))
+    df_analysis['MACD_Sign_Param'] = np.where(cond_high, MACD_FAST_SIGN, np.where(cond_low, MACD_SLOW_SIGN, MACD_NORM_SIGN))
 
-    # DI Crossover signals
+    # ── RSI ──────────────────────────────────────────────────
+    df_analysis['RSI_14'] = ta.momentum.RSIIndicator(df_analysis['Close'], window=RSI_WINDOW).rsi()
+
+    # ── ADX / DMI ────────────────────────────────────────────
+    # FIX: Use ADX_WINDOW=14 (Wilder standard). window=10 produced a noisier ADX
+    # whose volatility misaligned the slope/acceleration thresholds, firing
+    # patterns that shouldn't trigger and creating a messy chart.
+    adx_ind = ta.trend.ADXIndicator(
+        df_analysis['High'], df_analysis['Low'], df_analysis['Close'],
+        window=ADX_WINDOW
+    )
+    df_analysis['ADX']      = adx_ind.adx()
+    df_analysis['DI_Plus']  = adx_ind.adx_pos()
+    df_analysis['DI_Minus'] = adx_ind.adx_neg()
+
+    # DI crossover signals
     df_analysis['DI_Bullish_Cross'] = (
-        (df_analysis['DI_Plus'] > df_analysis['DI_Minus']) &
+        (df_analysis['DI_Plus']  > df_analysis['DI_Minus']) &
         (df_analysis['DI_Plus'].shift(1) <= df_analysis['DI_Minus'].shift(1))
     )
     df_analysis['DI_Bearish_Cross'] = (
         (df_analysis['DI_Minus'] > df_analysis['DI_Plus']) &
         (df_analysis['DI_Minus'].shift(1) <= df_analysis['DI_Plus'].shift(1))
     )
-    
-    
-    # ADX LOWESS Smoothing
+
+    # DI Screaming Buy — mirrors the simulator definition:
+    # a fresh bullish crossover AND spread widened by > DI_SCREAMING_BUY_MOMENTUM in one day.
+    # FIX: was only computed inside simulate_next_day_indicators(), so the Today's Alerts
+    # scan always received False for this column. Now emitted by the main engine.
+    _di_spread    = df_analysis['DI_Plus'] - df_analysis['DI_Minus']
+    _di_spread_mo = _di_spread - _di_spread.shift(1)
+    df_analysis['DI_Screaming_Buy'] = (
+        df_analysis['DI_Bullish_Cross'] &
+        (_di_spread_mo > DI_SCREAMING_BUY_MOMENTUM)
+    )
+
+    # ── ADX Smoothing ─────────────────────────────────────────
+    # FIX: fillna(method='ffill') is deprecated — use .ffill() directly.
+    adx_filled = df_analysis['ADX'].ffill()
     try:
         from scipy.signal import savgol_filter
         df_analysis['ADX_LOWESS'] = savgol_filter(
-            df_analysis['ADX'].fillna(method='ffill'),
-            window_length=7, # Reduced from 11 to 7
-            polyorder=2  # Reduced from 3 to 2
+            adx_filled, window_length=ADX_SG_WINDOW, polyorder=ADX_SG_POLYORDER
         )
-    except:
-        df_analysis['ADX_LOWESS'] = df_analysis['ADX'].ewm(span=9, adjust=False).mean()
-    
+    except Exception:
+        df_analysis['ADX_LOWESS'] = adx_filled.ewm(span=ADX_EWM_SPAN, adjust=False).mean()
+
     # ADX Bollinger Bands
-    df_analysis['ADX_BB_Middle'] = df_analysis['ADX'].rolling(window=20).mean()
-    df_analysis['ADX_BB_Std'] = df_analysis['ADX'].rolling(window=20).std()
-    df_analysis['ADX_BB_Upper'] = df_analysis['ADX_BB_Middle'] + 2 * df_analysis['ADX_BB_Std']
-    df_analysis['ADX_BB_Lower'] = df_analysis['ADX_BB_Middle'] - 2 * df_analysis['ADX_BB_Std']
-    
-    # ==================== OBV ====================
+    # FIX: was computed on raw ADX while slope was computed on ADX_LOWESS, creating
+    # a visual/logical mismatch. Both now use the same smoothed series.
+    df_analysis['ADX_BB_Middle'] = df_analysis['ADX_LOWESS'].rolling(window=ADX_BB_WINDOW).mean()
+    df_analysis['ADX_BB_Std']    = df_analysis['ADX_LOWESS'].rolling(window=ADX_BB_WINDOW).std()
+    df_analysis['ADX_BB_Upper']  = df_analysis['ADX_BB_Middle'] + ADX_BB_STD * df_analysis['ADX_BB_Std']
+    df_analysis['ADX_BB_Lower']  = df_analysis['ADX_BB_Middle'] - ADX_BB_STD * df_analysis['ADX_BB_Std']
+
+    # ── ADX Slope & Acceleration ──────────────────────────────
+    def _linreg_slope(y):
+        if len(y) < 3 or np.isnan(y).any():
+            return 0.0
+        x = np.arange(len(y), dtype=float)
+        slope, *_ = stats.linregress(x, y)
+        return float(slope)
+
+    df_analysis['ADX_Slope'] = (
+        df_analysis['ADX_LOWESS']
+        .rolling(window=ADX_SLOPE_WINDOW, min_periods=3)
+        .apply(_linreg_slope, raw=True)
+    )
+
+    # FIX: raw diff(1) of slope is very spiky; a 3-day EWM smooths it while
+    # preserving direction changes needed for pattern detection.
+    df_analysis['ADX_Acceleration'] = (
+        df_analysis['ADX_Slope'].diff(1).ewm(span=3, adjust=False).mean()
+    )
+
+    # ── ADX Pattern Detection ─────────────────────────────────
+    df_analysis = apply_adx_patterns(df_analysis)
+
+    # ── OBV ──────────────────────────────────────────────────
     df_analysis['OBV'] = ta.volume.on_balance_volume(df_analysis['Close'], df_analysis['Volume'])
-    df_analysis['Volume_Scaled_OBV'] = df_analysis['OBV'] / df_analysis['Volume'].rolling(window=20).mean()
-    
-    # ==================== VOLUME STATS ====================
-    df_analysis['VolMean_100d'] = df_analysis['Volume'].rolling(window=100, min_periods=20).mean()
-    df_analysis['VolStd_100d'] = df_analysis['Volume'].rolling(window=100, min_periods=20).std()
-    df_analysis['Volume_ZScore'] = (df_analysis['Volume'] - df_analysis['VolMean_100d']) / df_analysis['VolStd_100d']
-    
-    # ==================== ADAPTIVE PARAMETERS ====================
-    def get_adaptive_lookback(df_length, min_days=60, max_days=250):
-        if df_length < 120:
-            return max(min_days, int(df_length * 0.5))
-        elif df_length < 250:
-            return 120
-        else:
-            return max_days
-    
-    lookback_period = get_adaptive_lookback(len(df_analysis))
-    params = calculate_adaptive_parameters_percentile(df, lookback_days=30)
+    df_analysis['Volume_Scaled_OBV'] = (
+        df_analysis['OBV'] / df_analysis['Volume'].rolling(window=VOL_OBV_WINDOW).mean()
+    )
+
+    # ── Volume Statistics ─────────────────────────────────────
+    df_analysis['VolMean_100d']  = df_analysis['Volume'].rolling(window=VOL_LOOKBACK, min_periods=20).mean()
+    df_analysis['VolStd_100d']   = df_analysis['Volume'].rolling(window=VOL_LOOKBACK, min_periods=20).std()
+    df_analysis['Volume_ZScore'] = (
+        (df_analysis['Volume'] - df_analysis['VolMean_100d']) / df_analysis['VolStd_100d']
+    )
+
+    # ── Adaptive Parameters ───────────────────────────────────
+    def _adaptive_lookback(n, min_d=60, max_d=250):
+        if n < 120:   return max(min_d, int(n * 0.5))
+        elif n < 250: return 120
+        else:         return max_d
+
+    lookback_period = _adaptive_lookback(len(df_analysis))
+    params   = calculate_adaptive_parameters_percentile(df, lookback_days=30)
     lookback = params['obv_lookback']
-    
-    # ==================== INITIALIZE SIGNAL COLUMNS ====================
-    df_analysis['Signal_Accumulation'] = False
-    df_analysis['Signal_Squeeze'] = False
+
+    # ── Signal Column Initialisation ─────────────────────────
+    df_analysis['Signal_Accumulation']  = False
+    df_analysis['Signal_Squeeze']       = False
     df_analysis['Signal_Golden_Launch'] = False
-    df_analysis['Exit_MACD_Lead'] = False
-    
-    # ==================== PHASE 1: ACCUMULATION ====================
-    df_analysis['PriceChg'] = df_analysis['Close'].pct_change(periods=lookback)
-    
-    # FIX: Use the Volume_Scaled_OBV difference instead of pct_change on raw OBV. 
-    # This prevents the negative-number math bug and normalizes the volume perfectly.
-    df_analysis[f'OBV_Scaled_Diff'] = df_analysis['Volume_Scaled_OBV'] - df_analysis['Volume_Scaled_OBV'].shift(lookback)
-    
+    df_analysis['Exit_MACD_Lead']       = False
+
+    # ── Phase 1: Accumulation ─────────────────────────────────
+    df_analysis['PriceChg']        = df_analysis['Close'].pct_change(periods=lookback)
+    df_analysis['OBV_Scaled_Diff'] = (
+        df_analysis['Volume_Scaled_OBV'] - df_analysis['Volume_Scaled_OBV'].shift(lookback)
+    )
+
     accumulation = (
-        (df_analysis[f'OBV_Scaled_Diff'] > 0.5) &  # Genuinely positive OBV momentum
-        (df_analysis['PriceChg'].abs() < params['price_flat_threshold']) &  # Price is trapped/flat
-        (df_analysis['RSI_14'] < 60) & # Not overbought
-        (df_analysis['Close'] > df_analysis['MA200']) # ADDED: Only look for accumulation in macro uptrends
+        (df_analysis['OBV_Scaled_Diff']  > 0.5) &
+        (df_analysis['PriceChg'].abs()   < params['price_flat_threshold']) &
+        (df_analysis['RSI_14']           < 60) &
+        (df_analysis['Close']            > df_analysis['MA200'])
     )
     df_analysis.loc[accumulation, 'Signal_Accumulation'] = True
-    
-    # ==================== PHASE 2: SQUEEZE ====================
-    df_analysis['BB_Width_Percentile'] = df_analysis['BB_Width'].rolling(
-        window=lookback_period, min_periods=20
-    ).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan)
-    
+
+    # ── Phase 2: Squeeze ──────────────────────────────────────
+    df_analysis['BB_Width_Percentile'] = (
+        df_analysis['BB_Width']
+        .rolling(window=lookback_period, min_periods=20)
+        .apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan)
+    )
     df_analysis['Squeeze_Raw'] = df_analysis['BB_Width_Percentile'] <= 0.10
-    
-    def consecutive_days_filter(series, min_days=3):
+
+    def _consecutive_days(series: pd.Series, min_days: int = 3) -> pd.Series:
         if series.sum() == 0:
             return pd.Series(False, index=series.index)
         groups = (series != series.shift()).cumsum()
-        count = series.groupby(groups).transform('size')
-        return (series) & (count >= min_days)
-    
-    df_analysis['Signal_Squeeze'] = consecutive_days_filter(df_analysis['Squeeze_Raw'], min_days=3)
-    
-    squeeze_groups = (df_analysis['Signal_Squeeze'] != df_analysis['Signal_Squeeze'].shift()).cumsum()
-    df_analysis['Squeeze_Age'] = df_analysis.groupby(squeeze_groups)['Signal_Squeeze'].cumsum()
-    df_analysis['Squeeze_Mature'] = (df_analysis['Signal_Squeeze']) & (df_analysis['Squeeze_Age'] >= 5)
-    
-    # NEW: Directional Squeeze Breakout Triggers
-    # A squeeze is just stored energy. These signals tell us which way the energy is releasing.
-    df_analysis['Squeeze_Fired_Bullish'] = (
-        df_analysis['Signal_Squeeze'].shift(1) &  # Was in a squeeze yesterday
-        (df_analysis['Close'] > df_analysis['BB_Upper']) & # Broke the upper band today
-        (df_analysis['MACD'] > df_analysis['MACD_Signal']) # Momentum is supporting the upside
-    )
-    
-    df_analysis['Squeeze_Fired_Bearish'] = (
-        df_analysis['Signal_Squeeze'].shift(1) &  
-        (df_analysis['Close'] < df_analysis['BB_Lower']) & 
-        (df_analysis['MACD'] < df_analysis['MACD_Signal']) 
-    )
-    
-    # Keep legacy column for backward compatibility
-    df_analysis['Min_Width_120d'] = df_analysis['BB_Width'].rolling(window=120, min_periods=20).min()
-    
-    # ==================== ADX TREND & ACCELERATION ====================
-    def calculate_adx_trend(series, window=3):  # Reduced default window to 3
-        def get_slope(y):
-            if len(y) < 3 or y.isna().any():
-                return 0
-            x = np.arange(len(y))
-            slope, _, _, _, _ = stats.linregress(x, y)
-            return slope
-        return series.rolling(window=window, min_periods=3).apply(get_slope, raw=False)
-    
-    df_analysis['ADX_Slope'] = calculate_adx_trend(df_analysis['ADX_LOWESS'], window=5)
-    df_analysis['ADX_Acceleration'] = df_analysis['ADX_Slope'] - df_analysis['ADX_Slope'].shift(1)
-    
-    # ==================== ADX PATTERN DETECTION (COMPLETE - 9 PATTERNS) ====================
-    df_analysis = apply_adx_patterns(df_analysis)
+        count  = series.groupby(groups).transform('size')
+        return series & (count >= min_days)
 
-    
-    # ==================== MACD SCENARIOS ====================
-    df_analysis['MACD_Gap'] = df_analysis['MACD'] - df_analysis['MACD_Signal']
-    df_analysis['MACD_Momentum'] = df_analysis['MACD'] - df_analysis['MACD'].shift(1)
+    df_analysis['Signal_Squeeze'] = _consecutive_days(df_analysis['Squeeze_Raw'], min_days=3)
+
+    sq_groups = (df_analysis['Signal_Squeeze'] != df_analysis['Signal_Squeeze'].shift()).cumsum()
+    df_analysis['Squeeze_Age']    = df_analysis.groupby(sq_groups)['Signal_Squeeze'].cumsum()
+    df_analysis['Squeeze_Mature'] = df_analysis['Signal_Squeeze'] & (df_analysis['Squeeze_Age'] >= 5)
+
+    df_analysis['Squeeze_Fired_Bullish'] = (
+        df_analysis['Signal_Squeeze'].shift(1) &
+        (df_analysis['Close'] > df_analysis['BB_Upper']) &
+        (df_analysis['MACD']  > df_analysis['MACD_Signal'])
+    )
+    df_analysis['Squeeze_Fired_Bearish'] = (
+        df_analysis['Signal_Squeeze'].shift(1) &
+        (df_analysis['Close'] < df_analysis['BB_Lower']) &
+        (df_analysis['MACD']  < df_analysis['MACD_Signal'])
+    )
+
+    # Legacy compatibility
+    df_analysis['Min_Width_120d'] = df_analysis['BB_Width'].rolling(window=120, min_periods=20).min()
+
+    # ── MACD Scenarios ────────────────────────────────────────
+    df_analysis['MACD_Gap']          = df_analysis['MACD'] - df_analysis['MACD_Signal']
+    df_analysis['MACD_Momentum']     = df_analysis['MACD'] - df_analysis['MACD'].shift(1)
     df_analysis['MACD_Momentum_Pct'] = df_analysis['MACD'].pct_change()
-    df_analysis['MACD_Acceleration'] = df_analysis['MACD_Momentum_Pct'] - df_analysis['MACD_Momentum_Pct'].shift(1)
-    
+    df_analysis['MACD_Acceleration'] = (
+        df_analysis['MACD_Momentum_Pct'] - df_analysis['MACD_Momentum_Pct'].shift(1)
+    )
+
     # Scenario 1: Classic crossover
     classic_crossover = (
         (df_analysis['MACD_Gap'].shift(1) <= 0) &
-        (df_analysis['MACD_Gap'] > 0)
+        (df_analysis['MACD_Gap']          >  0)
     )
-    
+
     # Scenario 2: Approaching from below
     approaching_from_below = (
         (df_analysis['MACD_Gap'] < 0) &
@@ -332,370 +391,195 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
             (df_analysis['MACD_Acceleration'] > 0.03) |
             (
                 (df_analysis['MACD_Momentum_Pct'].shift(2) < -0.05) &
-                (df_analysis['MACD_Momentum_Pct'] > -0.02)
+                (df_analysis['MACD_Momentum_Pct']           > -0.02)
             )
         )
     )
-    
-    # Scenario 3: Bottoming (MACD in bottom zone with recovery signs)
-    # Calculate rolling stats for context
-    df_analysis['MACD_5d_Low'] = df_analysis['MACD'].rolling(5).min()
+
+    # Scenario 3: Bottoming
+    df_analysis['MACD_5d_Low']  = df_analysis['MACD'].rolling(5).min()
     df_analysis['MACD_10d_Low'] = df_analysis['MACD'].rolling(10).min()
 
+    # FIX: comment said "Need at least 2 signals" but threshold was >= 4 (all four).
+    # Corrected to >= 2 to match stated design intent.
     bottoming = (
         (df_analysis['MACD'] < 0) &
-        # Tighter window: within 5% of low instead of 15%
         (df_analysis['MACD'] >= df_analysis['MACD_10d_Low']) &
-        (df_analysis['MACD'] <= df_analysis['MACD_10d_Low'] * 0.95) &  # Changed from 0.85 to 0.95
-        
-        # Require at least 2 out of 4 signals:
+        (df_analysis['MACD'] <= df_analysis['MACD_10d_Low'] * 0.95) &
         (
             (
-                # first detect that MACD is coming back from yesterday, meaning that yesterday is even lower.
-                # 2nd is that the MACD today is higher than the lowest of the last 5 days, showing that it's trying to come off the bottom.
-                # 3rd is that the GAP between MACD and signal line is narrowing, showing that the signal line hasn't picked up yet.
-                # 4th is that OBV is rising, showing that volume is supporting the move.
                 (df_analysis['MACD'] >= df_analysis['MACD'].shift(1)).astype(int) +
-                (df_analysis['MACD'] > df_analysis['MACD_5d_Low']).astype(int) +
+                (df_analysis['MACD'] >  df_analysis['MACD_5d_Low']).astype(int) +
                 (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1)).astype(int) +
-                (df_analysis['OBV'] > df_analysis['OBV'].shift(3)).astype(int)
-            ) >= 4  # Need at least 2 signals
+                (df_analysis['OBV']  >  df_analysis['OBV'].shift(3)).astype(int)
+            ) >= 2
         )
     )
 
-    def debug_macd_bottoming(df_analysis, target_date='2025-09-10'):
-  
-        try:
-            import pandas as pd
-            target = pd.to_datetime(target_date)
-            
-            # Get 10 days leading up to and including target
-            mask = (df_analysis.index >= target - pd.Timedelta(days=15)) & \
-                (df_analysis.index <= target + pd.Timedelta(days=2))
-            
-            if not mask.any():
-                print(f"❌ Date {target_date} not found in data")
-                return
-            
-            print("\n" + "="*120)
-            print(f"🔍 MACD BOTTOMING DEBUG - Last 10 Days Around {target_date}")
-            print("="*120)
-            
-            debug_rows = df_analysis[mask].tail(10).copy()
-            
-            print("\n📊 RAW VALUES (Last 10 Days):")
-            print("-"*120)
-            raw_cols = ['MACD', 'MACD_Signal', 'MACD_Gap', 'OBV', 'MACD_5d_Low', 'MACD_10d_Low']
-            raw_df = debug_rows[raw_cols].copy()
-            raw_df.index = raw_df.index.strftime('%Y-%m-%d')
-            print(raw_df.to_string())
-            
-            print("\n" + "="*120)
-            print("🔬 CONDITION CHECKS (Last 10 Days):")
-            print("-"*120)
-            
-            # Now check conditions for each row
-            debug_data = []
-            for idx in debug_rows.index:
-                row = df_analysis.loc[idx]
-                idx_loc = df_analysis.index.get_loc(idx)
-                
-                # Get previous values safely
-                macd_prev = df_analysis.iloc[idx_loc-1]['MACD'] if idx_loc > 0 else None
-                gap_prev = df_analysis.iloc[idx_loc-1]['MACD_Gap'] if idx_loc > 0 else None
-                obv_prev3 = df_analysis.iloc[idx_loc-3]['OBV'] if idx_loc >= 3 else None
-                
-                # Calculate conditions
-                cond1_macd_neg = row['MACD'] < 0
-                cond2_within_15pct = row['MACD'] <= row['MACD_10d_Low'] * 1.15
-                
-                signal1_stopped = (row['MACD'] >= macd_prev) if macd_prev is not None else False
-                signal2_off_low = row['MACD'] > row['MACD_5d_Low']
-                signal3_gap_narrow = (row['MACD_Gap'] > gap_prev) if gap_prev is not None else False
-                signal4_obv_rising = (row['OBV'] > obv_prev3) if obv_prev3 is not None else False
-                
-                any_signal = signal1_stopped or signal2_off_low or signal3_gap_narrow or signal4_obv_rising
-                bottoming_detected = cond1_macd_neg and cond2_within_15pct and any_signal
-                
-                debug_data.append({
-                    'Date': idx.strftime('%m-%d'),
-                    'MACD<0': '✓' if cond1_macd_neg else '✗',
-                    'Within15%': '✓' if cond2_within_15pct else '✗',
-                    '├─10d_Low*1.15': f"{row['MACD_10d_Low']*1.15:.4f}",
-                    'Stopped↑': '✓' if signal1_stopped else '✗',
-                    '├─Δ': f"{row['MACD']-macd_prev:.4f}" if macd_prev else 'N/A',
-                    'Off_5d_Low': '✓' if signal2_off_low else '✗',
-                    'Gap_Narrow': '✓' if signal3_gap_narrow else '✗',
-                    '├─Gap_Δ': f"{row['MACD_Gap']-gap_prev:.4f}" if gap_prev else 'N/A',
-                    'OBV_Up3d': '✓' if signal4_obv_rising else '✗',
-                    '├─OBV_Δ': f"{(row['OBV']-obv_prev3)/obv_prev3*100:.1f}%" if obv_prev3 else 'N/A',
-                    'ANY': '✓' if any_signal else '✗',
-                    '🎯': '✅' if bottoming_detected else '❌'
-                })
-            
-            df_debug = pd.DataFrame(debug_data)
-            print(df_debug.to_string(index=False))
-            
-            print("\n" + "="*120)
-            print("📋 WHAT TO LOOK FOR:")
-            print("  1. Check RAW VALUES: Is MACD actually at/near bottom on Sep 10?")
-            print("  2. Check MACD vs 10d_Low*1.15: Is MACD within the 15% threshold?")
-            print("  3. Check Δ (delta) values: Did MACD stop falling? Did gap narrow?")
-            print("  4. If all look correct but still ❌, the threshold (15%, 3d, etc.) is too strict")
-            print("\n💡 ADJUSTMENTS:")
-            print("  - If MACD outside 15%: Increase to 1.20 or 1.25")
-            print("  - If Stopped always ✗: MACD is still falling (expected at true bottom)")
-            print("  - If Gap_Narrow always ✗: Gap still widening (classic late detection)")
-            print("  - If OBV_Up3d ✗: Try OBV.shift(5) or remove OBV requirement")
-            print("="*120 + "\n")
-            
-        except Exception as e:
-            print(f"❌ Debug failed: {e}")
-            import traceback
-            traceback.print_exc()
-
-    # Call it
-    # debug_macd_bottoming(df_analysis, target_date='2025-09-10')
-    
-    # Scenario 4: Momentum building (2-day acceleration)
-    df_analysis['MACD_Gap_Ratio'] = df_analysis['MACD_Gap'] / df_analysis['MACD_Signal'].abs()
+    # Scenario 4: Momentum building
+    df_analysis['MACD_Gap_Ratio']        = df_analysis['MACD_Gap'] / df_analysis['MACD_Signal'].abs()
     df_analysis['MACD_Gap_Ratio_Change'] = (
         df_analysis['MACD_Gap_Ratio'] - df_analysis['MACD_Gap_Ratio'].shift(1)
     )
-    
+
     momentum_building = (
-        (df_analysis['MACD_Gap'] > 0) &
-        (df_analysis['MACD_Gap'].shift(1) > 0) &
-        (df_analysis['MACD_Gap'].shift(2) > 0) &
-        (df_analysis['MACD_Gap'] > df_analysis['MACD_Gap'].shift(1)) &
-        (df_analysis['MACD_Gap_Ratio'] > df_analysis['MACD_Gap_Ratio'].shift(1)) &
+        (df_analysis['MACD_Gap']               > 0) &
+        (df_analysis['MACD_Gap'].shift(1)       > 0) &
+        (df_analysis['MACD_Gap'].shift(2)       > 0) &
+        (df_analysis['MACD_Gap']               > df_analysis['MACD_Gap'].shift(1)) &
+        (df_analysis['MACD_Gap_Ratio']          > df_analysis['MACD_Gap_Ratio'].shift(1)) &
         (df_analysis['MACD_Gap_Ratio'].shift(1) > df_analysis['MACD_Gap_Ratio'].shift(2)) &
-        (df_analysis['MACD_Gap_Ratio_Change'] > 0.10) &
-        (df_analysis['MACD_Gap_Ratio_Change'].shift(1) > 0.10) &
-        (df_analysis['MACD'] > df_analysis['MACD'].shift(1))
+        (df_analysis['MACD_Gap_Ratio_Change']           > 0.10) &
+        (df_analysis['MACD_Gap_Ratio_Change'].shift(1)  > 0.10) &
+        (df_analysis['MACD']                    > df_analysis['MACD'].shift(1))
     )
-    
+
     macd_trigger = classic_crossover | approaching_from_below | bottoming | momentum_building
-    
-    # Scenario 5: Peaking (BEARISH)
+
+    # Scenario 5: Peaking (bearish)
     peaking = (
-        (df_analysis['MACD_Gap'] > 0) &
-        (df_analysis['MACD'] > 0 ) &
-        (df_analysis['MACD_Signal'] > 0 ) &
-        (df_analysis['MACD'].shift(1) > df_analysis['MACD'].shift(2)) &
-        (df_analysis['MACD'] < df_analysis['MACD'].shift(1)) &
-        (df_analysis['MACD_Momentum_Pct'] < df_analysis['MACD_Momentum_Pct'].shift(1))
+        (df_analysis['MACD_Gap']              > 0) &
+        (df_analysis['MACD']                  > 0) &
+        (df_analysis['MACD_Signal']           > 0) &
+        (df_analysis['MACD'].shift(1)         > df_analysis['MACD'].shift(2)) &
+        (df_analysis['MACD']                  < df_analysis['MACD'].shift(1)) &
+        (df_analysis['MACD_Momentum_Pct']     < df_analysis['MACD_Momentum_Pct'].shift(1))
     )
-    
-    # Scenario 6: Bearish crossover (BEARISH)
+
+    # Scenario 6: Bearish crossover
     bearish_crossover = (
         (df_analysis['MACD_Gap'].shift(1) > 0) &
-        (df_analysis['MACD_Gap'] <= 0) &
-        (df_analysis['MACD'].shift(1) > 0)
+        (df_analysis['MACD_Gap']          <= 0) &
+        (df_analysis['MACD'].shift(1)     > 0)
     )
-    
-    # Store MACD scenario columns
-    df_analysis['MACD_ClassicCrossover'] = classic_crossover
-    df_analysis['MACD_Approaching'] = approaching_from_below
-    df_analysis['MACD_Bottoming'] = bottoming
-    df_analysis['MACD_MomentumBuilding'] = momentum_building
-    df_analysis['MACD_Trigger'] = macd_trigger
-    df_analysis['MACD_Peaking'] = peaking
-    df_analysis['MACD_BearishCrossover'] = bearish_crossover
-    
-    # ==================== MACD SIGNAL LINE TREND ====================
+
+    df_analysis['MACD_ClassicCrossover']  = classic_crossover
+    df_analysis['MACD_Approaching']       = approaching_from_below
+    df_analysis['MACD_Bottoming']         = bottoming
+    df_analysis['MACD_MomentumBuilding']  = momentum_building
+    df_analysis['MACD_Trigger']           = macd_trigger
+    df_analysis['MACD_Peaking']           = peaking
+    df_analysis['MACD_BearishCrossover']  = bearish_crossover
+
+    # ── MACD Signal Line Trend ────────────────────────────────
     df_analysis['MACD_Signal_Slope'] = df_analysis['MACD_Signal'] - df_analysis['MACD_Signal'].shift(2)
-    df_analysis['Large_Uptrend'] = df_analysis['MACD_Signal_Slope'] > 0
-    df_analysis['Large_Downtrend'] = df_analysis['MACD_Signal_Slope'] < 0
-    
-    # ==================== RSI DYNAMIC PERCENTILE THRESHOLDS ====================
-    lookback_window = min(252, len(df_analysis))  # Use 1 year or available data
-    
-    if 'RSI_14' in df_analysis.columns:
-        df_analysis['RSI_P10'] = df_analysis['RSI_14'].rolling(
-            window=lookback_window, min_periods=60
-        ).quantile(0.10)
-        
-        df_analysis['RSI_P90'] = df_analysis['RSI_14'].rolling(
-            window=lookback_window, min_periods=60
-        ).quantile(0.90)
-        
-        # Bottoming: Must be BOTH in bottom 10% AND <= 30
-        df_analysis['RSI_Bottoming'] = (
-            (df_analysis['RSI_14'] <= df_analysis['RSI_P10']) &
-            (df_analysis['RSI_14'] <= 30)
-        )
-        
-        # Peaking: Must be BOTH in top 10% AND >= 70
-        df_analysis['RSI_Peaking'] = (
-            (df_analysis['RSI_14'] >= df_analysis['RSI_P90']) &
-            (df_analysis['RSI_14'] >= 70)
-        )
-    
-    # ==================== PHASE 3: GOLDEN LAUNCH (Old Code) ====================
-    # launch = (
-    #     macd_trigger &
-    #     (df_analysis['MA20'] > df_analysis['MA50']) &
-    #     adx_healthy &
-    #     (df_analysis['RSI_14'] <= 70) &
-    #     (df_analysis['Volume'] > df_analysis['Volume'].rolling(5).mean())
-    # )
-    # df_analysis.loc[launch, 'Signal_Golden_Launch'] = True
-    
-    # ==================== EXIT SIGNALS ====================
-    macd_bearish_cross = (
-        (df_analysis['MACD'].shift(1) > df_analysis['MACD_Signal'].shift(1)) &
-        (df_analysis['MACD'] < df_analysis['MACD_Signal']) &
-        (df_analysis['MACD'].shift(1) > 0) &
-        (df_analysis['MACD_Hist'] < df_analysis['MACD_Hist'].shift(1))
+    df_analysis['Large_Uptrend']     = df_analysis['MACD_Signal_Slope'] > 0
+    df_analysis['Large_Downtrend']   = df_analysis['MACD_Signal_Slope'] < 0
+
+    # ── RSI Dynamic Percentile Thresholds ────────────────────
+    lookback_window = min(RSI_LOOKBACK, len(df_analysis))
+    df_analysis['RSI_P10'] = df_analysis['RSI_14'].rolling(
+        window=lookback_window, min_periods=60
+    ).quantile(0.10)
+    df_analysis['RSI_P90'] = df_analysis['RSI_14'].rolling(
+        window=lookback_window, min_periods=60
+    ).quantile(0.90)
+
+    df_analysis['RSI_Bottoming'] = (
+        (df_analysis['RSI_14'] <= df_analysis['RSI_P10']) &
+        (df_analysis['RSI_14'] <= RSI_OVERSOLD)
     )
-    
+    df_analysis['RSI_Peaking'] = (
+        (df_analysis['RSI_14'] >= df_analysis['RSI_P90']) &
+        (df_analysis['RSI_14'] >= RSI_OVERBOUGHT)
+    )
+
+    # ── Exit Signals ──────────────────────────────────────────
+    macd_bearish_cross = (
+        (df_analysis['MACD'].shift(1)     > df_analysis['MACD_Signal'].shift(1)) &
+        (df_analysis['MACD']              < df_analysis['MACD_Signal']) &
+        (df_analysis['MACD'].shift(1)     > 0) &
+        (df_analysis['MACD_Hist']         < df_analysis['MACD_Hist'].shift(1))
+    )
     ma_cross_down = (
         (df_analysis['MA20'].shift(1) > df_analysis['MA50'].shift(1)) &
-        (df_analysis['MA20'] < df_analysis['MA50']) &
-        (df_analysis['ADX'] > 20)
+        (df_analysis['MA20']          < df_analysis['MA50']) &
+        (df_analysis['ADX']           > ADX_WEAK)
     )
-    
-    exit_signal = macd_bearish_cross | ma_cross_down
-    df_analysis.loc[exit_signal, 'Exit_MACD_Lead'] = True
+    df_analysis.loc[macd_bearish_cross | ma_cross_down, 'Exit_MACD_Lead'] = True
 
-
-    # ==================== MARKET REGIME DETECTION ====================
-    # df_analysis = detect_market_regime(df_analysis)
-    # this was moved up so it detect regime before MACD.
-    
-    # ==================== SIGNAL SCORE ====================
+    # ── Signal Score ──────────────────────────────────────────
     df_analysis['Signal_Score'] = 0
-    
-    # POSITIVE INDICATORS (+1 each)
-    if 'ADX_Pattern' in df_analysis.columns:
-        df_analysis.loc[df_analysis['ADX_Pattern'] == 'Bottoming', 'Signal_Score'] += 1
-        df_analysis.loc[df_analysis['ADX_Pattern'] == 'Reversing Up', 'Signal_Score'] += 1
-        df_analysis.loc[df_analysis['ADX_Pattern'] == 'Accelerating Up', 'Signal_Score'] += 1
-        df_analysis.loc[df_analysis['ADX_Pattern'] == 'Strong Trend', 'Signal_Score'] += 1
-    
-    if 'RSI_Bottoming' in df_analysis.columns:
-        df_analysis.loc[df_analysis['RSI_Bottoming'], 'Signal_Score'] += 1
-    
-    if 'MACD_Bottoming' in df_analysis.columns:
-        df_analysis.loc[df_analysis['MACD_Bottoming'], 'Signal_Score'] += 1
-    
-    if 'MACD_Approaching' in df_analysis.columns:
-        df_analysis.loc[df_analysis['MACD_Approaching'], 'Signal_Score'] += 1
-    
-    if 'MACD_ClassicCrossover' in df_analysis.columns:
-        df_analysis.loc[df_analysis['MACD_ClassicCrossover'], 'Signal_Score'] += 1
-    
-    if 'MACD_MomentumBuilding' in df_analysis.columns:
-        df_analysis.loc[df_analysis['MACD_MomentumBuilding'], 'Signal_Score'] += 1
-    
-    if 'Signal_Accumulation' in df_analysis.columns:
-        df_analysis.loc[df_analysis['Signal_Accumulation'], 'Signal_Score'] += 1
-    
-    # NEGATIVE INDICATORS (-1 each)
-    if 'MACD_Peaking' in df_analysis.columns:
-        df_analysis.loc[df_analysis['MACD_Peaking'], 'Signal_Score'] -= 1
-    
-    if 'MACD_BearishCrossover' in df_analysis.columns:
-        df_analysis.loc[df_analysis['MACD_BearishCrossover'], 'Signal_Score'] -= 1
-    
-    if 'RSI_Peaking' in df_analysis.columns:
-        df_analysis.loc[df_analysis['RSI_Peaking'], 'Signal_Score'] -= 1
-    
-    if 'ADX_Pattern' in df_analysis.columns:
-        df_analysis.loc[df_analysis['ADX_Pattern'] == 'Peaking', 'Signal_Score'] -= 1
-        df_analysis.loc[df_analysis['ADX_Pattern'] == 'Reversing Down', 'Signal_Score'] -= 1
-        df_analysis.loc[df_analysis['ADX_Pattern'] == 'Accelerating Down', 'Signal_Score'] -= 1
-    
-    # Calculate cumulative score
+
+    for pat in ['Bottoming', 'Reversing Up', 'Accelerating Up', 'Strong Trend']:
+        df_analysis.loc[df_analysis['ADX_Pattern'] == pat, 'Signal_Score'] += 1
+
+    for col in ['RSI_Bottoming', 'MACD_Bottoming', 'MACD_Approaching',
+                'MACD_ClassicCrossover', 'MACD_MomentumBuilding', 'Signal_Accumulation']:
+        if col in df_analysis.columns:
+            df_analysis.loc[df_analysis[col], 'Signal_Score'] += 1
+
+    for col in ['MACD_Peaking', 'MACD_BearishCrossover', 'RSI_Peaking']:
+        if col in df_analysis.columns:
+            df_analysis.loc[df_analysis[col], 'Signal_Score'] -= 1
+
+    for pat in ['Peaking', 'Reversing Down', 'Accelerating Down']:
+        df_analysis.loc[df_analysis['ADX_Pattern'] == pat, 'Signal_Score'] -= 1
+
     df_analysis['Cumulative_Score'] = df_analysis['Signal_Score'].cumsum()
-    
+
     return df_analysis
 
 
-def calculate_adaptive_parameters_percentile(df, lookback_days=30):
+# ============================================================
+#  ADAPTIVE PARAMETER CALCULATION
+# ============================================================
+
+def calculate_adaptive_parameters_percentile(df: pd.DataFrame, lookback_days: int = 30) -> dict:
     """
-    Calculate adaptive parameters based on recent volatility.
-    
-    Args:
-        df: DataFrame with OHLC data
-        lookback_days: Number of days to look back for volatility calculation
-    
-    Returns:
-        Dictionary with adaptive parameters
+    Derive volatility-adaptive parameters based on recent volatility regime.
     """
     df_temp = df.copy()
-    
-    # Calculate volatility windows
-    for window in [10, 15, 20, 25, 30]:
-        df_temp[f'vol_{window}d'] = df_temp['Close'].pct_change().rolling(window).std()
-    
+    for w in [10, 15, 20, 25, 30]:
+        df_temp[f'vol_{w}d'] = df_temp['Close'].pct_change().rolling(w).std()
+
     current_vol_10d = df_temp['vol_10d'].iloc[-1]
-    vol_5days_ago = df_temp['vol_10d'].iloc[-5] if len(df_temp) >= 5 else current_vol_10d
-    
-    # Determine volatility trend
-    vol_trend = 'rising' if current_vol_10d > vol_5days_ago * 1.2 else \
-                'falling' if current_vol_10d < vol_5days_ago * 0.8 else 'stable'
-    
+    vol_5days_ago   = df_temp['vol_10d'].iloc[-5] if len(df_temp) >= 5 else current_vol_10d
+
+    vol_trend = (
+        'rising'  if current_vol_10d > vol_5days_ago * 1.2 else
+        'falling' if current_vol_10d < vol_5days_ago * 0.8 else
+        'stable'
+    )
+
     recent_vol = df_temp['vol_10d'].iloc[-lookback_days:].dropna()
-    
+
     if len(recent_vol) < 10:
         return {
-            'vol_window': 20,
-            'obv_lookback': 10,
-            'obv_threshold': 0.025,
-            'current_vol': current_vol_10d,
-            'vol_regime': 'insufficient_data',
+            'vol_window': 20, 'obv_lookback': 10, 'obv_threshold': 0.025,
+            'current_vol': current_vol_10d, 'vol_regime': 'insufficient_data',
             'price_flat_threshold': 0.05
         }
-    
+
     p25, p50, p75, p90 = recent_vol.quantile([0.25, 0.50, 0.75, 0.90])
-    
-    # Determine regime based on percentile
-    if current_vol_10d >= p90:
-        vol_regime, percentile, vol_window, obv_lookback = 'very_high', 90, 10, 5
-    elif current_vol_10d >= p75:
-        vol_regime, percentile, vol_window, obv_lookback = 'high', 75, 15, 7
-    elif current_vol_10d >= p50:
-        vol_regime, percentile, vol_window, obv_lookback = 'medium_high', 60, 20, 10
-    elif current_vol_10d >= p25:
-        vol_regime, percentile, vol_window, obv_lookback = 'medium_low', 40, 25, 12
-    else:
-        vol_regime, percentile, vol_window, obv_lookback = 'low', 20, 30, 15
-    
-    # Adjust for trend
+
+    if   current_vol_10d >= p90: vol_regime, percentile, vol_window, obv_lookback = 'very_high', 90, 10,  5
+    elif current_vol_10d >= p75: vol_regime, percentile, vol_window, obv_lookback = 'high',      75, 15,  7
+    elif current_vol_10d >= p50: vol_regime, percentile, vol_window, obv_lookback = 'medium_high',60, 20, 10
+    elif current_vol_10d >= p25: vol_regime, percentile, vol_window, obv_lookback = 'medium_low', 40, 25, 12
+    else:                         vol_regime, percentile, vol_window, obv_lookback = 'low',        20, 30, 15
+
     if vol_trend == 'rising' and vol_regime in ['high', 'very_high']:
-        vol_window = max(10, vol_window - 5)
-        obv_lookback = max(5, obv_lookback - 2)
-    
-    current_vol = df_temp[f'vol_{min(vol_window, 30)}d'].iloc[-1]
-    obv_threshold = max(0.008, min(0.08, current_vol * obv_lookback * 0.35))
-    price_flat_threshold = max(0.03, min(0.08, current_vol * obv_lookback * 0.5))
-    
+        vol_window   = max(10, vol_window   - 5)
+        obv_lookback = max(5,  obv_lookback - 2)
+
+    current_vol          = df_temp[f'vol_{min(vol_window, 30)}d'].iloc[-1]
+    obv_threshold        = max(0.008, min(0.08, current_vol * obv_lookback * 0.35))
+    price_flat_threshold = max(0.03,  min(0.08, current_vol * obv_lookback * 0.50))
+
     return {
-        'vol_window': vol_window,
-        'current_vol': current_vol,
-        'vol_percentile': percentile,
-        'vol_regime': vol_regime,
-        'vol_trend': vol_trend,
-        'p25': p25,
-        'p50': p50,
-        'p75': p75,
-        'p90': p90,
-        'obv_lookback': obv_lookback,
-        'obv_threshold': obv_threshold,
+        'vol_window': vol_window, 'current_vol': current_vol,
+        'vol_percentile': percentile, 'vol_regime': vol_regime, 'vol_trend': vol_trend,
+        'p25': p25, 'p50': p50, 'p75': p75, 'p90': p90,
+        'obv_lookback': obv_lookback, 'obv_threshold': obv_threshold,
         'price_flat_threshold': price_flat_threshold,
         'cycle_estimate': obv_lookback * 2
     }
 
 
-
-from hmmlearn.hmm import GaussianHMM
-from sklearn.preprocessing import StandardScaler
-from scipy import stats
-
-# INTERNAL TOGGLE: Set this to 'HMM', 'JUMP', or 'ATR'
-REGIME_METHOD = 'HMM' 
+# ============================================================
+#  MARKET REGIME DETECTION  (HMM / JUMP)
+# ============================================================
 
 def detect_market_regime(
     df: pd.DataFrame,
@@ -706,74 +590,55 @@ def detect_market_regime(
     refit_every: int | None = None,
     min_obs: int | None = None,
     z_clip: float = 3.0,
-):
+) -> pd.DataFrame:
     """
     Volatility/Liquidity regime detection.
 
-    Backward compatible:
-      - existing calls: detect_market_regime(df) still work (defaults to daily + global REGIME_METHOD)
-    Robust:
-      - auto fallback from HMM -> JUMP if insufficient data or fit issues
-      - weekly-safe (won't crash due to uninitialized model/rank_map)
+    Backward compatible: detect_market_regime(df) still works.
+    Auto-falls back from HMM -> JUMP if insufficient data or fit fails.
+    Weekly-safe: won't crash due to uninitialised model/rank_map.
     """
-
     if df is None or df.empty:
         return df
 
-    # Resolve method locally (do NOT mutate global REGIME_METHOD)
-    m = (method or REGIME_METHOD).upper()
-
+    m  = (method or REGIME_METHOD).upper()
     tf = (freq or "daily").lower()
     is_weekly = ("week" in tf) or tf.startswith("w") or ("周" in tf)
 
-    # Defaults scale with timeframe
-    if window is None:
-        window = 26 if is_weekly else 90
-    if refit_every is None:
-        refit_every = 2 if is_weekly else 5
-    if min_obs is None:
-        # enough for rolling z-score + stable HMM
-        min_obs = 70 if is_weekly else 120
+    if window      is None: window      = 26  if is_weekly else 90
+    if refit_every is None: refit_every = 2   if is_weekly else 5
+    if min_obs     is None: min_obs     = 70  if is_weekly else 120
 
-    # If not enough data, fallback if HMM was requested
     if len(df) < min_obs:
         if m == "HMM" and fallback_method:
             return detect_market_regime(df, freq=freq, method=fallback_method, fallback_method=None)
         df = df.copy()
-        df["Market_Regime"] = "Normal Volatility"
+        df["Market_Regime"]  = "Normal Volatility"
         df["ATR_Percentile"] = 0.5
         return df
 
-    # =========================
-    # HMM MODE
-    # =========================
+    # ── HMM MODE ─────────────────────────────────────────────
     if m == "HMM":
         df = df.copy()
-
         vol_ma_len = 10 if is_weekly else 20
-        ewm_span = 2 if is_weekly else 3
+        ewm_span   = 2  if is_weekly else 3
 
-        # True range & NATR
         df["prev_close"] = df["Close"].shift(1)
-        df["h_l"] = df["High"] - df["Low"]
+        df["h_l"]  = df["High"] - df["Low"]
         df["h_pc"] = (df["High"] - df["prev_close"]).abs()
-        df["l_pc"] = (df["Low"] - df["prev_close"]).abs()
-        df["TR"] = df[["h_l", "h_pc", "l_pc"]].max(axis=1)
+        df["l_pc"] = (df["Low"]  - df["prev_close"]).abs()
+        df["TR"]   = df[["h_l", "h_pc", "l_pc"]].max(axis=1)
         df["NATR"] = (df["TR"] / df["Close"]) * 100
 
-        # RVOL (log)
-        df["Vol_MA"] = df["Volume"].rolling(vol_ma_len).mean()
-        df["RVOL"] = df["Volume"] / (df["Vol_MA"] + 1)
+        df["Vol_MA"]   = df["Volume"].rolling(vol_ma_len).mean()
+        df["RVOL"]     = df["Volume"] / (df["Vol_MA"] + 1)
         df["Log_RVOL"] = np.log(df["RVOL"] + 0.1)
 
-        # Smooth then rolling z-score
         feat_df = df[["NATR", "Log_RVOL"]].copy()
-        feat_df["NATR"] = feat_df["NATR"].ewm(span=ewm_span).mean()
+        feat_df["NATR"]     = feat_df["NATR"].ewm(span=ewm_span).mean()
         feat_df["Log_RVOL"] = feat_df["Log_RVOL"].ewm(span=ewm_span).mean()
 
-        # raw=True => x is ndarray, x[-1] is always "last"
         zfn = lambda x: (x[-1] - x.mean()) / (x.std() + 1e-6)
-
         feat_df["scaled_natr"] = feat_df["NATR"].rolling(window=window).apply(zfn, raw=True)
         feat_df["scaled_rvol"] = feat_df["Log_RVOL"].rolling(window=window).apply(zfn, raw=True)
 
@@ -781,17 +646,14 @@ def detect_market_regime(
         if features.empty or len(features) < (window + 5):
             if fallback_method:
                 return detect_market_regime(df, freq=freq, method=fallback_method, fallback_method=None)
-            df["Market_Regime"] = "Normal Volatility"
+            df["Market_Regime"]  = "Normal Volatility"
             df["ATR_Percentile"] = 0.5
             return df
 
-        # clamp extreme spikes (A-share theme bursts / limit behavior)
         features = features.clip(-z_clip, z_clip)
         X = features.values
 
-        # Rolling refit HMM + robust fallback
-        final_regimes = [1] * window  # 1 = Normal baseline
-
+        final_regimes = [1] * window
         model = None
         rank_map = None
         last_good_model = None
@@ -799,31 +661,22 @@ def detect_market_regime(
 
         for i in range(window, len(X)):
             need_refit = (model is None) or (i % refit_every == 0)
-
             if need_refit:
                 X_train = X[i - window : i]
                 try:
-                    mm = GaussianHMM(
-                        n_components=3,
-                        covariance_type="diag",
-                        n_iter=200,
-                        random_state=42
-                    )
+                    mm = GaussianHMM(n_components=3, covariance_type="diag",
+                                     n_iter=200, random_state=42)
                     mm.fit(X_train)
-
                     state_energy = [float(mm.means_[j][0] + mm.means_[j][1]) for j in range(3)]
                     ordered = np.argsort(state_energy)
                     rm = {int(ordered[0]): 0, int(ordered[1]): 1, int(ordered[2]): 2}
-
                     model = mm
                     rank_map = rm
-                    last_good_model = mm
+                    last_good_model    = mm
                     last_good_rank_map = rm
-
                 except Exception:
-                    # fallback to last good model OR fallback method
                     if last_good_model is not None:
-                        model = last_good_model
+                        model    = last_good_model
                         rank_map = last_good_rank_map
                     elif fallback_method:
                         return detect_market_regime(df, freq=freq, method=fallback_method, fallback_method=None)
@@ -831,25 +684,24 @@ def detect_market_regime(
                         final_regimes.append(1)
                         continue
 
-            # decode sequence (less jumpy than single-point predict)
-            seq_start = max(0, i - window)
-            decoded = model.predict(X[seq_start : i + 1])
+            seq_start    = max(0, i - window)
+            decoded      = model.predict(X[seq_start : i + 1])
             current_state = int(decoded[-1])
             final_regimes.append(int(rank_map.get(current_state, 1)))
 
-        # Smart persistence (keep your original intent)
+        # Smart persistence (damp single-bar spikes)
         smoothed_final = []
         curr_fixed = final_regimes[0]
-        strength = 5.0
+        strength   = 5.0
         natr_series = features["scaled_natr"].values
 
         for i in range(len(final_regimes)):
             s = final_regimes[i]
             is_wide_candle = natr_series[i] > 0.5
-            target_state = 1 if (s == 0 and is_wide_candle) else s
+            target_state   = 1 if (s == 0 and is_wide_candle) else s
 
             if target_state == 2 and target_state != curr_fixed:
-                strength = 0
+                strength   = 0
                 curr_fixed = 2
             elif target_state != curr_fixed:
                 strength -= 1.0
@@ -858,22 +710,22 @@ def detect_market_regime(
 
             if strength <= 0:
                 curr_fixed = target_state
-                strength = 4.0
+                strength   = 4.0
 
             smoothed_final.append(curr_fixed)
 
         smoothed_series = pd.Series(smoothed_final, index=features.index)
         label_map = {0: "Low Volatility", 1: "Normal Volatility", 2: "High Volatility"}
 
-        df["Market_Regime"] = smoothed_series.map(label_map).reindex(df.index, method="ffill")
-        df["ATR_Percentile"] = smoothed_series.map({0: 0.2, 1: 0.5, 2: 0.8}).reindex(df.index, method="ffill")
+        df["Market_Regime"]  = smoothed_series.map(label_map).reindex(df.index, method="ffill")
+        df["ATR_Percentile"] = (
+            smoothed_series.map({0: 0.2, 1: 0.5, 2: 0.8}).reindex(df.index, method="ffill")
+        )
         return df
 
-    # =========================
-    # JUMP MODE
-    # =========================
+    # ── JUMP MODE ────────────────────────────────────────────
     if m == "JUMP":
-        df = df.copy()
+        df      = df.copy()
         vol_win = 10 if is_weekly else 20
         df["vol_rolling"] = df["Close"].pct_change().rolling(vol_win).std()
 
@@ -881,295 +733,257 @@ def detect_market_regime(
         thresh_lo = df["vol_rolling"].rolling(252, min_periods=60).quantile(0.2)
 
         regimes = []
-        curr = "Normal Volatility"
-        for v in df["vol_rolling"]:
+        curr    = "Normal Volatility"
+        for v, hi, lo in zip(df["vol_rolling"], thresh_hi, thresh_lo):
             if pd.isna(v):
                 regimes.append(curr)
                 continue
-            if v > thresh_hi:
-                curr = "High Volatility"
-            elif v < thresh_lo:
-                curr = "Low Volatility"
-            else:
-                curr = "Normal Volatility"
+            if v > hi:   curr = "High Volatility"
+            elif v < lo: curr = "Low Volatility"
+            else:        curr = "Normal Volatility"
             regimes.append(curr)
 
-        df["Market_Regime"] = regimes
-        df["ATR_Percentile"] = pd.Series(regimes).map(
-            {"Low Volatility": 0.2, "Normal Volatility": 0.5, "High Volatility": 0.8}
-        ).values
+        df["Market_Regime"]  = regimes
+        df["ATR_Percentile"] = (
+            pd.Series(regimes)
+            .map({"Low Volatility": 0.2, "Normal Volatility": 0.5, "High Volatility": 0.8})
+            .values
+        )
         return df
 
-    # Fallback
+    # ── Bare fallback ─────────────────────────────────────────
     df = df.copy()
-    df["Market_Regime"] = "Normal Volatility"
+    df["Market_Regime"]  = "Normal Volatility"
     df["ATR_Percentile"] = 0.5
     return df
 
 
+# ============================================================
+#  NEXT-DAY SIMULATOR
+# ============================================================
 
-def simulate_next_day_indicators(df, price_change_pct, volume):
+def simulate_next_day_indicators(df: pd.DataFrame,
+                                  price_change_pct: float,
+                                  volume: float) -> dict | None:
     """
-    Simulate what technical indicators would be tomorrow
-    Uses Volume_Scaled_OBV to match chart display
+    Simulate what technical indicators would look like tomorrow.
+
+    Uses dynamic MACD parameters stored in df columns (MACD_Fast/Slow/Sign_Param)
+    so the simulation always matches the currently active gear.
+    Uses a mini-df ADX re-calculation for an exact ADX/DI simulation.
 
     Args:
-        df: DataFrame with technical indicators (correct column names with underscores)
-        price_change_pct: Tomorrow's price change percentage
-        volume: Tomorrow's volume
+        df:                DataFrame produced by run_single_stock_analysis()
+        price_change_pct:  Hypothetical tomorrow % price change
+        volume:            Hypothetical tomorrow volume
 
     Returns:
-        Dictionary with simulated indicator values
+        Dictionary with simulated indicator values and signals, or None if too short.
     """
     if len(df) < 30:
         return None
 
-    latest = df.iloc[-1]
-
-    # Calculate tomorrow's price
+    latest      = df.iloc[-1]
     close_today = latest['Close']
     close_tomorrow = close_today * (1 + price_change_pct / 100)
 
-    # Old MACD calculator using static MACD parameters
-    # # Get current EMA values for MACD calculation
-    # ema12_today = df['Close'].ewm(span=12, adjust=False).mean().iloc[-1]
-    # ema26_today = df['Close'].ewm(span=26, adjust=False).mean().iloc[-1]
+    # ── Dynamic MACD simulation via EWM step ─────────────────
+    p_fast = int(latest.get('MACD_Fast_Param', MACD_NORM_F))
+    p_slow = int(latest.get('MACD_Slow_Param', MACD_NORM_S))
+    p_sign = int(latest.get('MACD_Sign_Param', MACD_NORM_SIGN))
 
-    # # Calculate tomorrow's EMAs
-    # alpha12 = 2 / (12 + 1)
-    # alpha26 = 2 / (26 + 1)
-
-    # ema12_tomorrow = alpha12 * close_tomorrow + (1 - alpha12) * ema12_today
-    # ema26_tomorrow = alpha26 * close_tomorrow + (1 - alpha26) * ema26_today
-
-    # # MACD
-    # macd_tomorrow = ema12_tomorrow - ema26_tomorrow
-    # macd_signal_today = latest['MACD_Signal']
-    # alpha_signal = 2 / (9 + 1)
-    # macd_signal_tomorrow = alpha_signal * macd_tomorrow + (1 - alpha_signal) * macd_signal_today
-    # macd_hist_tomorrow = macd_tomorrow - macd_signal_tomorrow
-
-    # ==================== DYNAMIC SIMULATOR MACD ====================
-    # Grab today's active dynamic parameters
-    p_fast = int(latest.get('MACD_Fast_Param', 12))
-    p_slow = int(latest.get('MACD_Slow_Param', 26))
-    p_sign = int(latest.get('MACD_Sign_Param', 9))
-
-    # Get current EMA values USING DYNAMIC PARAMS
     ema_fast_today = df['Close'].ewm(span=p_fast, adjust=False).mean().iloc[-1]
     ema_slow_today = df['Close'].ewm(span=p_slow, adjust=False).mean().iloc[-1]
 
-    # Calculate tomorrow's EMAs
     alpha_fast = 2 / (p_fast + 1)
     alpha_slow = 2 / (p_slow + 1)
+    alpha_sign = 2 / (p_sign + 1)
 
     ema_fast_tomorrow = alpha_fast * close_tomorrow + (1 - alpha_fast) * ema_fast_today
     ema_slow_tomorrow = alpha_slow * close_tomorrow + (1 - alpha_slow) * ema_slow_today
 
-    # MACD Tomorrow
-    macd_tomorrow = ema_fast_tomorrow - ema_slow_tomorrow
-    macd_signal_today = latest['MACD_Signal']
-    alpha_signal = 2 / (p_sign + 1)
-    macd_signal_tomorrow = alpha_signal * macd_tomorrow + (1 - alpha_signal) * macd_signal_today
-    macd_hist_tomorrow = macd_tomorrow - macd_signal_tomorrow
-    # ================================================================
+    macd_tomorrow        = ema_fast_tomorrow - ema_slow_tomorrow
+    macd_signal_today    = latest['MACD_Signal']
+    macd_signal_tomorrow = alpha_sign * macd_tomorrow + (1 - alpha_sign) * macd_signal_today
+    macd_hist_tomorrow   = macd_tomorrow - macd_signal_tomorrow
 
-    # RSI
+    # ── RSI simulation via Wilder step ───────────────────────
     price_change = close_tomorrow - close_today
-    returns = df['Close'].diff()
-    gains = returns.where(returns > 0, 0)
-    losses = -returns.where(returns < 0, 0)
+    returns      = df['Close'].diff()
+    gains        = returns.where(returns > 0, 0)
+    losses       = -returns.where(returns < 0, 0)
 
-    avg_gain_today = gains.rolling(14).mean().iloc[-1]
-    avg_loss_today = losses.rolling(14).mean().iloc[-1]
+    avg_gain_today = gains.ewm(com=RSI_WINDOW - 1, adjust=False).mean().iloc[-1]
+    avg_loss_today = losses.ewm(com=RSI_WINDOW - 1, adjust=False).mean().iloc[-1]
 
     if price_change > 0:
-        avg_gain_tomorrow = (avg_gain_today * 13 + price_change) / 14
-        avg_loss_tomorrow = (avg_loss_today * 13) / 14
+        avg_gain_tomorrow = (avg_gain_today * (RSI_WINDOW - 1) + price_change)  / RSI_WINDOW
+        avg_loss_tomorrow = (avg_loss_today * (RSI_WINDOW - 1))                 / RSI_WINDOW
     else:
-        avg_gain_tomorrow = (avg_gain_today * 13) / 14
-        avg_loss_tomorrow = (avg_loss_today * 13 + abs(price_change)) / 14
+        avg_gain_tomorrow = (avg_gain_today * (RSI_WINDOW - 1))                 / RSI_WINDOW
+        avg_loss_tomorrow = (avg_loss_today * (RSI_WINDOW - 1) + abs(price_change)) / RSI_WINDOW
 
-    if avg_loss_tomorrow == 0:
-        rsi_tomorrow = 100
-    else:
-        rs = avg_gain_tomorrow / avg_loss_tomorrow
-        rsi_tomorrow = 100 - (100 / (1 + rs))
+    rsi_tomorrow = (100 if avg_loss_tomorrow == 0
+                    else 100 - (100 / (1 + avg_gain_tomorrow / avg_loss_tomorrow)))
 
-    # OBV - use Volume_Scaled_OBV to match chart
+    # ── OBV simulation ────────────────────────────────────────
     obv_today = latest['OBV']
-    if close_tomorrow > close_today:
-        obv_tomorrow = obv_today + volume
-    elif close_tomorrow < close_today:
-        obv_tomorrow = obv_today - volume
-    else:
-        obv_tomorrow = obv_today
+    obv_tomorrow = (obv_today + volume if close_tomorrow > close_today else
+                    obv_today - volume if close_tomorrow < close_today else
+                    obv_today)
 
-    # 1. FIX: Calculate tomorrow's true 20-day volume average
     if len(df) >= 19:
         vol_20d_avg_tomorrow = (df['Volume'].iloc[-19:].sum() + volume) / 20
     else:
         vol_20d_avg_tomorrow = (df['Volume'].sum() + volume) / (len(df) + 1)
 
-    vol_20d_avg_today = df['Volume'].rolling(20).mean().iloc[-1]
-
-    # Convert to Volume_Scaled_OBV
-    obv_scaled_today = latest.get('Volume_Scaled_OBV', obv_today / vol_20d_avg_today)
+    vol_20d_avg_today   = df['Volume'].rolling(20).mean().iloc[-1]
+    obv_scaled_today    = latest.get('Volume_Scaled_OBV', obv_today / vol_20d_avg_today)
     obv_scaled_tomorrow = obv_tomorrow / vol_20d_avg_tomorrow
 
-    # Convert to Volume_Scaled_OBV (matches chart display)
-    vol_20d_avg = df['Volume'].rolling(20).mean().iloc[-1]
-    obv_scaled_today = latest.get('Volume_Scaled_OBV', obv_today / vol_20d_avg)
-    obv_scaled_tomorrow = obv_tomorrow / vol_20d_avg
-   # Fixed index to -3 (T-2 days ago relative to tomorrow)
-    obv_scaled_3d_ago = df['Volume_Scaled_OBV'].iloc[-3] if len(df) >= 3 and 'Volume_Scaled_OBV' in df.columns else obv_scaled_today
-    obv_3d_ago_raw = df['OBV'].iloc[-3] if len(df) >= 3 else obv_today
+    obv_scaled_3d_ago = (df['Volume_Scaled_OBV'].iloc[-3]
+                         if len(df) >= 3 and 'Volume_Scaled_OBV' in df.columns
+                         else obv_scaled_today)
+    obv_3d_ago_raw    = df['OBV'].iloc[-3] if len(df) >= 3 else obv_today
 
-    # ==========================================
-    # EXACT ADX, DI & PATTERN SIMULATION
-    # ==========================================
-    # 1. Create a mini-dataframe for the simulation (last 100 days for smoothing)
+    # ── Exact ADX simulation via mini-df ─────────────────────
     df_sim = df[['High', 'Low', 'Close']].tail(100).copy()
-    
-    # Estimate tomorrow's wicks
-    recent_tr = (df_sim['High'] - df_sim['Low']).mean()
-    high_tomorrow = max(close_today, close_tomorrow) + (recent_tr * 0.2)
-    low_tomorrow = min(close_today, close_tomorrow) - (recent_tr * 0.2)
-    
-    # Append tomorrow's simulated price
-    tomorrow_idx = df_sim.index[-1] + pd.Timedelta(days=1)
-    new_row = pd.DataFrame({
-        'High': [high_tomorrow], 
-        'Low': [low_tomorrow], 
-        'Close': [close_tomorrow]
-    }, index=[tomorrow_idx])
-    df_sim = pd.concat([df_sim, new_row])
-    
-    # 2. Run exact ADX calculation on the appended dataframe
-    adx_calculator = ta.trend.ADXIndicator(df_sim['High'], df_sim['Low'], df_sim['Close'], window=10)
-    df_sim['ADX'] = adx_calculator.adx()
-    df_sim['DI_Plus'] = adx_calculator.adx_pos()
-    df_sim['DI_Minus'] = adx_calculator.adx_neg()
-    
-    # 3. Apply your exact LOWESS and Slope math
+
+    recent_tr      = (df_sim['High'] - df_sim['Low']).mean()
+    high_tomorrow  = max(close_today, close_tomorrow) + (recent_tr * 0.2)
+    low_tomorrow   = min(close_today, close_tomorrow) - (recent_tr * 0.2)
+    tomorrow_idx   = df_sim.index[-1] + pd.Timedelta(days=1)
+
+    df_sim = pd.concat([df_sim, pd.DataFrame(
+        {'High': [high_tomorrow], 'Low': [low_tomorrow], 'Close': [close_tomorrow]},
+        index=[tomorrow_idx]
+    )])
+
+    adx_calc = ta.trend.ADXIndicator(
+        df_sim['High'], df_sim['Low'], df_sim['Close'], window=ADX_WINDOW
+    )
+    df_sim['ADX']      = adx_calc.adx()
+    df_sim['DI_Plus']  = adx_calc.adx_pos()
+    df_sim['DI_Minus'] = adx_calc.adx_neg()
+
+    # Reproduce the same smoothing pipeline as the main engine
+    adx_filled_sim = df_sim['ADX'].ffill()
     try:
         from scipy.signal import savgol_filter
-        df_sim['ADX_LOWESS'] = savgol_filter(df_sim['ADX'].fillna(method='ffill'), window_length=7, polyorder=2)
-    except:
-        df_sim['ADX_LOWESS'] = df_sim['ADX'].ewm(span=4, adjust=False).mean()
-        
-    def calculate_adx_trend(series, window=3):
-        def get_slope(y):
-            if len(y) < 3 or y.isna().any(): return 0
-            x = np.arange(len(y))
-            slope, _, _, _, _ = stats.linregress(x, y)
-            return slope
-        return series.rolling(window=window, min_periods=3).apply(get_slope, raw=False)
-        
-    df_sim['ADX_Slope'] = calculate_adx_trend(df_sim['ADX_LOWESS'], window=3)
-    df_sim['ADX_Acceleration'] = df_sim['ADX_Slope'] - df_sim['ADX_Slope'].shift(1)
-    
-    # 4. Apply the isolated 9-pattern logic!
+        df_sim['ADX_LOWESS'] = savgol_filter(
+            adx_filled_sim, window_length=ADX_SG_WINDOW, polyorder=ADX_SG_POLYORDER
+        )
+    except Exception:
+        df_sim['ADX_LOWESS'] = adx_filled_sim.ewm(span=ADX_EWM_SPAN, adjust=False).mean()
+
+    def _sim_slope(y):
+        if len(y) < 3 or np.isnan(y).any(): return 0.0
+        x = np.arange(len(y), dtype=float)
+        sl, *_ = stats.linregress(x, y)
+        return float(sl)
+
+    df_sim['ADX_Slope'] = (
+        df_sim['ADX_LOWESS']
+        .rolling(window=ADX_SLOPE_WINDOW, min_periods=3)
+        .apply(_sim_slope, raw=True)
+    )
+    df_sim['ADX_Acceleration'] = df_sim['ADX_Slope'].diff(1).ewm(span=3, adjust=False).mean()
     df_sim = apply_adx_patterns(df_sim)
-    
-    # 5. Extract tomorrow's simulated values
-    tmr = df_sim.iloc[-1]
-    yest = df_sim.iloc[-2] # "Today" in the context of the simulation
-    
-    adx_today = yest['ADX']
-    adx_tomorrow = tmr['ADX']
-    adx_pattern = tmr['ADX_Pattern']
-    
-    di_plus_today = yest['DI_Plus']
-    di_minus_today = yest['DI_Minus']
-    di_plus_tmr = tmr['DI_Plus']
-    di_minus_tmr = tmr['DI_Minus']
-    
-    # 6. Calculate Screaming DI Logic
-    di_spread_today = di_plus_today - di_minus_today
-    di_spread_tmr = di_plus_tmr - di_minus_tmr
-    di_spread_momentum = di_spread_tmr - di_spread_today
-    
+
+    tmr  = df_sim.iloc[-1]
+    yest = df_sim.iloc[-2]
+
+    adx_today    = float(yest['ADX'])
+    adx_tomorrow = float(tmr['ADX'])
+    adx_pattern  = str(tmr['ADX_Pattern'])
+
+    di_plus_today  = float(yest['DI_Plus'])
+    di_minus_today = float(yest['DI_Minus'])
+    di_plus_tmr    = float(tmr['DI_Plus'])
+    di_minus_tmr   = float(tmr['DI_Minus'])
+
+    di_spread_today    = di_plus_today  - di_minus_today
+    di_spread_tmr      = di_plus_tmr    - di_minus_tmr
+    di_spread_momentum = di_spread_tmr  - di_spread_today
+
     di_bullish_cross_tmr = (di_plus_tmr > di_minus_tmr) and (di_plus_today <= di_minus_today)
-    di_screaming_buy = di_bullish_cross_tmr and (di_spread_momentum > 15)
+    di_screaming_buy     = di_bullish_cross_tmr and (di_spread_momentum > DI_SCREAMING_BUY_MOMENTUM)
 
-    # ==========================================
-    # THRESHOLDS & SIGNALS
-    # ==========================================
-    # Calculate tomorrow's TRUE 10-day low (including tomorrow's MACD)
-    macd_9d_low = df['MACD'].rolling(9).min().iloc[-1]
-    macd_10d_low_tomorrow = min(macd_9d_low, macd_tomorrow)
-    macd_10d_high = df['MACD'].rolling(10).max().iloc[-1]
+    # ── Thresholds ────────────────────────────────────────────
+    macd_9d_low          = df['MACD'].rolling(9).min().iloc[-1]
+    macd_10d_low_tomorrow= min(macd_9d_low, macd_tomorrow)
+    macd_10d_high        = df['MACD'].rolling(10).max().iloc[-1]
+    macd_10d_low         = df['MACD'].rolling(10).min().iloc[-1]
 
-    # Get thresholds
-    macd_10d_low = df['MACD'].rolling(10).min().iloc[-1]
-    macd_10d_high = df['MACD'].rolling(10).max().iloc[-1]
-    rsi_p10 = df['RSI_14'].rolling(60).quantile(0.10).iloc[-1] if 'RSI_14' in df.columns else 30
-    rsi_p90 = df['RSI_14'].rolling(60).quantile(0.90).iloc[-1] if 'RSI_14' in df.columns else 70
+    rsi_p10 = (df['RSI_14'].rolling(60).quantile(0.10).iloc[-1]
+               if 'RSI_14' in df.columns else RSI_OVERSOLD)
+    rsi_p90 = (df['RSI_14'].rolling(60).quantile(0.90).iloc[-1]
+               if 'RSI_14' in df.columns else RSI_OVERBOUGHT)
 
-    # Check signals
-    signals = {}
-
-    # MACD signals (directional)
+    # ── Signal evaluation ─────────────────────────────────────
     macd_stopped_falling = macd_tomorrow >= latest['MACD']
-    macd_in_bottom_zone = (macd_tomorrow >= macd_10d_low_tomorrow) and (macd_tomorrow <= macd_10d_low_tomorrow * 0.95)
-    macd_gap_narrowing = (macd_tomorrow - macd_signal_tomorrow) > (latest['MACD'] - latest['MACD_Signal'])
-    # Use raw OBV to perfectly match the `df['OBV'] > df['OBV'].shift(3)` logic in the main engine
-    obv_rising = obv_tomorrow > obv_3d_ago_raw
+    macd_in_bottom_zone  = (macd_tomorrow >= macd_10d_low_tomorrow and
+                            macd_tomorrow <= macd_10d_low_tomorrow * 0.95)
+    macd_gap_narrowing   = ((macd_tomorrow - macd_signal_tomorrow) >
+                            (latest['MACD'] - latest['MACD_Signal']))
+    obv_rising           = obv_tomorrow > obv_3d_ago_raw
 
-    conditions_met = sum([macd_stopped_falling, macd_in_bottom_zone, macd_gap_narrowing, obv_rising])
-    signals['MACD_Bottoming'] = macd_tomorrow < 0 and macd_in_bottom_zone and conditions_met >= 2
-    signals['MACD_Bullish_Cross'] = (latest['MACD'] < latest['MACD_Signal']) and (macd_tomorrow > macd_signal_tomorrow)
-    signals['MACD_Bearish_Cross'] = (latest['MACD'] > latest['MACD_Signal']) and (macd_tomorrow < macd_signal_tomorrow)
+    conditions_met = sum([macd_stopped_falling, macd_in_bottom_zone,
+                          macd_gap_narrowing, obv_rising])
 
-    # RSI signals (directional)
-    signals['RSI_Bottoming'] = rsi_tomorrow < 30 and rsi_tomorrow <= rsi_p10
-    signals['RSI_Peaking'] = rsi_tomorrow > 70 and rsi_tomorrow >= rsi_p90
-
-    # ADX pattern (informational, not directional)
-    signals['ADX_Pattern'] = adx_pattern
-    signals['DI_Screaming_Buy'] = di_screaming_buy
+    signals = {
+        'MACD_Bottoming':    macd_tomorrow < 0 and macd_in_bottom_zone and conditions_met >= 2,
+        'MACD_Bullish_Cross':(latest['MACD'] < latest['MACD_Signal']) and
+                             (macd_tomorrow  > macd_signal_tomorrow),
+        'MACD_Bearish_Cross':(latest['MACD'] > latest['MACD_Signal']) and
+                             (macd_tomorrow  < macd_signal_tomorrow),
+        'RSI_Bottoming':     rsi_tomorrow < RSI_OVERSOLD  and rsi_tomorrow <= rsi_p10,
+        'RSI_Peaking':       rsi_tomorrow > RSI_OVERBOUGHT and rsi_tomorrow >= rsi_p90,
+        'ADX_Pattern':       adx_pattern,
+        'DI_Screaming_Buy':  di_screaming_buy,
+    }
 
     return {
         'input_price_change_pct': price_change_pct,
-        'input_volume': volume,
-        'close_today': close_today,
-        'close_tomorrow': close_tomorrow,
+        'input_volume':           volume,
+        'close_today':            close_today,
+        'close_tomorrow':         close_tomorrow,
 
-        'macd_today': latest['MACD'],
-        'macd_tomorrow': macd_tomorrow,
-        'macd_signal_today': macd_signal_today,
-        'macd_signal_tomorrow': macd_signal_tomorrow,
-        'macd_hist_today': latest['MACD_Hist'],
-        'macd_hist_tomorrow': macd_hist_tomorrow,
-        'macd_gap_today': latest['MACD'] - latest['MACD_Signal'],
-        'macd_gap_tomorrow': macd_tomorrow - macd_signal_tomorrow,
-        'macd_10d_low_tomorrow': macd_10d_low_tomorrow,
-        'macd_10d_high': macd_10d_high,
-        'macd_10d_low': macd_10d_low,
-        'rsi_today': latest['RSI_14'],
-        'rsi_tomorrow': rsi_tomorrow,
-        'rsi_p10': rsi_p10,
-        'rsi_p90': rsi_p90,
+        'macd_today':             latest['MACD'],
+        'macd_tomorrow':          macd_tomorrow,
+        'macd_signal_today':      macd_signal_today,
+        'macd_signal_tomorrow':   macd_signal_tomorrow,
+        'macd_hist_today':        latest['MACD_Hist'],
+        'macd_hist_tomorrow':     macd_hist_tomorrow,
+        'macd_gap_today':         latest['MACD'] - latest['MACD_Signal'],
+        'macd_gap_tomorrow':      macd_tomorrow  - macd_signal_tomorrow,
+        'macd_10d_low_tomorrow':  macd_10d_low_tomorrow,
+        'macd_10d_high':          macd_10d_high,
+        'macd_10d_low':           macd_10d_low,
 
-        'adx_today': adx_today,
-        'adx_tomorrow': adx_tomorrow,
-        'adx_pattern': adx_pattern,
+        'rsi_today':              latest['RSI_14'],
+        'rsi_tomorrow':           rsi_tomorrow,
+        'rsi_p10':                rsi_p10,
+        'rsi_p90':                rsi_p90,
 
-        'obv_scaled_today': obv_scaled_today,
-        'obv_scaled_tomorrow': obv_scaled_tomorrow,
-        'obv_scaled_3d_ago': obv_scaled_3d_ago,
-        'obv_rising': obv_rising,
+        'adx_today':              adx_today,
+        'adx_tomorrow':           adx_tomorrow,
+        'adx_pattern':            adx_pattern,
 
-        'obv_raw_today': obv_today,
-        'obv_raw_tomorrow': obv_tomorrow,
-        'obv_raw_3d_ago': obv_3d_ago_raw,
+        'obv_scaled_today':       obv_scaled_today,
+        'obv_scaled_tomorrow':    obv_scaled_tomorrow,
+        'obv_scaled_3d_ago':      obv_scaled_3d_ago,
+        'obv_rising':             obv_rising,
 
-        'volume_today': latest['Volume'],
-        'volume_tomorrow': volume,
-        'volume_10d_avg': df['Volume'].rolling(10).mean().iloc[-1],
-        'volume_20d_avg': vol_20d_avg,
+        'obv_raw_today':          obv_today,
+        'obv_raw_tomorrow':       obv_tomorrow,
+        'obv_raw_3d_ago':         obv_3d_ago_raw,
 
-        'signals': signals,
-        'conditions_met': conditions_met
+        'volume_today':           latest['Volume'],
+        'volume_tomorrow':        volume,
+        'volume_10d_avg':         df['Volume'].rolling(10).mean().iloc[-1],
+        'volume_20d_avg':         vol_20d_avg_today,
+
+        'signals':                signals,
+        'conditions_met':         conditions_met,
     }
