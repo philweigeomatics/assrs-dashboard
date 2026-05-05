@@ -29,3 +29,4 @@ def _get_secret(key: str, fallback_env: str = None) -> str:
 
 # ── API tokens ────────────────────────────────────────────────────────
 TUSHARE_TOKEN = _get_secret("TUSHARE_TOKEN")
+DEEPSEEK_API_KEY = _get_secret("DEEPSEEK_API_KEY")

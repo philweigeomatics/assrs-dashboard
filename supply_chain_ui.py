@@ -165,18 +165,6 @@ _D3_TEMPLATE = r"""<!DOCTYPE html>
 <body>
 <div id="tooltip"></div>
 <svg id="graph">
-  <defs>
-    <!-- Arrowhead for company → product spokes (target = rect, ~80px half-width) -->
-    <marker id="arr-hub" viewBox="0 -4 10 8" refX="82" refY="0"
-            markerWidth="7" markerHeight="7" orient="auto">
-      <path d="M0,-4L10,0L0,4" fill="#a16207"/>
-    </marker>
-    <!-- Arrowhead for product → sector links (target = circle r=50) -->
-    <marker id="arr-sec" viewBox="0 -4 10 8" refX="55" refY="0"
-            markerWidth="7" markerHeight="7" orient="auto">
-      <path d="M0,-4L10,0L0,4" fill="#6b7280"/>
-    </marker>
-  </defs>
 </svg>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script>
@@ -194,34 +182,55 @@ svg.call(
 );
 
 // ── Nodes & links ───────────────────────────────────────────────────────────
-// Layout: Company (centre, pinned) → Products (inner ring) → Sectors (outer ring)
 const COMPANY_ID = DATA.company_name;
 
+// Fallback height in case Streamlit iframe hasn't fully rendered
+const width = window.innerWidth || 700;
+const height = window.innerHeight || 560;
+
 const nodes = [
-  { id: COMPANY_ID, type: "company", fx: W / 2, fy: H / 2 },
+  // explicitly pin the company to the exact center using fx and fy
+  { id: COMPANY_ID, type: "company", fx: width / 2, fy: height / 2 },
   ...DATA.products.map(id      => ({ id, type: "product" })),
   ...DATA.macro_sectors.map(id => ({ id, type: "sector"  })),
 ];
 
 const links = [
-  ...DATA.products.map(p => ({ source: COMPANY_ID, target: p,        kind: "hub" })),
+  ...DATA.products.map(p => ({ source: COMPANY_ID, target: p,      kind: "hub" })),
   ...DATA.links.map(l    => ({ source: l.source,   target: l.target, kind: "sec" })),
 ];
 
-// ── Force simulation — radial forces enforce the 3-ring hierarchy ────────────
-const INNER_R = Math.min(W, H) * 0.27;   // products ring
-const OUTER_R = Math.min(W, H) * 0.47;   // sectors ring
-
+// ── Force simulation — Organic Gravity ───────────────────────────────────────
 const sim = d3.forceSimulation(nodes)
-  .force("link",         d3.forceLink(links).id(d => d.id).strength(0.4)
-                           .distance(d => d.kind === "hub" ? INNER_R * 0.9 : OUTER_R * 0.55))
-  .force("charge",       d3.forceManyBody().strength(-400))
-  .force("collision",    d3.forceCollide().radius(d => d.type === "sector" ? 60 : 50))
-  // Radial forces pull products to inner ring and sectors to outer ring
-  .force("radial-prod",  d3.forceRadial(INNER_R, W / 2, H / 2)
-                           .strength(d => d.type === "product" ? 0.9 : 0))
-  .force("radial-sec",   d3.forceRadial(OUTER_R, W / 2, H / 2)
-                           .strength(d => d.type === "sector"  ? 0.9 : 0));
+  // Hub links (Company to Product) are short and tight. Sector links are longer and looser.
+  .force("link", d3.forceLink(links).id(d => d.id)
+    .distance(d => d.kind === "hub" ? 140 : 180)
+    .strength(d => d.kind === "hub" ? 1.0 : 0.5)
+  )
+  // Strong negative charge pushes all nodes away from each other so it spreads out
+  .force("charge", d3.forceManyBody().strength(-800))
+  // A gentle gravity pulling everything toward the center of the canvas
+  .force("center", d3.forceCenter(width / 2, height / 2))
+  // Collision prevents bubbles from overlapping
+  .force("collision", d3.forceCollide().radius(d => d.type === "company" ? 70 : 60));
+
+// ── Drag ────────────────────────────────────────────────────────────────────
+const drag = d3.drag()
+  .on("start", (e, d) => { 
+      if (!e.active) sim.alphaTarget(0.3).restart(); 
+      // Keep company pinned even if clicked, let others drag freely
+      if (d.type !== "company") { d.fx = d.x; d.fy = d.y; }
+  })
+  .on("drag",  (e, d) => { 
+      if (d.type !== "company") { d.fx = e.x; d.fy = e.y; }
+  })
+  .on("end",   (e, d) => {
+    if (!e.active) sim.alphaTarget(0);
+    // When drag ends, let products/sectors float again. Keep company pinned.
+    if (d.type !== "company") { d.fx = null; d.fy = null; }
+  });
+
+
 
 // ── Links ───────────────────────────────────────────────────────────────────
 const linkEl = g.selectAll(".link")
@@ -230,18 +239,8 @@ const linkEl = g.selectAll(".link")
   .attr("stroke",         d => d.kind === "hub" ? "#92400e" : "#4b5563")
   .attr("stroke-width",   d => d.kind === "hub" ? 1.5 : 1.5)
   .attr("stroke-opacity", d => d.kind === "hub" ? 0.7  : 0.7)
-  .attr("stroke-dasharray", d => d.kind === "hub" ? "5,3" : null)
-  .attr("marker-end",     d => d.kind === "hub" ? "url(#arr-hub)" : "url(#arr-sec)");
+  .attr("stroke-dasharray", d => d.kind === "hub" ? "5,3" : null);
 
-// ── Drag ────────────────────────────────────────────────────────────────────
-// Company re-pins where dropped; products & sectors float freely after drag.
-const drag = d3.drag()
-  .on("start", (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-  .on("drag",  (e, d) => { d.fx = e.x; d.fy = e.y; })
-  .on("end",   (e, d) => {
-    if (!e.active) sim.alphaTarget(0);
-    if (d.type !== "company") { d.fx = null; d.fy = null; }
-  });
 
 // ── Node groups ─────────────────────────────────────────────────────────────
 const nodeEl = g.selectAll(".node")
