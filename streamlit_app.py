@@ -49,6 +49,7 @@ pages = {
         st.Page("pages/sector_stock_selector.py", title="Stock Selector 选股器"),
         st.Page("pages/watchlist.py", title="Watchlist 观察名单"),
         st.Page("pages/watchlist_earnings_calendar.py", title="Earnings Calendar 财报日历"),
+        st.Page("pages/sector_explorer.py", title="Sector Explorer 产业链"),
     ],
     "💼 Portfolio 组合": [
         st.Page("pages/Portfolio_Optimization.py", title="Optimization 组合优化"),

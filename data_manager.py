@@ -3464,3 +3464,113 @@ def get_all_supply_chain_tickers() -> set:
     df = db.read_table('supply_chain_graphs', columns='ticker')
     return set(df['ticker'].tolist()) if not df.empty else set()
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MACRO SECTOR THEMES
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Stores chronological supply-chain maps generated from rough industry themes
+# ("ev", "data center", etc.) by DeepSeek.
+#
+# SQLite — auto-created on first insert.
+#
+# Supabase — run this DDL once in the Supabase SQL editor:
+#
+#   CREATE TABLE IF NOT EXISTS sector_themes (
+#       id          BIGSERIAL PRIMARY KEY,
+#       raw_input   TEXT NOT NULL UNIQUE,
+#       formal_name TEXT NOT NULL,
+#       layers_json JSONB NOT NULL,
+#       created_by  TEXT,
+#       created_at  TIMESTAMPTZ DEFAULT NOW()
+#   );
+#
+# raw_input is UNIQUE so we can dedupe API calls and provide an audit trail.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _create_sector_themes_table():
+    """Create sector_themes in SQLite (no-op for Supabase — run DDL above)."""
+    db.create_table_sqlite("""
+        CREATE TABLE IF NOT EXISTS sector_themes (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            raw_input   TEXT NOT NULL UNIQUE,
+            formal_name TEXT NOT NULL,
+            layers_json TEXT NOT NULL,
+            created_by  TEXT,
+            created_at  TEXT
+        )
+    """)
+
+
+def get_all_sector_themes():
+    """Return [{'id', 'raw_input', 'formal_name'}, ...] sorted by formal_name."""
+    if not db.table_exists('sector_themes'):
+        return []
+    df = db.read_table(
+        'sector_themes',
+        columns='id,raw_input,formal_name',
+        order_by='formal_name',
+    )
+    return df.to_dict('records') if not df.empty else []
+
+
+def get_sector_theme_by_id(theme_id):
+    """Return the full theme record incl. parsed 'layers' list, or None."""
+    import json as _json
+    if not db.table_exists('sector_themes'):
+        return None
+    df = db.read_table('sector_themes', filters={'id': theme_id}, limit=1)
+    if df.empty:
+        return None
+    rec = df.iloc[0].to_dict()
+    raw = rec.get('layers_json', '')
+    try:
+        full = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+        rec['data']   = full
+        rec['layers'] = full.get('layers', []) if isinstance(full, dict) else []
+    except Exception:
+        rec['data']   = {}
+        rec['layers'] = []
+    return rec
+
+
+def get_sector_theme_by_raw_input(raw_input):
+    """Existence check by raw_input (case-insensitive on the stored value)."""
+    if not db.table_exists('sector_themes'):
+        return None
+    key = (raw_input or '').strip().lower()
+    df = db.read_table('sector_themes', filters={'raw_input': key}, limit=1)
+    return df.iloc[0].to_dict() if not df.empty else None
+
+
+def add_sector_theme(raw_input, formal_name, layers_data, created_by=None):
+    """Insert a new theme. raw_input is normalised to lowercase. Returns True on success."""
+    import json as _json
+    from datetime import datetime as _dt
+    if not db.table_exists('sector_themes'):
+        _create_sector_themes_table()
+    try:
+        db.insert_records('sector_themes', {
+            'raw_input':   (raw_input or '').strip().lower(),
+            'formal_name': formal_name,
+            'layers_json': _json.dumps(layers_data, ensure_ascii=False),
+            'created_by':  created_by,
+            'created_at':  _dt.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }, upsert=False)
+        return True
+    except Exception as e:
+        print(f"[data_manager] ❌ add_sector_theme: {e}")
+        return False
+
+
+def delete_sector_theme(theme_id):
+    """Delete a theme by id. Returns True on success."""
+    if not db.table_exists('sector_themes'):
+        return False
+    try:
+        db.delete_records('sector_themes', filters={'id': theme_id})
+        return True
+    except Exception as e:
+        print(f"[data_manager] ❌ delete_sector_theme({theme_id}): {e}")
+        return False
+
