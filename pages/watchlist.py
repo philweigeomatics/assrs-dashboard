@@ -1,8 +1,15 @@
 """
 Watchlist Management — 观察列表管理
 Each user manages their own watchlist.
-Supply chain graph generation (DeepSeek) and D3 visualisation are handled
-by supply_chain_ui; all DB operations go through data_manager.
+
+Performance notes:
+  - @st.cache_data wrappers keep the 3 Supabase round-trips out of the hot
+    path.  Cache is keyed by user_id so multi-user data never crosses.
+  - @st.fragment scopes row-click reruns to just the grid section; the add
+    stock form and bulk import above are never re-executed on a row click.
+  - st.switch_page cannot be called inside a fragment, so "Analyze" writes a
+    session-state flag that the navigation bridge (outside the fragment) picks
+    up on the next full-app rerun.
 """
 
 import streamlit as st
@@ -15,8 +22,26 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 # ── Auth ───────────────────────────────────────────────────────────────────────
 auth_manager.require_login()
 user = auth_manager.get_current_user()
+_uid = auth_manager.get_current_user_id()  # used as cache-key discriminator
+
+# ── Per-user cached data loaders ───────────────────────────────────────────────
+# user_id in the signature makes each entry user-specific (no cross-user leakage).
+# Call .clear() after any mutation so the next read is fresh.
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _load_watchlist(user_id):
+    return data_manager.get_watchlist()
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _load_graphed_tickers(user_id):
+    return data_manager.get_all_supply_chain_tickers()
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_daily_basic(tickers_tuple, user_id):
+    return data_manager.get_daily_basic_latest(list(tickers_tuple))
 
 # ── Supply Chain Graph Dialog ──────────────────────────────────────────────────
+# Must be at module level (not inside a fragment or function).
 @st.dialog("Supply Chain Graph 供应链图谱", width="large")
 def _show_graph_dialog(ticker: str, graph_data: dict) -> None:
     company  = graph_data.get("company_name", ticker)
@@ -55,6 +80,8 @@ with col2:
             else:
                 success, message = data_manager.add_to_watchlist(ticker_clean)
                 if success:
+                    _load_watchlist.clear()
+                    _load_daily_basic.clear()
                     st.success(message)
                     st.rerun()
                 else:
@@ -83,6 +110,8 @@ with st.expander("📥 Bulk Import | 批量导入", expanded=False):
                 if tickers:
                     with st.spinner(f"Importing {len(tickers)} stocks..."):
                         success_count, failed_count, msgs = data_manager.bulk_add_to_watchlist(tickers)
+                    _load_watchlist.clear()
+                    _load_daily_basic.clear()
                     st.success(f"✅ Imported {success_count} stocks")
                     if failed_count > 0:
                         st.warning(f"⚠️ {failed_count} failed (already in watchlist or errors)")
@@ -97,19 +126,32 @@ with st.expander("📥 Bulk Import | 批量导入", expanded=False):
 
 st.markdown("---")
 
-# ── Watchlist Display ──────────────────────────────────────────────────────────
-st.subheader("📋 Current Watchlist")
-watchlist_data = data_manager.get_watchlist()
+# ── Navigation bridge ──────────────────────────────────────────────────────────
+# st.switch_page cannot be called inside @st.fragment, so the Analyze button
+# sets this flag and triggers a full-app rerun; we intercept it here.
+if st.session_state.get("_goto_analysis"):
+    ticker = st.session_state.pop("_goto_analysis")
+    st.session_state.active_ticker = ticker
+    st.switch_page("pages/2_Single_Stock_Analysis_个股分析.py")
 
-if not watchlist_data:
-    st.info("📭 Your watchlist is empty. Add stocks above to get started.")
-else:
+
+# ── Watchlist Grid ─────────────────────────────────────────────────────────────
+# Wrapped in @st.fragment: row clicks, pagination, and search only rerun this
+# section — the add-stock form and bulk import above are untouched.
+@st.fragment
+def _watchlist_grid():
+    st.subheader("📋 Current Watchlist")
+    watchlist_data = _load_watchlist(_uid)
+
+    if not watchlist_data:
+        st.info("📭 Your watchlist is empty. Add stocks above to get started.")
+        return
+
     st.write(f"**Total: {len(watchlist_data)} stocks**")
     df = pd.DataFrame(watchlist_data)[["ticker", "stock_name", "added_date"]]
     df = df.sort_values("added_date", ascending=False)
 
-    # ── Batch-fetch graph status ───────────────────────────────────────────────
-    graphed_tickers: set = data_manager.get_all_supply_chain_tickers()
+    graphed_tickers: set = _load_graphed_tickers(_uid)
 
     # ── Search ─────────────────────────────────────────────────────────────────
     col1, col2 = st.columns([3, 1])
@@ -157,11 +199,11 @@ else:
     )
 
     start_idx = st.session_state.watchlist_page * ITEMS_PER_PAGE
-    end_idx = min(start_idx + ITEMS_PER_PAGE, total_items)
+    end_idx   = min(start_idx + ITEMS_PER_PAGE, total_items)
 
-    # ── Enrich with daily basic & graph status ─────────────────────────────────
+    # ── Enrich: daily basic + graph status ─────────────────────────────────────
     all_tickers = filtered_df["ticker"].tolist()
-    daily_df = data_manager.get_daily_basic_latest(all_tickers)
+    daily_df    = _load_daily_basic(tuple(sorted(all_tickers)), _uid)
     if not daily_df.empty:
         filtered_df = filtered_df.merge(daily_df, on="ticker", how="left")
 
@@ -181,6 +223,8 @@ else:
         if col_confirm.button("✅ Confirm Delete", type="primary"):
             success, message = data_manager.remove_from_watchlist(ticker_to_delete)
             st.success(message) if success else st.error(message)
+            _load_watchlist.clear()
+            _load_daily_basic.clear()
             st.session_state.pending_delete = None
             st.rerun()
         if col_cancel.button("❌ Cancel"):
@@ -191,16 +235,16 @@ else:
     # ── AgGrid Table ───────────────────────────────────────────────────────────
     gb = GridOptionsBuilder.from_dataframe(page_df)
     gb.configure_selection(selection_mode="single", use_checkbox=False)
-    gb.configure_column("ticker",        header_name="代码",       width=110)
-    gb.configure_column("stock_name",    header_name="名称",       flex=1)
-    gb.configure_column("supply_chain",  header_name="图谱",       width=70)
-    gb.configure_column("close",         header_name="收盘价",     width=100)
-    gb.configure_column("pe_ttm",        header_name="PE(TTM)",    width=100)
-    gb.configure_column("pb",            header_name="PB",         width=90)
-    gb.configure_column("turnover_rate", header_name="换手率%",    width=100)
+    gb.configure_column("ticker",        header_name="代码",        width=110)
+    gb.configure_column("stock_name",    header_name="名称",        flex=1)
+    gb.configure_column("supply_chain",  header_name="图谱",        width=70)
+    gb.configure_column("close",         header_name="收盘价",      width=100)
+    gb.configure_column("pe_ttm",        header_name="PE(TTM)",     width=100)
+    gb.configure_column("pb",            header_name="PB",          width=90)
+    gb.configure_column("turnover_rate", header_name="换手率%",     width=100)
     gb.configure_column("circ_mv_yi",    header_name="流通市值(亿)", width=130)
-    gb.configure_column("trade_date",    header_name="数据日期",   width=120)
-    gb.configure_column("added_date",    header_name="添加日期",   width=120)
+    gb.configure_column("trade_date",    header_name="数据日期",    width=120)
+    gb.configure_column("added_date",    header_name="添加日期",    width=120)
     gb.configure_grid_options(rowHeight=40, suppressMovableColumns=True)
     grid_options = gb.build()
 
@@ -224,21 +268,16 @@ else:
         st.info(f"Selected: **{selected_name} ({selected_ticker})**")
 
         if has_graph:
-            c_analyze, c_view, c_update, c_remove, _ = st.columns(
-                [1.2, 1.2, 1.4, 1.2, 2.5]
-            )
+            c_analyze, c_view, c_update, c_remove, _ = st.columns([1.2, 1.2, 1.4, 1.2, 2.5])
         else:
-            c_analyze, c_generate, c_remove, _ = st.columns(
-                [1.2, 1.6, 1.2, 3.5]
-            )
+            c_analyze, c_generate, c_remove, _ = st.columns([1.2, 1.6, 1.2, 3.5])
 
-        # ── Analyze ──────────────────────────────────────────────────────────
+        # Analyze — needs full-app rerun so st.switch_page works outside the fragment
         if c_analyze.button("🔍 Analyze", type="primary", use_container_width=True):
-            st.session_state.active_ticker = selected_ticker
-            st.switch_page("pages/2_Single_Stock_Analysis_个股分析.py")
+            st.session_state["_goto_analysis"] = selected_ticker
+            st.rerun(scope="app")
 
         if has_graph:
-            # ── View Graph ────────────────────────────────────────────────────
             if c_view.button("📊 View Graph", use_container_width=True):
                 graph_data = data_manager.get_supply_chain_graph(selected_ticker)
                 if graph_data:
@@ -246,53 +285,45 @@ else:
                 else:
                     st.error("Graph record found but data could not be loaded.")
 
-            # ── Update Graph ──────────────────────────────────────────────────
             if c_update.button("🔄 Update Graph", use_container_width=True):
-                with st.spinner(
-                    f"Re-generating supply chain graph for {selected_name} ({selected_ticker})…"
-                ):
+                with st.spinner(f"Re-generating graph for {selected_name}…"):
                     try:
                         graph_data = supply_chain_ui.generate_supply_chain_graph(
                             selected_ticker, selected_name
                         )
-                        saved = data_manager.upsert_supply_chain_graph(
+                        if data_manager.upsert_supply_chain_graph(
                             selected_ticker, selected_name, graph_data
-                        )
-                        if saved:
+                        ):
+                            _load_graphed_tickers.clear()
                             st.success(f"✅ Graph updated for {selected_name}")
                             st.rerun()
                         else:
-                            st.error("❌ Graph generated but failed to save to database.")
+                            st.error("❌ Graph generated but failed to save.")
                     except RuntimeError as exc:
                         st.error(f"❌ {exc}")
 
-            # ── Remove ────────────────────────────────────────────────────────
             if c_remove.button("🗑️ Remove", use_container_width=True):
                 st.session_state.pending_delete = selected_ticker
                 st.rerun()
 
         else:
-            # ── Generate Graph ────────────────────────────────────────────────
             if c_generate.button("🧬 Generate Graph", use_container_width=True):
-                with st.spinner(
-                    f"Generating supply chain graph for {selected_name} ({selected_ticker})…"
-                ):
+                with st.spinner(f"Generating supply chain graph for {selected_name}…"):
                     try:
                         graph_data = supply_chain_ui.generate_supply_chain_graph(
                             selected_ticker, selected_name
                         )
-                        saved = data_manager.upsert_supply_chain_graph(
+                        if data_manager.upsert_supply_chain_graph(
                             selected_ticker, selected_name, graph_data
-                        )
-                        if saved:
-                            st.success(f"✅ Supply chain graph generated for {selected_name}!")
+                        ):
+                            _load_graphed_tickers.clear()
+                            st.success(f"✅ Graph generated for {selected_name}!")
                             st.rerun()
                         else:
-                            st.error("❌ Graph generated but failed to save to database.")
+                            st.error("❌ Graph generated but failed to save.")
                     except RuntimeError as exc:
                         st.error(f"❌ {exc}")
 
-            # ── Remove ────────────────────────────────────────────────────────
             if c_remove.button("🗑️ Remove", use_container_width=True):
                 st.session_state.pending_delete = selected_ticker
                 st.rerun()
@@ -325,3 +356,6 @@ else:
         ):
             st.session_state.watchlist_page += 1
             st.rerun()
+
+
+_watchlist_grid()
