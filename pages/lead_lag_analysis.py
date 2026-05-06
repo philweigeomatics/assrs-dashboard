@@ -25,6 +25,7 @@ import streamlit as st
 
 import auth_manager
 import data_manager
+import lead_lag_stats
 import peer_discovery
 import sector_themes as sector_themes_mod
 import supply_chain_ui
@@ -409,4 +410,308 @@ else:
         st.info(
             "No supply chain theme has been saved for this sector yet. "
             "Ask an admin to generate one from the Sector Explorer page."
+        )
+
+# ── Gate: Phase 3 + 4 require a valid matched theme ───────────────────────────
+if not matched:
+    st.stop()
+theme_full = st.session_state.get(f"ll_p2_theme_{matched['id']}")
+if not theme_full:
+    st.stop()
+
+p2_layers = sorted(theme_full.get("layers") or [], key=lambda l: l.get("layer_index", 0))
+if not p2_layers:
+    st.stop()
+
+st.markdown("---")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 3 · Key Stocks per Layer
+# ══════════════════════════════════════════════════════════════════════════════
+st.subheader("🏭 Phase 3 · Key Stocks per Layer 各层核心标的")
+st.caption(
+    "DeepSeek identifies the top 3 A-share companies per supply-chain layer, "
+    "validated against the stock_basic database. 🔗 = supply chain graph already saved."
+)
+
+p3_key = f"ll_p3_stocks_{ticker}_{matched['id']}"
+
+c_run, c_refresh = st.columns([2, 1])
+if c_run.button("🔍 Identify Key Stocks per Layer", type="primary",
+                key="ll_p3_run", use_container_width=True,
+                disabled=p3_key in st.session_state):
+    st.session_state[p3_key] = {}   # empty dict = run discovery below
+    st.rerun()
+
+if c_refresh.button("🔄 Re-query DeepSeek", key="ll_p3_refresh",
+                    use_container_width=True):
+    # Clear the page-level cache and also bust the product_peers DB cache for
+    # each layer by writing an empty entry; discovery block will re-call DeepSeek.
+    st.session_state.pop(p3_key, None)
+    for l in p2_layers:
+        layer_key = f"__layer__|{chosen_sector.strip().lower()}|{l.get('layer_name','').strip().lower()}"
+        data_manager.upsert_product_peers(layer_key, [], source_method="invalidated")
+    st.rerun()
+
+# ── Discovery + display ────────────────────────────────────────────────────────
+if p3_key not in st.session_state:
+    st.info("Click **Identify Key Stocks per Layer** to run DeepSeek.")
+    st.stop()
+
+# Fetch stocks for every layer (cached in product_peers after first run)
+if not st.session_state[p3_key]:
+    graphs_in_db = data_manager.get_all_supply_chain_tickers()
+    layer_results = {}
+
+    prog = st.progress(0, text="Querying DeepSeek for each layer…")
+    for i, layer in enumerate(p2_layers):
+        prog.progress((i + 1) / len(p2_layers),
+                      text=f"Layer {i+1}/{len(p2_layers)}: {layer.get('layer_name','')}")
+        try:
+            raw_stocks = peer_discovery.discover_layer_stocks(
+                chosen_sector,
+                layer.get("layer_name", ""),
+                layer.get("items", []),
+                layer.get("layer_index", i + 1),
+                len(p2_layers),
+            )
+        except RuntimeError as exc:
+            st.error(f"❌ {exc}")
+            raw_stocks = []
+
+        # Validate against stock_basic
+        all_t = [s["ticker"] for s in raw_stocks]
+        validation = data_manager.validate_tickers_against_stock_basic(all_t)
+
+        enriched = []
+        for s in raw_stocks:
+            t_val = validation.get(s["ticker"], {})
+            enriched.append({
+                "ticker":        s["ticker"],
+                "name":          t_val.get("official_name") or s["name"],
+                "primary_product": s.get("primary_product", ""),
+                "valid":         t_val.get("valid", False),
+                "has_graph":     s["ticker"] in graphs_in_db,
+                "layer_name":    layer.get("layer_name", ""),
+                "layer_idx":     layer.get("layer_index", i + 1),
+            })
+
+        layer_results[layer.get("layer_name", f"Layer {i+1}")] = enriched
+
+    prog.empty()
+    st.session_state[p3_key] = layer_results
+
+layer_results = st.session_state[p3_key]
+
+# ── Render one expander per layer ──────────────────────────────────────────────
+for layer_name, stocks in layer_results.items():
+    with st.expander(f"**{layer_name}** · {len(stocks)} stocks", expanded=True):
+        if not stocks:
+            st.caption("No stocks found.")
+            continue
+        cols = st.columns(len(stocks)) if len(stocks) > 0 else [st]
+        for col, s in zip(cols, stocks):
+            with col:
+                badges = ""
+                if s["has_graph"]:
+                    badges += " 🔗"
+                valid_badge = "✅" if s["valid"] else "⚠️"
+                st.markdown(
+                    f"**{s['ticker']}** {valid_badge}{badges}  \n"
+                    f"{s['name']}  \n"
+                    f"*{s['primary_product']}*"
+                )
+                chk_key = f"ll_p3_chk_{ticker}_{s['layer_idx']}_{s['ticker']}"
+                st.checkbox("Include in analysis", value=s["valid"],
+                            key=chk_key)
+
+st.markdown("---")
+
+# ── Collect checked stocks for Phase 4 ────────────────────────────────────────
+p4_peers = []
+for layer_name, stocks in layer_results.items():
+    for s in stocks:
+        chk_key = f"ll_p3_chk_{ticker}_{s['layer_idx']}_{s['ticker']}"
+        if st.session_state.get(chk_key, s["valid"]) and s["ticker"] != ticker:
+            p4_peers.append({
+                "ticker":     s["ticker"],
+                "name":       s["name"],
+                "layer_name": s["layer_name"],
+                "layer_idx":  s["layer_idx"],
+            })
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 4 · Lead-Lag Statistical Analysis
+# ══════════════════════════════════════════════════════════════════════════════
+st.subheader("📊 Phase 4 · Lead-Lag Statistical Analysis 领先滞后统计分析")
+
+with st.expander("ℹ️ How to read the results", expanded=False):
+    st.markdown("""
+**Three statistical layers per stock pair (T stock vs each identified stock S):**
+
+| Layer | Method | Interpretation |
+|---|---|---|
+| **Granger causality** | F-test: do T's past returns predict S's future returns (and vice versa)? | p < 0.05 → significant lead-lag relationship |
+| **Cross-correlation** | Pearson correlation at each lag offset (-N to +N days) | Positive lag = T leads S; negative lag = S leads T |
+| **Cointegration + half-life** | Engle-Granger test on price levels; OU half-life of the spread | Short half-life (< 10d) → exploitable mean-reversion |
+
+**Beta adjustment:** Beta measures how much T moves per 1% move in S (estimated via OLS).
+A beta of 1.2 means if S rises 8%, T's "expected" move is 9.6% — any difference beyond that is the signal.
+
+**Signal strength:** 🔥 Strong = Granger p < 0.01 + cointegrated + half-life < 15d ·
+⚡ Moderate = Granger p < 0.05 + cointegrated or |corr| > 0.4 ·
+〰 Weak = Granger p < 0.10 · ✗ None = no statistical evidence.
+""")
+
+import pandas as pd
+
+lb_col, lag_col, _ = st.columns([2, 2, 4])
+lookback = lb_col.radio("Lookback 回溯天数", [90, 120, 180], index=1,
+                        horizontal=True, key="ll_p4_lookback")
+max_lag  = lag_col.radio("Max lag 最大滞后", [3, 5, 10], index=1,
+                         horizontal=True, key="ll_p4_maxlag")
+
+p4_results_key = f"ll_p4_results_{ticker}_{matched['id']}_{lookback}_{max_lag}"
+
+if not p4_peers:
+    st.warning("No stocks selected in Phase 3. Check at least one stock above.")
+    st.stop()
+
+if st.button("📊 Run Lead-Lag Analysis", type="primary", key="ll_p4_run"):
+    st.session_state[p4_results_key] = None   # None = compute on next rerun
+    st.rerun()
+
+if p4_results_key not in st.session_state:
+    st.info("Configure lookback / max-lag above, then click **Run Lead-Lag Analysis**.")
+    st.stop()
+
+# ── Fetch + compute (runs once; stored in session state) ──────────────────────
+if st.session_state[p4_results_key] is None:
+    all_tickers_needed = list({ticker} | {p["ticker"] for p in p4_peers})
+    n = len(all_tickers_needed)
+
+    prog4 = st.progress(0, text=f"Fetching {lookback}d qfq data for {n} stocks…")
+    # We can't easily stream progress inside fetch_qfq_returns, so show indeterminate
+    prog4.progress(0.1, text=f"Fetching qfq data for {n} tickers (this may take ~{n*2}s)…")
+
+    try:
+        returns_df, prices_df = lead_lag_stats.fetch_qfq_returns(
+            all_tickers_needed, lookback_days=lookback
+        )
+    except Exception as exc:
+        st.error(f"❌ Data fetch failed: {exc}")
+        st.stop()
+
+    prog4.progress(0.6, text="Running Granger causality, cross-correlation, cointegration…")
+
+    if returns_df.empty or ticker not in returns_df.columns:
+        st.error(f"Could not fetch price data for T stock {ticker}. Check Tushare quota.")
+        st.stop()
+
+    n_obs = returns_df[ticker].dropna().__len__()
+    if n_obs < 60:
+        st.warning(
+            f"Only {n_obs} trading days of data available (60 minimum recommended). "
+            "Results may be unreliable."
+        )
+
+    try:
+        results_df = lead_lag_stats.compute_lead_lag(
+            ticker, p4_peers, returns_df, prices_df, max_lag=max_lag
+        )
+    except RuntimeError as exc:
+        st.error(f"❌ {exc}")
+        st.stop()
+
+    prog4.empty()
+    st.session_state[p4_results_key] = {
+        "results": results_df,
+        "returns": returns_df,
+        "prices":  prices_df,
+    }
+
+stored = st.session_state.get(p4_results_key)
+if not stored:
+    st.stop()
+
+results_df = stored["results"]
+returns_df = stored["returns"]
+
+if results_df.empty:
+    st.warning("No results — none of the selected stocks had sufficient price data.")
+    st.stop()
+
+# ── Summary table ──────────────────────────────────────────────────────────────
+st.markdown("#### 📋 Results Summary")
+
+def _fmt_p(v):
+    if pd.isna(v):
+        return "—"
+    return f"{v:.3f}" if v >= 0.001 else "< 0.001"
+
+def _fmt_f(v, dec=2):
+    return f"{v:.{dec}f}" if not pd.isna(v) else "—"
+
+display_rows = []
+for _, row in results_df.iterrows():
+    hl = _fmt_f(row["half_life"], 1) + "d" if not pd.isna(row["half_life"]) else "—"
+    display_rows.append({
+        "Signal":          row["signal"],
+        "Ticker":          row["ticker"],
+        "Name":            row["name"],
+        "Layer":           row["layer"],
+        "Beta (T/S)":      _fmt_f(row["beta"], 2),
+        "Relationship":    row["relationship"],
+        "p T→S":           _fmt_p(row["p_T_leads_S"]),
+        "Lag T→S":         f"{row['lag_T_leads_S']}d" if row["p_T_leads_S"] < 0.1 else "—",
+        "p S→T":           _fmt_p(row["p_S_leads_T"]),
+        "Lag S→T":         f"{row['lag_S_leads_T']}d" if row["p_S_leads_T"] < 0.1 else "—",
+        "Cointegrated":    "✅" if row["cointegrated"] else "✗",
+        "Half-life":       hl,
+        "n obs":           int(row["n_obs"]),
+    })
+
+display_df = pd.DataFrame(display_rows)
+# Sort: Strong first, then Moderate, then by p-value
+signal_order = {"🔥 Strong": 0, "⚡ Moderate": 1, "〰 Weak": 2, "✗ None": 3}
+display_df["_sort"] = display_df["Signal"].map(signal_order)
+display_df = display_df.sort_values("_sort").drop(columns=["_sort"])
+
+st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+# ── Cross-correlation heatmap ──────────────────────────────────────────────────
+st.markdown("#### 🌡️ Cross-Correlation Heatmap")
+st.caption(
+    "Columns = lag offset · **Positive lag (T+Nd→S)**: T leads S by N days · "
+    "**Negative lag (S+Nd→T)**: S leads T by N days · "
+    "Green = positive correlation, Red = negative."
+)
+
+heatmap_df = lead_lag_stats.build_heatmap_df(results_df, max_lag=max_lag)
+if not heatmap_df.empty:
+    styled = (
+        heatmap_df
+        .style
+        .background_gradient(cmap="RdYlGn", vmin=-0.6, vmax=0.6, axis=None)
+        .format("{:.2f}", na_rep="—")
+    )
+    st.dataframe(styled, use_container_width=True)
+
+# ── Strong signal callouts ─────────────────────────────────────────────────────
+strong = results_df[results_df["signal"].str.startswith("🔥")]
+moderate = results_df[results_df["signal"].str.startswith("⚡")]
+
+if not strong.empty or not moderate.empty:
+    st.markdown("#### 🎯 Highlighted Signals")
+    for _, row in pd.concat([strong, moderate]).iterrows():
+        hl_str = ""
+        if not pd.isna(row["half_life"]):
+            hl_str = f" · half-life **{row['half_life']:.1f}d**"
+        coint_str = " · cointegrated ✅" if row["cointegrated"] else ""
+        st.info(
+            f"{row['signal']} &nbsp; **{row['ticker']} {row['name']}** "
+            f"({row['layer']})  \n"
+            f"**{row['relationship']}** · beta {_fmt_f(row['beta'])} "
+            f"· best corr {_fmt_f(row['peak_corr'])} at lag {row['peak_lag']}d"
+            f"{coint_str}{hl_str}"
         )
