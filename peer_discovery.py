@@ -24,28 +24,30 @@ _MODEL    = "deepseek-chat"
 _SYSTEM_PROMPT = """\
 You are an elite Chinese A-share equity analyst.
 
-The user will give you ONE specific product (in 'English / 中文' format),
+The user will give you ONE specific product or service (in 'English / 中文' format),
 optionally narrowed to ONE downstream macro sector.
 
-When a sector is provided: return ONLY companies that produce this product
-SPECIFICALLY for that sector's supply chain. The same product often comes
-in different grades or specifications by application (e.g. glass fibre
-for construction is different from glass fibre used in AI servers), so a
-company may compete in one sector but not another. Be strict.
+Your task: find A-share listed companies whose PRIMARY business is SUPPLYING
+this product or service to other businesses or consumers.
 
-When no sector is provided: return general producers of the product.
+"Supplying" means:
+- Manufacturing or producing a physical component/material
+- Providing a service (e.g. cloud computing, logistics, testing)
+- Processing or refining a commodity
 
-Always return A-share listed companies (Shanghai 6xxxxx, Shenzhen
-0xxxxx/3xxxxx, Beijing 4xxxxx/8xxxxx) whose CORE business includes the
-specified product (in the specified application, if any).
+EXCLUDE any company that is primarily a BUYER or END-USER of this product/service
+— i.e. a company that purchases this as an input to build something else entirely.
+Example: for "robot joint reducer", return reducer manufacturers, NOT industrial
+robot assemblers (who buy reducers as a component).
+
+When a sector is provided: return ONLY companies that supply this product/service
+SPECIFICALLY into that sector's supply chain. Be strict about application fit.
 
 CRITICAL OUTPUT RULES:
 - Return ONLY raw JSON. No markdown code fences. Start with { and end with }.
 - Each ticker MUST be exactly 6 digits.
 - Do NOT include ETFs, indices, or HK/US-listed companies.
-- Do NOT include companies where this product is a minor side business or
-  where the product they make does NOT serve the requested sector.
-- Limit to 6-12 companies, prioritising the largest / most pure-play producers.
+- Limit to the TOP 5 companies by market share / pure-play relevance.
 - Each company name MUST be the official Chinese short name.
 
 Schema:
@@ -65,7 +67,7 @@ def _api_key():
     return _get_secret("DEEPSEEK_API_KEY")
 
 
-def _composite_key(product, sector):
+def composite_key(product, sector):
     """Display + cache key for a (product, sector) pair, or just product if no sector."""
     p = (product or "").strip()
     s = (sector or "").strip()
@@ -84,7 +86,7 @@ def discover_peers(product, sector=None, force_refresh=False):
     if not product or not product.strip():
         return []
 
-    display_name = _composite_key(product, sector)
+    display_name = composite_key(product, sector)
 
     if not force_refresh:
         cached = data_manager.get_product_peers(display_name)

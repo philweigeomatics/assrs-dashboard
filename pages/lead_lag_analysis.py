@@ -258,7 +258,7 @@ for product, sector, peers, err in edges:
             key=f"ll_save_{ticker}_{product}_{sector}",
             help="Persist the cleaned list. Shared with any stock that has this same edge.",
         ):
-            composite_name = peer_discovery._composite_key(product, sector)
+            composite_name = peer_discovery.composite_key(product, sector)
             if data_manager.upsert_product_peers(
                 composite_name, active_peers, source_method="user_curated"
             ):
