@@ -26,6 +26,7 @@ import streamlit as st
 import auth_manager
 import data_manager
 import peer_discovery
+import sector_themes as sector_themes_mod
 import supply_chain_ui
 
 auth_manager.require_login()
@@ -311,8 +312,7 @@ st.success(
 )
 st.caption(
     f"This (product, sector) edge has the cleanest co-movement with **{ticker}** today — "
-    f"likely the story driving the move. Phase 2 will fuzzy-match **{top_s}** to a "
-    f"saved sector theme and walk the chain."
+    f"likely the story driving the move."
 )
 
 with st.expander("📊 Full ranking", expanded=False):
@@ -324,3 +324,89 @@ with st.expander("📊 Full ranking", expanded=False):
                  f"Co-move (±{tol:.1f}%)"],
     )
     st.dataframe(df_rank, use_container_width=True, hide_index=True)
+
+st.markdown("---")
+
+# ── Phase 2 · Sector Supply Chain Walk-Down ────────────────────────────────────
+st.subheader("🔍 Phase 2 · Sector Supply Chain 产业链走查")
+st.caption(
+    "Select the sector whose supply chain you want to walk. "
+    "Defaults to the top-ranked edge identified above."
+)
+
+# Dropdown — all unique sectors from the stock's supply chain
+all_sectors = sorted({link["target"] for link in unique_links})
+default_idx = all_sectors.index(top_s) if top_s in all_sectors else 0
+chosen_sector = st.selectbox(
+    "Sector to explore 选择产业链",
+    all_sectors,
+    index=default_idx,
+    key="ll_phase2_sector",
+)
+
+st.markdown("---")
+
+# Cache the match result in session state so node-click reruns don't re-call DeepSeek
+all_themes = data_manager.get_all_sector_themes()
+match_cache_key = f"ll_p2_match_{ticker}_{chosen_sector}_{len(all_themes)}"
+if match_cache_key not in st.session_state:
+    with st.spinner(f"Matching '{chosen_sector}' to stored sector themes…"):
+        st.session_state[match_cache_key] = sector_themes_mod.match_sector_theme(
+            chosen_sector, all_themes
+        )
+matched = st.session_state[match_cache_key]
+
+if matched:
+    st.success(f"✅ Matched to saved theme: **{matched['formal_name']}**")
+
+    # Cache the full theme (layers) too
+    theme_cache_key = f"ll_p2_theme_{matched['id']}"
+    if theme_cache_key not in st.session_state:
+        st.session_state[theme_cache_key] = data_manager.get_sector_theme_by_id(matched["id"])
+    theme_full = st.session_state[theme_cache_key]
+
+    if theme_full:
+        sector_themes_mod.render_sector_layers(
+            theme_full,
+            key_prefix=f"ll_p2_{ticker}_{matched['id']}",
+        )
+    else:
+        st.error("Could not load theme details from the database.")
+
+else:
+    st.warning(f"No stored theme matches **'{chosen_sector}'** yet.")
+
+    if auth_manager.is_admin():
+        st.caption(
+            "As an admin you can generate and save a new theme for this sector. "
+            "It will then be available in the Sector Explorer as well."
+        )
+        if st.button(
+            f"🧬 Generate & Save Theme for '{chosen_sector}'",
+            type="primary",
+            key="ll_p2_gen_theme",
+        ):
+            with st.spinner(f"Generating supply chain for '{chosen_sector}'…"):
+                try:
+                    data = sector_themes_mod.generate_sector_theme(chosen_sector)
+                    user_info = auth_manager.get_current_user()
+                    ok = data_manager.add_sector_theme(
+                        raw_input=chosen_sector,
+                        formal_name=data["name"],
+                        layers_data=data,
+                        created_by=user_info["username"],
+                    )
+                    if ok:
+                        # Bust the match cache so the next rerun picks up the new theme
+                        st.session_state.pop(match_cache_key, None)
+                        st.success(f"✅ Saved: **{data['name']}**. Reloading…")
+                        st.rerun()
+                    else:
+                        st.error("Generated but failed to save to DB.")
+                except RuntimeError as exc:
+                    st.error(f"❌ {exc}")
+    else:
+        st.info(
+            "No supply chain theme has been saved for this sector yet. "
+            "Ask an admin to generate one from the Sector Explorer page."
+        )
