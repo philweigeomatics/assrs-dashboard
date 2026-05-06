@@ -8,6 +8,7 @@ All DB interactions go through data_manager (not this module).
 import json
 
 import requests
+import streamlit as st
 
 # ── DeepSeek config ───────────────────────────────────────────────────────────
 
@@ -47,6 +48,20 @@ Schema:
     }
   ]
 }
+"""
+
+
+_MATCH_PROMPT = """\
+Match an industry sector label to the closest entry in a list of stored themes.
+
+Input JSON: {"sector": "...", "themes": [{"id": 1, "formal_name": "...", "raw_input": "..."}, ...]}
+
+Rules:
+- Return ONLY raw JSON: {"matched_id": <integer> or null}
+- matched_id is the id of the best-matching theme, or null if none fits well.
+- A match is good if the theme clearly covers the same industry, even with
+  different wording (e.g. "Industrial Robot" matches "Robotics / 机器人").
+- Do NOT force a match when nothing is close enough.
 """
 
 
@@ -129,3 +144,137 @@ def generate_sector_theme(raw_input: str) -> dict:
             layer["layer_name"] = f"Layer {i + 1}"
 
     return data
+
+
+def match_sector_theme(sector_name: str, all_themes: list) -> dict | None:
+    """
+    Find the best-matching stored theme for `sector_name`.
+
+    Strategy:
+      1. Simple case-insensitive substring match against formal_name / raw_input.
+         If exactly one candidate, return it immediately (no API call).
+      2. Otherwise ask DeepSeek to pick the best match (or return null).
+
+    Returns a theme dict {id, formal_name, raw_input} or None.
+    """
+    if not all_themes or not sector_name.strip():
+        return None
+
+    low = sector_name.strip().lower()
+
+    candidates = [
+        t for t in all_themes
+        if low in t["formal_name"].lower()
+        or low in t["raw_input"].lower()
+        or t["formal_name"].lower() in low
+        or t["raw_input"].lower() in low
+    ]
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Multiple or zero candidates — ask DeepSeek
+    try:
+        api_key = _api_key()
+    except ValueError:
+        return candidates[0] if candidates else None
+
+    pool = candidates if candidates else all_themes
+    payload = {
+        "model": _MODEL,
+        "messages": [
+            {"role": "system", "content": _MATCH_PROMPT},
+            {"role": "user", "content": json.dumps({
+                "sector": sector_name,
+                "themes": [
+                    {"id": t["id"], "formal_name": t["formal_name"],
+                     "raw_input": t["raw_input"]}
+                    for t in pool
+                ],
+            })},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 50,
+    }
+
+    try:
+        resp = requests.post(
+            _ENDPOINT, json=payload,
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "application/json"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
+        result = json.loads(raw)
+        matched_id = result.get("matched_id")
+        if matched_id is not None:
+            for t in pool:
+                if t["id"] == int(matched_id):
+                    return t
+    except Exception:
+        pass
+
+    return candidates[0] if candidates else None
+
+
+def render_sector_layers(theme: dict, key_prefix: str = "sl") -> None:
+    """
+    Render a sector theme as horizontal upstream→downstream columns.
+    Identical layout to sector_explorer.py; key_prefix namespaces session state
+    so multiple callers on the same page don't collide.
+    """
+    layers = theme.get("layers") or []
+    if not layers:
+        st.warning("This theme has no layers stored.")
+        return
+
+    layers = sorted(layers, key=lambda l: l.get("layer_index", 0))
+
+    st.subheader(f"🔗 {theme['formal_name']}")
+    st.caption("Upstream → Downstream  ·  上游 → 下游")
+
+    cols = st.columns(len(layers), gap="small")
+    for layer_pos, (col, layer) in enumerate(zip(cols, layers)):
+        with col:
+            idx        = layer.get("layer_index", layer_pos + 1)
+            layer_name = layer.get("layer_name", f"Layer {idx}")
+            items      = layer.get("items", [])
+
+            st.markdown(
+                f"<div style='text-align:center;color:#9ca3af;font-size:11px;"
+                f"font-weight:600;'>LAYER {idx}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div style='text-align:center;color:#e5e7eb;font-size:13px;"
+                f"font-weight:700;margin-bottom:6px;line-height:1.2;'>"
+                f"{layer_name}</div>",
+                unsafe_allow_html=True,
+            )
+            st.divider()
+
+            sel_key = f"{key_prefix}_selected"
+            for item_idx, item in enumerate(items):
+                highlighted = st.session_state.get(sel_key) == item
+                btn_key = f"{key_prefix}_{idx}_{item_idx}"
+                if st.button(
+                    item,
+                    key=btn_key,
+                    use_container_width=True,
+                    type=("primary" if highlighted else "secondary"),
+                ):
+                    st.session_state[sel_key] = item
+                    st.rerun()
+
+    selected = st.session_state.get(f"{key_prefix}_selected")
+    if selected:
+        st.markdown("---")
+        c1, c2 = st.columns([5, 1])
+        c1.info(f"🔎 **Selected:** {selected}")
+        if c2.button("✖ Clear", key=f"{key_prefix}_clear", use_container_width=True):
+            st.session_state.pop(f"{key_prefix}_selected", None)
+            st.rerun()
