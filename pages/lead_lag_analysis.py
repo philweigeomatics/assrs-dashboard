@@ -21,6 +21,7 @@ v3 changes
 
 import statistics
 
+import numpy as np
 import streamlit as st
 
 import auth_manager
@@ -698,15 +699,13 @@ if not heatmap_df.empty:
     st.dataframe(styled, use_container_width=True)
 
 # ── Strong signal callouts ─────────────────────────────────────────────────────
-strong = results_df[results_df["signal"].str.startswith("🔥")]
+strong   = results_df[results_df["signal"].str.startswith("🔥")]
 moderate = results_df[results_df["signal"].str.startswith("⚡")]
 
 if not strong.empty or not moderate.empty:
     st.markdown("#### 🎯 Highlighted Signals")
     for _, row in pd.concat([strong, moderate]).iterrows():
-        hl_str = ""
-        if not pd.isna(row["half_life"]):
-            hl_str = f" · half-life **{row['half_life']:.1f}d**"
+        hl_str    = f" · half-life **{row['half_life']:.1f}d**" if not pd.isna(row["half_life"]) else ""
         coint_str = " · cointegrated ✅" if row["cointegrated"] else ""
         st.info(
             f"{row['signal']} &nbsp; **{row['ticker']} {row['name']}** "
@@ -715,3 +714,232 @@ if not strong.empty or not moderate.empty:
             f"· best corr {_fmt_f(row['peak_corr'])} at lag {row['peak_lag']}d"
             f"{coint_str}{hl_str}"
         )
+
+st.markdown("---")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 4 · Relationship Charts
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown("#### 📈 Relationship Charts")
+st.caption("Select a stock to visualise its relationship with T across three chart types.")
+
+try:
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    _PLOTLY_OK = True
+except ImportError:
+    _PLOTLY_OK = False
+
+if not _PLOTLY_OK:
+    st.warning("Install plotly (`pip install plotly`) to enable relationship charts.")
+    st.stop()
+
+# Stock selector — prefer strongest signals at top
+_signal_rank = {"🔥 Strong": 0, "⚡ Moderate": 1, "〰 Weak": 2, "✗ None": 3}
+chart_options = (
+    results_df
+    .assign(_r=results_df["signal"].map(_signal_rank))
+    .sort_values("_r")
+    [["ticker", "name", "signal"]]
+    .apply(lambda r: f"{r['signal']} {r['ticker']} {r['name']}", axis=1)
+    .tolist()
+)
+chart_choice = st.selectbox(
+    "Stock to chart 选择标的",
+    chart_options,
+    key="ll_chart_choice",
+)
+chosen_s_ticker = chart_choice.split()[1]   # second token is always the 6-digit ticker
+chosen_row = results_df[results_df["ticker"] == chosen_s_ticker].iloc[0]
+
+# ── Shared data prep ──────────────────────────────────────────────────────────
+best_lag  = int(chosen_row["peak_lag"])
+beta_val  = chosen_row["beta"]
+xcorrs    = chosen_row["_xcorrs"]
+lags      = sorted(xcorrs.keys())
+corr_vals = [xcorrs[k] for k in lags]
+
+# Prices aligned on common dates
+p_t_full = stored["prices"].get(ticker)
+p_s_full = stored["prices"].get(chosen_s_ticker)
+r_t_full = stored["returns"].get(ticker)
+r_s_full = stored["returns"].get(chosen_s_ticker)
+
+tab_price, tab_corr, tab_scatter = st.tabs(
+    ["📉 Normalized Price", "📊 Cross-Correlation", "🔵 Return Scatter"]
+)
+
+# ── Tab 1: Normalized price with optional lag shift ───────────────────────────
+with tab_price:
+    apply_shift = st.checkbox(
+        f"Apply lag shift ({best_lag:+d}d) — shift S so it aligns with T if T leads",
+        value=(best_lag != 0),
+        key="ll_chart_shift",
+    )
+
+    if p_t_full is not None and p_s_full is not None:
+        pt, ps = p_t_full.align(p_s_full, join="inner")
+        pt = pt.dropna()
+        ps = ps.dropna()
+        pt, ps = pt.align(ps, join="inner")
+
+        # Normalize to 100 at first common date
+        pt_norm = pt / pt.iloc[0] * 100
+        ps_norm = ps / ps.iloc[0] * 100
+
+        if apply_shift and best_lag != 0:
+            # Shift S forward so it "catches up" to T visually
+            ps_norm = ps_norm.shift(-best_lag)
+
+        fig1 = go.Figure()
+        fig1.add_trace(go.Scatter(
+            x=pt_norm.index, y=pt_norm.values,
+            name=f"T · {ticker} {company}",
+            line=dict(color="#60a5fa", width=2),
+        ))
+        s_label  = f"S · {chosen_s_ticker} {chosen_row['name']}"
+        if apply_shift and best_lag != 0:
+            s_label += f" (shifted {best_lag:+d}d)"
+        ps_plot = ps_norm.dropna()
+        fig1.add_trace(go.Scatter(
+            x=ps_plot.index, y=ps_plot.values,
+            name=s_label,
+            line=dict(color="#f97316", width=2, dash="dot" if apply_shift else "solid"),
+        ))
+        fig1.update_layout(
+            title=f"Normalized Price (base 100) · lag shift: {best_lag:+d}d",
+            xaxis_title="Date",
+            yaxis_title="Indexed Price (100 = start)",
+            legend=dict(orientation="h", y=-0.15),
+            height=420,
+            margin=dict(l=40, r=20, t=50, b=60),
+            plot_bgcolor="#0f172a",
+            paper_bgcolor="#0f172a",
+            font=dict(color="#e2e8f0"),
+            xaxis=dict(gridcolor="#1e293b"),
+            yaxis=dict(gridcolor="#1e293b"),
+        )
+        st.plotly_chart(fig1, use_container_width=True)
+        if apply_shift and best_lag != 0:
+            direction = "T leads S" if best_lag > 0 else "S leads T"
+            st.caption(
+                f"S's price series shifted {abs(best_lag)}d earlier ({direction}). "
+                "When lines overlap closely after the shift, the lead-lag relationship is genuine."
+            )
+    else:
+        st.warning("Price data unavailable for one or both stocks.")
+
+# ── Tab 2: Cross-correlation bar chart ────────────────────────────────────────
+with tab_corr:
+    bar_colors = ["#22c55e" if v > 0 else "#ef4444" for v in corr_vals]
+    # Highlight the peak lag bar
+    peak_idx = lags.index(best_lag) if best_lag in lags else None
+    if peak_idx is not None:
+        bar_colors[peak_idx] = "#facc15"   # yellow = peak
+
+    col_labels = []
+    for k in lags:
+        if k < 0:
+            col_labels.append(f"S+{-k}d→T")
+        elif k == 0:
+            col_labels.append("±0d")
+        else:
+            col_labels.append(f"T+{k}d→S")
+
+    fig2 = go.Figure()
+    fig2.add_trace(go.Bar(
+        x=col_labels, y=corr_vals,
+        marker_color=bar_colors,
+        text=[f"{v:.2f}" if not pd.isna(v) else "" for v in corr_vals],
+        textposition="outside",
+    ))
+    # Reference lines
+    for lvl, label in [(0.4, "moderate"), (-0.4, "moderate"), (0.2, "weak"), (-0.2, "weak")]:
+        fig2.add_hline(y=lvl, line_dash="dot", line_color="#475569",
+                       annotation_text=label if lvl > 0 else "",
+                       annotation_position="right")
+    fig2.add_hline(y=0, line_color="#94a3b8", line_width=1)
+    fig2.update_layout(
+        title=f"Cross-Correlation at Each Lag · peak at {best_lag:+d}d (🟡)",
+        xaxis_title="Lag  (S+Nd→T = S leads T  ·  T+Nd→S = T leads S)",
+        yaxis_title="Pearson Correlation",
+        yaxis=dict(range=[-1, 1], gridcolor="#1e293b"),
+        height=400,
+        margin=dict(l=40, r=20, t=50, b=80),
+        plot_bgcolor="#0f172a",
+        paper_bgcolor="#0f172a",
+        font=dict(color="#e2e8f0"),
+        xaxis=dict(gridcolor="#1e293b"),
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+    st.caption(
+        "🟡 Yellow = peak correlation lag · 🟢 Green = positive correlation · "
+        "🔴 Red = negative correlation · Dotted lines at ±0.2 (weak) and ±0.4 (moderate)."
+    )
+
+# ── Tab 3: Return scatter with regression ────────────────────────────────────
+with tab_scatter:
+    if r_t_full is not None and r_s_full is not None:
+        # Shift S by best lag: if lag > 0, T leads S so compare T[t] vs S[t+lag]
+        if best_lag > 0:
+            s_shifted = r_s_full.shift(-best_lag)
+        elif best_lag < 0:
+            s_shifted = r_s_full.shift(abs(best_lag))
+        else:
+            s_shifted = r_s_full
+
+        combined = pd.concat([r_t_full, s_shifted], axis=1).dropna()
+        combined.columns = ["T_ret", "S_ret"]
+
+        x_vals = combined["S_ret"].values * 100
+        y_vals = combined["T_ret"].values * 100
+
+        # OLS for regression line
+        if len(combined) >= 10 and not pd.isna(beta_val):
+            x_line = np.array([x_vals.min(), x_vals.max()])
+            # Use beta from compute_lead_lag (already estimated)
+            intercept = y_vals.mean() - beta_val * x_vals.mean()
+            y_line    = beta_val * x_line + intercept
+        else:
+            x_line = y_line = None
+
+        fig3 = go.Figure()
+        fig3.add_trace(go.Scatter(
+            x=x_vals, y=y_vals,
+            mode="markers",
+            marker=dict(color="#60a5fa", size=5, opacity=0.6),
+            name="Daily returns",
+            hovertemplate="S: %{x:.2f}%<br>T: %{y:.2f}%<extra></extra>",
+        ))
+        if x_line is not None:
+            fig3.add_trace(go.Scatter(
+                x=x_line, y=y_line,
+                mode="lines",
+                line=dict(color="#facc15", width=2, dash="dash"),
+                name=f"OLS fit (β={beta_val:.2f})",
+            ))
+        fig3.add_hline(y=0, line_color="#475569", line_width=1)
+        fig3.add_vline(x=0, line_color="#475569", line_width=1)
+
+        lag_note = f" (S shifted {best_lag:+d}d)" if best_lag != 0 else ""
+        fig3.update_layout(
+            title=f"T returns vs S returns{lag_note} · β = {_fmt_f(beta_val)}",
+            xaxis_title=f"S · {chosen_s_ticker} {chosen_row['name']} return (%){lag_note}",
+            yaxis_title=f"T · {ticker} {company} return (%)",
+            height=430,
+            margin=dict(l=50, r=20, t=50, b=60),
+            plot_bgcolor="#0f172a",
+            paper_bgcolor="#0f172a",
+            font=dict(color="#e2e8f0"),
+            xaxis=dict(gridcolor="#1e293b", zeroline=False),
+            yaxis=dict(gridcolor="#1e293b", zeroline=False),
+            legend=dict(orientation="h", y=-0.15),
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+        st.caption(
+            f"Each dot = one trading day. S returns shifted by best lag ({best_lag:+d}d). "
+            f"Slope of yellow line = beta ({_fmt_f(beta_val)}): "
+            f"for every 1% move in S, T is expected to move {_fmt_f(beta_val)}%."
+        )
+    else:
+        st.warning("Return data unavailable for one or both stocks.")
