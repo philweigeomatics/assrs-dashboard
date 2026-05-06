@@ -60,6 +60,7 @@ pages = {
     "🌊 Strategy 策略": [
         st.Page("pages/wave_trader.py", title="Wave Trader 波段交易"),
         st.Page("pages/pair_trader.py", title="Pair Trader 配对交易"),
+        st.Page("pages/lead_lag_analysis.py", title="Lead-Lag 领先滞后"),
     ],
     "🔔 Alerts 提示": [
         st.Page("pages/4_Todays_Alerts_今日提醒.py", title="Today's Alerts 今日提醒"),

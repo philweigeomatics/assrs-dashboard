@@ -3574,3 +3574,77 @@ def delete_sector_theme(theme_id):
         print(f"[data_manager] ❌ delete_sector_theme({theme_id}): {e}")
         return False
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PRODUCT PEERS (Phase 1 of lead-lag analysis)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Cache of {product_name → list of A-share peer tickers that produce it}, sourced
+# from DeepSeek. Reused across Stages 1 & 3 of the lead-lag pipeline so we only
+# call DeepSeek once per unique product string.
+#
+# Supabase DDL (run once):
+#   CREATE TABLE IF NOT EXISTS product_peers (
+#       product_key   TEXT PRIMARY KEY,
+#       display_name  TEXT NOT NULL,
+#       peers_json    JSONB NOT NULL,
+#       source_method TEXT,
+#       last_updated  TIMESTAMPTZ DEFAULT NOW()
+#   );
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _create_product_peers_table():
+    db.create_table_sqlite("""
+        CREATE TABLE IF NOT EXISTS product_peers (
+            product_key   TEXT PRIMARY KEY,
+            display_name  TEXT NOT NULL,
+            peers_json    TEXT NOT NULL,
+            source_method TEXT,
+            last_updated  TEXT
+        )
+    """)
+
+
+def _normalize_product_key(display_name):
+    return (display_name or "").strip().lower()
+
+
+def get_product_peers(display_name):
+    """Return cached {display_name, peers, source_method, last_updated} or None."""
+    import json as _json
+    if not db.table_exists('product_peers'):
+        return None
+    key = _normalize_product_key(display_name)
+    if not key:
+        return None
+    df = db.read_table('product_peers', filters={'product_key': key}, limit=1)
+    if df.empty:
+        return None
+    rec = df.iloc[0].to_dict()
+    raw = rec.get('peers_json', '[]')
+    try:
+        rec['peers'] = _json.loads(raw) if isinstance(raw, str) else (raw or [])
+    except Exception:
+        rec['peers'] = []
+    return rec
+
+
+def upsert_product_peers(display_name, peers, source_method='deepseek'):
+    """Insert or update peers for a product. peers = list of {ticker, name} dicts."""
+    import json as _json
+    from datetime import datetime as _dt
+    if not db.table_exists('product_peers'):
+        _create_product_peers_table()
+    try:
+        db.insert_records('product_peers', {
+            'product_key':   _normalize_product_key(display_name),
+            'display_name':  display_name,
+            'peers_json':    _json.dumps(peers, ensure_ascii=False),
+            'source_method': source_method,
+            'last_updated':  _dt.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }, upsert=True)
+        return True
+    except Exception as e:
+        print(f"[data_manager] ❌ upsert_product_peers: {e}")
+        return False
+
