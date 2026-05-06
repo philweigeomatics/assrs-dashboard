@@ -125,30 +125,49 @@ def discover_peers(display_name, force_refresh=False):
 def fetch_latest_pct_chg(tickers):
     """
     Returns ({ticker: pct_chg_float}, trade_date_str_or_None).
-    One Tushare daily() call for all stocks on the latest trading day; walks
-    back up to 8 days if today/recent are non-trading.
+
+    Single Tushare daily() call with comma-separated ts_codes — only fetches
+    the rows we need (vs scanning every A-share for a date).  Looks back over
+    the last 10 calendar days to handle weekends / holidays, and keeps the
+    most recent trade_date per ts_code.
+
+    Chunks at 80 ts_codes per call to stay under Tushare's per-call cap.
     """
     if not tickers or not data_manager.init_tushare():
         return {}, None
 
+    ts_codes = [data_manager.get_tushare_ticker(t) for t in tickers]
     bj = datetime.now(pytz.timezone("Asia/Shanghai"))
-    ts_codes = {data_manager.get_tushare_ticker(t) for t in tickers}
+    end_date   = bj.strftime("%Y%m%d")
+    start_date = (bj - timedelta(days=10)).strftime("%Y%m%d")
 
-    for delta in range(8):
-        date = (bj - timedelta(days=delta)).strftime("%Y%m%d")
+    pct_map = {}
+    latest_date = None
+    CHUNK = 80
+
+    for i in range(0, len(ts_codes), CHUNK):
+        chunk = ts_codes[i:i + CHUNK]
+        ts_str = ",".join(chunk)
         try:
             df = data_manager.TUSHARE_API.daily(
-                trade_date=date,
-                fields="ts_code,pct_chg,close",
+                ts_code=ts_str,
+                start_date=start_date,
+                end_date=end_date,
+                fields="ts_code,trade_date,pct_chg",
             )
-        except Exception:
+        except Exception as exc:
+            print(f"[peer_discovery] Tushare error for chunk {i//CHUNK}: {exc}")
             continue
         if df is None or df.empty:
             continue
-        df = df[df["ts_code"].isin(ts_codes)].copy()
-        if df.empty:
-            continue
-        df["ticker"] = df["ts_code"].str[:6]
-        return dict(zip(df["ticker"], df["pct_chg"])), date
 
-    return {}, None
+        # Latest trade_date per ts_code
+        df = df.sort_values("trade_date", ascending=False).drop_duplicates("ts_code")
+        df["ticker"] = df["ts_code"].str[:6]
+        for _, row in df.iterrows():
+            pct_map[row["ticker"]] = float(row["pct_chg"])
+            d = str(row["trade_date"])
+            if latest_date is None or d > latest_date:
+                latest_date = d
+
+    return pct_map, latest_date
