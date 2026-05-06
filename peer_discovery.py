@@ -202,3 +202,129 @@ def fetch_latest_pct_chg(tickers):
                 latest_date = d
 
     return pct_map, latest_date
+
+
+# ── Layer Stock Discovery ─────────────────────────────────────────────────────
+
+_LAYER_STOCK_PROMPT = """\
+You are an elite Chinese A-share equity analyst.
+
+Given a specific layer in a supply chain, find the TOP 3 A-share listed companies
+whose PRIMARY or MAJORITY revenue comes from SUPPLYING the products or services
+listed for that layer.
+
+Context provided:
+- Sector: the overall industry theme
+- Layer position in chain (1 = most upstream)
+- Layer name: what this layer does
+- Key items: the products or services that belong in this layer
+
+"Supplying" means producing, manufacturing, processing, or delivering these items
+to downstream customers — NOT companies that purchase these items as inputs to
+build something else entirely.
+
+Rank by: (1) revenue concentration in this layer's products, (2) market size.
+
+CRITICAL OUTPUT RULES:
+- Return ONLY raw JSON. No markdown, no fences. Start with { end with }.
+- Each ticker MUST be exactly 6 digits (A-share only; no ETFs, no HK/US stocks).
+- primary_product must name one specific item from the layer's key items list.
+- Return exactly 3 stocks (or fewer only if fewer than 3 qualified companies exist).
+
+Schema:
+{
+  "stocks": [
+    {"ticker": "000001", "name": "公司名", "primary_product": "specific item they supply"}
+  ]
+}
+"""
+
+
+def discover_layer_stocks(
+    sector_name: str,
+    layer_name: str,
+    layer_items: list,
+    layer_idx: int,
+    total_layers: int,
+    force_refresh: bool = False,
+) -> list:
+    """
+    Return top 3 A-share stocks for a specific supply-chain layer.
+
+    Results are cached in product_peers under a namespaced key so the same
+    (sector, layer) pair is not re-queried on every page load.
+
+    Returns list of {ticker, name, primary_product}.
+    """
+    sector_clean = (sector_name or "").strip().lower()
+    layer_clean  = (layer_name  or "").strip().lower()
+    cache_key    = f"__layer__|{sector_clean}|{layer_clean}"
+
+    if not force_refresh:
+        cached = data_manager.get_product_peers(cache_key)
+        peers = cached.get("peers") if cached else None
+        # Treat invalidated (empty list) as a cache miss so Re-query works
+        if peers:
+            return peers
+
+    try:
+        api_key = _api_key()
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    position  = "upstream" if layer_idx <= (total_layers // 2) else "downstream"
+    items_str = " | ".join(layer_items) if layer_items else "unspecified"
+
+    user_msg = (
+        f"Sector: {sector_name}\n"
+        f"Layer {layer_idx} of {total_layers} ({position}): {layer_name}\n"
+        f"Key items in this layer: {items_str}"
+    )
+
+    payload = {
+        "model": _MODEL,
+        "messages": [
+            {"role": "system", "content": _LAYER_STOCK_PROMPT},
+            {"role": "user",   "content": user_msg},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 400,
+    }
+
+    try:
+        resp = requests.post(
+            _ENDPOINT, json=payload,
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "application/json"},
+            timeout=40,
+        )
+        resp.raise_for_status()
+    except requests.Timeout:
+        raise RuntimeError("DeepSeek API timed out after 40 s.")
+    except requests.RequestException as exc:
+        raise RuntimeError(f"DeepSeek API failed: {exc}") from exc
+
+    raw = resp.json()["choices"][0]["message"]["content"].strip()
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"DeepSeek returned invalid JSON ({exc}). Preview: {raw[:200]}"
+        ) from exc
+
+    raw_stocks = data.get("stocks", [])
+    cleaned, seen = [], set()
+    for s in raw_stocks:
+        t  = str(s.get("ticker", "")).strip().zfill(6)
+        n  = (s.get("name", "") or "").strip()
+        pp = (s.get("primary_product", "") or "").strip()
+        if len(t) == 6 and t.isdigit() and t not in seen:
+            cleaned.append({"ticker": t, "name": n, "primary_product": pp})
+            seen.add(t)
+
+    data_manager.upsert_product_peers(cache_key, cleaned)
+    return cleaned

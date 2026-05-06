@@ -3648,3 +3648,101 @@ def upsert_product_peers(display_name, peers, source_method='deepseek'):
         print(f"[data_manager] ❌ upsert_product_peers: {e}")
         return False
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Stock validation & adjusted price helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def validate_tickers_against_stock_basic(tickers: list) -> dict:
+    """
+    Check each 6-digit ticker against the local stock_basic table.
+
+    Returns {ticker: {"valid": bool, "official_name": str|None, "ts_code": str|None}}.
+    Useful for verifying AI-generated ticker lists before displaying or trading.
+    """
+    result = {}
+    table_ok = db.table_exists("stock_basic")
+
+    for t in tickers:
+        if not table_ok:
+            result[t] = {"valid": False, "official_name": None, "ts_code": None}
+            continue
+        ts_code = get_tushare_ticker(t)
+        try:
+            df = db.read_table(
+                "stock_basic",
+                filters={"ts_code": ts_code},
+                columns="ts_code,name",
+                limit=1,
+            )
+            if not df.empty:
+                result[t] = {
+                    "valid":         True,
+                    "official_name": df.iloc[0]["name"],
+                    "ts_code":       df.iloc[0]["ts_code"],
+                }
+            else:
+                result[t] = {"valid": False, "official_name": None, "ts_code": ts_code}
+        except Exception:
+            result[t] = {"valid": False, "official_name": None, "ts_code": None}
+
+    return result
+
+
+def fetch_adjusted_daily(ticker: str, start_date: str, end_date: str,
+                         adj: str = "qfq") -> "pd.DataFrame":
+    """
+    Fetch forward-adjusted (qfq) daily close prices for a single ticker.
+
+    Returns DataFrame with columns [trade_date, close] sorted ascending,
+    or an empty DataFrame on failure.
+
+    Tries ts.pro_bar (adjusted) first; falls back to pro.daily (raw) if
+    pro_bar is unavailable or fails.
+    """
+    import pandas as _pd
+    if not init_tushare():
+        return _pd.DataFrame()
+
+    ts_code = get_tushare_ticker(ticker)
+
+    # ── Primary: qfq-adjusted via ts.pro_bar ─────────────────────────────────
+    try:
+        import tushare as _ts
+        df = _ts.pro_bar(
+            ts_code=ts_code,
+            api=TUSHARE_API,
+            adj=adj,
+            start_date=start_date,
+            end_date=end_date,
+            freq="D",
+        )
+        if df is not None and not df.empty:
+            return (
+                df[["trade_date", "close"]]
+                .sort_values("trade_date")
+                .reset_index(drop=True)
+            )
+    except Exception:
+        pass
+
+    # ── Fallback: raw daily (no split/dividend adjustment) ────────────────────
+    try:
+        df = TUSHARE_API.daily(
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+            fields="trade_date,close",
+        )
+        if df is not None and not df.empty:
+            return (
+                df[["trade_date", "close"]]
+                .sort_values("trade_date")
+                .reset_index(drop=True)
+            )
+    except Exception as e:
+        print(f"[data_manager] fetch_adjusted_daily({ticker}): {e}")
+
+    import pandas as _pd
+    return _pd.DataFrame()
+
