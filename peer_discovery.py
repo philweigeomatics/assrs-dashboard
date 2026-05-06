@@ -24,21 +24,34 @@ _MODEL    = "deepseek-chat"
 _SYSTEM_PROMPT = """\
 You are an elite Chinese A-share equity analyst.
 
-The user will give you ONE specific product or component (in 'English / 中文' format).
-Return a list of A-share listed companies (Shanghai 6xxxxx, Shenzhen 0xxxxx/3xxxxx,
-Beijing 4xxxxx/8xxxxx) whose CORE business includes manufacturing or supplying that product.
+The user will give you ONE specific product (in 'English / 中文' format),
+optionally narrowed to ONE downstream macro sector.
+
+When a sector is provided: return ONLY companies that produce this product
+SPECIFICALLY for that sector's supply chain. The same product often comes
+in different grades or specifications by application (e.g. glass fibre
+for construction is different from glass fibre used in AI servers), so a
+company may compete in one sector but not another. Be strict.
+
+When no sector is provided: return general producers of the product.
+
+Always return A-share listed companies (Shanghai 6xxxxx, Shenzhen
+0xxxxx/3xxxxx, Beijing 4xxxxx/8xxxxx) whose CORE business includes the
+specified product (in the specified application, if any).
 
 CRITICAL OUTPUT RULES:
 - Return ONLY raw JSON. No markdown code fences. Start with { and end with }.
 - Each ticker MUST be exactly 6 digits.
 - Do NOT include ETFs, indices, or HK/US-listed companies.
-- Do NOT include companies where this product is a minor side business.
+- Do NOT include companies where this product is a minor side business or
+  where the product they make does NOT serve the requested sector.
 - Limit to 6-12 companies, prioritising the largest / most pure-play producers.
 - Each company name MUST be the official Chinese short name.
 
 Schema:
 {
-  "product": "exact bilingual product name as provided",
+  "product": "exact product name as provided",
+  "sector": "exact sector name as provided, or null if not specified",
   "peers": [
     {"ticker": "002080", "name": "中材科技"},
     ...
@@ -52,14 +65,26 @@ def _api_key():
     return _get_secret("DEEPSEEK_API_KEY")
 
 
-def discover_peers(display_name, force_refresh=False):
+def _composite_key(product, sector):
+    """Display + cache key for a (product, sector) pair, or just product if no sector."""
+    p = (product or "").strip()
+    s = (sector or "").strip()
+    return f"{p}  →  {s}" if s else p
+
+
+def discover_peers(product, sector=None, force_refresh=False):
     """
-    Return list of {ticker, name} for A-share peers producing `display_name`.
-    Hits DeepSeek on cache miss; otherwise returns the cached DB entry.
-    Raises RuntimeError on API failure.
+    Return list of {ticker, name} for A-share peers producing `product`,
+    optionally narrowed to a specific downstream `sector` so we only get
+    competitors that actually compete in that application.
+
+    Cache key is the composite "product → sector" string, so two stocks that
+    share the same (product, sector) edge share the cached/curated peer set.
     """
-    if not display_name or not display_name.strip():
+    if not product or not product.strip():
         return []
+
+    display_name = _composite_key(product, sector)
 
     if not force_refresh:
         cached = data_manager.get_product_peers(display_name)
@@ -71,11 +96,15 @@ def discover_peers(display_name, force_refresh=False):
     except ValueError as exc:
         raise RuntimeError(str(exc)) from exc
 
+    user_msg = f"Product: {product}"
+    if sector:
+        user_msg += f"\nDownstream sector: {sector}"
+
     payload = {
         "model": _MODEL,
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user",   "content": f"Product: {display_name}"},
+            {"role": "user",   "content": user_msg},
         ],
         "temperature": 0.2,
         "max_tokens": 800,
