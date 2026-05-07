@@ -333,35 +333,55 @@ def discover_layer_stocks(
 # ── Product-Level Stock Discovery (Sector Explorer) ───────────────────────────
 
 _PRODUCT_STOCK_PROMPT = """\
-You are an elite Chinese A-share equity analyst.
+You are an elite Chinese A-share equity analyst with deep knowledge of every A-share listed company.
 
 The user will give you:
   - A specific PRODUCT or SERVICE within a supply chain
   - The SECTOR this product is used in
   - The LAYER within that sector's supply chain this product belongs to
 
-Your task: find A-share listed companies whose PRIMARY or MAJORITY revenue comes from
-SUPPLYING this exact product/service INTO the named sector's supply chain.
+Your task: find A-share listed companies that currently generate SIGNIFICANT and VERIFIABLE
+revenue from manufacturing or supplying this EXACT product into the named sector.
 
-"Supplying into a sector" means:
-  - The company's END CUSTOMERS are businesses operating in that sector
-  - The product they sell is used specifically in that sector's production or operation
-  - NOT companies that make a generic version of this product for all industries
+QUALIFICATION RULES — a company qualifies if ALL of the following are true:
+  1. It actively manufactures or supplies the named product TODAY with paying customers
+     (not "in R&D", not "announced plans", not "subsidiary exploring")
+  2. Its end customers for this product are companies operating in the named sector
+  Note: revenue share does NOT need to be large — a company ramping fast in an emerging
+  sector is fine to include as long as it is genuinely shipping product to real customers.
 
-Example — "Lithium Carbonate / 碳酸锂" in sector "EV / 新能源汽车":
-  → Return battery-grade lithium producers whose main buyers are EV battery makers
-  → EXCLUDE industrial-grade lithium producers whose customers are ceramics / glass
+DISQUALIFICATION — exclude a company if ANY of the following apply:
+  - It makes a RELATED but DIFFERENT product (e.g. AI accelerator ≠ server CPU; FPGA ≠ GPU)
+  - It is a buyer, integrator, or distributor of this product, not a direct manufacturer
+  - It has announced plans or is in trial production but has not yet shipped to paying customers
+  - It is adjacent to this market but does not directly produce the named item
+
+SELF-CHECK — before adding each candidate, ask:
+  "Has this company shipped THIS exact product to paying customers in THIS sector?"
+  If the answer is uncertain or only aspirational → leave it out.
+
+QUANTITY RULE — precision over padding:
+  - Return as many as 5 or as few as 0.
+  - If only 1 company truly qualifies, return just that 1.
+  - If no company genuinely qualifies, return an empty stocks list.
+  - NEVER pad the list with adjacent, aspirational, or loosely-related companies.
+
+Example — "Server CPU / 服务器CPU" in "Data Center / 数据中心":
+  ✓ INCLUDE: 海光信息 688041 — ships x86-compatible server CPUs to data-centre customers
+  ✗ EXCLUDE: 寒武纪 688256 — AI inference accelerator, categorically different from a CPU
+  ✗ EXCLUDE: 紫光国微 002049 — security chips / FPGAs, not server CPUs
+  ✗ EXCLUDE: 全志科技 300458 — embedded ARM SoCs for IoT, not server-grade CPUs
 
 CRITICAL OUTPUT RULES:
-- Return ONLY raw JSON. No markdown code fences. Start with { and end with }.
+- Return ONLY raw JSON. No markdown fences. Start with { and end with }.
 - Each ticker MUST be exactly 6 digits (A-share only; no ETFs, no HK/US stocks).
-- primary_product must name the specific thing they supply in this layer.
-- Return 3 to 5 stocks, ranked by revenue concentration in this exact product.
+- primary_product must name the specific item they supply.
+- "stocks" may be an empty list [] when no company genuinely qualifies.
 
 Schema:
 {
   "stocks": [
-    {"ticker": "002460", "name": "赣锋锂业", "primary_product": "battery-grade lithium carbonate"}
+    {"ticker": "688041", "name": "海光信息", "primary_product": "x86-compatible server CPU"}
   ]
 }
 """
