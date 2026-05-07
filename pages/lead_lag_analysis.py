@@ -562,6 +562,11 @@ A beta of 1.2 means if S rises 8%, T's "expected" move is 9.6% — any differenc
 **Signal strength:** 🔥 Strong = Granger p < 0.01 + cointegrated + half-life < 15d ·
 ⚡ Moderate = Granger p < 0.05 + cointegrated or |corr| > 0.4 ·
 〰 Weak = Granger p < 0.10 · ✗ None = no statistical evidence.
+
+**Multiple-testing guard:** All Granger signals also require |peak cross-correlation| > 0.15.
+With many peer stocks tested simultaneously, a bare p < 0.05 threshold produces ~1 spurious
+"significant" result per 20 pairs by chance. The correlation floor ensures the p-value reflects
+real co-movement rather than sampling noise.
 """)
 
 import pandas as pd
