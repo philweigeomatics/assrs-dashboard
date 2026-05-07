@@ -297,39 +297,54 @@ validation = data_manager.validate_tickers_against_stock_basic(
     [s["ticker"] for s in raw_results]
 )
 
-st.markdown(f"**{len(raw_results)} candidates identified:**")
-
-# ── Render each stock row ──────────────────────────────────────────────────────
+# ── Render stock cards in a responsive grid ───────────────────────────────────
 admin_include: dict[str, bool] = {}   # ticker → checkbox state (admin only)
 
-for s in raw_results:
+n      = len(raw_results)
+n_cols = min(n, 3)   # up to 3 cards per row
+cols   = st.columns(n_cols, gap="small")
+
+for i, s in enumerate(raw_results):
     t      = s["ticker"]
     v      = validation.get(t, {})
     valid  = v.get("valid", False)
     name   = v.get("official_name") or s.get("name", "")
     pp     = s.get("primary_product", "")
+    badge  = "✅" if valid else "⚠️"
+    badge_title = "" if valid else " · not in stock_basic"
 
-    info_col, chk_col = st.columns([8, 1])
-    with info_col:
-        badge = "✅" if valid else "⚠️ not in stock_basic"
-        st.markdown(
-            f"**{t}** &nbsp; {badge}  \n"
-            f"{name}  \n"
-            f"<span style='color:#6b7280;font-size:12px;'>{pp}</span>",
-            unsafe_allow_html=True,
-        )
-    with chk_col:
-        if is_admin:
-            # Admin can deselect any stock; ⚠️ stocks are forced off (can't be saved)
-            admin_include[t] = st.checkbox(
-                "",
-                value=valid,       # default: on for valid, off for invalid
-                disabled=not valid,
-                key=f"se_chk_{_pk}_{t}",
+    with cols[i % n_cols]:
+        with st.container(border=True):
+            # Ticker + validity badge on one line
+            st.markdown(
+                f"<div style='font-size:18px;font-weight:700;line-height:1.2;'>"
+                f"{t} <span style='font-size:14px;'>{badge}</span>"
+                f"<span style='color:#ef4444;font-size:11px;'>{badge_title}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
             )
-        else:
-            # Non-admin: show a static tick/cross so layout stays consistent
-            st.markdown("✔" if valid else "✗")
+            # Company name
+            st.markdown(
+                f"<div style='font-size:14px;font-weight:600;margin-top:2px;'>{name}</div>",
+                unsafe_allow_html=True,
+            )
+            # Primary product in muted text
+            st.markdown(
+                f"<div style='color:#6b7280;font-size:12px;margin-top:2px;"
+                f"margin-bottom:8px;'>{pp}</div>",
+                unsafe_allow_html=True,
+            )
+            if is_admin:
+                # Checkbox label hidden visually but present for accessibility
+                admin_include[t] = st.checkbox(
+                    "Include in save",
+                    value=valid,
+                    disabled=not valid,
+                    key=f"se_chk_{_pk}_{t}",
+                    label_visibility="collapsed",
+                    help="Uncheck to exclude this stock from the saved list."
+                    if valid else "Not in stock_basic — cannot be saved.",
+                )
 
 # ── Admin save panel ──────────────────────────────────────────────────────────
 if is_admin:
@@ -347,8 +362,7 @@ if is_admin:
         and validation.get(s["ticker"], {}).get("valid", False)
     ]
 
-    sav_col, note_col = st.columns([2, 5])
-    if sav_col.button(
+    if st.button(
         f"💾 Save {len(to_save)} checked stocks",
         type="primary",
         key="se_save_btn",
@@ -364,10 +378,9 @@ if is_admin:
             st.rerun()
         else:
             st.error("Save failed — check DB connection.")
-
-    note_col.caption(
-        "Only ✅ checked stocks are saved. "
-        "⚠️ tickers (not in stock_basic) are excluded regardless."
+    st.caption(
+        "Uncheck any card above to exclude it. "
+        "⚠️ tickers not in stock_basic cannot be saved regardless."
     )
 else:
     # Non-admin: if data came from DB (admin-curated) no note needed;
