@@ -749,7 +749,13 @@ chart_choice = st.selectbox(
     chart_options,
     key="ll_chart_choice",
 )
-chosen_s_ticker = chart_choice.split()[1]   # second token is always the 6-digit ticker
+# Ticker is always 6 digits; extract reliably rather than relying on split position
+import re as _re
+_m = _re.search(r'\b(\d{6})\b', chart_choice)
+chosen_s_ticker = _m.group(1) if _m else None
+if not chosen_s_ticker or chosen_s_ticker not in results_df["ticker"].values:
+    st.warning("Could not identify the selected stock. Please re-run the analysis.")
+    st.stop()
 chosen_row = results_df[results_df["ticker"] == chosen_s_ticker].iloc[0]
 
 # ── Shared data prep ──────────────────────────────────────────────────────────
