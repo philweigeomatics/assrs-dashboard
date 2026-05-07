@@ -328,3 +328,118 @@ def discover_layer_stocks(
 
     data_manager.upsert_product_peers(cache_key, cleaned)
     return cleaned
+
+
+# ── Product-Level Stock Discovery (Sector Explorer) ───────────────────────────
+
+_PRODUCT_STOCK_PROMPT = """\
+You are an elite Chinese A-share equity analyst.
+
+The user will give you:
+  - A specific PRODUCT or SERVICE within a supply chain
+  - The SECTOR this product is used in
+  - The LAYER within that sector's supply chain this product belongs to
+
+Your task: find A-share listed companies whose PRIMARY or MAJORITY revenue comes from
+SUPPLYING this exact product/service INTO the named sector's supply chain.
+
+"Supplying into a sector" means:
+  - The company's END CUSTOMERS are businesses operating in that sector
+  - The product they sell is used specifically in that sector's production or operation
+  - NOT companies that make a generic version of this product for all industries
+
+Example — "Lithium Carbonate / 碳酸锂" in sector "EV / 新能源汽车":
+  → Return battery-grade lithium producers whose main buyers are EV battery makers
+  → EXCLUDE industrial-grade lithium producers whose customers are ceramics / glass
+
+CRITICAL OUTPUT RULES:
+- Return ONLY raw JSON. No markdown code fences. Start with { and end with }.
+- Each ticker MUST be exactly 6 digits (A-share only; no ETFs, no HK/US stocks).
+- primary_product must name the specific thing they supply in this layer.
+- Return 3 to 5 stocks, ranked by revenue concentration in this exact product.
+
+Schema:
+{
+  "stocks": [
+    {"ticker": "002460", "name": "赣锋锂业", "primary_product": "battery-grade lithium carbonate"}
+  ]
+}
+"""
+
+
+def discover_product_stocks(
+    product: str,
+    layer_name: str,
+    sector_name: str,
+) -> list:
+    """
+    Return top 3-5 A-share stocks for a specific product within a sector's supply chain.
+
+    Sector + layer context narrows results to companies supplying this product
+    specifically into that sector's value chain (e.g. battery-grade vs. industrial).
+
+    Results are NOT auto-saved to DB — the caller (admin UI) decides whether to persist.
+    Cache key used only for reading: __sector_product__|{sector}|{layer}|{product}.
+
+    Returns list of {ticker, name, primary_product}.
+    """
+    if not product or not product.strip():
+        return []
+
+    try:
+        api_key = _api_key()
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    user_msg = (
+        f"Sector: {sector_name}\n"
+        f"Layer: {layer_name}\n"
+        f"Product/Service: {product}"
+    )
+
+    payload = {
+        "model": _MODEL,
+        "messages": [
+            {"role": "system", "content": _PRODUCT_STOCK_PROMPT},
+            {"role": "user",   "content": user_msg},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 500,
+    }
+
+    try:
+        resp = requests.post(
+            _ENDPOINT, json=payload,
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "application/json"},
+            timeout=40,
+        )
+        resp.raise_for_status()
+    except requests.Timeout:
+        raise RuntimeError("DeepSeek API timed out after 40 s.")
+    except requests.RequestException as exc:
+        raise RuntimeError(f"DeepSeek API failed: {exc}") from exc
+
+    raw = resp.json()["choices"][0]["message"]["content"].strip()
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"DeepSeek returned invalid JSON ({exc}). Preview: {raw[:200]}"
+        ) from exc
+
+    raw_stocks = data.get("stocks", [])
+    cleaned, seen = [], set()
+    for s in raw_stocks:
+        t  = str(s.get("ticker", "")).strip().zfill(6)
+        n  = (s.get("name", "") or "").strip()
+        pp = (s.get("primary_product", "") or "").strip()
+        if len(t) == 6 and t.isdigit() and t not in seen:
+            cleaned.append({"ticker": t, "name": n, "primary_product": pp})
+            seen.add(t)
+
+    return cleaned
