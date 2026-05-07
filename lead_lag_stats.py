@@ -6,6 +6,13 @@ Three-layer output per (T stock, peer) pair:
   2. Cross-correlation  — visualisable heatmap, lag by lag
   3. Cointegration + half-life — mean-reversion exploitability check
 
+Design notes:
+  - Cointegration and half-life are computed on LOG prices so the spread is a
+    % deviation rather than an absolute dollar gap (stable across price levels).
+  - Signal classification requires |peak_corr| > 0.15 as a multiple-testing
+    guard: with many peer stocks under test, a bare p < 0.05 Granger threshold
+    produces false positives purely by chance.
+
 All heavy lifting is in compute_lead_lag(); fetch_qfq_returns() handles data.
 """
 
@@ -215,7 +222,10 @@ def compute_lead_lag(
         else:
             peak_lag, peak_corr = 0, float("nan")
 
-        # ── Cointegration + half-life ─────────────────────────────────────────
+        # ── Cointegration + half-life (on log prices) ────────────────────────
+        # Log transform before cointegration so the spread is a % deviation
+        # rather than an absolute dollar difference.  This makes the OLS beta
+        # and OU half-life far more stable across stocks at different price levels.
         cointegrated = False
         half_life    = float("nan")
         if p_t is not None and p_s is not None:
@@ -224,11 +234,13 @@ def compute_lead_lag(
                 pt_c = pt_c.dropna()
                 ps_c = ps_c.dropna()
                 if len(pt_c) >= 60:
-                    _, coint_p, _ = coint(pt_c.values, ps_c.values)
+                    pt_log = np.log(pt_c)
+                    ps_log = np.log(ps_c)
+                    _, coint_p, _ = coint(pt_log.values, ps_log.values)
                     cointegrated  = bool(coint_p < 0.05)
                     if cointegrated:
-                        beta_price = _estimate_beta(pt_c, ps_c)
-                        spread     = pt_c - beta_price * ps_c
+                        beta_price = _estimate_beta(pt_log, ps_log)
+                        spread     = pt_log - beta_price * ps_log
                         half_life  = _half_life(spread)
             except Exception:
                 pass
@@ -247,17 +259,22 @@ def compute_lead_lag(
             relationship = "No relationship"
 
         # ── Signal strength ───────────────────────────────────────────────────
-        p_vals = [p for p in [p_T_leads_S, p_S_leads_T] if not np.isnan(p)]
-        p_best = min(p_vals) if p_vals else float("nan")
-        hl_ok  = not np.isnan(half_life) and half_life < 15
+        # Multiple-testing guard: with many stocks under test, a 5% Granger
+        # threshold produces ~1 false positive per 20 pairs by pure chance.
+        # Requiring |peak_corr| > 0.15 as a minimum economic filter ensures
+        # the Granger p-value reflects actual co-movement, not sampling noise.
+        p_vals   = [p for p in [p_T_leads_S, p_S_leads_T] if not np.isnan(p)]
+        p_best   = min(p_vals) if p_vals else float("nan")
+        hl_ok    = not np.isnan(half_life) and half_life < 15
+        corr_ok  = not np.isnan(peak_corr) and abs(peak_corr) > 0.15
 
-        if not np.isnan(p_best) and p_best < 0.01 and cointegrated and hl_ok:
+        if not np.isnan(p_best) and p_best < 0.01 and cointegrated and hl_ok and corr_ok:
             signal = "🔥 Strong"
-        elif not np.isnan(p_best) and p_best < 0.05 and (
-            cointegrated or (not np.isnan(peak_corr) and abs(peak_corr) > 0.4)
+        elif not np.isnan(p_best) and p_best < 0.05 and corr_ok and (
+            cointegrated or abs(peak_corr) > 0.4
         ):
             signal = "⚡ Moderate"
-        elif not np.isnan(p_best) and p_best < 0.10:
+        elif not np.isnan(p_best) and p_best < 0.10 and corr_ok:
             signal = "〰 Weak"
         else:
             signal = "✗ None"
