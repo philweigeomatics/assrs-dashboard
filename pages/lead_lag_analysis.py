@@ -759,13 +759,25 @@ if not chosen_s_ticker or chosen_s_ticker not in results_df["ticker"].values:
 chosen_row = results_df[results_df["ticker"] == chosen_s_ticker].iloc[0]
 
 # ── Shared data prep ──────────────────────────────────────────────────────────
-best_lag  = int(chosen_row["peak_lag"])
+import math as _math
+
+# Use the Granger lag (which direction is significant) rather than the raw
+# cross-correlation peak, which can be 0 even when Granger found a 4-day lead.
+_p_tls = chosen_row["p_T_leads_S"]
+_p_slt = chosen_row["p_S_leads_T"]
+if not _math.isnan(_p_tls) and _p_tls < 0.05:
+    display_lag = int(chosen_row["lag_T_leads_S"])   # +N: T leads S by N days
+elif not _math.isnan(_p_slt) and _p_slt < 0.05:
+    display_lag = -int(chosen_row["lag_S_leads_T"])  # -N: S leads T by N days
+else:
+    display_lag = int(chosen_row["peak_lag"])         # fallback to cross-corr
+
 beta_val  = chosen_row["beta"]
 xcorrs    = chosen_row["_xcorrs"]
 lags      = sorted(xcorrs.keys())
 corr_vals = [xcorrs[k] for k in lags]
 
-# Prices aligned on common dates
+# Prices/returns for this pair
 p_t_full = stored["prices"].get(ticker)
 p_s_full = stored["prices"].get(chosen_s_ticker)
 r_t_full = stored["returns"].get(ticker)
@@ -779,107 +791,83 @@ with st.expander("🔍 Raw data (debug)", expanded=False):
         if p_t_full is not None:
             st.dataframe(
                 p_t_full.rename("close").reset_index().rename(columns={"index": "date"}),
-                use_container_width=True, height=300,
+                use_container_width=True, height=280,
             )
         else:
             st.warning("No price data for T.")
-
-        st.markdown(f"**T · {ticker} returns**")
+        st.markdown(f"**T · {ticker} daily returns**")
         if r_t_full is not None:
             st.dataframe(
                 r_t_full.rename("pct_return").reset_index().rename(columns={"index": "date"}),
-                use_container_width=True, height=300,
+                use_container_width=True, height=280,
             )
-
     with dc2:
         st.markdown(f"**S · {chosen_s_ticker} prices** ({len(p_s_full) if p_s_full is not None else 0} rows)")
         if p_s_full is not None:
             st.dataframe(
                 p_s_full.rename("close").reset_index().rename(columns={"index": "date"}),
-                use_container_width=True, height=300,
+                use_container_width=True, height=280,
             )
         else:
             st.warning("No price data for S.")
-
-        st.markdown(f"**S · {chosen_s_ticker} returns**")
+        st.markdown(f"**S · {chosen_s_ticker} daily returns**")
         if r_s_full is not None:
             st.dataframe(
                 r_s_full.rename("pct_return").reset_index().rename(columns={"index": "date"}),
-                use_container_width=True, height=300,
+                use_container_width=True, height=280,
             )
 
 tab_price, tab_corr, tab_scatter = st.tabs(
     ["📉 Normalized Price", "📊 Cross-Correlation", "🔵 Return Scatter"]
 )
 
-# ── Tab 1: Normalized price with optional lag shift ───────────────────────────
+# ── Tab 1: Normalized price ───────────────────────────────────────────────────
 with tab_price:
+    if display_lag != 0:
+        direction_lbl = f"T leads S by {display_lag}d" if display_lag > 0 else f"S leads T by {-display_lag}d"
+    else:
+        direction_lbl = "no significant lag"
+
     apply_shift = st.checkbox(
-        f"Apply lag shift ({best_lag:+d}d) — shift S so it aligns with T if T leads",
-        value=(best_lag != 0),
+        f"Apply Granger lag shift ({display_lag:+d}d, {direction_lbl}) — shift S to align with T",
+        value=(display_lag != 0),
         key="ll_chart_shift",
     )
 
     if p_t_full is not None and p_s_full is not None:
         pt, ps = p_t_full.align(p_s_full, join="inner")
-        pt = pt.dropna()
-        ps = ps.dropna()
-        pt, ps = pt.align(ps, join="inner")
+        pt, ps = pt.dropna().align(ps.dropna(), join="inner")
 
-        # Normalize to 100 at first common date
         pt_norm = pt / pt.iloc[0] * 100
         ps_norm = ps / ps.iloc[0] * 100
 
-        if apply_shift and best_lag != 0:
-            # Shift S forward so it "catches up" to T visually
-            ps_norm = ps_norm.shift(-best_lag)
+        if apply_shift and display_lag != 0:
+            # Positive lag: T leads S → shift S backward (pull earlier) so it overlaps T
+            # Negative lag: S leads T → shift S forward so it overlaps T
+            ps_norm = ps_norm.shift(-display_lag)
 
-        fig1 = go.Figure()
-        fig1.add_trace(go.Scatter(
-            x=pt_norm.index, y=pt_norm.values,
-            name=f"T · {ticker} {company}",
-            line=dict(color="#60a5fa", width=2),
-        ))
-        s_label  = f"S · {chosen_s_ticker} {chosen_row['name']}"
-        if apply_shift and best_lag != 0:
-            s_label += f" (shifted {best_lag:+d}d)"
-        ps_plot = ps_norm.dropna()
-        fig1.add_trace(go.Scatter(
-            x=ps_plot.index, y=ps_plot.values,
-            name=s_label,
-            line=dict(color="#f97316", width=2, dash="dot" if apply_shift else "solid"),
-        ))
-        fig1.update_layout(
-            title=f"Normalized Price (base 100) · lag shift: {best_lag:+d}d",
-            xaxis_title="Date",
-            yaxis_title="Indexed Price (100 = start)",
-            legend=dict(orientation="h", y=-0.15),
-            height=420,
-            margin=dict(l=40, r=20, t=50, b=60),
-            plot_bgcolor="#0f172a",
-            paper_bgcolor="#0f172a",
-            font=dict(color="#e2e8f0"),
-            xaxis=dict(gridcolor="#1e293b"),
-            yaxis=dict(gridcolor="#1e293b"),
-        )
-        st.plotly_chart(fig1, use_container_width=True)
-        if apply_shift and best_lag != 0:
-            direction = "T leads S" if best_lag > 0 else "S leads T"
+        t_label = f"T · {ticker} {company}"
+        s_label = f"S · {chosen_s_ticker} {chosen_row['name']}"
+        if apply_shift and display_lag != 0:
+            s_label += f" (shifted {display_lag:+d}d)"
+
+        price_chart_df = pd.DataFrame({
+            t_label: pt_norm,
+            s_label: ps_norm,
+        }).dropna(how="all")
+
+        st.line_chart(price_chart_df, use_container_width=True, height=380)
+
+        if apply_shift and display_lag != 0:
             st.caption(
-                f"S's price series shifted {abs(best_lag)}d earlier ({direction}). "
-                "When lines overlap closely after the shift, the lead-lag relationship is genuine."
+                f"S shifted {abs(display_lag)}d ({direction_lbl}). "
+                "Closer overlap after the shift = stronger evidence the relationship is real."
             )
     else:
         st.warning("Price data unavailable for one or both stocks.")
 
-# ── Tab 2: Cross-correlation bar chart ────────────────────────────────────────
+# ── Tab 2: Cross-correlation bar chart ───────────────────────────────────────
 with tab_corr:
-    bar_colors = ["#22c55e" if v > 0 else "#ef4444" for v in corr_vals]
-    # Highlight the peak lag bar
-    peak_idx = lags.index(best_lag) if best_lag in lags else None
-    if peak_idx is not None:
-        bar_colors[peak_idx] = "#facc15"   # yellow = peak
-
     col_labels = []
     for k in lags:
         if k < 0:
@@ -889,100 +877,38 @@ with tab_corr:
         else:
             col_labels.append(f"T+{k}d→S")
 
-    fig2 = go.Figure()
-    fig2.add_trace(go.Bar(
-        x=col_labels, y=corr_vals,
-        marker_color=bar_colors,
-        text=[f"{v:.2f}" if not pd.isna(v) else "" for v in corr_vals],
-        textposition="outside",
-    ))
-    # Reference lines
-    for lvl, label in [(0.4, "moderate"), (-0.4, "moderate"), (0.2, "weak"), (-0.2, "weak")]:
-        fig2.add_hline(y=lvl, line_dash="dot", line_color="#475569",
-                       annotation_text=label if lvl > 0 else "",
-                       annotation_position="right")
-    fig2.add_hline(y=0, line_color="#94a3b8", line_width=1)
-    fig2.update_layout(
-        title=f"Cross-Correlation at Each Lag · peak at {best_lag:+d}d (🟡)",
-        xaxis_title="Lag  (S+Nd→T = S leads T  ·  T+Nd→S = T leads S)",
-        yaxis_title="Pearson Correlation",
-        yaxis=dict(range=[-1, 1], gridcolor="#1e293b"),
-        height=400,
-        margin=dict(l=40, r=20, t=50, b=80),
-        plot_bgcolor="#0f172a",
-        paper_bgcolor="#0f172a",
-        font=dict(color="#e2e8f0"),
-        xaxis=dict(gridcolor="#1e293b"),
+    corr_df = pd.DataFrame(
+        {"Correlation": corr_vals},
+        index=col_labels,
     )
-    st.plotly_chart(fig2, use_container_width=True)
+    st.bar_chart(corr_df, use_container_width=True, height=360)
     st.caption(
-        "🟡 Yellow = peak correlation lag · 🟢 Green = positive correlation · "
-        "🔴 Red = negative correlation · Dotted lines at ±0.2 (weak) and ±0.4 (moderate)."
+        f"Granger lag: **{display_lag:+d}d** ({direction_lbl if display_lag != 0 else 'none'})  ·  "
+        "S+Nd→T = S leads T by N days  ·  T+Nd→S = T leads S by N days  ·  "
+        "Bars above 0 = positive correlation at that lag."
     )
 
-# ── Tab 3: Return scatter with regression ────────────────────────────────────
+# ── Tab 3: Return scatter ─────────────────────────────────────────────────────
 with tab_scatter:
     if r_t_full is not None and r_s_full is not None:
-        # Shift S by best lag: if lag > 0, T leads S so compare T[t] vs S[t+lag]
-        if best_lag > 0:
-            s_shifted = r_s_full.shift(-best_lag)
-        elif best_lag < 0:
-            s_shifted = r_s_full.shift(abs(best_lag))
-        else:
-            s_shifted = r_s_full
+        s_shifted = r_s_full.shift(-display_lag)   # same sign convention as price chart
+        combined  = pd.concat([r_t_full, s_shifted], axis=1).dropna()
+        combined.columns = [
+            f"T return · {ticker}",
+            f"S return · {chosen_s_ticker}" + (f" (shifted {display_lag:+d}d)" if display_lag != 0 else ""),
+        ]
+        combined = combined * 100   # express as %
 
-        combined = pd.concat([r_t_full, s_shifted], axis=1).dropna()
-        combined.columns = ["T_ret", "S_ret"]
-
-        x_vals = combined["S_ret"].values * 100
-        y_vals = combined["T_ret"].values * 100
-
-        # OLS for regression line
-        if len(combined) >= 10 and not pd.isna(beta_val):
-            x_line = np.array([x_vals.min(), x_vals.max()])
-            # Use beta from compute_lead_lag (already estimated)
-            intercept = y_vals.mean() - beta_val * x_vals.mean()
-            y_line    = beta_val * x_line + intercept
-        else:
-            x_line = y_line = None
-
-        fig3 = go.Figure()
-        fig3.add_trace(go.Scatter(
-            x=x_vals, y=y_vals,
-            mode="markers",
-            marker=dict(color="#60a5fa", size=5, opacity=0.6),
-            name="Daily returns",
-            hovertemplate="S: %{x:.2f}%<br>T: %{y:.2f}%<extra></extra>",
-        ))
-        if x_line is not None:
-            fig3.add_trace(go.Scatter(
-                x=x_line, y=y_line,
-                mode="lines",
-                line=dict(color="#facc15", width=2, dash="dash"),
-                name=f"OLS fit (β={beta_val:.2f})",
-            ))
-        fig3.add_hline(y=0, line_color="#475569", line_width=1)
-        fig3.add_vline(x=0, line_color="#475569", line_width=1)
-
-        lag_note = f" (S shifted {best_lag:+d}d)" if best_lag != 0 else ""
-        fig3.update_layout(
-            title=f"T returns vs S returns{lag_note} · β = {_fmt_f(beta_val)}",
-            xaxis_title=f"S · {chosen_s_ticker} {chosen_row['name']} return (%){lag_note}",
-            yaxis_title=f"T · {ticker} {company} return (%)",
-            height=430,
-            margin=dict(l=50, r=20, t=50, b=60),
-            plot_bgcolor="#0f172a",
-            paper_bgcolor="#0f172a",
-            font=dict(color="#e2e8f0"),
-            xaxis=dict(gridcolor="#1e293b", zeroline=False),
-            yaxis=dict(gridcolor="#1e293b", zeroline=False),
-            legend=dict(orientation="h", y=-0.15),
+        st.scatter_chart(
+            combined,
+            x=combined.columns[1],
+            y=combined.columns[0],
+            use_container_width=True,
+            height=380,
         )
-        st.plotly_chart(fig3, use_container_width=True)
         st.caption(
-            f"Each dot = one trading day. S returns shifted by best lag ({best_lag:+d}d). "
-            f"Slope of yellow line = beta ({_fmt_f(beta_val)}): "
-            f"for every 1% move in S, T is expected to move {_fmt_f(beta_val)}%."
+            f"Each dot = one trading day. S returns shifted by Granger lag ({display_lag:+d}d).  "
+            f"Beta = **{_fmt_f(beta_val)}**: for every 1% S moves, T is expected to move {_fmt_f(beta_val)}%."
         )
     else:
         st.warning("Return data unavailable for one or both stocks.")
