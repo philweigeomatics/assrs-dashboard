@@ -825,17 +825,16 @@ direction_lbl = (
     else "no significant lag"
 )
 
-# Shared light-theme layout defaults
+# Shared light-theme layout defaults (no xaxis/yaxis — each chart sets its own)
 _LAYOUT = dict(
     height=400,
     margin=dict(l=50, r=20, t=45, b=60),
     plot_bgcolor="#f8fafc",
     paper_bgcolor="#ffffff",
     font=dict(color="#1e293b", size=12),
-    xaxis=dict(gridcolor="#e2e8f0", linecolor="#cbd5e1"),
-    yaxis=dict(gridcolor="#e2e8f0", linecolor="#cbd5e1"),
     legend=dict(orientation="h", y=-0.18, font=dict(size=11)),
 )
+_AXIS = dict(gridcolor="#e2e8f0", linecolor="#cbd5e1")
 
 tab_price, tab_corr, tab_scatter = st.tabs(
     ["📉 Normalized Price", "📊 Cross-Correlation", "🔵 Return Scatter"]
@@ -882,6 +881,8 @@ with tab_price:
                        font=dict(size=13)),
             xaxis_title="Date",
             yaxis_title="Indexed Price (100 = start)",
+            xaxis=_AXIS,
+            yaxis=_AXIS,
         )
         st.plotly_chart(fig1, use_container_width=True)
         if apply_shift and display_lag != 0:
@@ -926,6 +927,7 @@ with tab_corr:
         title=dict(text=f"Cross-Correlation at Each Lag · Granger lag {display_lag:+d}d (🟠)",
                    font=dict(size=13)),
         xaxis_title="Lag  (S+Nd→T = S leads T  ·  T+Nd→S = T leads S)",
+        xaxis=_AXIS,
         yaxis=dict(range=[-1, 1], gridcolor="#e2e8f0", linecolor="#cbd5e1"),
     )
     st.plotly_chart(fig2, use_container_width=True)
