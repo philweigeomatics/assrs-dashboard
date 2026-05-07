@@ -343,20 +343,22 @@ The user will give you:
 Your task: find A-share listed companies that currently generate SIGNIFICANT and VERIFIABLE
 revenue from manufacturing or supplying this EXACT product into the named sector.
 
-QUALIFICATION RULES — a company qualifies ONLY if ALL of the following are true:
-  1. It actively manufactures or supplies the named product TODAY (not "researching" or "entering")
-  2. This product accounts for at least ~20% of the company's total annual revenue
-  3. Its end customers for this product are companies operating in the named sector
+QUALIFICATION RULES — a company qualifies if ALL of the following are true:
+  1. It actively manufactures or supplies the named product TODAY with paying customers
+     (not "in R&D", not "announced plans", not "subsidiary exploring")
+  2. Its end customers for this product are companies operating in the named sector
+  Note: revenue share does NOT need to be large — a company ramping fast in an emerging
+  sector is fine to include as long as it is genuinely shipping product to real customers.
 
 DISQUALIFICATION — exclude a company if ANY of the following apply:
   - It makes a RELATED but DIFFERENT product (e.g. AI accelerator ≠ server CPU; FPGA ≠ GPU)
   - It is a buyer, integrator, or distributor of this product, not a direct manufacturer
-  - Revenue from this product is negligible, early-stage, or not yet commercialised at scale
+  - It has announced plans or is in trial production but has not yet shipped to paying customers
   - It is adjacent to this market but does not directly produce the named item
 
 SELF-CHECK — before adding each candidate, ask:
-  "Can I confirm from public financial disclosures that this company earns meaningful revenue
-   from THIS exact product sold to customers in THIS sector?" If uncertain → leave it out.
+  "Has this company shipped THIS exact product to paying customers in THIS sector?"
+  If the answer is uncertain or only aspirational → leave it out.
 
 QUANTITY RULE — precision over padding:
   - Return as many as 5 or as few as 0.
