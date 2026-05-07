@@ -771,6 +771,43 @@ p_s_full = stored["prices"].get(chosen_s_ticker)
 r_t_full = stored["returns"].get(ticker)
 r_s_full = stored["returns"].get(chosen_s_ticker)
 
+# ── Debug expander ────────────────────────────────────────────────────────────
+with st.expander("🔍 Raw data (debug)", expanded=False):
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        st.markdown(f"**T · {ticker} prices** ({len(p_t_full) if p_t_full is not None else 0} rows)")
+        if p_t_full is not None:
+            st.dataframe(
+                p_t_full.rename("close").reset_index().rename(columns={"index": "date"}),
+                use_container_width=True, height=300,
+            )
+        else:
+            st.warning("No price data for T.")
+
+        st.markdown(f"**T · {ticker} returns**")
+        if r_t_full is not None:
+            st.dataframe(
+                r_t_full.rename("pct_return").reset_index().rename(columns={"index": "date"}),
+                use_container_width=True, height=300,
+            )
+
+    with dc2:
+        st.markdown(f"**S · {chosen_s_ticker} prices** ({len(p_s_full) if p_s_full is not None else 0} rows)")
+        if p_s_full is not None:
+            st.dataframe(
+                p_s_full.rename("close").reset_index().rename(columns={"index": "date"}),
+                use_container_width=True, height=300,
+            )
+        else:
+            st.warning("No price data for S.")
+
+        st.markdown(f"**S · {chosen_s_ticker} returns**")
+        if r_s_full is not None:
+            st.dataframe(
+                r_s_full.rename("pct_return").reset_index().rename(columns={"index": "date"}),
+                use_container_width=True, height=300,
+            )
+
 tab_price, tab_corr, tab_scatter = st.tabs(
     ["📉 Normalized Price", "📊 Cross-Correlation", "🔵 Return Scatter"]
 )
