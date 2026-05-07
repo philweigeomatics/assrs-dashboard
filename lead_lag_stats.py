@@ -58,6 +58,8 @@ def fetch_qfq_returns(tickers: list, lookback_days: int = 180):
         return pd.DataFrame(), pd.DataFrame()
 
     prices_df = pd.DataFrame(prices).sort_index()
+    # Convert "YYYYMMDD" string index to proper datetime so charts render correctly
+    prices_df.index = pd.to_datetime(prices_df.index, format="%Y%m%d")
     # Keep only the last `lookback_days` trading rows
     if len(prices_df) > lookback_days:
         prices_df = prices_df.iloc[-lookback_days:]
