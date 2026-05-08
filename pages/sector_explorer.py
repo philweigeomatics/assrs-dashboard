@@ -303,25 +303,24 @@ validation = data_manager.validate_tickers_against_stock_basic(
     [s["ticker"] for s in raw_results]
 )
 
-# ── Render stock cards in a responsive grid ───────────────────────────────────
-admin_include: dict[str, bool] = {}   # ticker → checkbox state (admin only)
+# ── Render stock cards — checkboxes visible to ALL users ─────────────────────
+# stock_include drives both the admin DB-save and the pair-trade actions.
+stock_include: dict[str, bool] = {}
 
-n      = len(raw_results)
-n_cols = min(n, 3)   # up to 3 cards per row
+n_cols = min(len(raw_results), 3)
 cols   = st.columns(n_cols, gap="small")
 
 for i, s in enumerate(raw_results):
-    t      = s["ticker"]
-    v      = validation.get(t, {})
-    valid  = v.get("valid", False)
-    name   = v.get("official_name") or s.get("name", "")
-    pp     = s.get("primary_product", "")
-    badge  = "✅" if valid else "⚠️"
+    t           = s["ticker"]
+    v           = validation.get(t, {})
+    valid       = v.get("valid", False)
+    name        = v.get("official_name") or s.get("name", "")
+    pp          = s.get("primary_product", "")
+    badge       = "✅" if valid else "⚠️"
     badge_title = "" if valid else " · not in stock_basic"
 
     with cols[i % n_cols]:
         with st.container(border=True):
-            # Ticker + validity badge on one line
             st.markdown(
                 f"<div style='font-size:18px;font-weight:700;line-height:1.2;'>"
                 f"{t} <span style='font-size:14px;'>{badge}</span>"
@@ -329,94 +328,98 @@ for i, s in enumerate(raw_results):
                 f"</div>",
                 unsafe_allow_html=True,
             )
-            # Company name
             st.markdown(
                 f"<div style='font-size:14px;font-weight:600;margin-top:2px;'>{name}</div>",
                 unsafe_allow_html=True,
             )
-            # Primary product in muted text
             st.markdown(
                 f"<div style='color:#6b7280;font-size:12px;margin-top:2px;"
                 f"margin-bottom:8px;'>{pp}</div>",
                 unsafe_allow_html=True,
             )
-            if is_admin:
-                # Checkbox label hidden visually but present for accessibility
-                admin_include[t] = st.checkbox(
-                    "Include in save",
-                    value=valid,
-                    disabled=not valid,
-                    key=f"se_chk_{_pk}_{t}",
-                    label_visibility="collapsed",
-                    help="Uncheck to exclude this stock from the saved list."
-                    if valid else "Not in stock_basic — cannot be saved.",
-                )
+            # Checkbox for everyone — ⚠️ stocks forced off (no real data)
+            stock_include[t] = st.checkbox(
+                "Include",
+                value=valid,
+                disabled=not valid,
+                key=f"se_chk_{_pk}_{t}",
+                label_visibility="collapsed",
+                help=(
+                    "Uncheck to exclude from pair analysis and save."
+                    if valid else "Not in stock_basic — cannot be used."
+                ),
+            )
 
-# ── Admin save panel ──────────────────────────────────────────────────────────
-if is_admin:
-    st.markdown("---")
-
-    to_save = [
-        {
-            "ticker":          s["ticker"],
-            "name":            validation.get(s["ticker"], {}).get("official_name") or s.get("name", ""),
-            "primary_product": s.get("primary_product", ""),
-        }
-        for s in raw_results
-        if admin_include.get(s["ticker"], False)
-        and validation.get(s["ticker"], {}).get("valid", False)
-    ]
-
-    if st.button(
-        f"💾 Save {len(to_save)} checked stocks",
-        type="primary",
-        key="se_save_btn",
-        disabled=len(to_save) == 0,
-    ):
-        ok = data_manager.upsert_product_peers(
-            _db_key, to_save, source_method="admin_curated"
-        )
-        if ok:
-            st.session_state[se_results_key] = to_save
-            st.session_state.pop(se_trigger_key, None)
-            st.success(f"✅ Saved {len(to_save)} stocks for **{selected}**.")
-            st.rerun()
-        else:
-            st.error("Save failed — check DB connection.")
-    st.caption(
-        "Uncheck any card above to exclude it. "
-        "⚠️ tickers not in stock_basic cannot be saved regardless."
-    )
-else:
-    if se_trigger_key in st.session_state and db_method != "admin_curated":
-        st.caption(
-            "ℹ️ These results are session-only. "
-            "Ask an admin to curate and save the list for everyone."
-        )
-
-# ── Send to Pair Trader (all users) ───────────────────────────────────────────
-valid_tickers = [
-    s["ticker"] for s in raw_results
-    if validation.get(s["ticker"], {}).get("valid", False)
+# ── Shared action bar ─────────────────────────────────────────────────────────
+# Derive the working set from the shared checkboxes
+to_act = [
+    {
+        "ticker":          s["ticker"],
+        "name":            validation.get(s["ticker"], {}).get("official_name") or s.get("name", ""),
+        "primary_product": s.get("primary_product", ""),
+    }
+    for s in raw_results
+    if stock_include.get(s["ticker"], False)
+    and validation.get(s["ticker"], {}).get("valid", False)
 ]
-if valid_tickers:
-    st.markdown("---")
-    pt_col, pt_info = st.columns([2, 5])
-    if pt_col.button(
-        "🔗 Analyse pairs in Pair Trader",
+act_tickers = [s["ticker"] for s in to_act]
+n_act       = len(act_tickers)
+
+st.markdown("---")
+
+# Layout: [💾 Save — admin only] [🔗 Pair Trader — all users] [caption]
+if is_admin:
+    save_col, pt_col, cap_col = st.columns([2, 2, 3])
+else:
+    save_col = None
+    pt_col, cap_col = st.columns([2, 5])
+
+if is_admin:
+    with save_col:
+        if st.button(
+            f"💾 Save {n_act} to peers",
+            type="primary",
+            key="se_save_btn",
+            disabled=n_act == 0,
+            use_container_width=True,
+        ):
+            ok = data_manager.upsert_product_peers(
+                _db_key, to_act, source_method="admin_curated"
+            )
+            if ok:
+                st.session_state[se_results_key] = to_act
+                st.session_state.pop(se_trigger_key, None)
+                st.success(f"✅ Saved {n_act} stocks for **{selected}**.")
+                st.rerun()
+            else:
+                st.error("Save failed — check DB connection.")
+
+with pt_col:
+    if st.button(
+        f"🔗 Analyse {n_act} in Pair Trader",
         key="se_to_pt_btn",
+        disabled=n_act < 2,
         use_container_width=True,
-        help="Pre-load these stocks into Pair Trader for mean-reversion analysis.",
+        help=(
+            "Need at least 2 checked ✅ stocks for pair analysis."
+            if n_act < 2 else
+            f"Send {n_act} checked stocks to Pair Trader."
+        ),
     ):
-        st.session_state["pt_preload_tickers"] = "\n".join(valid_tickers)
-        st.session_state["pt_from_sector"]     = True
+        st.session_state["pt_preload_tickers"]  = "\n".join(act_tickers)
+        st.session_state["pt_from_sector"]      = True
         st.session_state["pt_from_sector_name"] = f"{selected}  ·  {sector_name}"
         st.switch_page("pages/pair_trader.py")
-    pt_info.caption(
-        f"Sends {len(valid_tickers)} valid stock(s) — "
-        + ", ".join(valid_tickers)
-        + " — to Pair Trader for cointegration & z-score analysis."
-    )
+
+with cap_col:
+    if n_act == 0:
+        st.caption("Check at least one valid stock above to enable actions.")
+    elif n_act == 1:
+        st.caption(f"**{act_tickers[0]}** selected · check ≥ 2 stocks to enable pair trade.")
+    else:
+        st.caption(f"**{', '.join(act_tickers)}** — {n_act} stocks selected.")
+    if not is_admin and se_trigger_key in st.session_state and db_method != "admin_curated":
+        st.caption("ℹ️ Session-only results. Ask an admin to save this list to the database.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Phase 2 · Product Revenue Breakdown  主营业务收入分析
