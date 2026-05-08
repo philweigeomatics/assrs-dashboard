@@ -70,7 +70,10 @@ def send_invite_email(to_email: str, username: str, temp_password: str, app_url:
     msg.attach(MIMEText(html,  "html"))
 
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
             server.login(sender, app_password)
             server.sendmail(sender, to_email, msg.as_string())
     except smtplib.SMTPAuthenticationError as exc:
