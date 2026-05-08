@@ -15,6 +15,12 @@ import data_manager
 import peer_discovery
 import sector_themes
 
+try:
+    import plotly.graph_objects as go
+    _PLOTLY_OK = True
+except ImportError:
+    _PLOTLY_OK = False
+
 # ── Auth ───────────────────────────────────────────────────────────────────────
 auth_manager.require_login()
 user      = auth_manager.get_current_user()
@@ -390,3 +396,158 @@ else:
             "ℹ️ These results are session-only. "
             "Ask an admin to curate and save the list for everyone."
         )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 2 · Product Revenue Breakdown  主营业务收入分析
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown("---")
+st.markdown("### 📊 Phase 2 · Product Revenue Breakdown 主营业务收入分析")
+st.caption(
+    "Select a stock to see how its revenue is split across product lines "
+    "(Tushare `fina_mainbz`, type=P · 按产品分类)."
+)
+
+# Only offer stocks that passed stock_basic validation (they have real data)
+valid_for_p2 = [
+    s for s in raw_results
+    if validation.get(s["ticker"], {}).get("valid", False)
+]
+
+if not valid_for_p2:
+    st.info("No valid stocks available for breakdown — run Phase 1 first.")
+    st.stop()
+
+# Stable key scoped to this (theme, layer, product) triple
+p2_select_key = f"se_p2_pick_{_pk}"
+
+p2_options = [""] + [
+    f"{s['ticker']} · {validation.get(s['ticker'], {}).get('official_name') or s.get('name', '')}"
+    for s in valid_for_p2
+]
+
+def _on_p2_pick():
+    pass  # selection is read directly from session state on next rerun
+
+st.selectbox(
+    "Select stock for breakdown 选择标的",
+    p2_options,
+    key=p2_select_key,
+    format_func=lambda x: "Choose a stock…" if x == "" else x,
+    on_change=_on_p2_pick,
+)
+
+p2_pick = (st.session_state.get(p2_select_key) or "").strip()
+if not p2_pick:
+    st.caption("Select a stock above to expand its product revenue breakdown.")
+    st.stop()
+
+p2_ticker = p2_pick.split(" · ")[0].strip()
+p2_name   = p2_pick.split(" · ", 1)[1].strip() if " · " in p2_pick else p2_ticker
+
+# ── Fetch fina_mainbz (cached 24 h — quarterly filings don't change intraday) ─
+@st.cache_data(ttl=86400, show_spinner=False)
+def _fetch_mainbz(ticker: str):
+    return data_manager.fetch_fina_mainbz(ticker, bz_type="P")
+
+with st.spinner(f"Fetching product breakdown for {p2_name} ({p2_ticker})…"):
+    bz_df = _fetch_mainbz(p2_ticker)
+
+if bz_df is None or bz_df.empty:
+    st.warning(
+        f"No product revenue data available for **{p2_ticker}**. "
+        "The company may not report by product line, or data is unavailable."
+    )
+    st.stop()
+
+# ── Period selector ────────────────────────────────────────────────────────────
+periods      = sorted(bz_df["end_date"].dropna().unique(), reverse=True)
+period_labels = []
+for p in periods[:6]:           # up to 6 most recent periods
+    ps = str(p)
+    label = f"{ps[:4]}-{ps[4:6]}-{ps[6:]}" if len(ps) == 8 else ps
+    period_labels.append(label)
+
+chosen_label = st.radio(
+    "Reporting period 报告期",
+    period_labels,
+    horizontal=True,
+    key=f"se_p2_period_{_pk}",
+)
+# Map label back to raw end_date value
+chosen_period = periods[period_labels.index(chosen_label)]
+
+period_df = bz_df[bz_df["end_date"] == chosen_period].copy()
+if period_df.empty:
+    st.warning("No data for selected period.")
+    st.stop()
+
+# ── Derived columns ────────────────────────────────────────────────────────────
+total_sales = period_df["bz_sales"].sum()
+if total_sales > 0:
+    period_df["share_pct"] = (period_df["bz_sales"] / total_sales * 100).round(1)
+else:
+    period_df["share_pct"] = 0.0
+period_df["revenue_yi"] = (period_df["bz_sales"] / 1e8).round(2)   # 亿 RMB
+period_df["profit_yi"]  = (period_df["bz_profit"] / 1e8).round(2)
+period_df = period_df.sort_values("bz_sales", ascending=False).reset_index(drop=True)
+
+# ── Layout: chart left, table right ───────────────────────────────────────────
+ch1, ch2 = st.columns([3, 2], gap="medium")
+
+with ch1:
+    if _PLOTLY_OK:
+        # Horizontal bar sorted ascending so largest is at top visually
+        df_plot = period_df.sort_values("bz_sales", ascending=True)
+        bar_text = [
+            f"{v:.1f}亿 ({p:.1f}%)"
+            for v, p in zip(df_plot["revenue_yi"], df_plot["share_pct"])
+        ]
+        fig = go.Figure(go.Bar(
+            x=df_plot["revenue_yi"],
+            y=df_plot["bz_item"],
+            orientation="h",
+            text=bar_text,
+            textposition="outside",
+            marker_color="#2563eb",
+            marker_line_color="#1d4ed8",
+            marker_line_width=0.5,
+        ))
+        fig.update_layout(
+            height=max(320, len(period_df) * 52),
+            margin=dict(l=10, r=90, t=45, b=40),
+            xaxis=dict(
+                title="Revenue 营收 (亿 RMB)",
+                gridcolor="#e2e8f0", linecolor="#cbd5e1",
+            ),
+            yaxis=dict(gridcolor="#e2e8f0", linecolor="#cbd5e1"),
+            title=dict(
+                text=f"{p2_name} — Product Revenue · {chosen_label}",
+                font=dict(size=13),
+            ),
+            plot_bgcolor="#f8fafc",
+            paper_bgcolor="#ffffff",
+            font=dict(color="#1e293b", size=12),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.bar_chart(
+            period_df.set_index("bz_item")["revenue_yi"],
+            use_container_width=True,
+        )
+
+with ch2:
+    curr = str(period_df["curr_type"].iloc[0]) if "curr_type" in period_df.columns else "CNY"
+    st.markdown(
+        f"**{p2_name}** · {chosen_label}  \n"
+        f"Total revenue: **{total_sales/1e8:.2f} 亿 {curr}**"
+    )
+    display_df = (
+        period_df[["bz_item", "revenue_yi", "share_pct", "profit_yi"]]
+        .rename(columns={
+            "bz_item":     "Product / Segment",
+            "revenue_yi":  "Revenue (亿)",
+            "share_pct":   "Share %",
+            "profit_yi":   "Profit (亿)",
+        })
+    )
+    st.dataframe(display_df, use_container_width=True, hide_index=True)

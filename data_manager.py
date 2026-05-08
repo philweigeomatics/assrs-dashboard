@@ -3826,3 +3826,39 @@ def fetch_adjusted_daily(ticker: str, start_date: str, end_date: str,
     import pandas as _pd
     return _pd.DataFrame()
 
+
+def fetch_fina_mainbz(ticker: str, bz_type: str = "P") -> "pd.DataFrame":
+    """
+    Fetch main-business revenue breakdown from Tushare fina_mainbz.
+
+    bz_type="P"  →  product-level breakdown (products as rows)
+    bz_type="D"  →  department/segment breakdown
+
+    Returns a DataFrame with columns:
+        ts_code, end_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
+    sorted by end_date descending (most recent period first).
+    Returns an empty DataFrame on any failure.
+    """
+    import pandas as _pd
+    if not init_tushare():
+        return _pd.DataFrame()
+
+    ts_code = get_tushare_ticker(ticker)
+    try:
+        df = TUSHARE_API.fina_mainbz(
+            ts_code=ts_code,
+            type=bz_type,
+            fields="ts_code,end_date,bz_item,bz_sales,bz_profit,bz_cost,curr_type",
+        )
+        if df is None or df.empty:
+            return _pd.DataFrame()
+
+        for col in ("bz_sales", "bz_profit", "bz_cost"):
+            df[col] = _pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+        df = df.sort_values("end_date", ascending=False).reset_index(drop=True)
+        return df
+    except Exception as exc:
+        print(f"[data_manager] fetch_fina_mainbz({ticker}): {exc}")
+        return _pd.DataFrame()
+
