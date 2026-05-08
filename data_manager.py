@@ -3653,6 +3653,64 @@ def upsert_product_peers(display_name, peers, source_method='deepseek'):
 # Stock validation & adjusted price helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
+def search_stock_basic(query: str, limit: int = 20) -> list:
+    """
+    Search stock_basic by ticker prefix OR company name contains (case-insensitive).
+
+    Returns [{ticker: '6-digit', name: 'company name'}] sorted by relevance:
+      0 — exact ticker match
+      1 — ticker starts with query
+      2 — name contains query
+
+    Works for both SQLite (LIKE query) and Supabase (Python-side filter).
+    """
+    query = (query or "").strip()
+    if not query or not db.table_exists("stock_basic"):
+        return []
+
+    try:
+        if db.use_supabase:
+            # Supabase: load symbol+name for all ~5 k stocks and filter in Python
+            df = db.read_table("stock_basic", columns="symbol,name")
+            if df.empty:
+                return []
+            q_low = query.lower()
+            scored = []
+            for _, row in df.iterrows():
+                sym  = str(row.get("symbol") or "").strip()
+                name = str(row.get("name")   or "").strip()
+                if sym == query:
+                    scored.append((0, sym, name))
+                elif query.isdigit() and sym.startswith(query):
+                    scored.append((1, sym, name))
+                elif q_low in name.lower():
+                    scored.append((2, sym, name))
+            scored.sort(key=lambda x: (x[0], x[1]))
+            return [{"ticker": s, "name": n} for _, s, n in scored[:limit]]
+        else:
+            # SQLite: parameterized LIKE with inline relevance score
+            import sqlite3 as _sqlite3
+            sql = """
+                SELECT symbol, name,
+                       CASE WHEN symbol = ?           THEN 0
+                            WHEN symbol LIKE ?        THEN 1
+                            ELSE                           2
+                       END AS _score
+                FROM   stock_basic
+                WHERE  symbol LIKE ?
+                   OR  LOWER(name) LIKE LOWER(?)
+                ORDER  BY _score, symbol
+                LIMIT  ?
+            """
+            params = (query, f"{query}%", f"{query}%", f"%{query}%", limit)
+            with _sqlite3.connect(db.dbname) as conn:
+                rows = conn.execute(sql, params).fetchall()
+            return [{"ticker": row[0], "name": row[1]} for row in rows]
+    except Exception as exc:
+        print(f"[data_manager] search_stock_basic error: {exc}")
+        return []
+
+
 def validate_tickers_against_stock_basic(tickers: list) -> dict:
     """
     Check each 6-digit ticker against the local stock_basic table.
