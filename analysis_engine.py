@@ -315,43 +315,52 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     df_analysis['Signal_Accumulation']  = False
     df_analysis['Signal_Squeeze']       = False
     df_analysis['Signal_Golden_Launch'] = False
-    df_analysis['Exit_MACD_Lead']       = False
-
-    # ── Phase 1: Accumulation ─────────────────────────────────
-    df_analysis['PriceChg']        = df_analysis['Close'].pct_change(periods=lookback)
-    df_analysis['OBV_Scaled_Diff'] = (
-        df_analysis['Volume_Scaled_OBV'] - df_analysis['Volume_Scaled_OBV'].shift(lookback)
-    )
-
-    accumulation = (
-        (df_analysis['OBV_Scaled_Diff']  > 0.5) &
-        (df_analysis['PriceChg'].abs()   < params['price_flat_threshold']) &
-        (df_analysis['RSI_14']           < 60) &
-        (df_analysis['Close']            > df_analysis['MA200'])
-    )
-    df_analysis.loc[accumulation, 'Signal_Accumulation'] = True
-
-    # ── Phase 2: Squeeze ──────────────────────────────────────
-    df_analysis['BB_Width_Percentile'] = (
-        df_analysis['BB_Width']
-        .rolling(window=lookback_period, min_periods=20)
-        .apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan)
-    )
-    df_analysis['Squeeze_Raw'] = df_analysis['BB_Width_Percentile'] <= 0.10
-
-    def _consecutive_days(series: pd.Series, min_days: int = 3) -> pd.Series:
+    df_analysis['Exit_MACD_Lead'] = False
+    
+    # ==================== SHARED HELPERS ====================
+    def consecutive_days_filter(series, min_days=3):
         if series.sum() == 0:
             return pd.Series(False, index=series.index)
         groups = (series != series.shift()).cumsum()
-        count  = series.groupby(groups).transform('size')
-        return series & (count >= min_days)
+        count = series.groupby(groups).transform('size')
+        return (series) & (count >= min_days)
 
-    df_analysis['Signal_Squeeze'] = _consecutive_days(df_analysis['Squeeze_Raw'], min_days=3)
+    # ==================== PHASE 1: ACCUMULATION ====================
+    df_analysis['PriceChg'] = df_analysis['Close'].pct_change(periods=lookback)
 
-    sq_groups = (df_analysis['Signal_Squeeze'] != df_analysis['Signal_Squeeze'].shift()).cumsum()
-    df_analysis['Squeeze_Age']    = df_analysis.groupby(sq_groups)['Signal_Squeeze'].cumsum()
-    df_analysis['Squeeze_Mature'] = df_analysis['Signal_Squeeze'] & (df_analysis['Squeeze_Age'] >= 5)
+    # FIX: Use the Volume_Scaled_OBV difference instead of pct_change on raw OBV.
+    # This prevents the negative-number math bug and normalizes the volume perfectly.
+    df_analysis[f'OBV_Scaled_Diff'] = df_analysis['Volume_Scaled_OBV'] - df_analysis['Volume_Scaled_OBV'].shift(lookback)
 
+    # OBV threshold scaled to lookback: lookback * 0.35 requires ~68% up-close days,
+    # ensuring a clear buyer tilt rather than ~60% (lookback * 0.2) or near-noise 53% (fixed 0.5).
+    obv_acc_threshold = lookback * 0.35
+
+    accumulation_raw = (
+        (df_analysis[f'OBV_Scaled_Diff'] > obv_acc_threshold) &  # ~68% up-close days required
+        (df_analysis['PriceChg'].abs() < params['price_flat_threshold']) &  # Price genuinely trapped
+        (df_analysis['RSI_14'] < 60) &  # Not overbought
+        (df_analysis['Close'] > df_analysis['MA200'])  # Macro uptrend context
+    )
+    # Duration filter: all conditions must hold for 3 consecutive days (mirrors Squeeze filter).
+    # Prevents single-day OBV spikes from firing the signal.
+    df_analysis.loc[consecutive_days_filter(accumulation_raw, min_days=3), 'Signal_Accumulation'] = True
+    
+    # ==================== PHASE 2: SQUEEZE ====================
+    df_analysis['BB_Width_Percentile'] = df_analysis['BB_Width'].rolling(
+        window=lookback_period, min_periods=20
+    ).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan)
+    
+    df_analysis['Squeeze_Raw'] = df_analysis['BB_Width_Percentile'] <= 0.10
+
+    df_analysis['Signal_Squeeze'] = consecutive_days_filter(df_analysis['Squeeze_Raw'], min_days=3)
+    
+    squeeze_groups = (df_analysis['Signal_Squeeze'] != df_analysis['Signal_Squeeze'].shift()).cumsum()
+    df_analysis['Squeeze_Age'] = df_analysis.groupby(squeeze_groups)['Signal_Squeeze'].cumsum()
+    df_analysis['Squeeze_Mature'] = (df_analysis['Signal_Squeeze']) & (df_analysis['Squeeze_Age'] >= 5)
+    
+    # NEW: Directional Squeeze Breakout Triggers
+    # A squeeze is just stored energy. These signals tell us which way the energy is releasing.
     df_analysis['Squeeze_Fired_Bullish'] = (
         df_analysis['Signal_Squeeze'].shift(1) &
         (df_analysis['Close'] > df_analysis['BB_Upper']) &
@@ -546,9 +555,12 @@ def calculate_adaptive_parameters_percentile(df: pd.DataFrame, lookback_days: in
 
     if len(recent_vol) < 10:
         return {
-            'vol_window': 20, 'obv_lookback': 10, 'obv_threshold': 0.025,
-            'current_vol': current_vol_10d, 'vol_regime': 'insufficient_data',
-            'price_flat_threshold': 0.05
+            'vol_window': 20,
+            'obv_lookback': 10,
+            'obv_threshold': 0.025,
+            'current_vol': current_vol_10d,
+            'vol_regime': 'insufficient_data',
+            'price_flat_threshold': 0.04  # tight default for insufficient-data fallback
         }
 
     p25, p50, p75, p90 = recent_vol.quantile([0.25, 0.50, 0.75, 0.90])
@@ -560,13 +572,13 @@ def calculate_adaptive_parameters_percentile(df: pd.DataFrame, lookback_days: in
     else:                         vol_regime, percentile, vol_window, obv_lookback = 'low',        20, 30, 15
 
     if vol_trend == 'rising' and vol_regime in ['high', 'very_high']:
-        vol_window   = max(10, vol_window   - 5)
-        obv_lookback = max(5,  obv_lookback - 2)
-
-    current_vol          = df_temp[f'vol_{min(vol_window, 30)}d'].iloc[-1]
-    obv_threshold        = max(0.008, min(0.08, current_vol * obv_lookback * 0.35))
-    price_flat_threshold = max(0.03,  min(0.08, current_vol * obv_lookback * 0.50))
-
+        vol_window = max(10, vol_window - 5)
+        obv_lookback = max(5, obv_lookback - 2)
+    
+    current_vol = df_temp[f'vol_{min(vol_window, 30)}d'].iloc[-1]
+    obv_threshold = max(0.008, min(0.08, current_vol * obv_lookback * 0.35))
+    price_flat_threshold = max(0.03, min(0.05, current_vol * obv_lookback * 0.5))  # cap tightened 0.08→0.05
+    
     return {
         'vol_window': vol_window, 'current_vol': current_vol,
         'vol_percentile': percentile, 'vol_regime': vol_regime, 'vol_trend': vol_trend,
