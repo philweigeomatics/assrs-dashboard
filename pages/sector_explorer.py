@@ -51,7 +51,7 @@ if is_admin:
                 "Industry theme 行业主题",
                 placeholder="e.g. 'ev', 'data centre', 'liquid cooling'",
                 key="sector_admin_raw",
-                help="Anything goes — DeepSeek will formalise it.",
+                help="Anything goes — AI will formalise it.",
             )
             if st.button("🧬 Generate & Save", type="primary"):
                 if not raw.strip():
@@ -252,16 +252,16 @@ if b1.button(
     type="primary",
     key="se_find_btn",
     disabled=btn_find_disabled,
-    help="Ask DeepSeek to identify top A-share stocks for this product in this sector.",
+    help="Ask AI to identify top A-share stocks for this product in this sector.",
 ):
     st.session_state[se_trigger_key] = True
     st.session_state.pop(se_results_key, None)
     st.rerun()
 
 if is_admin and b2.button(
-    "🔄 Re-query DeepSeek",
+    "🔄 Re-query AI",
     key="se_requery_btn",
-    help="Bust the DB cache and run a fresh DeepSeek query.",
+    help="Bust the DB cache and run a fresh AI query.",
 ):
     data_manager.upsert_product_peers(_db_key, [], source_method="invalidated")
     st.session_state.pop(se_results_key, None)
@@ -273,11 +273,11 @@ if db_peers and se_trigger_key not in st.session_state:
     if db_method == "admin_curated":
         st.caption("✅ Admin-curated list")
     else:
-        st.caption("🤖 DeepSeek results (not yet curated by admin)")
+        st.caption("🤖 AI results (not yet curated by admin)")
 
-# ── Run DeepSeek if triggered and results not yet in session ──────────────────
+# ── Run AI if triggered and results not yet in session ────────────────────────
 if st.session_state.get(se_trigger_key) and se_results_key not in st.session_state:
-    with st.spinner(f"Querying DeepSeek for '{selected}' in {sector_name}…"):
+    with st.spinner(f"Querying AI for '{selected}' in {sector_name}…"):
         try:
             raw_stocks = peer_discovery.discover_product_stocks(
                 product=selected,

@@ -60,15 +60,20 @@ def _co_move_tolerance(t_ret: float) -> float:
     """Tolerance band around T's return: ±1% floor, or 50% of |T| magnitude."""
     return max(1.0, abs(t_ret) * 0.5)
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _all_stock_options_ll():
+    stocks = data_manager.get_all_stock_basic()
+    return [""] + [f"{s['ticker']} · {s['name']}" for s in stocks]
+
 
 # ── Input ──────────────────────────────────────────────────────────────────────
 c1, c2, c3 = st.columns([3, 1, 1])
 with c1:
-    ticker_input = st.text_input(
-        "Stock Code 股票代码",
-        placeholder="e.g., 002080",
+    ticker_input = st.selectbox(
+        "Stock Code or Name 股票代码或名称",
+        options=_all_stock_options_ll(),
         key="ll_ticker",
-        help="Enter the 6-digit code of any A-share stock that moved today.",
+        format_func=lambda x: "Type to search… (code or name)" if x == "" else x,
     )
 with c2:
     st.write("")
@@ -81,7 +86,9 @@ with c3:
         st.session_state.pop("ll_active_ticker", None)
         st.rerun()
 
-ticker = (ticker_input or "").strip()
+# Extract ticker from "XXXXXX · 名称" selection
+_raw = (ticker_input or "").strip()
+ticker = _raw.split(" · ")[0].strip() if " · " in _raw else _raw
 
 # Promote the typed ticker to "active" only when Analyze is pressed.  After
 # that, all subsequent reruns (checkbox clicks, save, generate, regen, etc.)
@@ -92,7 +99,7 @@ if run and len(ticker) == 6 and ticker.isdigit():
 active_ticker = st.session_state.get("ll_active_ticker")
 if not active_ticker:
     st.info(
-        "Enter a 6-digit ticker and click **Analyze**. "
+        "Search by code or name and click **Analyze**. "
         "If the stock has no supply chain yet, you'll be prompted to generate one inline."
     )
     st.stop()
@@ -142,7 +149,7 @@ hc1.caption(
     f"{len(products)} products · {len(sectors)} sectors · "
     f"{len(unique_links)} supply-chain edges"
 )
-if hc2.button("🔄 Regenerate", help="Regenerate the supply chain via DeepSeek", key="ll_regen"):
+if hc2.button("🔄 Regenerate", help="Regenerate the supply chain via AI", key="ll_regen"):
     with st.spinner("Regenerating…"):
         try:
             new_graph = supply_chain_ui.generate_supply_chain_graph(ticker, company)
@@ -169,7 +176,7 @@ if not unique_links:
 
 # ── Discover peers per edge (cached in DB) ─────────────────────────────────────
 edges = []  # (product, sector, peers, error)
-with st.spinner("Discovering A-share peers per edge via DeepSeek (cached after first run)…"):
+with st.spinner("Discovering A-share peers per edge via AI (cached after first run)…"):
     for link in unique_links:
         product, sector = link["source"], link["target"]
         try:
@@ -181,7 +188,7 @@ with st.spinner("Discovering A-share peers per edge via DeepSeek (cached after f
 
 errs = [(p, s, e) for p, s, _, e in edges if e]
 if errs:
-    with st.expander("⚠️ DeepSeek errors", expanded=False):
+    with st.expander("⚠️ AI errors", expanded=False):
         for p, s, e in errs:
             st.write(f"**{p} → {s}**: {e}")
 
@@ -222,8 +229,9 @@ st.markdown("---")
 st.markdown("### 🔗 Edges & Peer Co-Movement")
 st.caption(
     "One section per **product → sector** edge. Same product to different sectors "
-    "= different competitors. Uncheck irrelevant peers, then **💾 Save curation** "
-    "to persist the cleaned list (shared across any stock with this same edge)."
+    "= different competitors. Uncheck irrelevant peers. "
+    + ("Admins can **💾 Save curation** to persist the cleaned list for all users." if auth_manager.is_admin()
+       else "Admins can save the curated peer list for all users.")
 )
 
 scores = []  # (product, sector, median, abs_dist, n_co, n_active)
@@ -255,11 +263,15 @@ for product, sector, peers, err in edges:
                     active_returns.append(ret)
 
         # Curation actions — keys include product+sector so each edge is independent
-        ar1, ar2, _ = st.columns([1.5, 1.7, 4])
-        if ar1.button(
+        _is_admin = auth_manager.is_admin()
+        action_cols = st.columns([1.5, 1.7, 4]) if _is_admin else st.columns([1.7, 4])
+        save_col   = action_cols[0] if _is_admin else None
+        refresh_col = action_cols[1] if _is_admin else action_cols[0]
+
+        if _is_admin and save_col.button(
             "💾 Save curation",
             key=f"ll_save_{ticker}_{product}_{sector}",
-            help="Persist the cleaned list. Shared with any stock that has this same edge.",
+            help="Admin only — persist the cleaned peer list (shared across all users for this edge).",
         ):
             composite_name = peer_discovery.composite_key(product, sector)
             if data_manager.upsert_product_peers(
@@ -269,11 +281,12 @@ for product, sector, peers, err in edges:
                 st.rerun()
             else:
                 st.error("Save failed.")
-        if ar2.button(
-            "🔄 Refresh from DeepSeek",
+
+        if refresh_col.button(
+            "🔄 Refresh from AI",
             key=f"ll_refresh_{ticker}_{product}_{sector}",
         ):
-            with st.spinner("Re-querying DeepSeek…"):
+            with st.spinner("Re-querying AI…"):
                 try:
                     peer_discovery.discover_peers(product, sector, force_refresh=True)
                     st.success("✅ Peers refreshed.")
@@ -431,7 +444,7 @@ st.markdown("---")
 # ══════════════════════════════════════════════════════════════════════════════
 st.subheader("🏭 Phase 3 · Key Stocks per Layer 各层核心标的")
 st.caption(
-    "DeepSeek identifies the top 3 A-share companies per supply-chain layer, "
+    "AI identifies the top 3 A-share companies per supply-chain layer, "
     "validated against the stock_basic database. 🔗 = supply chain graph already saved."
 )
 
@@ -444,7 +457,7 @@ if c_run.button("🔍 Identify Key Stocks per Layer", type="primary",
     st.session_state[p3_key] = {}   # empty dict = run discovery below
     st.rerun()
 
-if c_refresh.button("🔄 Re-query DeepSeek", key="ll_p3_refresh",
+if c_refresh.button("🔄 Re-query AI", key="ll_p3_refresh",
                     use_container_width=True):
     # Clear the page-level cache and also bust the product_peers DB cache for
     # each layer by writing an empty entry; discovery block will re-call DeepSeek.
@@ -456,7 +469,7 @@ if c_refresh.button("🔄 Re-query DeepSeek", key="ll_p3_refresh",
 
 # ── Discovery + display ────────────────────────────────────────────────────────
 if p3_key not in st.session_state:
-    st.info("Click **Identify Key Stocks per Layer** to run DeepSeek.")
+    st.info("Click **Identify Key Stocks per Layer** to run AI discovery.")
     st.stop()
 
 # Fetch stocks for every layer (cached in product_peers after first run)
@@ -464,7 +477,7 @@ if not st.session_state[p3_key]:
     graphs_in_db = data_manager.get_all_supply_chain_tickers()
     layer_results = {}
 
-    prog = st.progress(0, text="Querying DeepSeek for each layer…")
+    prog = st.progress(0, text="Querying AI for each layer…")
     for i, layer in enumerate(p2_layers):
         prog.progress((i + 1) / len(p2_layers),
                       text=f"Layer {i+1}/{len(p2_layers)}: {layer.get('layer_name','')}")
