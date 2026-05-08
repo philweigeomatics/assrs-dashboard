@@ -1679,13 +1679,24 @@ if 'active_ticker' not in st.session_state:
     st.session_state.active_ticker = None
 
 def set_active_ticker(ticker: str):
-    """Set active ticker and sync input."""
+    """Set active ticker and sync search box."""
     st.session_state.active_ticker = ticker
-    st.session_state.ticker_input = ticker
+    st.session_state["ssa_query"] = ticker   # keep search box in sync
 
 def analyze_ticker():
-    """Analyze the ticker from input box."""
-    ticker_val = st.session_state.get('ticker_input')
+    """Resolve ticker from the search box + suggestion and trigger analysis."""
+    query = (st.session_state.get("ssa_query") or "").strip()
+    pick  = (st.session_state.get("ssa_suggestion") or "").strip()
+
+    if pick:
+        # A suggestion was chosen from the dropdown — use it directly
+        ticker_val = pick.split(" · ")[0].strip()
+    elif len(query) == 6 and query.isdigit():
+        # Raw 6-digit code typed without picking a suggestion
+        ticker_val = query
+    else:
+        ticker_val = None
+
     if ticker_val:
         st.session_state.active_ticker = ticker_val
 
@@ -2887,43 +2898,76 @@ def analyze_down_day_bounce_probability(df, ticker_name="Stock"):
 
 st.subheader("📈 Single Stock Analysis")
 
-# Input section
+# ── Cached search helper (TTL = 1 h; stock_basic changes once a day) ──────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def _search_stocks(query: str):
+    return data_manager.search_stock_basic(query, limit=20)
+
+# ── Suggestion selectbox callback — auto-analyzes on pick ─────────────────────
+def _on_suggestion_pick():
+    pick = (st.session_state.get("ssa_suggestion") or "").strip()
+    if pick:
+        st.session_state.active_ticker = pick.split(" · ")[0].strip()
+
+# ── Search input row ──────────────────────────────────────────────────────────
 c1, c2 = st.columns([3, 1])
-
 with c1:
-    ticker_input = st.text_input("Enter Stock Code (e.g., 600760):", key='ticker_input')
-
+    query = st.text_input(
+        "Stock code or name 股票代码或名称",
+        placeholder="e.g. 600760  or  海光信息",
+        key="ssa_query",
+    )
 with c2:
-    st.button("Analyze", key='analyze_btn', on_click=analyze_ticker)
+    st.write(""); st.write("")
+    st.button("Analyze 分析", key="analyze_btn", type="primary",
+              on_click=analyze_ticker, use_container_width=True)
 
-# Around line 2054 - Replace the search history section:
+# ── Live suggestions (trigger at ≥ 2 characters) ─────────────────────────────
+query = (query or "").strip()
+if len(query) >= 2:
+    matches = _search_stocks(query)
 
-# Search history section - Fixed version
+    if len(query) == 6 and query.isdigit() and matches and matches[0]["ticker"] == query:
+        # Exact 6-digit ticker — confirm name inline, no dropdown needed
+        st.caption(f"✅ **{query}** · {matches[0]['name']}")
+        # Pre-fill suggestion key so analyze_ticker() and Analyze btn both work
+        st.session_state.setdefault("ssa_suggestion", f"{query} · {matches[0]['name']}")
+    elif matches:
+        options = [""] + [f"{m['ticker']} · {m['name']}" for m in matches]
+        st.selectbox(
+            "Suggestions 建议",
+            options,
+            key="ssa_suggestion",
+            label_visibility="collapsed",
+            format_func=lambda x: "Choose a stock… 选择股票" if x == "" else x,
+            on_change=_on_suggestion_pick,
+        )
+    else:
+        st.caption("No matches found in stock_basic.")
+elif query:
+    st.caption("Type at least 2 characters to see suggestions.")
+
+# ── Recent searches ───────────────────────────────────────────────────────────
 history = data_manager.get_search_history()
+if history:
+    history_options = [""] + [item["display"] for item in history[:10]]
 
-if history and len(history) > 0:
-    # Create options list with empty default
-    history_options = [""] + [item['display'] for item in history[:10]]
-    
-    def on_history_change():
-        """Callback when history selection changes"""
-        selected = st.session_state.history_select
-        if selected and selected != "":
-            # Find the ticker for the selected display name
+    def _on_history_change():
+        selected = st.session_state.get("history_select", "")
+        if selected:
             for item in history:
-                if item['display'] == selected:
-                    st.session_state.active_ticker = item['ticker']
-                    # Clear the selectbox back to empty
-                    st.session_state.history_select = ""
+                if item["display"] == selected:
+                    st.session_state.active_ticker = item["ticker"]
+                    st.session_state["ssa_query"]   = item["ticker"]
+                    st.session_state["history_select"] = ""
                     break
-    
-    # Selectbox with callback
-    selected = st.selectbox(
+
+    st.selectbox(
         "📜 Recent searches:",
         options=history_options,
-        format_func=lambda x: "Select a recent search..." if x == "" else x,
+        format_func=lambda x: "Select a recent search…" if x == "" else x,
         key="history_select",
-        on_change=on_history_change
+        on_change=_on_history_change,
     )
 
 
