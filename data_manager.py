@@ -3653,6 +3653,28 @@ def upsert_product_peers(display_name, peers, source_method='deepseek'):
 # Stock validation & adjusted price helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
+def get_all_stock_basic() -> list:
+    """
+    Return every stock in stock_basic as [{ticker, name}] sorted by ticker.
+    Used to populate the full-list selectbox (client-side filtering, no reruns).
+    Returns [] if the table doesn't exist or is empty.
+    """
+    if not db.table_exists("stock_basic"):
+        return []
+    try:
+        df = db.read_table("stock_basic", columns="symbol,name", order_by="symbol")
+        if df.empty:
+            return []
+        return [
+            {"ticker": str(r["symbol"]).strip(), "name": str(r["name"]).strip()}
+            for _, r in df.iterrows()
+            if r.get("symbol") and r.get("name")
+        ]
+    except Exception as exc:
+        print(f"[data_manager] get_all_stock_basic error: {exc}")
+        return []
+
+
 def search_stock_basic(query: str, limit: int = 20) -> list:
     """
     Search stock_basic by ticker prefix OR company name contains (case-insensitive).
