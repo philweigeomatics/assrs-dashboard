@@ -56,7 +56,6 @@ pages = {
         st.Page("pages/Fund_Manager.py", title="Portfolio Management 组合管理"),
         st.Page("pages/ai_supply_chain3.py", title="AI Supply Chain AI供应链"),
     ],
-
     "🌊 Strategy 策略": [
         st.Page("pages/wave_trader.py", title="Wave Trader 波段交易"),
         st.Page("pages/pair_trader.py", title="Pair Trader 配对交易"),
@@ -65,11 +64,16 @@ pages = {
     "🔔 Alerts 提示": [
         st.Page("pages/4_Todays_Alerts_今日提醒.py", title="Today's Alerts 今日提醒"),
     ],
-
     "📖 About 关于": [
         st.Page("pages/about.py", title="声明"),
-    ]
+    ],
 }
+
+# Admin-only section — only injected when the current user is an admin
+if auth_manager.is_admin():
+    pages["⚙️ Admin"] = [
+        st.Page("pages/Admin_Invite_Users.py", title="Invite Users 邀请用户", icon="👥"),
+    ]
 
 # Create navigation
 pg = st.navigation(pages)
