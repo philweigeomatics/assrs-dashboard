@@ -240,20 +240,34 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     df_analysis['Signal_Golden_Launch'] = False
     df_analysis['Exit_MACD_Lead'] = False
     
+    # ==================== SHARED HELPERS ====================
+    def consecutive_days_filter(series, min_days=3):
+        if series.sum() == 0:
+            return pd.Series(False, index=series.index)
+        groups = (series != series.shift()).cumsum()
+        count = series.groupby(groups).transform('size')
+        return (series) & (count >= min_days)
+
     # ==================== PHASE 1: ACCUMULATION ====================
     df_analysis['PriceChg'] = df_analysis['Close'].pct_change(periods=lookback)
-    
-    # FIX: Use the Volume_Scaled_OBV difference instead of pct_change on raw OBV. 
+
+    # FIX: Use the Volume_Scaled_OBV difference instead of pct_change on raw OBV.
     # This prevents the negative-number math bug and normalizes the volume perfectly.
     df_analysis[f'OBV_Scaled_Diff'] = df_analysis['Volume_Scaled_OBV'] - df_analysis['Volume_Scaled_OBV'].shift(lookback)
-    
-    accumulation = (
-        (df_analysis[f'OBV_Scaled_Diff'] > 0.5) &  # Genuinely positive OBV momentum
-        (df_analysis['PriceChg'].abs() < params['price_flat_threshold']) &  # Price is trapped/flat
-        (df_analysis['RSI_14'] < 60) & # Not overbought
-        (df_analysis['Close'] > df_analysis['MA200']) # ADDED: Only look for accumulation in macro uptrends
+
+    # OBV threshold scaled to lookback: lookback * 0.35 requires ~68% up-close days,
+    # ensuring a clear buyer tilt rather than ~60% (lookback * 0.2) or near-noise 53% (fixed 0.5).
+    obv_acc_threshold = lookback * 0.35
+
+    accumulation_raw = (
+        (df_analysis[f'OBV_Scaled_Diff'] > obv_acc_threshold) &  # ~68% up-close days required
+        (df_analysis['PriceChg'].abs() < params['price_flat_threshold']) &  # Price genuinely trapped
+        (df_analysis['RSI_14'] < 60) &  # Not overbought
+        (df_analysis['Close'] > df_analysis['MA200'])  # Macro uptrend context
     )
-    df_analysis.loc[accumulation, 'Signal_Accumulation'] = True
+    # Duration filter: all conditions must hold for 3 consecutive days (mirrors Squeeze filter).
+    # Prevents single-day OBV spikes from firing the signal.
+    df_analysis.loc[consecutive_days_filter(accumulation_raw, min_days=3), 'Signal_Accumulation'] = True
     
     # ==================== PHASE 2: SQUEEZE ====================
     df_analysis['BB_Width_Percentile'] = df_analysis['BB_Width'].rolling(
@@ -261,14 +275,7 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     ).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan)
     
     df_analysis['Squeeze_Raw'] = df_analysis['BB_Width_Percentile'] <= 0.10
-    
-    def consecutive_days_filter(series, min_days=3):
-        if series.sum() == 0:
-            return pd.Series(False, index=series.index)
-        groups = (series != series.shift()).cumsum()
-        count = series.groupby(groups).transform('size')
-        return (series) & (count >= min_days)
-    
+
     df_analysis['Signal_Squeeze'] = consecutive_days_filter(df_analysis['Squeeze_Raw'], min_days=3)
     
     squeeze_groups = (df_analysis['Signal_Squeeze'] != df_analysis['Signal_Squeeze'].shift()).cumsum()
@@ -646,9 +653,9 @@ def calculate_adaptive_parameters_percentile(df, lookback_days=30):
             'obv_threshold': 0.025,
             'current_vol': current_vol_10d,
             'vol_regime': 'insufficient_data',
-            'price_flat_threshold': 0.05
+            'price_flat_threshold': 0.04  # tight default for insufficient-data fallback
         }
-    
+
     p25, p50, p75, p90 = recent_vol.quantile([0.25, 0.50, 0.75, 0.90])
     
     # Determine regime based on percentile
@@ -670,7 +677,7 @@ def calculate_adaptive_parameters_percentile(df, lookback_days=30):
     
     current_vol = df_temp[f'vol_{min(vol_window, 30)}d'].iloc[-1]
     obv_threshold = max(0.008, min(0.08, current_vol * obv_lookback * 0.35))
-    price_flat_threshold = max(0.03, min(0.08, current_vol * obv_lookback * 0.5))
+    price_flat_threshold = max(0.03, min(0.05, current_vol * obv_lookback * 0.5))  # cap tightened 0.08→0.05
     
     return {
         'vol_window': vol_window,
