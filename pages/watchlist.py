@@ -18,6 +18,11 @@ import data_manager
 import auth_manager
 import supply_chain_ui
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _all_stock_options_wl():
+    stocks = data_manager.get_all_stock_basic()
+    return [""] + [f"{s['ticker']} · {s['name']}" for s in stocks]
+
 # ── Auth ───────────────────────────────────────────────────────────────────────
 auth_manager.require_login()
 user = auth_manager.get_current_user()
@@ -67,28 +72,30 @@ st.markdown("---")
 st.subheader("➕ Add Stock to Watchlist")
 c1, c2 = st.columns([3, 1])
 with c1:
-    new_ticker = st.text_input(
-        "Stock Code 股票代码", placeholder="e.g., 600519", key="add_ticker",
-        help="Enter 6-digit stock code",
+    new_ticker_raw = st.selectbox(
+        "Stock Code or Name 股票代码或名称",
+        options=_all_stock_options_wl(),
+        key="add_ticker",
+        format_func=lambda x: "Type to search… (code or name)" if x == "" else x,
     )
 with c2:
     st.write("")
     st.write("")
     if st.button("➕ Add Stock", type="primary", use_container_width=True):
-        if new_ticker:
-            t = new_ticker.strip()
-            if not (len(t) == 6 and t.isdigit()):
-                st.error("❌ Must be 6 digits (e.g., 600519)")
-            else:
-                ok, msg = data_manager.add_to_watchlist(t)
-                if ok:
-                    _clear_data_cache()
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
+        _raw = (new_ticker_raw or "").strip()
+        t = _raw.split(" · ")[0].strip() if " · " in _raw else _raw
+        if not t:
+            st.warning("⚠️ Please select a stock first")
+        elif not (len(t) == 6 and t.isdigit()):
+            st.error("❌ Invalid selection — please choose from the list")
         else:
-            st.warning("⚠️ Please enter a stock code")
+            ok, msg = data_manager.add_to_watchlist(t)
+            if ok:
+                _clear_data_cache()
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
 
 st.markdown("---")
 
