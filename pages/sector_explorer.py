@@ -356,7 +356,6 @@ for i, s in enumerate(raw_results):
 if is_admin:
     st.markdown("---")
 
-    # Build the list to save: only tickers the admin checked AND that passed stock_basic
     to_save = [
         {
             "ticker":          s["ticker"],
@@ -389,13 +388,35 @@ if is_admin:
         "⚠️ tickers not in stock_basic cannot be saved regardless."
     )
 else:
-    # Non-admin: if data came from DB (admin-curated) no note needed;
-    # if it's a fresh session-only query, let them know
     if se_trigger_key in st.session_state and db_method != "admin_curated":
         st.caption(
             "ℹ️ These results are session-only. "
             "Ask an admin to curate and save the list for everyone."
         )
+
+# ── Send to Pair Trader (all users) ───────────────────────────────────────────
+valid_tickers = [
+    s["ticker"] for s in raw_results
+    if validation.get(s["ticker"], {}).get("valid", False)
+]
+if valid_tickers:
+    st.markdown("---")
+    pt_col, pt_info = st.columns([2, 5])
+    if pt_col.button(
+        "🔗 Analyse pairs in Pair Trader",
+        key="se_to_pt_btn",
+        use_container_width=True,
+        help="Pre-load these stocks into Pair Trader for mean-reversion analysis.",
+    ):
+        st.session_state["pt_preload_tickers"] = "\n".join(valid_tickers)
+        st.session_state["pt_from_sector"]     = True
+        st.session_state["pt_from_sector_name"] = f"{selected}  ·  {sector_name}"
+        st.switch_page("pages/pair_trader.py")
+    pt_info.caption(
+        f"Sends {len(valid_tickers)} valid stock(s) — "
+        + ", ".join(valid_tickers)
+        + " — to Pair Trader for cointegration & z-score analysis."
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Phase 2 · Product Revenue Breakdown  主营业务收入分析
@@ -403,38 +424,46 @@ else:
 st.markdown("---")
 st.markdown("### 📊 Phase 2 · Product Revenue Breakdown 主营业务收入分析")
 st.caption(
-    "Select a stock to see how its revenue is split across product lines "
+    "Select a stock · choose a base period · compare same period across years "
     "(Tushare `fina_mainbz`, type=P · 按产品分类)."
 )
 
-# Only offer stocks that passed stock_basic validation (they have real data)
 valid_for_p2 = [
     s for s in raw_results
     if validation.get(s["ticker"], {}).get("valid", False)
 ]
-
 if not valid_for_p2:
     st.info("No valid stocks available for breakdown — run Phase 1 first.")
     st.stop()
 
-# Stable key scoped to this (theme, layer, product) triple
 p2_select_key = f"se_p2_pick_{_pk}"
-
-p2_options = [""] + [
+p2_options    = [""] + [
     f"{s['ticker']} · {validation.get(s['ticker'], {}).get('official_name') or s.get('name', '')}"
     for s in valid_for_p2
 ]
 
-def _on_p2_pick():
-    pass  # selection is read directly from session state on next rerun
-
-st.selectbox(
-    "Select stock for breakdown 选择标的",
-    p2_options,
-    key=p2_select_key,
-    format_func=lambda x: "Choose a stock…" if x == "" else x,
-    on_change=_on_p2_pick,
-)
+# Stock selector + navigation shortcut on the same row
+p2_sel_col, p2_nav_col = st.columns([3, 1])
+with p2_sel_col:
+    st.selectbox(
+        "Select stock for breakdown 选择标的",
+        p2_options,
+        key=p2_select_key,
+        format_func=lambda x: "Choose a stock…" if x == "" else x,
+    )
+with p2_nav_col:
+    st.write(""); st.write("")
+    _p2_cur = (st.session_state.get(p2_select_key) or "").strip()
+    if _p2_cur and st.button(
+        "📈 Single Stock Analysis",
+        key="se_p2_goto_ssa",
+        use_container_width=True,
+        help="Open this stock in Single Stock Analysis.",
+    ):
+        _p2_t = _p2_cur.split(" · ")[0].strip()
+        st.session_state["active_ticker"]  = _p2_t
+        st.session_state["ssa_stock_pick"] = _p2_cur
+        st.switch_page("pages/2_Single_Stock_Analysis_个股分析.py")
 
 p2_pick = (st.session_state.get(p2_select_key) or "").strip()
 if not p2_pick:
@@ -444,7 +473,7 @@ if not p2_pick:
 p2_ticker = p2_pick.split(" · ")[0].strip()
 p2_name   = p2_pick.split(" · ", 1)[1].strip() if " · " in p2_pick else p2_ticker
 
-# ── Fetch fina_mainbz (cached 24 h — quarterly filings don't change intraday) ─
+# ── Fetch all fina_mainbz data (cached 24 h) ──────────────────────────────────
 @st.cache_data(ttl=86400, show_spinner=False)
 def _fetch_mainbz(ticker: str):
     return data_manager.fetch_fina_mainbz(ticker, bz_type="P")
@@ -455,99 +484,143 @@ with st.spinner(f"Fetching product breakdown for {p2_name} ({p2_ticker})…"):
 if bz_df is None or bz_df.empty:
     st.warning(
         f"No product revenue data available for **{p2_ticker}**. "
-        "The company may not report by product line, or data is unavailable."
+        "The company may not report by product line, or Tushare data is unavailable."
     )
     st.stop()
 
-# ── Period selector ────────────────────────────────────────────────────────────
-periods      = sorted(bz_df["end_date"].dropna().unique(), reverse=True)
-period_labels = []
-for p in periods[:6]:           # up to 6 most recent periods
-    ps = str(p)
-    label = f"{ps[:4]}-{ps[4:6]}-{ps[6:]}" if len(ps) == 8 else ps
-    period_labels.append(label)
+# ── Base-period selector (most recent periods only) ───────────────────────────
+all_periods = sorted(bz_df["end_date"].dropna().unique(), reverse=True)
 
-chosen_label = st.radio(
-    "Reporting period 报告期",
-    period_labels,
+def _fmt_period(p):
+    ps = str(p)
+    return f"{ps[:4]}-{ps[4:6]}-{ps[6:]}" if len(ps) == 8 else ps
+
+# Show up to 4 base periods to choose from
+base_period_opts = all_periods[:4]
+chosen_base = st.radio(
+    "Base period 基准报告期",
+    base_period_opts,
     horizontal=True,
     key=f"se_p2_period_{_pk}",
+    format_func=_fmt_period,
 )
-# Map label back to raw end_date value
-chosen_period = periods[period_labels.index(chosen_label)]
 
-period_df = bz_df[bz_df["end_date"] == chosen_period].copy()
-if period_df.empty:
-    st.warning("No data for selected period.")
+# ── Collect same month-day across years for YoY comparison ───────────────────
+# e.g. chosen_base="20241231" → month_day="1231" → find all xxxxx1231 periods
+month_day    = str(chosen_base)[4:]          # e.g. "1231" or "0630"
+yoy_periods  = sorted(
+    [p for p in all_periods if str(p).endswith(month_day)],
+    reverse=True,
+)[:3]   # at most 3 years back
+
+if not yoy_periods:
+    yoy_periods = [chosen_base]
+
+yoy_labels = [_fmt_period(p) for p in yoy_periods]   # e.g. ["2024-12-31", "2023-12-31", …]
+
+# ── Slice and enrich data for each YoY period ─────────────────────────────────
+import pandas as _pd
+
+yoy_frames = {}
+for period in yoy_periods:
+    df_p = bz_df[bz_df["end_date"] == period].copy()
+    if df_p.empty:
+        continue
+    total = df_p["bz_sales"].sum()
+    df_p["revenue_yi"] = (df_p["bz_sales"] / 1e8).round(2)
+    df_p["profit_yi"]  = (df_p["bz_profit"] / 1e8).round(2)
+    df_p["share_pct"]  = ((df_p["bz_sales"] / total * 100).round(1) if total > 0 else 0.0)
+    yoy_frames[period] = df_p
+
+if not yoy_frames:
+    st.warning("No data found for the selected period.")
     st.stop()
 
-# ── Derived columns ────────────────────────────────────────────────────────────
-total_sales = period_df["bz_sales"].sum()
-if total_sales > 0:
-    period_df["share_pct"] = (period_df["bz_sales"] / total_sales * 100).round(1)
-else:
-    period_df["share_pct"] = 0.0
-period_df["revenue_yi"] = (period_df["bz_sales"] / 1e8).round(2)   # 亿 RMB
-period_df["profit_yi"]  = (period_df["bz_profit"] / 1e8).round(2)
-period_df = period_df.sort_values("bz_sales", ascending=False).reset_index(drop=True)
+# Product order: sorted by most recent period's revenue, ascending (for horizontal bar top = biggest)
+base_df     = yoy_frames.get(yoy_periods[0], next(iter(yoy_frames.values())))
+products_asc = base_df.sort_values("bz_sales", ascending=True)["bz_item"].tolist()
 
-# ── Layout: chart left, table right ───────────────────────────────────────────
+# ── Grouped horizontal bar chart ──────────────────────────────────────────────
+YEAR_COLORS = ["#2563eb", "#10b981", "#f59e0b", "#8b5cf6"]
+
 ch1, ch2 = st.columns([3, 2], gap="medium")
 
 with ch1:
     if _PLOTLY_OK:
-        # Horizontal bar sorted ascending so largest is at top visually
-        df_plot = period_df.sort_values("bz_sales", ascending=True)
-        bar_text = [
-            f"{v:.1f}亿 ({p:.1f}%)"
-            for v, p in zip(df_plot["revenue_yi"], df_plot["share_pct"])
-        ]
-        fig = go.Figure(go.Bar(
-            x=df_plot["revenue_yi"],
-            y=df_plot["bz_item"],
-            orientation="h",
-            text=bar_text,
-            textposition="outside",
-            marker_color="#2563eb",
-            marker_line_color="#1d4ed8",
-            marker_line_width=0.5,
-        ))
+        fig = go.Figure()
+        for idx, (period, df_p) in enumerate(
+            sorted(yoy_frames.items(), reverse=False)   # oldest first so newest is on top
+        ):
+            revenue_by_product = df_p.set_index("bz_item")["revenue_yi"]
+            x_vals = [float(revenue_by_product.get(p, 0)) for p in products_asc]
+            label  = _fmt_period(period)
+            color  = YEAR_COLORS[len(yoy_periods) - 1 - idx % len(YEAR_COLORS)]
+            fig.add_trace(go.Bar(
+                x=x_vals,
+                y=products_asc,
+                orientation="h",
+                name=label,
+                marker_color=color,
+                opacity=0.9,
+                text=[f"{v:.1f}" if v else "" for v in x_vals],
+                textposition="outside",
+                textfont=dict(size=10),
+            ))
+
         fig.update_layout(
-            height=max(320, len(period_df) * 52),
-            margin=dict(l=10, r=90, t=45, b=40),
+            barmode="group",
+            height=max(340, len(products_asc) * 55 + 80),
+            margin=dict(l=10, r=80, t=50, b=40),
             xaxis=dict(
                 title="Revenue 营收 (亿 RMB)",
                 gridcolor="#e2e8f0", linecolor="#cbd5e1",
             ),
             yaxis=dict(gridcolor="#e2e8f0", linecolor="#cbd5e1"),
             title=dict(
-                text=f"{p2_name} — Product Revenue · {chosen_label}",
+                text=f"{p2_name} — Product Revenue YoY · {' vs '.join(yoy_labels)}",
                 font=dict(size=13),
             ),
             plot_bgcolor="#f8fafc",
             paper_bgcolor="#ffffff",
             font=dict(color="#1e293b", size=12),
+            legend=dict(orientation="h", y=-0.15, font=dict(size=11)),
         )
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.bar_chart(
-            period_df.set_index("bz_item")["revenue_yi"],
+            base_df.set_index("bz_item")["revenue_yi"],
             use_container_width=True,
         )
 
+# ── YoY comparison table ───────────────────────────────────────────────────────
 with ch2:
-    curr = str(period_df["curr_type"].iloc[0]) if "curr_type" in period_df.columns else "CNY"
-    st.markdown(
-        f"**{p2_name}** · {chosen_label}  \n"
-        f"Total revenue: **{total_sales/1e8:.2f} 亿 {curr}**"
-    )
-    display_df = (
-        period_df[["bz_item", "revenue_yi", "share_pct", "profit_yi"]]
-        .rename(columns={
-            "bz_item":     "Product / Segment",
-            "revenue_yi":  "Revenue (亿)",
-            "share_pct":   "Share %",
-            "profit_yi":   "Profit (亿)",
-        })
-    )
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    curr = str(base_df["curr_type"].iloc[0]) if "curr_type" in base_df.columns else "CNY"
+    st.markdown(f"**{p2_name}** · Revenue (亿 {curr})")
+
+    # Pivot: rows = product, columns = year labels
+    pivot_rows = {}
+    for period, df_p in yoy_frames.items():
+        label = _fmt_period(period)
+        for _, row in df_p.iterrows():
+            item = row["bz_item"]
+            if item not in pivot_rows:
+                pivot_rows[item] = {}
+            pivot_rows[item][label] = row["revenue_yi"]
+
+    pivot_df = _pd.DataFrame(pivot_rows).T
+    # Ensure columns are in chronological order (newest first)
+    col_order = [_fmt_period(p) for p in yoy_periods if _fmt_period(p) in pivot_df.columns]
+    pivot_df  = pivot_df[col_order].fillna(0.0)
+
+    # Add YoY change column if we have ≥2 years
+    if len(col_order) >= 2:
+        newest, prev = col_order[0], col_order[1]
+        pivot_df["YoY Δ%"] = (
+            ((pivot_df[newest] - pivot_df[prev]) / pivot_df[prev].replace(0, float("nan"))) * 100
+        ).round(1)
+
+    # Sort by newest year revenue
+    if col_order:
+        pivot_df = pivot_df.sort_values(col_order[0], ascending=False)
+
+    st.dataframe(pivot_df, use_container_width=True)
