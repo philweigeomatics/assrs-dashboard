@@ -1679,26 +1679,14 @@ if 'active_ticker' not in st.session_state:
     st.session_state.active_ticker = None
 
 def set_active_ticker(ticker: str):
-    """Set active ticker and sync search box."""
+    """Set active ticker (called from history or external links)."""
     st.session_state.active_ticker = ticker
-    st.session_state["ssa_query"] = ticker   # keep search box in sync
 
 def analyze_ticker():
-    """Resolve ticker from the search box + suggestion and trigger analysis."""
-    query = (st.session_state.get("ssa_query") or "").strip()
-    pick  = (st.session_state.get("ssa_suggestion") or "").strip()
-
+    """Trigger analysis from the Analyze button — reads the combobox selection."""
+    pick = (st.session_state.get("ssa_stock_pick") or "").strip()
     if pick:
-        # A suggestion was chosen from the dropdown — use it directly
-        ticker_val = pick.split(" · ")[0].strip()
-    elif len(query) == 6 and query.isdigit():
-        # Raw 6-digit code typed without picking a suggestion
-        ticker_val = query
-    else:
-        ticker_val = None
-
-    if ticker_val:
-        st.session_state.active_ticker = ticker_val
+        st.session_state.active_ticker = pick.split(" · ")[0].strip()
 
 
 def analyze_return_distribution(df, ticker_name="Stock"):
@@ -2898,54 +2886,33 @@ def analyze_down_day_bounce_probability(df, ticker_name="Stock"):
 
 st.subheader("📈 Single Stock Analysis")
 
-# ── Cached search helper (TTL = 1 h; stock_basic changes once a day) ──────────
+# ── Load full stock list once per hour (client-side filtering = no reruns) ────
 @st.cache_data(ttl=3600, show_spinner=False)
-def _search_stocks(query: str):
-    return data_manager.search_stock_basic(query, limit=20)
+def _all_stock_options():
+    stocks = data_manager.get_all_stock_basic()
+    # Format: "688041 · 海光信息" — searchable by either part
+    return [""] + [f"{s['ticker']} · {s['name']}" for s in stocks]
 
-# ── Suggestion selectbox callback — auto-analyzes on pick ─────────────────────
-def _on_suggestion_pick():
-    pick = (st.session_state.get("ssa_suggestion") or "").strip()
+# ── Auto-analyze when a stock is picked from the combobox ─────────────────────
+def _on_stock_pick():
+    pick = (st.session_state.get("ssa_stock_pick") or "").strip()
     if pick:
         st.session_state.active_ticker = pick.split(" · ")[0].strip()
 
-# ── Search input row ──────────────────────────────────────────────────────────
+# ── Single combobox — type to filter, click to select ─────────────────────────
 c1, c2 = st.columns([3, 1])
 with c1:
-    query = st.text_input(
+    st.selectbox(
         "Stock code or name 股票代码或名称",
-        placeholder="e.g. 600760  or  海光信息",
-        key="ssa_query",
+        options=_all_stock_options(),
+        key="ssa_stock_pick",
+        format_func=lambda x: "Type to search… (code or name)" if x == "" else x,
+        on_change=_on_stock_pick,
     )
 with c2:
     st.write(""); st.write("")
     st.button("Analyze 分析", key="analyze_btn", type="primary",
               on_click=analyze_ticker, use_container_width=True)
-
-# ── Live suggestions (trigger at ≥ 2 characters) ─────────────────────────────
-query = (query or "").strip()
-if len(query) >= 2:
-    matches = _search_stocks(query)
-
-    if len(query) == 6 and query.isdigit() and matches and matches[0]["ticker"] == query:
-        # Exact 6-digit ticker — confirm name inline, no dropdown needed
-        st.caption(f"✅ **{query}** · {matches[0]['name']}")
-        # Pre-fill suggestion key so analyze_ticker() and Analyze btn both work
-        st.session_state.setdefault("ssa_suggestion", f"{query} · {matches[0]['name']}")
-    elif matches:
-        options = [""] + [f"{m['ticker']} · {m['name']}" for m in matches]
-        st.selectbox(
-            "Suggestions 建议",
-            options,
-            key="ssa_suggestion",
-            label_visibility="collapsed",
-            format_func=lambda x: "Choose a stock… 选择股票" if x == "" else x,
-            on_change=_on_suggestion_pick,
-        )
-    else:
-        st.caption("No matches found in stock_basic.")
-elif query:
-    st.caption("Type at least 2 characters to see suggestions.")
 
 # ── Recent searches ───────────────────────────────────────────────────────────
 history = data_manager.get_search_history()
@@ -2958,7 +2925,6 @@ if history:
             for item in history:
                 if item["display"] == selected:
                     st.session_state.active_ticker = item["ticker"]
-                    st.session_state["ssa_query"]   = item["ticker"]
                     st.session_state["history_select"] = ""
                     break
 
