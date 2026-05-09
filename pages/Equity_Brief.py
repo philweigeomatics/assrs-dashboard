@@ -21,6 +21,7 @@ import streamlit.components.v1 as components
 import auth_manager
 import data_manager
 import equity_brief
+import supply_chain_ui
 import trading_strategy
 from analysis_engine import run_single_stock_analysis
 
@@ -365,6 +366,105 @@ st.markdown(f"""
   </div>
 </div>
 """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 00 — OVERVIEW (what the company does + supply chain graph)
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.markdown("""
+<div class="eb-section">
+  <div class="eb-eyebrow">00 · Overview</div>
+  <div class="eb-h2">What this company does.</div>
+</div>
+""", unsafe_allow_html=True)
+
+# ── Company description card (AI, cached) ────────────────────────────────────
+ovcol1, ovcol2 = st.columns([5, 1])
+with ovcol2:
+    if is_admin and st.button("🔄 Regen", key="eb_re_overview", use_container_width=True):
+        with st.spinner("Regenerating overview…"):
+            try:
+                equity_brief.get_company_overview(ticker, company, industry,
+                                                   force_refresh=True)
+                st.rerun()
+            except RuntimeError as exc:
+                st.error(str(exc))
+
+try:
+    overview = equity_brief.get_company_overview(ticker, company, industry)
+    op = overview["payload"]
+    tagline = (op.get("tagline") or "").strip()
+    summary = (op.get("summary") or "").strip()
+    _render_html(f"""
+    <div class="eb-card" style="margin-bottom:14px">
+      {f'<div class="eb-eyebrow" style="margin-bottom:6px">{tagline}</div>' if tagline else ''}
+      <div style="font-size:14.5px;line-height:1.6;color:var(--ink);max-width:780px">
+        {summary}
+      </div>
+    </div>
+    """)
+except RuntimeError as exc:
+    st.warning(f"Overview unavailable: {exc}")
+
+# ── Supply chain graph (existing or admin-generated) ─────────────────────────
+graph = data_manager.get_supply_chain_graph(ticker)
+
+if graph:
+    sc_col1, sc_col2 = st.columns([5, 1])
+    with sc_col1:
+        st.markdown(
+            '<div class="eb-eyebrow" style="margin:6px 0 4px 0">'
+            'Industry & Product Supply Chain</div>',
+            unsafe_allow_html=True,
+        )
+    with sc_col2:
+        if is_admin and st.button("🔄 Regen graph", key="eb_re_graph",
+                                   use_container_width=True):
+            with st.spinner(f"Regenerating supply chain for {company}…"):
+                try:
+                    new_graph = supply_chain_ui.generate_supply_chain_graph(
+                        ticker, company)
+                    if data_manager.upsert_supply_chain_graph(
+                            ticker, company, new_graph):
+                        st.success("✅ Supply chain regenerated.")
+                        st.rerun()
+                    else:
+                        st.error("Generated but failed to save.")
+                except RuntimeError as exc:
+                    st.error(str(exc))
+    supply_chain_ui.render_supply_chain_graph(graph, height=520)
+elif is_admin:
+    st.markdown(
+        '<div class="eb-card" style="margin-top:8px">'
+        '<div class="eb-eyebrow" style="margin-bottom:6px">'
+        'Industry & Product Supply Chain</div>'
+        f'<div style="font-size:13px;color:var(--ink-2);margin-bottom:10px">'
+        f'No supply chain graph exists yet for <strong>{ticker} {company}</strong>. '
+        f'As an admin you can generate one — it will be saved and shared with all users.'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+    if st.button("🧬 Generate Supply Chain", type="primary", key="eb_gen_graph"):
+        with st.spinner(f"Generating supply chain for {company}…"):
+            try:
+                new_graph = supply_chain_ui.generate_supply_chain_graph(
+                    ticker, company)
+                if data_manager.upsert_supply_chain_graph(
+                        ticker, company, new_graph):
+                    st.success("✅ Supply chain generated.")
+                    st.rerun()
+                else:
+                    st.error("Generated but failed to save.")
+            except RuntimeError as exc:
+                st.error(str(exc))
+else:
+    st.markdown(
+        '<div class="eb-card" style="margin-top:8px;color:var(--ink-3);'
+        'font-size:13px">No supply chain graph available for this stock '
+        '(an admin can add one).</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -826,6 +926,159 @@ if inc is not None and not inc.empty:
     """, unsafe_allow_html=True)
 else:
     st.info("No income statement data available.")
+
+# ── Latest Earnings Commentary (forecast + express, company's own words) ────
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=20)
+def _earnings_commentary(ticker_):
+    return {
+        "forecast": data_manager.fetch_forecast(ticker_, periods=4),
+        "express":  data_manager.fetch_express(ticker_,  periods=4),
+    }
+
+ec = _earnings_commentary(ticker)
+fc_df, ex_df = ec["forecast"], ec["express"]
+
+# Show only if at least one of them returned data
+if (fc_df is not None and not fc_df.empty) or (ex_df is not None and not ex_df.empty):
+    cards_html = ""
+
+    # Forecast card — preliminary earnings warning with narrative
+    if fc_df is not None and not fc_df.empty:
+        f0 = fc_df.iloc[0]
+        ann = str(f0.get("ann_date") or "")
+        ann_fmt = f"{ann[:4]}-{ann[4:6]}-{ann[6:8]}" if len(ann) == 8 else "—"
+        period = str(f0.get("end_date") or "")
+        period_fmt = f"{period[:4]}-{period[4:6]}" if len(period) == 8 else "—"
+        ftype = (f0.get("type") or "").strip() or "—"
+        pmin, pmax = f0.get("p_change_min"), f0.get("p_change_max")
+        npmin, npmax = f0.get("net_profit_min"), f0.get("net_profit_max")
+        summary_txt = (f0.get("summary") or "").strip()
+        reason_txt  = (f0.get("change_reason") or "").strip()
+
+        range_str = ""
+        if pd.notna(pmin) and pd.notna(pmax):
+            range_str = f"{float(pmin):+.1f}% to {float(pmax):+.1f}%"
+        elif pd.notna(pmin):
+            range_str = f"≥ {float(pmin):+.1f}%"
+
+        np_range = ""
+        if pd.notna(npmin) and pd.notna(npmax):
+            np_range = f"{float(npmin)/1e4:.0f}–{float(npmax)/1e4:.0f} 万元"
+
+        # Color the type pill: 预增/续盈/扭亏/略增 = pos; 预减/续亏/略减/首亏 = neg
+        type_class = "pill"
+        if any(k in ftype for k in ("预增", "续盈", "扭亏", "略增")):
+            type_class = "pill pos"
+        elif any(k in ftype for k in ("预减", "续亏", "略减", "首亏")):
+            type_class = "pill neg"
+        elif "不确定" in ftype:
+            type_class = "pill warn"
+
+        # Build narrative block — show change_reason if available, else summary, else nothing
+        narrative_html = ""
+        if reason_txt:
+            narrative_html = (
+                f'<div style="font-size:10.5px;font-family:ui-monospace,monospace;'
+                f'letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-3);'
+                f'margin:14px 0 6px 0">Why (company\'s words)</div>'
+                f'<div style="font-size:13px;line-height:1.6;color:var(--ink);'
+                f'white-space:pre-wrap">{reason_txt}</div>'
+            )
+        elif summary_txt:
+            narrative_html = (
+                f'<div style="font-size:10.5px;font-family:ui-monospace,monospace;'
+                f'letter-spacing:0.1em;text-transform:uppercase;color:var(--ink-3);'
+                f'margin:14px 0 6px 0">Summary</div>'
+                f'<div style="font-size:13px;line-height:1.6;color:var(--ink);'
+                f'white-space:pre-wrap">{summary_txt}</div>'
+            )
+
+        cards_html += f"""
+        <div class="eb-card" style="margin-top:14px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:10px">
+            <div>
+              <div class="eb-eyebrow">业绩预告 · Earnings Forecast</div>
+              <div style="font-size:13px;color:var(--ink-2);margin-top:2px">
+                Period {period_fmt} · Filed {ann_fmt}
+              </div>
+            </div>
+            <span class="eb-pill {type_class.replace('pill ','').strip()}">{ftype}</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px">
+            <div>
+              <div class="eb-eyebrow">Net Profit YoY</div>
+              <div class="eb-num" style="font-size:22px">{range_str or '—'}</div>
+            </div>
+            <div>
+              <div class="eb-eyebrow">Net Profit Range</div>
+              <div class="eb-num" style="font-size:22px">{np_range or '—'}</div>
+            </div>
+          </div>
+          {narrative_html}
+        </div>
+        """
+
+    # Express card — full preliminary results with headline numbers
+    if ex_df is not None and not ex_df.empty:
+        e0 = ex_df.iloc[0]
+        ann = str(e0.get("ann_date") or "")
+        ann_fmt = f"{ann[:4]}-{ann[4:6]}-{ann[6:8]}" if len(ann) == 8 else "—"
+        period = str(e0.get("end_date") or "")
+        period_fmt = f"{period[:4]}-{period[4:6]}" if len(period) == 8 else "—"
+
+        rev = e0.get("revenue")
+        ni  = e0.get("n_income")
+        roe = e0.get("diluted_roe") if pd.notna(e0.get("diluted_roe")) else e0.get("yoy_roe")
+
+        yoy_sales = e0.get("yoy_sales")
+        yoy_np    = e0.get("yoy_dedu_np") if pd.notna(e0.get("yoy_dedu_np")) else None
+
+        def _ex_metric(label, val_yi, yoy_pct):
+            v_str = f"{val_yi:.2f} 亿" if val_yi is not None and pd.notna(val_yi) else "—"
+            yoy_str = ""
+            if yoy_pct is not None and pd.notna(yoy_pct):
+                cls = "pos" if float(yoy_pct) >= 0 else "neg"
+                yoy_str = (f'<span class="{cls}" style="font-size:12px;'
+                           f'margin-left:8px">{float(yoy_pct):+.1f}% YoY</span>')
+            return (f'<div><div class="eb-eyebrow">{label}</div>'
+                    f'<div class="eb-num" style="font-size:22px">{v_str}{yoy_str}</div></div>')
+
+        rev_yi = float(rev) / 1e8 if pd.notna(rev) else None
+        ni_yi  = float(ni) / 1e8 if pd.notna(ni) else None
+
+        cards_html += f"""
+        <div class="eb-card" style="margin-top:14px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline">
+            <div>
+              <div class="eb-eyebrow">业绩快报 · Earnings Express</div>
+              <div style="font-size:13px;color:var(--ink-2);margin-top:2px">
+                Period {period_fmt} · Filed {ann_fmt}
+              </div>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:14px">
+            {_ex_metric("Revenue", rev_yi, yoy_sales)}
+            {_ex_metric("Net Profit", ni_yi, yoy_np)}
+            <div><div class="eb-eyebrow">Diluted ROE</div>
+                 <div class="eb-num" style="font-size:22px">
+                   {f"{float(roe):.2f}%" if pd.notna(roe) else "—"}
+                 </div></div>
+          </div>
+        </div>
+        """
+
+    st.markdown(
+        f"""
+        <h3 class="eb-h3" style="margin-top:24px">Latest Earnings Commentary</h3>
+        <div style="font-size:13px;color:var(--ink-2);max-width:780px;line-height:1.55;
+                    margin-top:-4px;margin-bottom:6px">
+          The company's own pre-announcement filings — released BEFORE the formal
+          quarterly report. Not analyst commentary, not AI-generated.
+        </div>
+        {cards_html}
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

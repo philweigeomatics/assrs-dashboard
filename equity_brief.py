@@ -130,6 +130,31 @@ def _call_deepseek(system_prompt: str, user_msg: str, max_tokens: int = 900) -> 
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
+_OVERVIEW_PROMPT = """\
+You are an elite Chinese A-share equity analyst.
+
+In 3-4 sentences, describe what this company actually does — the products
+or services it sells, who its customers are, and what its main revenue
+drivers are. Be concrete and factual, not promotional.
+
+Avoid filler phrases like "is a leading provider", "is committed to", or
+"offers innovative solutions". Name actual products / customer types /
+end markets.
+
+OUTPUT RULES:
+- Return ONLY raw JSON (start { end }). No markdown.
+- "summary" is one paragraph (3-4 sentences) in English.
+- "tagline" is one short phrase (under 10 words) describing the company's
+  positioning in plain English.
+
+Schema:
+{
+  "tagline": "...",
+  "summary": "..."
+}
+"""
+
+
 _PESTEL_PROMPT = """\
 You are an elite Chinese A-share equity analyst.
 
@@ -226,6 +251,18 @@ Schema:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+def get_company_overview(ticker, name, industry, force_refresh=False):
+    """Returns {payload, generated_at}; payload = {tagline, summary}."""
+    if not force_refresh:
+        cached = _read_cache(ticker, "overview")
+        if cached:
+            return cached
+    user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
+    payload  = _call_deepseek(_OVERVIEW_PROMPT, user_msg, max_tokens=400)
+    _write_cache(ticker, "overview", payload)
+    return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
+
 
 def get_pestel(ticker: str, name: str, industry: str, force_refresh: bool = False) -> dict:
     """Returns {payload, generated_at}; payload is the parsed PESTEL dict."""
