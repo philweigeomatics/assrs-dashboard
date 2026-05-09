@@ -4076,6 +4076,72 @@ def compute_derived_metrics(income_df, balance_df, cashflow_df, daily_basic):
     return out
 
 
+def fetch_forecast(ticker, periods=8):
+    """
+    Tushare forecast (业绩预告): preliminary earnings warning released
+    BEFORE the actual quarterly report. Contains the company's own
+    narrative on why earnings moved.
+
+    Returns DataFrame DESC by ann_date. Empty DataFrame on any failure.
+    Key fields: ann_date, end_date, type, p_change_min, p_change_max,
+    net_profit_min, net_profit_max, summary, change_reason.
+    """
+    import pandas as _pd
+    if not init_tushare():
+        return _pd.DataFrame()
+    ts_code = get_tushare_ticker(ticker)
+    start, end = _start_for_periods(periods + 4)  # widen — forecasts span 1-2 yrs ahead
+    try:
+        df = TUSHARE_API.forecast(
+            ts_code=ts_code, start_date=start, end_date=end,
+            fields=("ts_code,ann_date,end_date,type,p_change_min,p_change_max,"
+                    "net_profit_min,net_profit_max,last_parent_net,"
+                    "first_ann_date,summary,change_reason"),
+        )
+        if df is None or df.empty:
+            return _pd.DataFrame()
+        return (df.drop_duplicates(subset=["ann_date", "end_date"])
+                  .sort_values("ann_date", ascending=False)
+                  .head(periods)
+                  .reset_index(drop=True))
+    except Exception as exc:
+        print(f"[data_manager] fetch_forecast({ticker}): {exc}")
+        return _pd.DataFrame()
+
+
+def fetch_express(ticker, periods=4):
+    """
+    Tushare express (业绩快报): full preliminary results released AFTER
+    quarter-end but BEFORE the formal 10-Q-equivalent. Contains revenue,
+    profits, balance-sheet headlines for the period.
+
+    Returns DataFrame DESC by ann_date. Empty DataFrame on any failure.
+    """
+    import pandas as _pd
+    if not init_tushare():
+        return _pd.DataFrame()
+    ts_code = get_tushare_ticker(ticker)
+    start, end = _start_for_periods(periods + 2)
+    try:
+        df = TUSHARE_API.express(
+            ts_code=ts_code, start_date=start, end_date=end,
+            fields=("ts_code,ann_date,end_date,revenue,operate_profit,"
+                    "total_profit,n_income,total_assets,"
+                    "total_hldr_eqy_exc_min_int,total_hldr_eqy_inc_min_int,"
+                    "yoy_sales,yoy_op,yoy_tp,yoy_dedu_np,yoy_eps,yoy_roe,"
+                    "bps,eps,diluted_eps,diluted_roe"),
+        )
+        if df is None or df.empty:
+            return _pd.DataFrame()
+        return (df.drop_duplicates(subset=["ann_date", "end_date"])
+                  .sort_values("ann_date", ascending=False)
+                  .head(periods)
+                  .reset_index(drop=True))
+    except Exception as exc:
+        print(f"[data_manager] fetch_express({ticker}): {exc}")
+        return _pd.DataFrame()
+
+
 def fetch_fina_mainbz(ticker: str, bz_type: str = "P") -> "pd.DataFrame":
     """
     Fetch main-business revenue breakdown from Tushare fina_mainbz.
