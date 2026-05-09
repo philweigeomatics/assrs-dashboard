@@ -187,6 +187,17 @@ def _pct_class(v):
     return "pos" if v > 0 else ("neg" if v < 0 else "")
 
 
+def _render_html(html: str) -> None:
+    """
+    Render HTML reliably. Streamlit's st.markdown(unsafe_allow_html=True) runs
+    the input through a markdown parser first — any line indented 4+ spaces is
+    treated as a code block, which blows up nested HTML like our grid bars.
+    Stripping leading whitespace from every line neutralizes that rule.
+    """
+    flat = "\n".join(line.lstrip() for line in html.splitlines())
+    st.markdown(flat, unsafe_allow_html=True)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _all_stock_options_eb():
     return [""] + [f"{s['ticker']} · {s['name']}"
@@ -674,7 +685,7 @@ if analysis_df is not None and not analysis_df.empty:
         """
 
         # ── Render: 2-column layout (gauge+breakdown | stop/targets) then 2 cols below
-        st.markdown(f"""
+        _render_html(f"""
         <div style="margin-top:24px;display:grid;grid-template-columns:1fr 1fr;gap:14px">
           <div class="eb-card">
             <div class="eb-eyebrow" style="margin-bottom:6px">Composite Signal Score</div>
@@ -689,7 +700,7 @@ if analysis_df is not None and not analysis_df.empty:
           {sr_html}
           {zone_bar_html}
         </div>
-        """, unsafe_allow_html=True)
+        """)
 else:
     st.warning("No technical data available.")
 
