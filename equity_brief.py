@@ -37,10 +37,11 @@ def ensure_equity_brief_cache_table() -> None:
     Idempotent migration. SQLite only — Supabase users add the table manually
     via SQL editor (see migration block in this module's docstring).
     """
-    from db_config import USE_SQLITE, DBNAME
+    from db_config import USE_SQLITE
     if not USE_SQLITE:
-        return
+        return  # Supabase: DBNAME isn't defined in production branch
 
+    from db_config import DBNAME
     import sqlite3
     with sqlite3.connect(DBNAME) as conn:
         conn.execute("""
