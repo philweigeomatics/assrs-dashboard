@@ -3854,7 +3854,7 @@ def fetch_income_statement(ticker: str, periods: int = 8) -> "pd.DataFrame":
             ts_code=ts_code, start_date=start, end_date=end,
             fields=("ts_code,end_date,report_type,total_revenue,revenue,oper_cost,"
                     "operate_profit,total_profit,n_income,n_income_attr_p,ebit,ebitda,"
-                    "basic_eps,diluted_eps,sell_exp,admin_exp,fin_exp,rd_exp"),
+                    "basic_eps,diluted_eps,sell_exp,admin_exp,fin_exp,interest_exp,rd_exp"),
         )
         if df is None or df.empty:
             return _pd.DataFrame()
@@ -3882,7 +3882,7 @@ def fetch_balance_sheet(ticker: str, periods: int = 8) -> "pd.DataFrame":
             ts_code=ts_code, start_date=start, end_date=end,
             fields=("ts_code,end_date,report_type,total_assets,total_liab,total_hldr_eqy_inc_min_int,"
                     "total_cur_assets,total_cur_liab,money_cap,inventories,accounts_receiv,"
-                    "st_borr,lt_borr,bond_payable,oth_pay_total,total_share"),
+                    "st_borr,lt_borr,bond_payable,non_cur_liab_due_1y,oth_pay_total,total_share"),
         )
         if df is None or df.empty:
             return _pd.DataFrame()
@@ -3991,9 +3991,25 @@ def compute_derived_metrics(income_df, balance_df, cashflow_df, daily_basic):
     debt_to_equity, net_debt_yi, net_debt_ebitda, interest_coverage,
     current_ratio, gross_margin_ttm_pct, net_margin_ttm_pct.
     Any metric that can't be computed is None.
+
+    ── TTM methodology ──────────────────────────────────────────────────────────
+    Tushare income/cashflow data is CUMULATIVE YTD within each fiscal year, not
+    discrete quarters. Naively summing the last 4 rows would double-count:
+      e.g. Q4 = full year, Q3 = Jan-Sep, Q2 = Jan-Jun, Q1 = Jan-Mar
+      → sum = 4× Jan-Mar + 3× Apr-Jun + 2× Jul-Sep + 1× Oct-Dec
+
+    Correct TTM formula for cumulative data:
+      TTM = Latest_YTD + Prev_Year_End − Prev_Year_Same_Period
+      e.g. if latest = Q1 2026:
+        TTM = Q1_2026 + FY_2025 − Q1_2025  (= Apr-2025 to Mar-2026) ✓
+
+    If the latest report IS the full-year annual, TTM = annual value (no adj).
+    Falls back to latest YTD alone if the anchor rows aren't in the window.
+    ─────────────────────────────────────────────────────────────────────────────
     """
     import pandas as _pd
-    out: dict = {
+
+    out = {
         "ev_yi": None, "ev_ebitda": None, "p_fcf": None, "fcf_yield_pct": None,
         "debt_to_equity": None, "net_debt_yi": None, "net_debt_ebitda": None,
         "interest_coverage": None, "current_ratio": None,
@@ -4003,73 +4019,139 @@ def compute_derived_metrics(income_df, balance_df, cashflow_df, daily_basic):
     if not daily_basic or income_df is None or income_df.empty:
         return out
 
-    mv_yi = daily_basic.get("total_mv")  # already in 亿元
+    mv_yi = daily_basic.get("total_mv")   # already in 亿元
     if mv_yi is None:
         return out
 
-    bal0 = balance_df.iloc[0] if (balance_df is not None and not balance_df.empty) else None
-    inc0 = income_df.iloc[0]
+    # ── TTM helper ────────────────────────────────────────────────────────────
+    def _ttm(df, col):
+        """
+        Trailing-twelve-month value for one column of a cumulative YTD DataFrame.
+        Formula: Latest_YTD + Prev_Year_End - Prev_Year_Same_Period
+        Returns float (0.0 if data is absent).
+        """
+        if df is None or df.empty or col not in df.columns:
+            return 0.0
 
-    # Net debt = (st_borr + lt_borr + bond_payable) − money_cap; in 元
+        # Work on a clean, date-sorted copy (DESC)
+        d = df[["end_date", col]].copy()
+        d["_end"] = d["end_date"].astype(str)
+        d = d.sort_values("_end", ascending=False).reset_index(drop=True)
+
+        latest_date = d.iloc[0]["_end"]
+        latest_val  = float(d.iloc[0][col] if _pd.notna(d.iloc[0][col]) else 0)
+
+        # Annual report: no adjustment required
+        if latest_date.endswith("1231"):
+            return latest_val
+
+        # Look up the two anchor rows
+        latest_year  = int(latest_date[:4])
+        prev_annual_key = f"{latest_year - 1}1231"
+        prev_same_key   = f"{latest_year - 1}{latest_date[4:]}"
+
+        def _lookup(key):
+            rows = d[d["_end"] == key]
+            if rows.empty:
+                return None
+            v = rows.iloc[0][col]
+            return float(v) if _pd.notna(v) else 0.0
+
+        prev_annual = _lookup(prev_annual_key)
+        prev_same   = _lookup(prev_same_key)
+
+        if prev_annual is None or prev_same is None:
+            # Anchor rows missing — fall back to latest YTD as-is
+            return latest_val
+
+        return latest_val + prev_annual - prev_same
+
+    # ── Balance sheet — point-in-time, no TTM ────────────────────────────────
+    bal0 = balance_df.iloc[0] if (balance_df is not None and not balance_df.empty) else None
+
     if bal0 is not None:
-        debt = sum(float(bal0.get(c) or 0) for c in ("st_borr", "lt_borr", "bond_payable"))
+        # Comprehensive financial debt:
+        #   st_borr           = 短期借款
+        #   lt_borr           = 长期借款
+        #   bond_payable      = 应付债券
+        #   non_cur_liab_due_1y = 一年内到期的非流动负债 (LT debt maturing soon)
+        debt_fields = ("st_borr", "lt_borr", "bond_payable", "non_cur_liab_due_1y")
+        debt = sum(float(bal0.get(c) or 0) for c in debt_fields)
         cash = float(bal0.get("money_cap") or 0)
         net_debt_yuan = debt - cash
         out["net_debt_yi"] = round(net_debt_yuan / 1e8, 2)
-        out["ev_yi"] = round(mv_yi + (net_debt_yuan / 1e8), 2)
+        out["ev_yi"]       = round(mv_yi + (net_debt_yuan / 1e8), 2)
+
         equity = float(bal0.get("total_hldr_eqy_inc_min_int") or 0)
         if equity > 0:
             out["debt_to_equity"] = round(debt / equity, 2)
+
         cur_assets = float(bal0.get("total_cur_assets") or 0)
         cur_liab   = float(bal0.get("total_cur_liab") or 0)
         if cur_liab > 0:
             out["current_ratio"] = round(cur_assets / cur_liab, 2)
 
-    # TTM EBITDA from last 4 quarters — use ebitda field if present, else ebit + D&A
-    if len(income_df) >= 4:
-        last4 = income_df.head(4)
-        if "ebitda" in last4.columns and last4["ebitda"].notna().all():
-            ebitda_ttm = float(last4["ebitda"].sum())
+    # ── TTM Income metrics ────────────────────────────────────────────────────
+    rev_ttm  = _ttm(income_df, "total_revenue")
+    cost_ttm = _ttm(income_df, "oper_cost")
+    ni_ttm   = _ttm(income_df, "n_income_attr_p")
+    ebit_ttm = _ttm(income_df, "ebit")
+
+    if rev_ttm > 0:
+        out["gross_margin_ttm_pct"] = round((rev_ttm - cost_ttm) / rev_ttm * 100, 2)
+        out["net_margin_ttm_pct"]   = round(ni_ttm / rev_ttm * 100, 2)
+
+    # ── TTM EBITDA ────────────────────────────────────────────────────────────
+    ebitda_ttm = 0.0
+    if "ebitda" in income_df.columns and income_df["ebitda"].notna().any():
+        ebitda_ttm = _ttm(income_df, "ebitda")
+    else:
+        # EBITDA = EBIT + D&A (depreciation from cashflow statement)
+        da_ttm = 0.0
+        if cashflow_df is not None and not cashflow_df.empty:
+            da_ttm = (_ttm(cashflow_df, "depr_fa_coga_dpba")
+                      + _ttm(cashflow_df, "amort_intang_assets"))
+        ebitda_ttm = ebit_ttm + da_ttm
+
+    # EV/EBITDA and Net Debt/EBITDA are N/A when EBITDA ≤ 0
+    # (negative multiples are not meaningful valuation metrics)
+    if ebitda_ttm > 0 and out["ev_yi"] is not None:
+        out["ev_ebitda"] = round((out["ev_yi"] * 1e8) / ebitda_ttm, 2)
+    if ebitda_ttm > 0 and out["net_debt_yi"] is not None:
+        out["net_debt_ebitda"] = round((out["net_debt_yi"] * 1e8) / ebitda_ttm, 2)
+
+    # ── Interest coverage: EBIT / interest cost ───────────────────────────────
+    # Prefer interest_exp (gross interest paid) over fin_exp (net financial cost
+    # = interest expense − interest income). fin_exp can be negative for cash-
+    # rich companies, which would produce a nonsensical coverage ratio.
+    int_exp_ttm = None
+    if "interest_exp" in income_df.columns:
+        v = _ttm(income_df, "interest_exp")
+        if v > 0:
+            int_exp_ttm = v
+    if int_exp_ttm is None:
+        # Fallback: use fin_exp only when it is net-positive (company is a net
+        # interest payer, so the sign is meaningful as a cost denominator).
+        v = _ttm(income_df, "fin_exp")
+        if v > 0:
+            int_exp_ttm = v
+    if int_exp_ttm and ebit_ttm:
+        out["interest_coverage"] = round(ebit_ttm / int_exp_ttm, 2)
+
+    # ── TTM Free Cash Flow ────────────────────────────────────────────────────
+    if cashflow_df is not None and not cashflow_df.empty:
+        if ("free_cashflow" in cashflow_df.columns
+                and cashflow_df["free_cashflow"].notna().any()):
+            fcf_ttm = _ttm(cashflow_df, "free_cashflow")
         else:
-            ebit_ttm = float(last4.get("ebit", _pd.Series(dtype=float)).fillna(0).sum())
-            da_ttm = 0.0
-            if cashflow_df is not None and len(cashflow_df) >= 4:
-                cf4 = cashflow_df.head(4)
-                da_ttm = float(cf4.get("depr_fa_coga_dpba", _pd.Series(dtype=float)).fillna(0).sum()
-                                + cf4.get("amort_intang_assets", _pd.Series(dtype=float)).fillna(0).sum())
-            ebitda_ttm = ebit_ttm + da_ttm
-
-        if ebitda_ttm > 0 and out["ev_yi"] is not None:
-            out["ev_ebitda"] = round((out["ev_yi"] * 1e8) / ebitda_ttm, 2)
-        if ebitda_ttm > 0 and out["net_debt_yi"] is not None:
-            out["net_debt_ebitda"] = round((out["net_debt_yi"] * 1e8) / ebitda_ttm, 2)
-
-        # Interest coverage = EBIT / |fin_exp|
-        ebit_ttm = float(last4.get("ebit", _pd.Series(dtype=float)).fillna(0).sum())
-        fin_exp_ttm = abs(float(last4.get("fin_exp", _pd.Series(dtype=float)).fillna(0).sum()))
-        if fin_exp_ttm > 0 and ebit_ttm:
-            out["interest_coverage"] = round(ebit_ttm / fin_exp_ttm, 2)
-
-        # Margins (TTM)
-        rev_ttm  = float(last4.get("total_revenue", _pd.Series(dtype=float)).fillna(0).sum())
-        cost_ttm = float(last4.get("oper_cost", _pd.Series(dtype=float)).fillna(0).sum())
-        ni_ttm   = float(last4.get("n_income_attr_p", _pd.Series(dtype=float)).fillna(0).sum())
-        if rev_ttm > 0:
-            out["gross_margin_ttm_pct"] = round((rev_ttm - cost_ttm) / rev_ttm * 100, 2)
-            out["net_margin_ttm_pct"]   = round(ni_ttm / rev_ttm * 100, 2)
-
-    # Free cash flow yield: TTM FCF / market cap
-    if cashflow_df is not None and len(cashflow_df) >= 4:
-        cf4 = cashflow_df.head(4)
-        if "free_cashflow" in cf4.columns and cf4["free_cashflow"].notna().all():
-            fcf_ttm = float(cf4["free_cashflow"].sum())
-        else:
-            ocf_ttm  = float(cf4.get("n_cashflow_act", _pd.Series(dtype=float)).fillna(0).sum())
-            capex_ttm = float(cf4.get("c_paid_for_assets", _pd.Series(dtype=float)).fillna(0).sum())
-            fcf_ttm = ocf_ttm - capex_ttm
+            ocf_ttm   = _ttm(cashflow_df, "n_cashflow_act")
+            capex_ttm = _ttm(cashflow_df, "c_paid_for_assets")
+            fcf_ttm   = ocf_ttm - capex_ttm
 
         if mv_yi > 0:
+            # FCF yield is meaningful even when negative (signals cash burn)
             out["fcf_yield_pct"] = round((fcf_ttm / 1e8) / mv_yi * 100, 2)
+            # P/FCF is only meaningful when FCF > 0
             if fcf_ttm > 0:
                 out["p_fcf"] = round((mv_yi * 1e8) / fcf_ttm, 2)
 
