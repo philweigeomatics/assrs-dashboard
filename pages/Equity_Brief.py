@@ -938,8 +938,38 @@ def _earnings_commentary(ticker_):
 ec = _earnings_commentary(ticker)
 fc_df, ex_df = ec["forecast"], ec["express"]
 
-# Show only if at least one of them returned data
-if (fc_df is not None and not fc_df.empty) or (ex_df is not None and not ex_df.empty):
+# Determine the latest formally-reported quarter from the income statement we
+# already pulled. We use this as the cutoff:
+#   - end_date >  latest_reported → upcoming (worth seeing prominently)
+#   - end_date == latest_reported → past quarter (worth seeing, marked as such)
+#   - end_date <  latest_reported → stale, skip silently
+latest_reported_period = (
+    str(inc.iloc[0]["end_date"]) if (inc is not None and not inc.empty) else ""
+)
+
+def _filing_status(filing_period_str):
+    """Return ('upcoming' | 'past' | 'stale', display_label)."""
+    if not filing_period_str or not latest_reported_period:
+        return "upcoming", ""  # treat unknowns as worth showing
+    if filing_period_str >  latest_reported_period: return "upcoming", "Upcoming Quarter"
+    if filing_period_str == latest_reported_period: return "past",     "Past Quarter · already reported"
+    return "stale", ""
+
+# Pre-filter both DataFrames so we never render stale rows
+def _filter_status(df):
+    if df is None or df.empty:
+        return df, None  # (df, status)
+    end_date_str = str(df.iloc[0].get("end_date") or "")
+    status, _label = _filing_status(end_date_str)
+    if status == "stale":
+        return None, "stale"
+    return df, status
+
+fc_df, fc_status = _filter_status(fc_df)
+ex_df, ex_status = _filter_status(ex_df)
+
+# Show only if at least one survived the staleness filter
+if fc_df is not None or ex_df is not None:
     cards_html = ""
 
     # Forecast card — preliminary earnings warning with narrative
@@ -993,6 +1023,14 @@ if (fc_df is not None and not fc_df.empty) or (ex_df is not None and not ex_df.e
                 f'white-space:pre-wrap">{summary_txt}</div>'
             )
 
+        # Status pill — Upcoming (warn) vs Past (neutral, dimmed)
+        period_pill_html = ""
+        if fc_status == "upcoming":
+            period_pill_html = '<span class="eb-pill warn">Upcoming Quarter</span>'
+        elif fc_status == "past":
+            period_pill_html = ('<span class="eb-pill" style="opacity:0.7">'
+                                'Past Quarter · already reported</span>')
+
         cards_html += f"""
         <div class="eb-card" style="margin-top:14px">
           <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:10px">
@@ -1002,7 +1040,10 @@ if (fc_df is not None and not fc_df.empty) or (ex_df is not None and not ex_df.e
                 Period {period_fmt} · Filed {ann_fmt}
               </div>
             </div>
-            <span class="eb-pill {type_class.replace('pill ','').strip()}">{ftype}</span>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+              {period_pill_html}
+              <span class="eb-pill {type_class.replace('pill ','').strip()}">{ftype}</span>
+            </div>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px">
             <div>
@@ -1046,15 +1087,23 @@ if (fc_df is not None and not fc_df.empty) or (ex_df is not None and not ex_df.e
         rev_yi = float(rev) / 1e8 if pd.notna(rev) else None
         ni_yi  = float(ni) / 1e8 if pd.notna(ni) else None
 
+        ex_period_pill_html = ""
+        if ex_status == "upcoming":
+            ex_period_pill_html = '<span class="eb-pill warn">Upcoming Quarter</span>'
+        elif ex_status == "past":
+            ex_period_pill_html = ('<span class="eb-pill" style="opacity:0.7">'
+                                   'Past Quarter · already reported</span>')
+
         cards_html += f"""
         <div class="eb-card" style="margin-top:14px">
-          <div style="display:flex;justify-content:space-between;align-items:baseline">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:10px">
             <div>
               <div class="eb-eyebrow">业绩快报 · Earnings Express</div>
               <div style="font-size:13px;color:var(--ink-2);margin-top:2px">
                 Period {period_fmt} · Filed {ann_fmt}
               </div>
             </div>
+            {ex_period_pill_html}
           </div>
           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:14px">
             {_ex_metric("Revenue", rev_yi, yoy_sales)}
@@ -1067,13 +1116,23 @@ if (fc_df is not None and not fc_df.empty) or (ex_df is not None and not ex_df.e
         </div>
         """
 
+    has_upcoming = (fc_status == "upcoming") or (ex_status == "upcoming")
+    section_title = ("Upcoming Earnings Preview" if has_upcoming
+                     else "Most Recent Earnings Filings")
+    section_blurb = (
+        "The company's own pre-announcement for a quarter that hasn't been "
+        "formally reported yet."
+        if has_upcoming else
+        "The company's pre-announcement filings for the quarter just reported. "
+        "Useful as a sanity-check companion to the formal numbers above."
+    )
+
     st.markdown(
         f"""
-        <h3 class="eb-h3" style="margin-top:24px">Latest Earnings Commentary</h3>
+        <h3 class="eb-h3" style="margin-top:24px">{section_title}</h3>
         <div style="font-size:13px;color:var(--ink-2);max-width:780px;line-height:1.55;
                     margin-top:-4px;margin-bottom:6px">
-          The company's own pre-announcement filings — released BEFORE the formal
-          quarterly report. Not analyst commentary, not AI-generated.
+          {section_blurb}
         </div>
         {cards_html}
         """,
