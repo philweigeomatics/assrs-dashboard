@@ -182,10 +182,11 @@ def ensure_must_change_password_column() -> None:
     Safe to call on every startup — no-ops if the column already exists.
     SQLite only; Supabase column must be added via the dashboard.
     """
-    from db_config import USE_SQLITE, DBNAME
+    from db_config import USE_SQLITE
     if not USE_SQLITE:
-        return  # Supabase: add column manually in dashboard
+        return  # Supabase: DBNAME isn't defined in this branch — add column manually
 
+    from db_config import DBNAME
     import sqlite3
     with sqlite3.connect(DBNAME) as conn:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(app_users)").fetchall()]
