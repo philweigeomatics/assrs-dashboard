@@ -322,8 +322,10 @@ is_admin = auth_manager.is_admin()
 # HEADER
 # ══════════════════════════════════════════════════════════════════════════════
 
-with st.spinner(f"Loading fundamentals for {company}…"):
-    bundle = _bundle_fundamentals(ticker)
+# No spinner — fetcher is cached (5 min TTL); reruns hit cache instantly.
+# Showing a spinner here would flash on every dropdown change even though
+# the brief is already loaded.
+bundle = _bundle_fundamentals(ticker)
 
 inc, bal, cf, fina, daily, mainbz = (
     bundle["income"], bundle["balance"], bundle["cashflow"],
@@ -437,8 +439,8 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-with st.spinner("Running technical analysis…"):
-    analysis_df, raw_df = _technical_signal(ticker)
+# Cached — no spinner needed
+analysis_df, raw_df = _technical_signal(ticker)
 
 if analysis_df is not None and not analysis_df.empty:
     last250 = analysis_df.tail(250)
@@ -629,49 +631,53 @@ if analysis_df is not None and not analysis_df.empty:
         z_max = max(b["high"] for b in all_zones)
         z_range = max(z_max - z_min, 1e-6)
 
-        bar_segments, label_segments = "", ""
+        # Build segments. Labels go INSIDE the colored bar (overlaid in white)
+        # so they never collide with the price endpoints below the bar.
+        bar_segments = ""
         for b in all_zones:
             left  = (b["low"]  - z_min) / z_range * 100
             width = (b["high"] - b["low"]) / z_range * 100
+            # Inline label only if the band is wide enough to fit the text
+            label_html = ""
+            if width >= 12:
+                label_html = (
+                    f'<span style="position:absolute;left:0;right:0;top:50%;'
+                    f'transform:translateY(-50%);text-align:center;'
+                    f'font-family:ui-monospace,monospace;font-size:9px;'
+                    f'color:rgba(255,255,255,0.95);letter-spacing:0.06em;'
+                    f'text-transform:uppercase;white-space:nowrap;'
+                    f'overflow:hidden;text-overflow:ellipsis;'
+                    f'text-shadow:0 1px 2px rgba(0,0,0,0.3);pointer-events:none">'
+                    f'{b["label"]}</span>'
+                )
             bar_segments += (
                 f'<div style="position:absolute;left:{left}%;width:{width}%;'
-                f'top:0;height:34px;background:{b["color"]};'
-                f'border-right:1px solid rgba(0,0,0,0.15)"></div>'
+                f'top:0;height:38px;background:{b["color"]};'
+                f'border-right:1px solid rgba(0,0,0,0.15)">{label_html}</div>'
             )
-            # Label only if wide enough
-            if width > 7:
-                label_segments += (
-                    f'<div style="position:absolute;left:{left}%;width:{width}%;'
-                    f'top:36px;text-align:center;font-family:ui-monospace,monospace;'
-                    f'font-size:9.5px;color:var(--ink-2);letter-spacing:0.06em;'
-                    f'text-transform:uppercase">{b["label"]}</div>'
-                )
 
         marker_left = (price - z_min) / z_range * 100
         zone_bar_html = f"""
         <div class="eb-card">
           <div class="eb-eyebrow" style="margin-bottom:10px">Entry Zone</div>
           <div style="display:flex;justify-content:space-between;
-                      font-size:13px;margin-bottom:8px">
-            <div>Current price sits in <strong>{zone['label']}</strong></div>
-            <div style="color:var(--ink-2)">{zone['action']}</div>
+                      font-size:13px;margin-bottom:8px;gap:8px">
+            <div>Current sits in <strong>{zone['label']}</strong></div>
+            <div style="color:var(--ink-2);text-align:right">{zone['action']}</div>
           </div>
-          <div style="position:relative;height:34px;background:#efe9df;
-                      border-radius:3px;overflow:hidden">
+          <div style="position:relative;height:38px;background:#efe9df;
+                      border-radius:3px;overflow:visible;margin-top:24px">
             {bar_segments}
             <div style="position:absolute;left:{marker_left}%;top:-6px;
-                        width:2px;height:46px;background:#1a1916;z-index:5"></div>
+                        width:2px;height:50px;background:#1a1916;z-index:5"></div>
             <div style="position:absolute;left:calc({marker_left}% - 30px);
                         top:-22px;font-family:JetBrains Mono,monospace;font-size:11px;
                         font-weight:600;color:#1a1916;z-index:6;width:60px;text-align:center">
               ¥{price:.2f}</div>
           </div>
-          <div style="position:relative;height:36px;margin-top:4px">
-            {label_segments}
-          </div>
           <div style="display:flex;justify-content:space-between;
                       font-family:JetBrains Mono,monospace;font-size:10px;
-                      color:var(--ink-3);margin-top:6px">
+                      color:var(--ink-3);margin-top:8px">
             <span>¥{z_min:.2f}</span>
             <span>¥{z_max:.2f}</span>
           </div>
@@ -746,7 +752,7 @@ body {{ margin:0; padding:0; background:var(--bg); color:var(--ink);
 
 </body></html>
 """
-        components.html(strategy_doc, height=560, scrolling=False)
+        components.html(strategy_doc, height=740, scrolling=False)
 else:
     st.warning("No technical data available.")
 
