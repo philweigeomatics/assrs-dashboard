@@ -3827,6 +3827,255 @@ def fetch_adjusted_daily(ticker: str, start_date: str, end_date: str,
     return _pd.DataFrame()
 
 
+# ── Equity Brief — Financial statement fetchers ───────────────────────────────
+
+def _start_for_periods(periods: int) -> tuple[str, str]:
+    """Return (start_date, end_date) covering ~periods quarters of history."""
+    from datetime import datetime as _dt, timedelta as _td
+    end = _dt.now()
+    start = end - _td(days=(periods + 1) * 95)
+    return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+
+
+def fetch_income_statement(ticker: str, periods: int = 8) -> "pd.DataFrame":
+    """
+    Fetch consolidated income statement from Tushare income().
+
+    Returns DataFrame sorted by end_date DESC (most recent first), trimmed to
+    periods rows. Empty DataFrame on any failure.
+    """
+    import pandas as _pd
+    if not init_tushare():
+        return _pd.DataFrame()
+    ts_code = get_tushare_ticker(ticker)
+    start, end = _start_for_periods(periods)
+    try:
+        df = TUSHARE_API.income(
+            ts_code=ts_code, start_date=start, end_date=end,
+            fields=("ts_code,end_date,report_type,total_revenue,revenue,oper_cost,"
+                    "operate_profit,total_profit,n_income,n_income_attr_p,ebit,ebitda,"
+                    "basic_eps,diluted_eps,sell_exp,admin_exp,fin_exp,rd_exp"),
+        )
+        if df is None or df.empty:
+            return _pd.DataFrame()
+        # Keep consolidated reports only (report_type==1) when present
+        if "report_type" in df.columns:
+            df = df[df["report_type"].astype(str) == "1"]
+        df = df.drop_duplicates(subset=["end_date"]).sort_values(
+            "end_date", ascending=False
+        ).head(periods).reset_index(drop=True)
+        return df
+    except Exception as exc:
+        print(f"[data_manager] fetch_income_statement({ticker}): {exc}")
+        return _pd.DataFrame()
+
+
+def fetch_balance_sheet(ticker: str, periods: int = 8) -> "pd.DataFrame":
+    """Fetch consolidated balance sheet from Tushare balancesheet()."""
+    import pandas as _pd
+    if not init_tushare():
+        return _pd.DataFrame()
+    ts_code = get_tushare_ticker(ticker)
+    start, end = _start_for_periods(periods)
+    try:
+        df = TUSHARE_API.balancesheet(
+            ts_code=ts_code, start_date=start, end_date=end,
+            fields=("ts_code,end_date,report_type,total_assets,total_liab,total_hldr_eqy_inc_min_int,"
+                    "total_cur_assets,total_cur_liab,money_cap,inventories,accounts_receiv,"
+                    "st_borr,lt_borr,bond_payable,oth_pay_total,total_share"),
+        )
+        if df is None or df.empty:
+            return _pd.DataFrame()
+        if "report_type" in df.columns:
+            df = df[df["report_type"].astype(str) == "1"]
+        df = df.drop_duplicates(subset=["end_date"]).sort_values(
+            "end_date", ascending=False
+        ).head(periods).reset_index(drop=True)
+        return df
+    except Exception as exc:
+        print(f"[data_manager] fetch_balance_sheet({ticker}): {exc}")
+        return _pd.DataFrame()
+
+
+def fetch_cashflow(ticker: str, periods: int = 8) -> "pd.DataFrame":
+    """Fetch consolidated cash-flow statement from Tushare cashflow()."""
+    import pandas as _pd
+    if not init_tushare():
+        return _pd.DataFrame()
+    ts_code = get_tushare_ticker(ticker)
+    start, end = _start_for_periods(periods)
+    try:
+        df = TUSHARE_API.cashflow(
+            ts_code=ts_code, start_date=start, end_date=end,
+            fields=("ts_code,end_date,report_type,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act,"
+                    "c_paid_for_assets,free_cashflow,depr_fa_coga_dpba,amort_intang_assets"),
+        )
+        if df is None or df.empty:
+            return _pd.DataFrame()
+        if "report_type" in df.columns:
+            df = df[df["report_type"].astype(str) == "1"]
+        df = df.drop_duplicates(subset=["end_date"]).sort_values(
+            "end_date", ascending=False
+        ).head(periods).reset_index(drop=True)
+        return df
+    except Exception as exc:
+        print(f"[data_manager] fetch_cashflow({ticker}): {exc}")
+        return _pd.DataFrame()
+
+
+def fetch_full_fina_indicator(ticker: str, periods: int = 8) -> "pd.DataFrame":
+    """
+    Wider field-set version of fina_indicator for the Equity Brief.
+    Returns DESC by end_date, capped at `periods` rows.
+    """
+    import pandas as _pd
+    if not init_tushare():
+        return _pd.DataFrame()
+    ts_code = get_tushare_ticker(ticker)
+    start, end = _start_for_periods(periods)
+    try:
+        df = TUSHARE_API.fina_indicator(
+            ts_code=ts_code, start_date=start, end_date=end,
+            fields=("ts_code,end_date,roe,roa,grossprofit_margin,netprofit_margin,"
+                    "q_netprofit_margin,debt_to_assets,current_ratio,quick_ratio,"
+                    "assets_turn,or_yoy,netprofit_yoy,basic_eps_yoy,equity_yoy,"
+                    "fcff,fcfe,ocf_to_or"),
+        )
+        if df is None or df.empty:
+            return _pd.DataFrame()
+        df = df.drop_duplicates(subset=["end_date"]).sort_values(
+            "end_date", ascending=False
+        ).head(periods).reset_index(drop=True)
+        return df
+    except Exception as exc:
+        print(f"[data_manager] fetch_full_fina_indicator({ticker}): {exc}")
+        return _pd.DataFrame()
+
+
+def get_latest_daily_basic(ticker: str) -> dict | None:
+    """
+    Return the most recent daily_basic row as a dict (close, pe, pb, ps, total_mv,
+    circ_mv, dv_ratio, etc.). None on any failure.
+    """
+    import pandas as _pd
+    if not init_tushare():
+        return None
+    ts_code = get_tushare_ticker(ticker)
+    from datetime import datetime as _dt, timedelta as _td
+    end_date   = _dt.now().strftime("%Y%m%d")
+    start_date = (_dt.now() - _td(days=15)).strftime("%Y%m%d")
+    try:
+        df = TUSHARE_API.daily_basic(
+            ts_code=ts_code, start_date=start_date, end_date=end_date,
+            fields="ts_code,trade_date,close,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,total_mv,circ_mv,total_share,turnover_rate",
+        )
+        if df is None or df.empty:
+            return None
+        df = df.sort_values("trade_date", ascending=False)
+        row = df.iloc[0].to_dict()
+        # Tushare market caps come in 万元 (10,000 RMB) — convert to 亿元 (100M)
+        for k in ("total_mv", "circ_mv"):
+            if row.get(k) is not None:
+                row[k] = float(row[k]) / 10_000  # 万 → 亿
+        return row
+    except Exception as exc:
+        print(f"[data_manager] get_latest_daily_basic({ticker}): {exc}")
+        return None
+
+
+def compute_derived_metrics(income_df, balance_df, cashflow_df, daily_basic: dict) -> dict:
+    """
+    Compute Equity Brief metrics that Tushare doesn't provide directly.
+
+    Returns a dict with: ev_yi (亿元), ev_ebitda, p_fcf, fcf_yield_pct,
+    debt_to_equity, net_debt_yi, net_debt_ebitda, interest_coverage,
+    current_ratio, gross_margin_ttm_pct, net_margin_ttm_pct.
+    Any metric that can't be computed is None.
+    """
+    import pandas as _pd
+    out: dict = {
+        "ev_yi": None, "ev_ebitda": None, "p_fcf": None, "fcf_yield_pct": None,
+        "debt_to_equity": None, "net_debt_yi": None, "net_debt_ebitda": None,
+        "interest_coverage": None, "current_ratio": None,
+        "gross_margin_ttm_pct": None, "net_margin_ttm_pct": None,
+    }
+
+    if not daily_basic or income_df is None or income_df.empty:
+        return out
+
+    mv_yi = daily_basic.get("total_mv")  # already in 亿元
+    if mv_yi is None:
+        return out
+
+    bal0 = balance_df.iloc[0] if (balance_df is not None and not balance_df.empty) else None
+    inc0 = income_df.iloc[0]
+
+    # Net debt = (st_borr + lt_borr + bond_payable) − money_cap; in 元
+    if bal0 is not None:
+        debt = sum(float(bal0.get(c) or 0) for c in ("st_borr", "lt_borr", "bond_payable"))
+        cash = float(bal0.get("money_cap") or 0)
+        net_debt_yuan = debt - cash
+        out["net_debt_yi"] = round(net_debt_yuan / 1e8, 2)
+        out["ev_yi"] = round(mv_yi + (net_debt_yuan / 1e8), 2)
+        equity = float(bal0.get("total_hldr_eqy_inc_min_int") or 0)
+        if equity > 0:
+            out["debt_to_equity"] = round(debt / equity, 2)
+        cur_assets = float(bal0.get("total_cur_assets") or 0)
+        cur_liab   = float(bal0.get("total_cur_liab") or 0)
+        if cur_liab > 0:
+            out["current_ratio"] = round(cur_assets / cur_liab, 2)
+
+    # TTM EBITDA from last 4 quarters — use ebitda field if present, else ebit + D&A
+    if len(income_df) >= 4:
+        last4 = income_df.head(4)
+        if "ebitda" in last4.columns and last4["ebitda"].notna().all():
+            ebitda_ttm = float(last4["ebitda"].sum())
+        else:
+            ebit_ttm = float(last4.get("ebit", _pd.Series(dtype=float)).fillna(0).sum())
+            da_ttm = 0.0
+            if cashflow_df is not None and len(cashflow_df) >= 4:
+                cf4 = cashflow_df.head(4)
+                da_ttm = float(cf4.get("depr_fa_coga_dpba", _pd.Series(dtype=float)).fillna(0).sum()
+                                + cf4.get("amort_intang_assets", _pd.Series(dtype=float)).fillna(0).sum())
+            ebitda_ttm = ebit_ttm + da_ttm
+
+        if ebitda_ttm > 0 and out["ev_yi"] is not None:
+            out["ev_ebitda"] = round((out["ev_yi"] * 1e8) / ebitda_ttm, 2)
+        if ebitda_ttm > 0 and out["net_debt_yi"] is not None:
+            out["net_debt_ebitda"] = round((out["net_debt_yi"] * 1e8) / ebitda_ttm, 2)
+
+        # Interest coverage = EBIT / |fin_exp|
+        ebit_ttm = float(last4.get("ebit", _pd.Series(dtype=float)).fillna(0).sum())
+        fin_exp_ttm = abs(float(last4.get("fin_exp", _pd.Series(dtype=float)).fillna(0).sum()))
+        if fin_exp_ttm > 0 and ebit_ttm:
+            out["interest_coverage"] = round(ebit_ttm / fin_exp_ttm, 2)
+
+        # Margins (TTM)
+        rev_ttm  = float(last4.get("total_revenue", _pd.Series(dtype=float)).fillna(0).sum())
+        cost_ttm = float(last4.get("oper_cost", _pd.Series(dtype=float)).fillna(0).sum())
+        ni_ttm   = float(last4.get("n_income_attr_p", _pd.Series(dtype=float)).fillna(0).sum())
+        if rev_ttm > 0:
+            out["gross_margin_ttm_pct"] = round((rev_ttm - cost_ttm) / rev_ttm * 100, 2)
+            out["net_margin_ttm_pct"]   = round(ni_ttm / rev_ttm * 100, 2)
+
+    # Free cash flow yield: TTM FCF / market cap
+    if cashflow_df is not None and len(cashflow_df) >= 4:
+        cf4 = cashflow_df.head(4)
+        if "free_cashflow" in cf4.columns and cf4["free_cashflow"].notna().all():
+            fcf_ttm = float(cf4["free_cashflow"].sum())
+        else:
+            ocf_ttm  = float(cf4.get("n_cashflow_act", _pd.Series(dtype=float)).fillna(0).sum())
+            capex_ttm = float(cf4.get("c_paid_for_assets", _pd.Series(dtype=float)).fillna(0).sum())
+            fcf_ttm = ocf_ttm - capex_ttm
+
+        if mv_yi > 0:
+            out["fcf_yield_pct"] = round((fcf_ttm / 1e8) / mv_yi * 100, 2)
+            if fcf_ttm > 0:
+                out["p_fcf"] = round((mv_yi * 1e8) / fcf_ttm, 2)
+
+    return out
+
+
 def fetch_fina_mainbz(ticker: str, bz_type: str = "P") -> "pd.DataFrame":
     """
     Fetch main-business revenue breakdown from Tushare fina_mainbz.
