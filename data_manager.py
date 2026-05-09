@@ -3829,7 +3829,7 @@ def fetch_adjusted_daily(ticker: str, start_date: str, end_date: str,
 
 # ── Equity Brief — Financial statement fetchers ───────────────────────────────
 
-def _start_for_periods(periods: int) -> tuple[str, str]:
+def _start_for_periods(periods):
     """Return (start_date, end_date) covering ~periods quarters of history."""
     from datetime import datetime as _dt, timedelta as _td
     end = _dt.now()
@@ -3952,7 +3952,7 @@ def fetch_full_fina_indicator(ticker: str, periods: int = 8) -> "pd.DataFrame":
         return _pd.DataFrame()
 
 
-def get_latest_daily_basic(ticker: str) -> dict | None:
+def get_latest_daily_basic(ticker):
     """
     Return the most recent daily_basic row as a dict (close, pe, pb, ps, total_mv,
     circ_mv, dv_ratio, etc.). None on any failure.
@@ -3983,7 +3983,7 @@ def get_latest_daily_basic(ticker: str) -> dict | None:
         return None
 
 
-def compute_derived_metrics(income_df, balance_df, cashflow_df, daily_basic: dict) -> dict:
+def compute_derived_metrics(income_df, balance_df, cashflow_df, daily_basic):
     """
     Compute Equity Brief metrics that Tushare doesn't provide directly.
 

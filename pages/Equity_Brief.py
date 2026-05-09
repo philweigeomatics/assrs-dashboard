@@ -191,7 +191,7 @@ def _all_stock_options_eb():
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _stock_basic_row(ticker: str) -> dict | None:
+def _stock_basic_row(ticker):
     ts_code = data_manager.get_tushare_ticker(ticker)
     df = data_manager.db.read_table(
         "stock_basic", filters={"ts_code": ts_code},
