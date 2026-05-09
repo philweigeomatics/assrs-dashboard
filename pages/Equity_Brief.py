@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 import auth_manager
 import data_manager
@@ -537,33 +538,26 @@ if analysis_df is not None and not analysis_df.empty:
 
         # ── Component breakdown bars ─────────────────────────────────────────
         comps = score["components"]
-        comp_html = ""
+        comp_rows = []
         for k in ("trend", "momentum", "rsi", "volatility", "custom"):
             c = comps[k]
             v, mx = c["value"], c["max"]
-            # Map -mx..+mx → 0..100% width, centered at 50%
-            center, width_pct = 50, abs(v) / mx * 50
+            width_pct = abs(v) / mx * 50  # half the bar at most (50% of 100%)
             if v >= 0:
-                bar_left, bar_right = center, center + width_pct
-                bar_color = "#2f8a4f"
+                bar_left, bar_color = 50, "#2f8a4f"
             else:
-                bar_left, bar_right = center - width_pct, center
-                bar_color = "#c6432a"
-            comp_html += f"""
-            <div style="display:grid;grid-template-columns:90px 1fr 50px;gap:10px;
-                        align-items:center;padding:5px 0;font-size:12px">
-              <div style="font-family:ui-monospace,monospace;font-size:10.5px;
-                          letter-spacing:0.08em;color:var(--ink-3);text-transform:uppercase">
-                {c['label']}</div>
-              <div style="position:relative;height:10px;background:#efe9df;border-radius:2px">
-                <div style="position:absolute;left:50%;top:-2px;width:1px;height:14px;
-                            background:#807a70"></div>
-                <div style="position:absolute;left:{bar_left}%;width:{bar_right-bar_left}%;
-                            top:0;height:10px;background:{bar_color};border-radius:2px"></div>
-              </div>
-              <div class="eb-num" style="text-align:right;font-size:12px;color:var(--ink-2)">
-                {v:+d}</div>
-            </div>"""
+                bar_left, bar_color = 50 - width_pct, "#c6432a"
+            comp_rows.append(
+                f'<div class="bar-row">'
+                f'<div class="bar-label">{c["label"]}</div>'
+                f'<div class="bar-track">'
+                f'<div class="bar-mid"></div>'
+                f'<div class="bar-fill" style="left:{bar_left}%;width:{width_pct}%;background:{bar_color}"></div>'
+                f'</div>'
+                f'<div class="bar-val">{v:+d}</div>'
+                f'</div>'
+            )
+        comp_html = "".join(comp_rows)
 
         # ── Stop/targets card ────────────────────────────────────────────────
         stop_targets_html = f"""
@@ -684,23 +678,75 @@ if analysis_df is not None and not analysis_df.empty:
         </div>
         """
 
-        # ── Render: 2-column layout (gauge+breakdown | stop/targets) then 2 cols below
-        _render_html(f"""
-        <div style="margin-top:24px;display:grid;grid-template-columns:1fr 1fr;gap:14px">
-          <div class="eb-card">
-            <div class="eb-eyebrow" style="margin-bottom:6px">Composite Signal Score</div>
-            <div style="display:flex;align-items:center;gap:18px">
-              {gauge_svg}
-              <div style="flex:1">{comp_html}</div>
-            </div>
-          </div>
-          {stop_targets_html}
-        </div>
-        <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:14px">
-          {sr_html}
-          {zone_bar_html}
-        </div>
-        """)
+        # ── Render in a sandboxed iframe so markdown processing doesn't
+        #    chew our nested HTML. Self-contained doc with inlined CSS
+        #    (the parent page's :root variables don't reach the iframe).
+        strategy_doc = f"""
+<!DOCTYPE html>
+<html><head><style>
+:root {{ --bg:#f7f3ec; --bg-2:#efe9df; --bg-3:#e6dfd2;
+        --ink:#1a1916; --ink-2:#4d4942; --ink-3:#807a70;
+        --rule:#d6cebe; --rule-2:#b8b09f;
+        --pos:#2f8a4f; --neg:#c6432a; --warn:#b8800f; }}
+* {{ box-sizing:border-box; }}
+body {{ margin:0; padding:0; background:var(--bg); color:var(--ink);
+       font-family: Georgia, "Newsreader", serif; font-size:14px; }}
+.eb-num {{ font-family:"JetBrains Mono",ui-monospace,monospace;
+          font-feature-settings:"tnum","zero"; }}
+.eb-card {{ background:#fff; border:1px solid var(--rule);
+           border-radius:4px; padding:16px 18px; }}
+.eb-eyebrow {{ font-family:ui-monospace,monospace; font-size:11px;
+              letter-spacing:0.18em; text-transform:uppercase;
+              color:var(--ink-3); }}
+.eb-pill {{ display:inline-block; padding:2px 8px; border-radius:999px;
+           font-family:ui-monospace,monospace; font-size:10.5px;
+           border:1px solid var(--rule-2); color:var(--ink-2);
+           background:#fff; letter-spacing:0.06em; text-transform:uppercase; }}
+.eb-table {{ width:100%; border-collapse:collapse; font-size:13px; }}
+.eb-table th {{ text-align:left; font-family:ui-monospace,monospace;
+               font-size:10.5px; text-transform:uppercase;
+               letter-spacing:0.1em; color:var(--ink-3);
+               border-bottom:1px solid var(--rule); padding:8px 10px;
+               font-weight:500; }}
+.eb-table td {{ padding:8px 10px; border-bottom:1px solid var(--rule); }}
+.eb-table td.num {{ font-family:"JetBrains Mono",ui-monospace,monospace;
+                   font-feature-settings:"tnum"; text-align:right; }}
+.eb-table tr:last-child td {{ border-bottom:0; }}
+.eb-table .pos {{ color:var(--pos); }}
+.eb-table .neg {{ color:var(--neg); }}
+.row {{ display:grid; grid-template-columns:1fr 1fr; gap:14px;
+       margin-bottom:14px; }}
+.bar-row {{ display:grid; grid-template-columns:90px 1fr 50px; gap:10px;
+           align-items:center; padding:5px 0; font-size:12px; }}
+.bar-label {{ font-family:ui-monospace,monospace; font-size:10.5px;
+             letter-spacing:0.08em; color:var(--ink-3); text-transform:uppercase; }}
+.bar-track {{ position:relative; height:10px; background:var(--bg-2);
+             border-radius:2px; }}
+.bar-mid {{ position:absolute; left:50%; top:-2px; width:1px; height:14px;
+           background:var(--ink-3); }}
+.bar-fill {{ position:absolute; top:0; height:10px; border-radius:2px; }}
+.bar-val {{ text-align:right; font-size:12px; color:var(--ink-2);
+           font-family:"JetBrains Mono",ui-monospace,monospace; }}
+</style></head><body>
+
+<div class="row">
+  <div class="eb-card">
+    <div class="eb-eyebrow" style="margin-bottom:6px">Composite Signal Score</div>
+    <div style="display:flex;align-items:center;gap:18px">
+      {gauge_svg}
+      <div style="flex:1">{comp_html}</div>
+    </div>
+  </div>
+  {stop_targets_html}
+</div>
+<div class="row">
+  {sr_html}
+  {zone_bar_html}
+</div>
+
+</body></html>
+"""
+        components.html(strategy_doc, height=560, scrolling=False)
 else:
     st.warning("No technical data available.")
 
