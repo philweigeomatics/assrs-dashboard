@@ -212,6 +212,19 @@ def compute_signal_score(analysis_df: pd.DataFrame) -> dict:
         elif macd < macd_sig and macd_hist < 0: macd_score = -20
         elif macd < macd_sig:                  macd_score = -10
 
+    # China context: in a confirmed long-term uptrend (price > MA50 > MA200),
+    # bearish MACD is typically a healthy pullback inside a bull cycle, not a
+    # trend reversal.  Policy/SOE/sector-driven A-share names rarely collapse
+    # indefinitely — a very low MACD is often a bottoming signal.
+    # Halve the bearish penalty when the structural trend is clearly bullish.
+    if macd_score < 0:
+        close_v = last.get("Close")
+        ma50_v  = last.get("MA50")
+        ma200_v = last.get("MA200")
+        if all(pd.notna(x) for x in (close_v, ma50_v, ma200_v)):
+            if close_v > ma50_v and ma50_v > ma200_v:
+                macd_score = macd_score // 2  # -20 → -10, -10 → -5
+
     # ── 3. RSI — 15 pts max (mean-reversion bias: extremes favour reversal)
     rsi = last.get("RSI_14")
     rsi_score = 0

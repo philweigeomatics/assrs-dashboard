@@ -475,10 +475,28 @@ pe   = (daily or {}).get("pe_ttm") or (daily or {}).get("pe")
 pb   = (daily or {}).get("pb")
 ps   = (daily or {}).get("ps_ttm") or (daily or {}).get("ps")
 dvr  = (daily or {}).get("dv_ratio")
-roe  = fina.iloc[0]["roe"] if (fina is not None and not fina.empty and "roe" in fina.columns) else None
 roa  = fina.iloc[0]["roa"] if (fina is not None and not fina.empty and "roa" in fina.columns) else None
 or_yoy = fina.iloc[0]["or_yoy"] if (fina is not None and not fina.empty and "or_yoy" in fina.columns) else None
 np_yoy = fina.iloc[0]["netprofit_yoy"] if (fina is not None and not fina.empty and "netprofit_yoy" in fina.columns) else None
+
+# ── ROE: split annual (latest 12-31 report) vs latest accumulated quarter ──
+# Chinese periodic reports are CUMULATIVE: Q1 covers Jan-Mar, H1 = Jan-Jun,
+# Q3 = Jan-Sep, Annual = Jan-Dec. You cannot annualise Q1 to get full-year ROE.
+# We show both values so the reader can judge trend across the year.
+roe_q        = None   # latest quarter (accumulated up to that date)
+roe_q_period = "—"
+roe_annual        = None   # most recent full-year (end_date ends '1231')
+roe_annual_period = "—"
+if fina is not None and not fina.empty and "roe" in fina.columns:
+    roe_q = fina.iloc[0]["roe"]
+    roe_q_period = str(fina.iloc[0].get("end_date", ""))
+    annual_rows = fina[fina["end_date"].astype(str).str.endswith("1231")]
+    if not annual_rows.empty:
+        roe_annual = annual_rows.iloc[0]["roe"]
+        roe_annual_period = str(annual_rows.iloc[0]["end_date"])
+
+# Keep a single `roe` alias so the SWOT metrics summary still works
+roe = roe_annual if roe_annual is not None else roe_q
 
 kpi_html = f"""
 <div class="eb-section">
@@ -495,8 +513,16 @@ kpi_html = f"""
       <div class="eb-kpi-value">{_fmt_num(ps, 2)}</div></div>
     <div class="eb-kpi"><div class="eb-kpi-label">EV / EBITDA</div>
       <div class="eb-kpi-value">{_fmt_num(metrics['ev_ebitda'], 1)}</div></div>
-    <div class="eb-kpi"><div class="eb-kpi-label">ROE</div>
-      <div class="eb-kpi-value">{_fmt_pct(roe, 1)}</div></div>
+    <div class="eb-kpi">
+      <div class="eb-kpi-label">ROE · Annual</div>
+      <div class="eb-kpi-value">{_fmt_pct(roe_annual, 1)}</div>
+      <div class="eb-kpi-sub">{roe_annual_period or "—"}</div>
+    </div>
+    <div class="eb-kpi">
+      <div class="eb-kpi-label">ROE · Latest Qtr</div>
+      <div class="eb-kpi-value">{_fmt_pct(roe_q, 1)}</div>
+      <div class="eb-kpi-sub">{roe_q_period or "—"} · cumulative YTD</div>
+    </div>
     <div class="eb-kpi"><div class="eb-kpi-label">ROA</div>
       <div class="eb-kpi-value">{_fmt_pct(roa, 1)}</div></div>
     <div class="eb-kpi"><div class="eb-kpi-label">Gross Margin (TTM)</div>
@@ -543,29 +569,44 @@ st.markdown("""
 analysis_df, raw_df = _technical_signal(ticker)
 
 if analysis_df is not None and not analysis_df.empty:
-    last250 = analysis_df.tail(250)
+    last250 = analysis_df.tail(250).copy()
+
+    # Use string dates as categorical x-axis so weekends and Chinese public
+    # holidays (which have no trading data) produce no gaps on the chart.
+    def _xdates(df_or_series):
+        idx = df_or_series.index
+        if hasattr(idx, "strftime"):
+            return idx.strftime("%Y-%m-%d").tolist()
+        return [str(d) for d in idx]
+
+    x_all = _xdates(last250)
+
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
-        x=last250.index, open=last250["Open"], high=last250["High"],
+        x=x_all, open=last250["Open"], high=last250["High"],
         low=last250["Low"], close=last250["Close"],
         name="Price",
         increasing=dict(line=dict(color="#c6432a")),
         decreasing=dict(line=dict(color="#2f8a4f")),
     ))
     if "MA20" in last250.columns:
-        fig.add_trace(go.Scatter(x=last250.index, y=last250["MA20"], name="MA20",
+        fig.add_trace(go.Scatter(x=x_all, y=last250["MA20"], name="MA20",
                                  line=dict(color="#b8800f", width=1.2, dash="dot")))
     if "MA50" in last250.columns:
-        fig.add_trace(go.Scatter(x=last250.index, y=last250["MA50"], name="MA50",
+        fig.add_trace(go.Scatter(x=x_all, y=last250["MA50"], name="MA50",
                                  line=dict(color="#2563a8", width=1.5)))
-    acc = last250[last250.get("Signal_Accumulation", False)]
-    if not acc.empty:
-        fig.add_trace(go.Scatter(x=acc.index, y=acc["Low"] * 0.98, mode="markers",
-            name="Accumulation", marker=dict(color="#b8800f", size=8, symbol="circle")))
-    bull = last250[last250.get("Squeeze_Fired_Bullish", False)]
-    if not bull.empty:
-        fig.add_trace(go.Scatter(x=bull.index, y=bull["Low"] * 0.95, mode="markers",
-            name="Squeeze Fired", marker=dict(color="#2f8a4f", size=12, symbol="triangle-up")))
+    if "Signal_Accumulation" in last250.columns:
+        acc = last250[last250["Signal_Accumulation"] == True]
+        if not acc.empty:
+            fig.add_trace(go.Scatter(x=_xdates(acc), y=acc["Low"] * 0.98,
+                mode="markers", name="Accumulation",
+                marker=dict(color="#b8800f", size=8, symbol="circle")))
+    if "Squeeze_Fired_Bullish" in last250.columns:
+        bull = last250[last250["Squeeze_Fired_Bullish"] == True]
+        if not bull.empty:
+            fig.add_trace(go.Scatter(x=_xdates(bull), y=bull["Low"] * 0.95,
+                mode="markers", name="Squeeze Fired",
+                marker=dict(color="#2f8a4f", size=12, symbol="triangle-up")))
 
     fig.update_layout(
         height=420, template="plotly_white", margin=dict(l=10, r=10, t=10, b=10),
@@ -573,7 +614,9 @@ if analysis_df is not None and not analysis_df.empty:
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         plot_bgcolor="#f7f3ec", paper_bgcolor="#f7f3ec",
     )
-    fig.update_xaxes(gridcolor="#d6cebe")
+    # type='category' treats each trading day as a discrete slot — no gaps
+    # for weekends or Chinese public holidays.
+    fig.update_xaxes(type="category", nticks=10, gridcolor="#d6cebe")
     fig.update_yaxes(gridcolor="#d6cebe", title="Price (¥)")
     st.plotly_chart(fig, use_container_width=True)
 
@@ -662,28 +705,58 @@ if analysis_df is not None and not analysis_df.empty:
         comp_html = "".join(comp_rows)
 
         # ── Stop/targets card ────────────────────────────────────────────────
+        # Chinese A-share colour convention: red (涨) = up, green (跌) = down.
+        # Stop is a downside level → green.  Targets are upside → red.
+        _cn_up   = "color:#c6432a"   # red  = 涨 (positive / up move)
+        _cn_down = "color:#2f8a4f"   # green = 跌 (negative / down move)
         stop_targets_html = f"""
         <div class="eb-card">
-          <div class="eb-eyebrow" style="margin-bottom:10px">Strategy</div>
+          <div class="eb-eyebrow" style="margin-bottom:6px">Stop &amp; Targets
+            <span style="font-size:9px;letter-spacing:0.08em;color:var(--ink-3);
+                         margin-left:8px">红涨绿跌 · red=up · green=down</span>
+          </div>
           <table class="eb-table" style="font-size:13px">
-            <tr><td>Current</td>
-                <td class="num"><strong>¥{price:.2f}</strong></td>
-                <td class="num" style="color:var(--ink-3)">ATR ¥{atr:.2f}</td></tr>
-            <tr><td>Stop</td>
-                <td class="num">¥{stg['stop']:.2f}</td>
-                <td class="num neg">{stg['risk_pct']:+.1f}%</td></tr>
-            <tr><td>T1 (1R)</td>
-                <td class="num">¥{stg['t1']:.2f}</td>
-                <td class="num pos">+{stg['reward_t1_pct']:.1f}%</td></tr>
-            <tr><td>T2 (1.5R)</td>
-                <td class="num">¥{stg['t2']:.2f}</td>
-                <td class="num pos">+{stg['reward_t2_pct']:.1f}%</td></tr>
-            <tr><td>T3 (capped at R1)</td>
-                <td class="num">¥{stg['t3']:.2f}</td>
-                <td class="num pos">+{stg['reward_t3_pct']:.1f}%</td></tr>
-            <tr><td><strong>R : R</strong></td>
-                <td class="num" colspan="2"><strong>1 : {stg['rr']:.2f}</strong>
-                    <span style="color:var(--ink-3);font-size:11px">  · using T2</span></td></tr>
+            <thead><tr>
+              <th>Level</th><th>Price</th><th>Δ from entry</th><th>Role</th>
+            </tr></thead>
+            <tbody>
+            <tr>
+              <td>Current</td>
+              <td class="num"><strong>¥{price:.2f}</strong></td>
+              <td class="num" style="color:var(--ink-3)">ATR ¥{atr:.2f}</td>
+              <td style="font-size:11px;color:var(--ink-3)">entry reference</td>
+            </tr>
+            <tr>
+              <td><strong>Stop Loss</strong></td>
+              <td class="num">¥{stg['stop']:.2f}</td>
+              <td class="num" style="{_cn_down}">−{stg['risk_pct']:.1f}%</td>
+              <td style="font-size:11px;color:var(--ink-3)">exit if breached; invalidates setup</td>
+            </tr>
+            <tr>
+              <td>T1 · Partial exit</td>
+              <td class="num">¥{stg['t1']:.2f}</td>
+              <td class="num" style="{_cn_up}">+{stg['reward_t1_pct']:.1f}%</td>
+              <td style="font-size:11px;color:var(--ink-3)">scale out ~⅓ position</td>
+            </tr>
+            <tr>
+              <td>T2 · Main target</td>
+              <td class="num">¥{stg['t2']:.2f}</td>
+              <td class="num" style="{_cn_up}">+{stg['reward_t2_pct']:.1f}%</td>
+              <td style="font-size:11px;color:var(--ink-3)">primary exit; basis for R:R</td>
+            </tr>
+            <tr>
+              <td>T3 · Full run</td>
+              <td class="num">¥{stg['t3']:.2f}</td>
+              <td class="num" style="{_cn_up}">+{stg['reward_t3_pct']:.1f}%</td>
+              <td style="font-size:11px;color:var(--ink-3)">if momentum holds; capped at R1</td>
+            </tr>
+            <tr>
+              <td><strong>R : R</strong></td>
+              <td class="num" colspan="3"><strong>1 : {stg['rr']:.2f}</strong>
+                <span style="color:var(--ink-3);font-size:11px"> · measured to T2</span>
+              </td>
+            </tr>
+            </tbody>
           </table>
         </div>
         """
@@ -1154,15 +1227,18 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Build the metrics summary string for SWOT grounding
+_roe_label = (f"ROE annual ({roe_annual_period[:4]})" if roe_annual is not None
+              else f"ROE Q ({roe_q_period})")
 metrics_summary = "\n".join([
     f"- P/E (TTM): {_fmt_num(pe, 1)}",
     f"- P/B: {_fmt_num(pb, 2)}",
-    f"- ROE: {_fmt_pct(roe, 1)}",
+    f"- {_roe_label}: {_fmt_pct(roe, 1)}",
+    f"- ROE latest quarter ({roe_q_period}): {_fmt_pct(roe_q, 1)} (cumulative YTD, not annualised)",
     f"- Gross margin (TTM): {_fmt_pct(metrics['gross_margin_ttm_pct'], 1)}",
     f"- Net margin (TTM): {_fmt_pct(metrics['net_margin_ttm_pct'], 1)}",
     f"- Revenue YoY: {_fmt_pct(or_yoy, 1, signed=True)}",
     f"- Net profit YoY: {_fmt_pct(np_yoy, 1, signed=True)}",
-    f"- Net debt: {_fmt_yi(metrics['net_debt_yi'])} 亿元",
+    f"- Net debt (short+long borrowings + bonds − cash): {_fmt_yi(metrics['net_debt_yi'])} 亿元",
     f"- EV/EBITDA: {_fmt_num(metrics['ev_ebitda'], 1)}",
     f"- FCF yield: {_fmt_pct(metrics['fcf_yield_pct'], 2)}",
 ])
@@ -1309,28 +1385,38 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-ccol1, ccol2 = st.columns([5, 1])
-with ccol2:
-    if is_admin and st.button("🔄 Regen peers", key="eb_re_peers", use_container_width=True):
-        with st.spinner("Regenerating peer set…"):
-            try:
-                equity_brief.get_competitors(ticker, company, industry, force_refresh=True)
-                st.session_state.pop(f"eb_peer_select_{ticker}", None)
-                st.rerun()
-            except RuntimeError as exc:
-                st.error(str(exc))
+@st.fragment
+def _competitors_section():
+    """
+    Wrapped in @st.fragment so 'Regen peers' only rerenders this block —
+    not the entire page (which would rerun all slow API calls above).
+    Variables are captured from the outer scope via closure.
+    """
+    ccol1, ccol2 = st.columns([5, 1])
+    with ccol2:
+        if is_admin and st.button("🔄 Regen peers", key="eb_re_peers",
+                                  use_container_width=True):
+            with st.spinner("Regenerating peer set…"):
+                try:
+                    equity_brief.get_competitors(ticker, company, industry,
+                                                 force_refresh=True)
+                    st.session_state.pop(f"eb_peer_select_{ticker}", None)
+                    st.rerun(scope="fragment")
+                except RuntimeError as exc:
+                    st.error(str(exc))
 
-try:
-    with st.spinner("Loading peers…"):
-        comps = equity_brief.get_competitors(ticker, company, industry)
-    peer_list = comps["payload"].get("competitors", [])
-except RuntimeError as exc:
-    st.error(f"Peer discovery failed: {exc}")
-    peer_list = []
+    try:
+        with st.spinner("Loading peers…"):
+            comps = equity_brief.get_competitors(ticker, company, industry)
+        peer_list = comps["payload"].get("competitors", [])
+    except RuntimeError as exc:
+        st.error(f"Peer discovery failed: {exc}")
+        peer_list = []
 
-if not peer_list:
-    st.info("No validated peers were returned.")
-else:
+    if not peer_list:
+        st.info("No validated peers were returned.")
+        return
+
     # Admin-only: per-peer checkbox for curation
     selected = []
     if is_admin:
@@ -1348,7 +1434,7 @@ else:
         if st.button("💾 Save curated peer set", key="eb_save_peers"):
             equity_brief.save_competitors_curated(ticker, selected)
             st.success(f"✅ Saved {len(selected)} peers.")
-            st.rerun()
+            st.rerun(scope="fragment")
     else:
         selected = peer_list
 
@@ -1356,7 +1442,9 @@ else:
     target_row = {
         "ticker": ticker, "name": company, "is_target": True,
         "pe": pe, "pb": pb, "ev_ebitda": metrics["ev_ebitda"],
-        "rev_yoy": or_yoy, "np_yoy": np_yoy, "roe": roe,
+        "rev_yoy": or_yoy, "np_yoy": np_yoy,
+        "roe_annual": roe_annual, "roe_annual_period": roe_annual_period,
+        "roe_q": roe_q, "roe_q_period": roe_q_period,
         "net_debt_ebitda": metrics["net_debt_ebitda"],
         "signal": _entry_signal_label(analysis_df),
     }
@@ -1377,6 +1465,16 @@ else:
                 print(f"[Equity_Brief] peer {t}: {exc}")
                 continue
 
+            # Peer ROE: split annual vs latest quarter
+            p_roe_q = p_roe_q_period = None
+            p_roe_annual = p_roe_annual_period = None
+            if pfina is not None and not pfina.empty and "roe" in pfina.columns:
+                p_roe_q = pfina.iloc[0]["roe"]
+                p_roe_q_period = str(pfina.iloc[0].get("end_date", ""))
+                p_annual_rows = pfina[pfina["end_date"].astype(str).str.endswith("1231")]
+                if not p_annual_rows.empty:
+                    p_roe_annual = p_annual_rows.iloc[0]["roe"]
+                    p_roe_annual_period = str(p_annual_rows.iloc[0]["end_date"])
             table_rows.append({
                 "ticker": t, "name": p["name"], "is_target": False,
                 "pe":  (pdaily or {}).get("pe_ttm") or (pdaily or {}).get("pe"),
@@ -1384,7 +1482,8 @@ else:
                 "ev_ebitda": pmet["ev_ebitda"],
                 "rev_yoy": pfina.iloc[0]["or_yoy"] if (pfina is not None and not pfina.empty) else None,
                 "np_yoy": pfina.iloc[0]["netprofit_yoy"] if (pfina is not None and not pfina.empty) else None,
-                "roe":   pfina.iloc[0]["roe"]    if (pfina is not None and not pfina.empty) else None,
+                "roe_annual": p_roe_annual, "roe_annual_period": p_roe_annual_period,
+                "roe_q": p_roe_q, "roe_q_period": p_roe_q_period,
                 "net_debt_ebitda": pmet["net_debt_ebitda"],
                 "signal": _entry_signal_label(pana),
             })
@@ -1394,15 +1493,21 @@ else:
         sig_lbl, sig_cls = r["signal"]
         sig_pill = f'<span class="eb-pill {sig_cls}">{sig_lbl}</span>' if sig_cls else sig_lbl
         target_marker = ' <span class="eb-pill">Target</span>' if r["is_target"] else ""
+        annual_yr   = (r.get("roe_annual_period") or "")[:4] or "—"
+        q_lbl       = (r.get("roe_q_period") or "")
+        q_lbl_short = f"{q_lbl[:4]}-{q_lbl[4:6]}" if len(q_lbl) >= 6 else q_lbl or "—"
         rows_html += f"""
         <tr>
-          <td><strong>`{r['ticker']}` {r['name']}</strong>{target_marker}</td>
+          <td><strong>{r['ticker']} {r['name']}</strong>{target_marker}</td>
           <td class="num">{_fmt_num(r['pe'], 1)}</td>
           <td class="num">{_fmt_num(r['pb'], 2)}</td>
           <td class="num">{_fmt_num(r['ev_ebitda'], 1)}</td>
           <td class="num {_pct_class(r['rev_yoy'])}">{_fmt_pct(r['rev_yoy'], 1, signed=True)}</td>
           <td class="num {_pct_class(r['np_yoy'])}">{_fmt_pct(r['np_yoy'], 1, signed=True)}</td>
-          <td class="num">{_fmt_pct(r['roe'], 1)}</td>
+          <td class="num">{_fmt_pct(r.get('roe_annual'), 1)}
+            <div style="font-size:9.5px;color:var(--ink-3)">{annual_yr} annual</div></td>
+          <td class="num">{_fmt_pct(r.get('roe_q'), 1)}
+            <div style="font-size:9.5px;color:var(--ink-3)">{q_lbl_short} YTD</div></td>
           <td class="num">{_fmt_num(r['net_debt_ebitda'], 2)}</td>
           <td>{sig_pill}</td>
         </tr>"""
@@ -1412,13 +1517,17 @@ else:
       <table class="eb-table">
         <thead><tr>
           <th>Stock</th><th>P/E</th><th>P/B</th><th>EV/EBITDA</th>
-          <th>Rev YoY</th><th>NP YoY</th><th>ROE</th>
-          <th>Net Debt / EBITDA</th><th>Latest Signal</th>
+          <th>Rev YoY</th><th>NP YoY</th>
+          <th>ROE (Annual)</th><th>ROE (Latest Qtr)</th>
+          <th>Net Debt/EBITDA</th><th>Latest Signal</th>
         </tr></thead>
         <tbody>{rows_html}</tbody>
       </table>
     </div>
     """, unsafe_allow_html=True)
+
+
+_competitors_section()
 
 # Footer
 gen_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
