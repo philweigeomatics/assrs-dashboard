@@ -101,7 +101,7 @@ def set_user_role(username: str, role: str) -> None:
     )
 
 
-def get_all_users() -> list[dict]:
+def get_all_users():
     """Return all user rows (excluding password_hash) for admin display."""
     df = db.read_table(
         "app_users",
