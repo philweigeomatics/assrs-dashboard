@@ -9,8 +9,10 @@ rendered as raw HTML cards/tables to match the AURX print aesthetic.
 """
 
 import json
+import math
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -18,6 +20,7 @@ import streamlit as st
 import auth_manager
 import data_manager
 import equity_brief
+import trading_strategy
 from analysis_engine import run_single_stock_analysis
 
 auth_manager.require_login()
@@ -464,6 +467,229 @@ if analysis_df is not None and not analysis_df.empty:
     pill_class = f"eb-pill {sig_class}" if sig_class else "eb-pill"
     st.markdown(f'<div style="margin-top:8px"><span class="{pill_class}">'
                 f'Latest signal · {sig_label}</span></div>', unsafe_allow_html=True)
+
+    # ── Trading Strategy block (within Section 02) ────────────────────────────
+    summary = trading_strategy.build_strategy_summary(raw_df, analysis_df)
+
+    if summary:
+        score   = summary["score"]
+        stg     = summary["stop_targets"]
+        zone    = summary["entry_zone"]
+        sups    = summary["supports"]
+        res     = summary["resistances"]
+        price   = summary["price"]
+        atr     = summary["atr"]
+
+        # ── Signal gauge as semicircle SVG (-100 left → +100 right) ──────────
+        # Map score → angle: -100 = -90°, +100 = +90°
+        angle_deg = score["score"] * 0.9
+        rad = np.deg2rad(angle_deg - 90)  # -90° offset → start at top
+        cx, cy, r = 110, 110, 90
+        nx = cx + r * np.cos(rad)
+        ny = cy + r * np.sin(rad)
+        # Score color
+        s = score["score"]
+        if s >= 40:    score_color = "#2f8a4f"
+        elif s >= 10:  score_color = "#82c69a"
+        elif s > -10:  score_color = "#b8800f"
+        elif s > -40:  score_color = "#e08a6e"
+        else:          score_color = "#c6432a"
+
+        gauge_svg = f"""
+        <svg width="220" height="135" viewBox="0 0 220 135">
+          <!-- background arc -->
+          <path d="M 20 110 A 90 90 0 0 1 200 110"
+                fill="none" stroke="#d6cebe" stroke-width="14"/>
+          <!-- colored arc up to the score -->
+          <path d="M 20 110 A 90 90 0 0 1 {nx:.2f} {ny:.2f}"
+                fill="none" stroke="{score_color}" stroke-width="14"
+                stroke-linecap="round"/>
+          <!-- needle -->
+          <line x1="{cx}" y1="{cy}" x2="{nx:.2f}" y2="{ny:.2f}"
+                stroke="#1a1916" stroke-width="2"/>
+          <circle cx="{cx}" cy="{cy}" r="5" fill="#1a1916"/>
+          <!-- score number -->
+          <text x="{cx}" y="80" text-anchor="middle"
+                font-family="JetBrains Mono, monospace" font-size="32"
+                font-weight="500" fill="#1a1916">{s:+d}</text>
+          <text x="{cx}" y="100" text-anchor="middle"
+                font-family="ui-monospace, monospace" font-size="11"
+                letter-spacing="0.14em" fill="#807a70" text-transform="uppercase">
+                {score['label'].upper()}</text>
+          <!-- scale labels -->
+          <text x="20" y="128" font-family="ui-monospace, monospace"
+                font-size="9" fill="#807a70">-100</text>
+          <text x="200" y="128" text-anchor="end" font-family="ui-monospace, monospace"
+                font-size="9" fill="#807a70">+100</text>
+        </svg>
+        """
+
+        # ── Component breakdown bars ─────────────────────────────────────────
+        comps = score["components"]
+        comp_html = ""
+        for k in ("trend", "momentum", "rsi", "volatility", "custom"):
+            c = comps[k]
+            v, mx = c["value"], c["max"]
+            # Map -mx..+mx → 0..100% width, centered at 50%
+            center, width_pct = 50, abs(v) / mx * 50
+            if v >= 0:
+                bar_left, bar_right = center, center + width_pct
+                bar_color = "#2f8a4f"
+            else:
+                bar_left, bar_right = center - width_pct, center
+                bar_color = "#c6432a"
+            comp_html += f"""
+            <div style="display:grid;grid-template-columns:90px 1fr 50px;gap:10px;
+                        align-items:center;padding:5px 0;font-size:12px">
+              <div style="font-family:ui-monospace,monospace;font-size:10.5px;
+                          letter-spacing:0.08em;color:var(--ink-3);text-transform:uppercase">
+                {c['label']}</div>
+              <div style="position:relative;height:10px;background:#efe9df;border-radius:2px">
+                <div style="position:absolute;left:50%;top:-2px;width:1px;height:14px;
+                            background:#807a70"></div>
+                <div style="position:absolute;left:{bar_left}%;width:{bar_right-bar_left}%;
+                            top:0;height:10px;background:{bar_color};border-radius:2px"></div>
+              </div>
+              <div class="eb-num" style="text-align:right;font-size:12px;color:var(--ink-2)">
+                {v:+d}</div>
+            </div>"""
+
+        # ── Stop/targets card ────────────────────────────────────────────────
+        stop_targets_html = f"""
+        <div class="eb-card">
+          <div class="eb-eyebrow" style="margin-bottom:10px">Strategy</div>
+          <table class="eb-table" style="font-size:13px">
+            <tr><td>Current</td>
+                <td class="num"><strong>¥{price:.2f}</strong></td>
+                <td class="num" style="color:var(--ink-3)">ATR ¥{atr:.2f}</td></tr>
+            <tr><td>Stop</td>
+                <td class="num">¥{stg['stop']:.2f}</td>
+                <td class="num neg">{stg['risk_pct']:+.1f}%</td></tr>
+            <tr><td>T1 (1R)</td>
+                <td class="num">¥{stg['t1']:.2f}</td>
+                <td class="num pos">+{stg['reward_t1_pct']:.1f}%</td></tr>
+            <tr><td>T2 (1.5R)</td>
+                <td class="num">¥{stg['t2']:.2f}</td>
+                <td class="num pos">+{stg['reward_t2_pct']:.1f}%</td></tr>
+            <tr><td>T3 (capped at R1)</td>
+                <td class="num">¥{stg['t3']:.2f}</td>
+                <td class="num pos">+{stg['reward_t3_pct']:.1f}%</td></tr>
+            <tr><td><strong>R : R</strong></td>
+                <td class="num" colspan="2"><strong>1 : {stg['rr']:.2f}</strong>
+                    <span style="color:var(--ink-3);font-size:11px">  · using T2</span></td></tr>
+          </table>
+        </div>
+        """
+
+        # ── S/R table ────────────────────────────────────────────────────────
+        sr_rows = ""
+        for r_lvl in res:
+            d = (r_lvl["price"] - price) / price * 100
+            dots = "●" * min(int(r_lvl["strength"]), 5)
+            sr_rows += f"""<tr>
+              <td><strong style="color:var(--neg)">R</strong></td>
+              <td class="num">¥{r_lvl['price']:.2f}</td>
+              <td class="num neg">+{d:.1f}%</td>
+              <td style="color:var(--ink-3);font-family:ui-monospace,monospace;font-size:11px">{dots}</td>
+            </tr>"""
+        sr_rows += f"""<tr style="background:#efe9df">
+          <td><strong>—</strong></td>
+          <td class="num"><strong>¥{price:.2f}</strong></td>
+          <td class="num"><strong>now</strong></td>
+          <td></td>
+        </tr>"""
+        for s_lvl in sups:
+            d = (s_lvl["price"] - price) / price * 100
+            dots = "●" * min(int(s_lvl["strength"]), 5)
+            sr_rows += f"""<tr>
+              <td><strong style="color:var(--pos)">S</strong></td>
+              <td class="num">¥{s_lvl['price']:.2f}</td>
+              <td class="num pos">{d:.1f}%</td>
+              <td style="color:var(--ink-3);font-family:ui-monospace,monospace;font-size:11px">{dots}</td>
+            </tr>"""
+
+        sr_html = f"""
+        <div class="eb-card">
+          <div class="eb-eyebrow" style="margin-bottom:10px">Support & Resistance · volume-weighted</div>
+          <table class="eb-table" style="font-size:13px">
+            <thead><tr><th></th><th>Price</th><th>Δ%</th><th>Strength</th></tr></thead>
+            <tbody>{sr_rows}</tbody>
+          </table>
+        </div>
+        """
+
+        # ── Entry zone bar ───────────────────────────────────────────────────
+        all_zones = zone["all_zones"]
+        z_min = min(b["low"] for b in all_zones)
+        z_max = max(b["high"] for b in all_zones)
+        z_range = max(z_max - z_min, 1e-6)
+
+        bar_segments, label_segments = "", ""
+        for b in all_zones:
+            left  = (b["low"]  - z_min) / z_range * 100
+            width = (b["high"] - b["low"]) / z_range * 100
+            bar_segments += (
+                f'<div style="position:absolute;left:{left}%;width:{width}%;'
+                f'top:0;height:34px;background:{b["color"]};'
+                f'border-right:1px solid rgba(0,0,0,0.15)"></div>'
+            )
+            # Label only if wide enough
+            if width > 7:
+                label_segments += (
+                    f'<div style="position:absolute;left:{left}%;width:{width}%;'
+                    f'top:36px;text-align:center;font-family:ui-monospace,monospace;'
+                    f'font-size:9.5px;color:var(--ink-2);letter-spacing:0.06em;'
+                    f'text-transform:uppercase">{b["label"]}</div>'
+                )
+
+        marker_left = (price - z_min) / z_range * 100
+        zone_bar_html = f"""
+        <div class="eb-card">
+          <div class="eb-eyebrow" style="margin-bottom:10px">Entry Zone</div>
+          <div style="display:flex;justify-content:space-between;
+                      font-size:13px;margin-bottom:8px">
+            <div>Current price sits in <strong>{zone['label']}</strong></div>
+            <div style="color:var(--ink-2)">{zone['action']}</div>
+          </div>
+          <div style="position:relative;height:34px;background:#efe9df;
+                      border-radius:3px;overflow:hidden">
+            {bar_segments}
+            <div style="position:absolute;left:{marker_left}%;top:-6px;
+                        width:2px;height:46px;background:#1a1916;z-index:5"></div>
+            <div style="position:absolute;left:calc({marker_left}% - 30px);
+                        top:-22px;font-family:JetBrains Mono,monospace;font-size:11px;
+                        font-weight:600;color:#1a1916;z-index:6;width:60px;text-align:center">
+              ¥{price:.2f}</div>
+          </div>
+          <div style="position:relative;height:36px;margin-top:4px">
+            {label_segments}
+          </div>
+          <div style="display:flex;justify-content:space-between;
+                      font-family:JetBrains Mono,monospace;font-size:10px;
+                      color:var(--ink-3);margin-top:6px">
+            <span>¥{z_min:.2f}</span>
+            <span>¥{z_max:.2f}</span>
+          </div>
+        </div>
+        """
+
+        # ── Render: 2-column layout (gauge+breakdown | stop/targets) then 2 cols below
+        st.markdown(f"""
+        <div style="margin-top:24px;display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <div class="eb-card">
+            <div class="eb-eyebrow" style="margin-bottom:6px">Composite Signal Score</div>
+            <div style="display:flex;align-items:center;gap:18px">
+              {gauge_svg}
+              <div style="flex:1">{comp_html}</div>
+            </div>
+          </div>
+          {stop_targets_html}
+        </div>
+        <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          {sr_html}
+          {zone_bar_html}
+        </div>
+        """, unsafe_allow_html=True)
 else:
     st.warning("No technical data available.")
 
