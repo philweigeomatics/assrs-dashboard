@@ -790,7 +790,7 @@ if analysis_df is not None and not analysis_df.empty:
               <td>T1 · Partial exit</td>
               <td class="num">¥{stg['t1']:.2f}</td>
               <td class="num" style="{_cn_up}">+{stg['reward_t1_pct']:.1f}%</td>
-              <td style="font-size:11px;color:var(--ink-3)">scale out ~⅓ position</td>
+              <td style="font-size:11px;color:var(--ink-3)">scale out ~⅓ at first resistance</td>
             </tr>
             <tr>
               <td>T2 · Main target</td>
@@ -802,7 +802,7 @@ if analysis_df is not None and not analysis_df.empty:
               <td>T3 · Full run</td>
               <td class="num">¥{stg['t3']:.2f}</td>
               <td class="num" style="{_cn_up}">+{stg['reward_t3_pct']:.1f}%</td>
-              <td style="font-size:11px;color:var(--ink-3)">if momentum holds; capped at R1</td>
+              <td style="font-size:11px;color:var(--ink-3)">if momentum carries through next resistance</td>
             </tr>
             <tr>
               <td><strong>R : R</strong></td>

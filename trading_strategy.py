@@ -321,40 +321,63 @@ def compute_signal_score(analysis_df: pd.DataFrame) -> dict:
 def compute_stop_targets(price: float, atr: float,
                          resistances: list[dict], supports: list[dict]) -> dict:
     """
-    Stop = MAX(price - 2*ATR, nearest_support * 0.97).
+    Stop = MAX(price - 2*ATR, nearest_support * 0.97, price * 0.01).
     Taking the MAX (i.e. tighter stop) is correct because:
       - if support is far below: ATR stop protects against noise
       - if support is right below: the support stop is more meaningful (a
         decisive break of support invalidates the setup)
 
-    Targets are an ATR-multiple ladder, T3 capped at the nearest resistance
-    if one exists below T3.
+    Targets ladder — T1 (partial exit) → T2 (main) → T3 (full run):
+
+    Base ATR-multiples are 2 / 3 / 4 ATR above price.  Each target is capped
+    at the FIRST resistance above the PREVIOUS target — so each target
+    consumes a distinct resistance level.
+
+    Why this matters: if R1 is very close to entry (e.g., 0.7% above price),
+    a "cap-everything-at-R1" rule would collapse T1 = T2 = T3 = R1, giving
+    three identical targets and a useless R:R ratio.  Instead, T1 = R1, then
+    T2 looks for the next resistance above T1 (or falls back to its ATR
+    target), and T3 looks for the next one above T2.  Targets stay
+    meaningfully separated.
     """
     atr_stop = price - 2 * atr
     nearest_support = supports[0]["price"] if supports else None
     sup_stop = nearest_support * 0.97 if nearest_support else atr_stop
 
-    # MAX = tighter stop (closer to current price = smaller loss).
-    # ATR stop wins when support is far away; sup stop wins when support is
-    # right below (breaking it clearly invalidates the setup).
-    # Floor at price * 0.01 so stop never goes negative on very cheap stocks.
     stop = max(atr_stop, sup_stop, price * 0.01)
     risk = max(price - stop, 1e-6)
 
-    t1 = price + 2 * atr   # partial exit  (~1R reward)
-    t2 = price + 3 * atr   # main target   (~1.5R reward)
-    t3 = price + 4 * atr   # full run      (~2R reward)
+    t1_base = price + 2 * atr   # partial exit
+    t2_base = price + 3 * atr   # main target
+    t3_base = price + 4 * atr   # full run
 
-    # Cap targets at the nearest resistance, working top-down so the ordering
-    # T1 ≤ T2 ≤ T3 is always preserved.
-    if resistances:
-        r1 = resistances[0]["price"]
-        if r1 <= t1:       # resistance is at or below T1 — all targets get capped
-            t1 = t2 = t3 = r1
-        elif r1 <= t2:     # resistance between T1 and T2 — cap T2 and T3
-            t2 = t3 = r1
-        elif r1 < t3:      # resistance between T2 and T3 — cap only T3
-            t3 = r1
+    # Walk resistances above current price and assign one to each target.
+    res_pool = sorted([r["price"] for r in resistances if r["price"] > price])
+
+    def _resolve(base, prev, pool):
+        """
+        Find the first resistance r in pool with prev < r <= base.
+        Returns (target, pool_after_consuming_used_resistances).
+        Falls back to `base` if no qualifying resistance exists.
+        """
+        # Drop any resistances at or below the previous target — already used
+        # or no longer in the way.
+        i = 0
+        while i < len(pool) and pool[i] <= prev:
+            i += 1
+        if i < len(pool) and pool[i] <= base:
+            return pool[i], pool[i + 1:]
+        return base, pool[i:]
+
+    t1, res_pool = _resolve(t1_base, price, res_pool)
+    t2, res_pool = _resolve(t2_base, t1,    res_pool)
+    t3, _        = _resolve(t3_base, t2,    res_pool)
+
+    # Minimum separation so targets stay visually & operationally distinct
+    # when resistances are tightly clustered.
+    min_sep = atr * 0.3
+    t2 = max(t2, t1 + min_sep)
+    t3 = max(t3, t2 + min_sep)
 
     rr = (t2 - price) / risk   # R:R measured to T2 (the realistic exit)
 
