@@ -262,6 +262,53 @@ def _entry_signal_label(analysis_df) -> tuple[str, str]:
     return "Neutral", ""
 
 
+@st.cache_data(ttl=600, show_spinner=False, max_entries=50)
+def _peer_row_data(peer_ticker: str):
+    """
+    Fetch all fundamentals + derived metrics for ONE peer.  Cached for
+    10 minutes so unchecking a peer (which reruns the fragment) does NOT
+    re-issue Tushare calls — the previously-fetched peers are served from
+    cache instantly.
+
+    Returns a dict ready to merge into a comparison-table row, or None on
+    fetch failure.  Caller adds name / signal / target marker.
+    """
+    try:
+        pdaily = data_manager.get_latest_daily_basic(peer_ticker)
+        pinc   = data_manager.fetch_income_statement(peer_ticker, 8)
+        pbal   = data_manager.fetch_balance_sheet(peer_ticker, 8)
+        pcf    = data_manager.fetch_cashflow(peer_ticker, 8)
+        pfina  = data_manager.fetch_full_fina_indicator(peer_ticker, 8)
+        pmet   = data_manager.compute_derived_metrics(pinc, pbal, pcf, pdaily or {})
+    except Exception as exc:
+        print(f"[Equity_Brief] peer {peer_ticker}: {exc}")
+        return None
+
+    p_roe_q = p_roe_q_period = None
+    p_roe_annual = p_roe_annual_period = None
+    if pfina is not None and not pfina.empty and "roe" in pfina.columns:
+        p_roe_q = pfina.iloc[0]["roe"]
+        p_roe_q_period = str(pfina.iloc[0].get("end_date", ""))
+        p_annual_rows = pfina[pfina["end_date"].astype(str).str.endswith("1231")]
+        if not p_annual_rows.empty:
+            p_roe_annual = p_annual_rows.iloc[0]["roe"]
+            p_roe_annual_period = str(p_annual_rows.iloc[0]["end_date"])
+
+    return {
+        "ticker":            peer_ticker,
+        "pe":                (pdaily or {}).get("pe_ttm") or (pdaily or {}).get("pe"),
+        "pb":                (pdaily or {}).get("pb"),
+        "ev_ebitda":         pmet["ev_ebitda"],
+        "rev_yoy":           pfina.iloc[0]["or_yoy"] if (pfina is not None and not pfina.empty) else None,
+        "np_yoy":            pfina.iloc[0]["netprofit_yoy"] if (pfina is not None and not pfina.empty) else None,
+        "roe_annual":        p_roe_annual,
+        "roe_annual_period": p_roe_annual_period,
+        "roe_q":             p_roe_q,
+        "roe_q_period":      p_roe_q_period,
+        "net_debt_ebitda":   pmet["net_debt_ebitda"],
+    }
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # INPUT
 # ══════════════════════════════════════════════════════════════════════════════
@@ -790,7 +837,7 @@ if analysis_df is not None and not analysis_df.empty:
               <td>T1 · Partial exit</td>
               <td class="num">¥{stg['t1']:.2f}</td>
               <td class="num" style="{_cn_up}">+{stg['reward_t1_pct']:.1f}%</td>
-              <td style="font-size:11px;color:var(--ink-3)">scale out ~⅓ position</td>
+              <td style="font-size:11px;color:var(--ink-3)">scale out ~⅓ at first resistance</td>
             </tr>
             <tr>
               <td>T2 · Main target</td>
@@ -802,7 +849,7 @@ if analysis_df is not None and not analysis_df.empty:
               <td>T3 · Full run</td>
               <td class="num">¥{stg['t3']:.2f}</td>
               <td class="num" style="{_cn_up}">+{stg['reward_t3_pct']:.1f}%</td>
-              <td style="font-size:11px;color:var(--ink-3)">if momentum holds; capped at R1</td>
+              <td style="font-size:11px;color:var(--ink-3)">if momentum carries through next resistance</td>
             </tr>
             <tr>
               <td><strong>R : R</strong></td>
@@ -1442,9 +1489,18 @@ st.markdown("""
 @st.fragment
 def _competitors_section():
     """
-    Wrapped in @st.fragment so 'Regen peers' only rerenders this block —
-    not the entire page (which would rerun all slow API calls above).
-    Variables are captured from the outer scope via closure.
+    Wrapped in @st.fragment so 'Regen peers' and 'Save curation' only
+    rerender this block — not the whole page.
+
+    IMPORTANT: the comparison table renders from the SAVED peer list
+    (whatever's persisted in equity_brief_cache), NOT from live checkbox
+    state.  Toggling a checkbox does NOT rebuild the table — it only
+    affects the next save.  This means:
+      - Unchecking a peer is instant (no Tushare calls).
+      - Clicking 'Save' persists the curated set + reruns the fragment;
+        the table then re-renders for the new (smaller) saved peer list.
+      - Per-peer fundamentals are cached in _peer_row_data, so even on a
+        full re-render only the peers we haven't seen recently hit Tushare.
     """
     ccol1, ccol2 = st.columns([5, 1])
     with ccol2:
@@ -1454,7 +1510,6 @@ def _competitors_section():
                 try:
                     equity_brief.get_competitors(ticker, company, industry,
                                                  force_refresh=True)
-                    st.session_state.pop(f"eb_peer_select_{ticker}", None)
                     st.rerun(scope="fragment")
                 except RuntimeError as exc:
                     st.error(str(exc))
@@ -1471,28 +1526,7 @@ def _competitors_section():
         st.info("No validated peers were returned.")
         return
 
-    # Admin-only: per-peer checkbox for curation
-    selected = []
-    if is_admin:
-        st.markdown('<div style="margin-bottom:8px"><span class="eb-pill warn">'
-                    'Admin · uncheck any wrong peers, then save</span></div>',
-                    unsafe_allow_html=True)
-        sel_key_root = f"eb_peer_chk_{ticker}"
-        for p in peer_list:
-            checked = st.checkbox(
-                f"`{p['ticker']}` {p['name']} — {p.get('why','')}",
-                value=True, key=f"{sel_key_root}_{p['ticker']}",
-            )
-            if checked:
-                selected.append(p)
-        if st.button("💾 Save curated peer set", key="eb_save_peers"):
-            equity_brief.save_competitors_curated(ticker, selected)
-            st.success(f"✅ Saved {len(selected)} peers.")
-            st.rerun(scope="fragment")
-    else:
-        selected = peer_list
-
-    # Build comparison table
+    # ── Comparison table — built from the SAVED peer list ───────────────────
     target_row = {
         "ticker": ticker, "name": company, "is_target": True,
         "pe": pe, "pb": pb, "ev_ebitda": metrics["ev_ebitda"],
@@ -1504,43 +1538,16 @@ def _competitors_section():
     }
     table_rows = [target_row]
 
-    with st.spinner(f"Pulling fundamentals + technicals for {len(selected)} peers…"):
-        for p in selected:
-            t = p["ticker"]
-            try:
-                pdaily = data_manager.get_latest_daily_basic(t)
-                pinc   = data_manager.fetch_income_statement(t, 8)
-                pbal   = data_manager.fetch_balance_sheet(t, 8)
-                pcf    = data_manager.fetch_cashflow(t, 8)
-                pfina  = data_manager.fetch_full_fina_indicator(t, 8)
-                pmet   = data_manager.compute_derived_metrics(pinc, pbal, pcf, pdaily or {})
-                pana, _ = _technical_signal(t)
-            except Exception as exc:
-                print(f"[Equity_Brief] peer {t}: {exc}")
+    with st.spinner(f"Loading peer fundamentals ({len(peer_list)})…"):
+        for p in peer_list:
+            row = _peer_row_data(p["ticker"])     # ← cached, fast on rerun
+            if row is None:
                 continue
-
-            # Peer ROE: split annual vs latest quarter
-            p_roe_q = p_roe_q_period = None
-            p_roe_annual = p_roe_annual_period = None
-            if pfina is not None and not pfina.empty and "roe" in pfina.columns:
-                p_roe_q = pfina.iloc[0]["roe"]
-                p_roe_q_period = str(pfina.iloc[0].get("end_date", ""))
-                p_annual_rows = pfina[pfina["end_date"].astype(str).str.endswith("1231")]
-                if not p_annual_rows.empty:
-                    p_roe_annual = p_annual_rows.iloc[0]["roe"]
-                    p_roe_annual_period = str(p_annual_rows.iloc[0]["end_date"])
-            table_rows.append({
-                "ticker": t, "name": p["name"], "is_target": False,
-                "pe":  (pdaily or {}).get("pe_ttm") or (pdaily or {}).get("pe"),
-                "pb":  (pdaily or {}).get("pb"),
-                "ev_ebitda": pmet["ev_ebitda"],
-                "rev_yoy": pfina.iloc[0]["or_yoy"] if (pfina is not None and not pfina.empty) else None,
-                "np_yoy": pfina.iloc[0]["netprofit_yoy"] if (pfina is not None and not pfina.empty) else None,
-                "roe_annual": p_roe_annual, "roe_annual_period": p_roe_annual_period,
-                "roe_q": p_roe_q, "roe_q_period": p_roe_q_period,
-                "net_debt_ebitda": pmet["net_debt_ebitda"],
-                "signal": _entry_signal_label(pana),
-            })
+            row["name"] = p["name"]
+            row["is_target"] = False
+            pana, _ = _technical_signal(p["ticker"])   # also cached
+            row["signal"] = _entry_signal_label(pana)
+            table_rows.append(row)
 
     rows_html = ""
     for r in table_rows:
@@ -1579,6 +1586,33 @@ def _competitors_section():
       </table>
     </div>
     """, unsafe_allow_html=True)
+
+    # ── Admin curation panel — placed BELOW the table so toggles don't
+    #    visually disturb the comparison.  Checkbox changes do NOT rebuild
+    #    the table; only clicking Save does (via fragment rerun).
+    if is_admin:
+        with st.expander("🛠 Edit peer set (admin)", expanded=False):
+            st.markdown(
+                '<div style="margin-bottom:8px;font-size:13px;color:var(--ink-2)">'
+                'Uncheck any wrong peers, then click <strong>Save</strong>. '
+                'Toggling checkboxes does not refresh the table — only Save does.'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            sel_key_root = f"eb_peer_chk_{ticker}"
+            for p in peer_list:
+                st.checkbox(
+                    f"`{p['ticker']}` {p['name']} — {p.get('why','')}",
+                    value=True, key=f"{sel_key_root}_{p['ticker']}",
+                )
+            if st.button("💾 Save curated peer set", key="eb_save_peers",
+                         type="primary"):
+                # Read final checkbox state at save time
+                selected = [p for p in peer_list
+                            if st.session_state.get(f"{sel_key_root}_{p['ticker']}", True)]
+                equity_brief.save_competitors_curated(ticker, selected)
+                st.success(f"✅ Saved {len(selected)} peers.")
+                st.rerun(scope="fragment")
 
 
 _competitors_section()
