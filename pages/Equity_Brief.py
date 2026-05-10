@@ -581,6 +581,9 @@ if analysis_df is not None and not analysis_df.empty:
 
     x_all = _xdates(last250)
 
+    # Compute strategy summary BEFORE building the chart so we can overlay S/R
+    summary = trading_strategy.build_strategy_summary(raw_df, analysis_df)
+
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=x_all, open=last250["Open"], high=last250["High"],
@@ -595,6 +598,50 @@ if analysis_df is not None and not analysis_df.empty:
     if "MA50" in last250.columns:
         fig.add_trace(go.Scatter(x=x_all, y=last250["MA50"], name="MA50",
                                  line=dict(color="#2563a8", width=1.5)))
+
+    # ── S/R overlay ───────────────────────────────────────────────────────────
+    # xref="paper" makes the lines span the full plot width regardless of the
+    # categorical x-axis.  Right-side annotations sit just outside the plot area.
+    # Chinese convention: red (涨) for resistance (above price), green (跌) for
+    # support (below price) — consistent with stop/targets table convention.
+    if summary:
+        _res = summary.get("resistances", [])
+        _sup = summary.get("supports", [])
+
+        for idx_r, r_lvl in enumerate(_res):
+            r_price = r_lvl["price"]
+            strength = min(int(r_lvl.get("strength", 1)), 3)
+            lw = 0.8 + strength * 0.3      # 1.1 → 1.4 → 1.7 px by strength
+            fig.add_shape(
+                type="line", xref="paper", yref="y",
+                x0=0, x1=1, y0=r_price, y1=r_price,
+                line=dict(color="#c6432a", width=lw, dash="dash"),
+            )
+            fig.add_annotation(
+                x=1.01, xref="paper", y=r_price, yref="y",
+                text=f"R{idx_r + 1} ¥{r_price:.2f}",
+                showarrow=False, xanchor="left",
+                font=dict(size=9.5, color="#c6432a",
+                          family="JetBrains Mono, ui-monospace, monospace"),
+            )
+
+        for idx_s, s_lvl in enumerate(_sup):
+            s_price = s_lvl["price"]
+            strength = min(int(s_lvl.get("strength", 1)), 3)
+            lw = 0.8 + strength * 0.3
+            fig.add_shape(
+                type="line", xref="paper", yref="y",
+                x0=0, x1=1, y0=s_price, y1=s_price,
+                line=dict(color="#2f8a4f", width=lw, dash="dash"),
+            )
+            fig.add_annotation(
+                x=1.01, xref="paper", y=s_price, yref="y",
+                text=f"S{idx_s + 1} ¥{s_price:.2f}",
+                showarrow=False, xanchor="left",
+                font=dict(size=9.5, color="#2f8a4f",
+                          family="JetBrains Mono, ui-monospace, monospace"),
+            )
+
     if "Signal_Accumulation" in last250.columns:
         acc = last250[last250["Signal_Accumulation"] == True]
         if not acc.empty:
@@ -609,7 +656,9 @@ if analysis_df is not None and not analysis_df.empty:
                 marker=dict(color="#2f8a4f", size=12, symbol="triangle-up")))
 
     fig.update_layout(
-        height=420, template="plotly_white", margin=dict(l=10, r=10, t=10, b=10),
+        height=420, template="plotly_white",
+        # Right margin widened to 90px so S/R annotations don't get clipped
+        margin=dict(l=10, r=90, t=10, b=10),
         xaxis_rangeslider_visible=False, showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         plot_bgcolor="#f7f3ec", paper_bgcolor="#f7f3ec",
@@ -624,9 +673,6 @@ if analysis_df is not None and not analysis_df.empty:
     pill_class = f"eb-pill {sig_class}" if sig_class else "eb-pill"
     st.markdown(f'<div style="margin-top:8px"><span class="{pill_class}">'
                 f'Latest signal · {sig_label}</span></div>', unsafe_allow_html=True)
-
-    # ── Trading Strategy block (within Section 02) ────────────────────────────
-    summary = trading_strategy.build_strategy_summary(raw_df, analysis_df)
 
     if summary:
         score   = summary["score"]
