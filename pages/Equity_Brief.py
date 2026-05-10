@@ -28,7 +28,7 @@ from analysis_engine import run_single_stock_analysis
 auth_manager.require_login()
 equity_brief.ensure_equity_brief_cache_table()
 
-st.set_page_config(page_title="Equity Brief | 个股研报", page_icon="📄", layout="wide")
+st.set_page_config(page_title="Equity Report | 个股研报", page_icon="📄", layout="wide")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -268,24 +268,32 @@ def _entry_signal_label(analysis_df) -> tuple[str, str]:
 
 st.markdown('<div class="eb-root">', unsafe_allow_html=True)
 
-c1, c2, c3 = st.columns([3, 1, 1])
-with c1:
-    pick = st.selectbox(
-        "Stock", options=_all_stock_options_eb(), key="eb_pick",
-        format_func=lambda x: "Type to search… (code or name)" if x == "" else x,
-        label_visibility="collapsed",
-    )
-with c2:
-    st.write("")
-    generate = st.button("📄 Generate Brief", type="primary", use_container_width=True)
-with c3:
-    st.write("")
-    if st.button("✖ Reset", use_container_width=True):
-        st.session_state.pop("eb_active_ticker", None)
-        st.rerun()
+# Wrap the stock picker in a form so that changing the selectbox does NOT
+# trigger a server rerun — only clicking a submit button does.
+# This prevents the page from re-rendering the previous stock's brief every
+# time the user scrolls through the dropdown to find a new stock.
+with st.form("eb_form"):
+    c1, c2, c3 = st.columns([3, 1, 1])
+    with c1:
+        pick = st.selectbox(
+            "Stock", options=_all_stock_options_eb(), key="eb_pick",
+            format_func=lambda x: "Type to search… (code or name)" if x == "" else x,
+            label_visibility="collapsed",
+        )
+    with c2:
+        st.write("")
+        generate = st.form_submit_button(
+            "📄 Generate Report", type="primary", use_container_width=True)
+    with c3:
+        st.write("")
+        reset = st.form_submit_button("✖ Reset", use_container_width=True)
 
 raw = (pick or "").strip()
 ticker = raw.split(" · ")[0].strip() if " · " in raw else raw
+
+if reset:
+    st.session_state.pop("eb_active_ticker", None)
+    st.rerun()
 
 if generate and len(ticker) == 6 and ticker.isdigit():
     st.session_state["eb_active_ticker"] = ticker
@@ -294,8 +302,8 @@ active = st.session_state.get("eb_active_ticker")
 if not active:
     st.markdown(
         '<div class="eb-card" style="margin-top:24px">'
-        '<div class="eb-eyebrow">Equity Brief · 个股研报</div>'
-        '<div class="eb-h2">A printable, AURX-style brief for any A-share stock.</div>'
+        '<div class="eb-eyebrow">Equity Report · 个股研报</div>'
+        '<div class="eb-h2">A printable, AURX-style report for any A-share stock.</div>'
         '<div class="eb-kicker">Combines fundamentals (Tushare income / balance sheet / '
         'cash flow), the technical signal engine you already use, and AI-generated '
         'qualitative analysis (PESTEL, Porter\'s Five, SWOT, peer set). '
@@ -342,7 +350,7 @@ mv_yi      = (daily or {}).get("total_mv")
 
 st.markdown(f"""
 <div class="eb-section">
-  <div class="eb-eyebrow">Equity Brief · {ticker}</div>
+  <div class="eb-eyebrow">Equity Report · {ticker}</div>
   <div class="eb-h1">{company}</div>
   <div style="display:flex;gap:18px;flex-wrap:wrap;color:var(--ink-2);font-size:13px;margin-top:10px">
     <div><span class="eb-pill">{basic.get('market') or 'A-share'}</span></div>
