@@ -61,7 +61,13 @@ def detect_blocks(df: pd.DataFrame, lookback: int = 120) -> list[dict]:
     all_dates = subset.index.tolist()
 
     subset["PctChange"] = subset["Close"].pct_change().abs()
-    subset["VolRatio"]  = subset["Volume"] / subset["Volume"].rolling(20).mean().shift(1)
+
+    # Guard: rolling mean can be 0 or NaN at the start of the window → Inf ratio.
+    # Replace Inf/NaN with 0 so those rows never trigger a breakout boundary.
+    raw_ratio = subset["Volume"] / subset["Volume"].rolling(20).mean().shift(1)
+    subset["VolRatio"] = (raw_ratio
+                         .replace([np.inf, -np.inf], np.nan)
+                         .fillna(0))
 
     breakout_mask  = (subset["PctChange"] > 0.03) & (subset["VolRatio"] > 1.5)
     breakout_dates = subset.index[breakout_mask].tolist()
@@ -84,17 +90,26 @@ def detect_blocks(df: pd.DataFrame, lookback: int = 120) -> list[dict]:
             continue
 
         pmin, pmax = float(seg["Low"].min()), float(seg["High"].max())
-        if pmin == pmax:
+        if pmin >= pmax:
             pmax = pmin + 0.01
 
-        bins    = np.linspace(pmin, pmax, 21)
-        indices = np.digitize(seg["Close"], bins)
+        bins = np.linspace(pmin, pmax, 21)   # 21 edges → 20 bins
+
+        # np.digitize with right=False assigns index len(bins) to values equal
+        # to bins[-1] (i.e. closes at the segment high).  Clip to [1, 20] so
+        # the highest-price closes are counted in the top bin, not discarded.
+        raw_idx = np.digitize(seg["Close"].values, bins)
+        indices = np.clip(raw_idx, 1, len(bins) - 1)
+
         bin_vol: dict = {}
         for j, vol in zip(indices, seg["Volume"]):
             bin_vol[j] = bin_vol.get(j, 0) + vol
 
         sorted_bins = sorted(bin_vol.items(), key=lambda x: x[1], reverse=True)
         total = sum(bin_vol.values())
+        if total == 0:
+            continue
+
         cum, value_bins = 0, []
         for bin_idx, v in sorted_bins:
             cum += v
@@ -102,20 +117,21 @@ def detect_blocks(df: pd.DataFrame, lookback: int = 120) -> list[dict]:
             if cum >= 0.7 * total:
                 break
 
-        valid = [v for v in value_bins if 1 <= v < len(bins)]
-        if not valid:
+        # All indices are already clipped to [1, 20] — no further filter needed
+        if not value_bins:
             continue
 
-        top, bot = float(bins[max(valid)]), float(bins[min(valid) - 1])
+        top = float(bins[max(value_bins)])        # upper edge of highest-volume bin
+        bot = float(bins[min(value_bins) - 1])    # lower edge of lowest-volume bin
         if top <= bot:
             top = bot + 0.01
 
         if is_active:
-            status = ("BREAKOUT" if cur_price > top
+            status = ("BREAKOUT"  if cur_price > top
                       else "BREAKDOWN" if cur_price < bot
                       else "INSIDE")
         else:
-            status = ("SUPPORT_BELOW" if cur_price > top
+            status = ("SUPPORT_BELOW"    if cur_price > top
                       else "RESISTANCE_ABOVE" if cur_price < bot
                       else "INSIDE_OLD_RANGE")
 
@@ -131,27 +147,44 @@ def detect_blocks(df: pd.DataFrame, lookback: int = 120) -> list[dict]:
 def extract_sr_levels(blocks: list[dict], current_price: float
                       ) -> tuple[list[dict], list[dict]]:
     """
-    From the block list, pull every top/bot edge and bucket them into
-    resistances (above current) and supports (below current). Levels within
-    1% of each other are merged (averaged), and "strength" = number of
-    blocks contributing to that cluster.
+    From the block list, pull every top/bot edge and cluster them into
+    resistances (above current) and supports (below current).
 
-    Returns (resistances, supports), each sorted by distance from current.
+    Clustering rule: levels within 1% of the FIRST member of a cluster
+    (anchor-based, not running-average-based) are merged. This avoids
+    "cluster drift" where three levels at 100 / 100.8 / 101.5 would all
+    merge under a running-average comparison (avg drifts to 100.4, and
+    101.5 is 1.09% from 100.4 — borderline), but 101.5 is 1.5% from the
+    anchor 100 and correctly starts a new cluster.
+
+    strength = number of block edges that fell into the same cluster
+    (proxy for how many distinct consolidation periods touched that level).
+
+    Levels more than 25% away from current price are dropped — they are too
+    distant to be relevant for the immediate trade setup.
+
+    Returns (resistances, supports), each sorted nearest-first.
     """
     raw_levels = []
     for b in blocks:
-        raw_levels.append((b["top"], b))
-        raw_levels.append((b["bot"], b))
+        raw_levels.append(b["top"])
+        raw_levels.append(b["bot"])
 
-    # Cluster within 1% of each other
-    raw_levels.sort(key=lambda x: x[0])
+    # Remove levels that are unrealistically far from current price
+    max_dist = 0.25  # 25% either side
+    raw_levels = [p for p in raw_levels
+                  if abs(p - current_price) / current_price <= max_dist]
+
+    raw_levels.sort()
+
+    # Anchor-based clustering: compare each incoming level to clusters[i][0]
     clusters: list[list[float]] = []
-    for price, _ in raw_levels:
+    for price in raw_levels:
         if not clusters:
             clusters.append([price])
             continue
-        last_avg = sum(clusters[-1]) / len(clusters[-1])
-        if abs(price - last_avg) / last_avg < 0.01:
+        anchor = clusters[-1][0]                     # ← always the first member
+        if abs(price - anchor) / anchor < 0.01:      # within 1% of anchor
             clusters[-1].append(price)
         else:
             clusters.append([price])
@@ -159,12 +192,12 @@ def extract_sr_levels(blocks: list[dict], current_price: float
     levels = [{"price": sum(c) / len(c), "strength": len(c)} for c in clusters]
 
     resistances = sorted(
-        [l for l in levels if l["price"] > current_price],
-        key=lambda l: l["price"],
+        [lv for lv in levels if lv["price"] > current_price],
+        key=lambda lv: lv["price"],          # nearest first (ascending)
     )
     supports = sorted(
-        [l for l in levels if l["price"] < current_price],
-        key=lambda l: l["price"], reverse=True,
+        [lv for lv in levels if lv["price"] < current_price],
+        key=lambda lv: lv["price"], reverse=True,   # nearest first (descending)
     )
     return resistances, supports
 
@@ -301,18 +334,29 @@ def compute_stop_targets(price: float, atr: float,
     nearest_support = supports[0]["price"] if supports else None
     sup_stop = nearest_support * 0.97 if nearest_support else atr_stop
 
-    stop = max(atr_stop, sup_stop)
+    # MAX = tighter stop (closer to current price = smaller loss).
+    # ATR stop wins when support is far away; sup stop wins when support is
+    # right below (breaking it clearly invalidates the setup).
+    # Floor at price * 0.01 so stop never goes negative on very cheap stocks.
+    stop = max(atr_stop, sup_stop, price * 0.01)
     risk = max(price - stop, 1e-6)
 
-    t1 = price + 2 * atr
-    t2 = price + 3 * atr
-    t3 = price + 4 * atr
-    if resistances:
-        nearest_r = resistances[0]["price"]
-        if nearest_r < t3:
-            t3 = nearest_r
+    t1 = price + 2 * atr   # partial exit  (~1R reward)
+    t2 = price + 3 * atr   # main target   (~1.5R reward)
+    t3 = price + 4 * atr   # full run      (~2R reward)
 
-    rr = (t2 - price) / risk  # use T2 as the realistic-target R:R
+    # Cap targets at the nearest resistance, working top-down so the ordering
+    # T1 ≤ T2 ≤ T3 is always preserved.
+    if resistances:
+        r1 = resistances[0]["price"]
+        if r1 <= t1:       # resistance is at or below T1 — all targets get capped
+            t1 = t2 = t3 = r1
+        elif r1 <= t2:     # resistance between T1 and T2 — cap T2 and T3
+            t2 = t3 = r1
+        elif r1 < t3:      # resistance between T2 and T3 — cap only T3
+            t3 = r1
+
+    rr = (t2 - price) / risk   # R:R measured to T2 (the realistic exit)
 
     return {
         "stop":          round(stop, 2),
