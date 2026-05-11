@@ -227,12 +227,13 @@ def compute_signal_score(analysis_df: pd.DataFrame) -> dict:
     ma200 = last.get("MA200")
     trend_score = 0
     trend_label = "—"
+    trend_reason = "insufficient MA data"
     if all(pd.notna(x) for x in (ma5, ma20, ma50, ma200)):
-        if   ma5 > ma20 > ma50 > ma200: trend_score, trend_label = +25, "Strong Bullish"
-        elif ma5 > ma20 > ma50:         trend_score, trend_label = +18, "Bullish"
-        elif ma5 < ma20 < ma50 < ma200: trend_score, trend_label = -25, "Strong Bearish"
-        elif ma5 < ma20 < ma50:         trend_score, trend_label = -18, "Bearish"
-        else:                            trend_score, trend_label =   0, "Neutral"
+        if   ma5 > ma20 > ma50 > ma200: trend_score, trend_label, trend_reason = +25, "Strong Bullish", "MA5 > MA20 > MA50 > MA200"
+        elif ma5 > ma20 > ma50:         trend_score, trend_label, trend_reason = +18, "Bullish",        "MA5 > MA20 > MA50"
+        elif ma5 < ma20 < ma50 < ma200: trend_score, trend_label, trend_reason = -25, "Strong Bearish", "MA5 < MA20 < MA50 < MA200"
+        elif ma5 < ma20 < ma50:         trend_score, trend_label, trend_reason = -18, "Bearish",        "MA5 < MA20 < MA50"
+        else:                            trend_score, trend_label, trend_reason =   0, "Neutral",        "MAs mixed / no clean stack"
 
     # ── 2. Momentum (MACD scenarios) — 20 pts max ───────────────────────────────
     # Scenario-based scoring: we use the richer MACD signals computed by
@@ -246,35 +247,46 @@ def compute_signal_score(analysis_df: pd.DataFrame) -> dict:
     # system would score it +10 to +20, also wrong.
     macd_score = 0
     macd_label = "MACD"
+    macd_reason = "no active scenario"
 
     if last.get("MACD_Bottoming", False):
-        macd_score = +15
-        macd_label = "MACD Bottoming ↑"
+        macd_score  = +15
+        macd_label  = "MACD Bottoming ↑"
+        macd_reason = "neg. MACD curling up + OBV rising"
     elif last.get("MACD_ClassicCrossover", False):
-        macd_score = +20
-        macd_label = "MACD Crossover ✓"
+        macd_score  = +20
+        macd_label  = "MACD Crossover ✓"
+        macd_reason = "MACD crossed above signal line"
     elif last.get("MACD_Approaching", False):
-        macd_score = +10
-        macd_label = "MACD Approaching"
+        macd_score  = +10
+        macd_label  = "MACD Approaching"
+        macd_reason = "below signal, gap closing"
     elif last.get("MACD_MomentumBuilding", False):
-        macd_score = +15
-        macd_label = "MACD Momentum"
+        macd_score  = +15
+        macd_label  = "MACD Momentum"
+        macd_reason = "above signal, gap expanding 3d"
     elif last.get("MACD_Peaking", False):
-        macd_score = -15
-        macd_label = "MACD Peaking ↓"
+        macd_score  = -15
+        macd_label  = "MACD Peaking ↓"
+        macd_reason = "positive but momentum decelerating"
     elif last.get("MACD_BearishCrossover", False):
-        macd_score = -20
-        macd_label = "MACD Bear Cross"
+        macd_score  = -20
+        macd_label  = "MACD Bear Cross"
+        macd_reason = "MACD crossed below signal line"
     else:
         # No scenario active — fall back to raw position (half weight vs. a scenario)
         macd      = last.get("MACD")
         macd_sig  = last.get("MACD_Signal")
         macd_hist = last.get("MACD_Hist")
         if all(pd.notna(x) for x in (macd, macd_sig, macd_hist)):
-            if   macd > macd_sig and macd_hist > 0: macd_score = +10
-            elif macd > macd_sig:                    macd_score =  +5
-            elif macd < macd_sig and macd_hist < 0:  macd_score = -10
-            elif macd < macd_sig:                    macd_score =  -5
+            if   macd > macd_sig and macd_hist > 0:
+                macd_score = +10; macd_reason = "above signal, hist positive"
+            elif macd > macd_sig:
+                macd_score =  +5; macd_reason = "above signal, hist negative"
+            elif macd < macd_sig and macd_hist < 0:
+                macd_score = -10; macd_reason = "below signal, hist negative"
+            elif macd < macd_sig:
+                macd_score =  -5; macd_reason = "below signal, hist positive"
         macd_label = "MACD"
 
     # China uptrend dampening — halve bearish penalty when price > MA50 > MA200
@@ -292,36 +304,41 @@ def compute_signal_score(analysis_df: pd.DataFrame) -> dict:
     # ── 3. RSI — 15 pts max (mean-reversion bias: extremes favour reversal)
     rsi = last.get("RSI_14")
     rsi_score = 0
+    rsi_reason = "no RSI data"
     if pd.notna(rsi):
-        if   rsi >= 75: rsi_score = -15  # severely overbought
-        elif rsi >= 65: rsi_score = -5   # warming up
-        elif rsi <= 25: rsi_score = +15  # severely oversold
-        elif rsi <= 35: rsi_score = +5   # cooling off
-        elif 45 <= rsi <= 55: rsi_score =  0
-        elif rsi > 55:  rsi_score = +3
-        else:           rsi_score = -3
+        if   rsi >= 75: rsi_score, rsi_reason = -15, f"RSI {rsi:.0f} — severely overbought"
+        elif rsi >= 65: rsi_score, rsi_reason =  -5, f"RSI {rsi:.0f} — warming up"
+        elif rsi <= 25: rsi_score, rsi_reason = +15, f"RSI {rsi:.0f} — severely oversold"
+        elif rsi <= 35: rsi_score, rsi_reason =  +5, f"RSI {rsi:.0f} — cooling off"
+        elif 45 <= rsi <= 55: rsi_score, rsi_reason = 0, f"RSI {rsi:.0f} — neutral range"
+        elif rsi > 55:  rsi_score, rsi_reason =  +3, f"RSI {rsi:.0f} — slightly extended"
+        else:           rsi_score, rsi_reason =  -3, f"RSI {rsi:.0f} — slightly elevated"
 
     # ── 4. Volatility regime / BB position — 15 pts max
     bb_u = last.get("BB_Upper")
     bb_l = last.get("BB_Lower")
     close = last.get("Close")
     bb_score = 0
+    bb_reason = "no BB data"
     if all(pd.notna(x) for x in (bb_u, bb_l, close)) and bb_u > bb_l:
         pos = (close - bb_l) / (bb_u - bb_l)
-        if   pos >= 0.95: bb_score = -15  # riding upper band — stretched
-        elif pos >= 0.80: bb_score = -5
-        elif pos <= 0.05: bb_score = +15  # riding lower — coiled
-        elif pos <= 0.20: bb_score = +5
-        else:             bb_score =  0
+        bb_pct = f"{pos * 100:.0f}% of band"
+        if   pos >= 0.95: bb_score, bb_reason = -15, f"riding upper band ({bb_pct})"
+        elif pos >= 0.80: bb_score, bb_reason =  -5, f"near upper band ({bb_pct})"
+        elif pos <= 0.05: bb_score, bb_reason = +15, f"riding lower band ({bb_pct}) — coiled"
+        elif pos <= 0.20: bb_score, bb_reason =  +5, f"near lower band ({bb_pct})"
+        else:             bb_score, bb_reason =   0, f"mid-band ({bb_pct})"
 
     # ── 5. Custom signals — 25 pts max (Accumulation, Squeeze, Squeeze Fired)
     custom = 0
-    if last.get("Squeeze_Fired_Bullish", False):  custom += 25
-    elif last.get("Signal_Accumulation", False):   custom += 18
-    elif last.get("Signal_Squeeze", False):        custom +=  8  # waiting → mildly positive
-    if last.get("Squeeze_Fired_Bearish", False):  custom -= 25
-    if last.get("Exit_MACD_Lead", False):          custom -= 12
+    _csigs: list[str] = []
+    if last.get("Squeeze_Fired_Bullish", False):  custom += 25; _csigs.append("Squeeze Fired Bullish")
+    elif last.get("Signal_Accumulation", False):   custom += 18; _csigs.append("Accumulation")
+    elif last.get("Signal_Squeeze", False):        custom +=  8; _csigs.append("In Squeeze")
+    if last.get("Squeeze_Fired_Bearish", False):  custom -= 25; _csigs.append("Squeeze Fired Bearish")
+    if last.get("Exit_MACD_Lead", False):          custom -= 12; _csigs.append("Exit MACD Lead")
     custom = max(-25, min(25, custom))
+    custom_reason = " · ".join(_csigs) if _csigs else "no active signal"
 
     total = trend_score + macd_score + rsi_score + bb_score + custom
     total = max(-100, min(100, total))
@@ -338,11 +355,11 @@ def compute_signal_score(analysis_df: pd.DataFrame) -> dict:
         "score": int(total),
         "label": label,
         "components": {
-            "trend":      {"value": trend_score, "max": 25, "label": trend_label},
-            "momentum":   {"value": macd_score,  "max": 20, "label": macd_label},
-            "rsi":        {"value": rsi_score,   "max": 15, "label": f"RSI {rsi:.0f}" if pd.notna(rsi) else "RSI —"},
-            "volatility": {"value": bb_score,    "max": 15, "label": "BB position"},
-            "custom":     {"value": custom,      "max": 25, "label": "Custom signals"},
+            "trend":      {"value": trend_score, "max": 25, "label": trend_label,  "reason": trend_reason},
+            "momentum":   {"value": macd_score,  "max": 20, "label": macd_label,   "reason": macd_reason},
+            "rsi":        {"value": rsi_score,   "max": 15, "label": f"RSI {rsi:.0f}" if pd.notna(rsi) else "RSI —", "reason": rsi_reason},
+            "volatility": {"value": bb_score,    "max": 15, "label": "BB",         "reason": bb_reason},
+            "custom":     {"value": custom,      "max": 25, "label": "Custom",     "reason": custom_reason},
         },
     }
 
