@@ -221,6 +221,101 @@ def match_sector_theme(sector_name: str, all_themes: list) -> dict | None:
     return candidates[0] if candidates else None
 
 
+# ── Layer classifier ──────────────────────────────────────────────────────────
+
+_CLASSIFY_PROMPT = """\
+You are an expert Chinese A-share supply chain analyst.
+
+Given a company's known products/services and a sector supply chain with
+numbered layers (upstream → downstream), determine which single layer best
+describes where this company PRIMARILY operates.
+
+Focus on the company's main revenue-generating activities, not aspirational
+or minor activities.
+
+OUTPUT RULES:
+- Return ONLY raw JSON (start { end }). No markdown.
+- layer_index must be an integer matching one of the provided layer_index
+  values, or null if the company does not fit any layer.
+- matched_items is a list of 1–3 items FROM that layer that best match the
+  company's products. Empty list if layer_index is null.
+
+Schema:
+{
+  "layer_index": <integer or null>,
+  "matched_items": ["item / 项目", ...]
+}
+"""
+
+
+def classify_ticker_in_theme(
+    ticker: str,
+    company_name: str,
+    products: list,
+    theme: dict,
+) -> dict:
+    """
+    Ask DeepSeek which layer of `theme` the company primarily operates in.
+
+    Returns {"layer_index": int|None, "matched_items": list[str]}.
+    Raises RuntimeError on failure.
+    """
+    try:
+        api_key = _api_key()
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    layers_text = "\n".join(
+        f"  Layer {l['layer_index']} — {l.get('layer_name', '')}: "
+        + ", ".join(l.get("items", []))
+        for l in sorted(theme.get("layers", []), key=lambda x: x.get("layer_index", 0))
+    )
+    user_msg = (
+        f"Company: {company_name} ({ticker})\n"
+        f"Products/Services: {', '.join(products) if products else 'Unknown'}\n\n"
+        f"Theme: {theme.get('name') or theme.get('formal_name', '')}\n"
+        f"Layers:\n{layers_text}"
+    )
+
+    payload = {
+        "model": _MODEL,
+        "messages": [
+            {"role": "system", "content": _CLASSIFY_PROMPT},
+            {"role": "user",   "content": user_msg},
+        ],
+        "temperature": 0.1,
+        "max_tokens":  200,
+    }
+    try:
+        resp = requests.post(
+            _ENDPOINT, json=payload,
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type":  "application/json"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except requests.Timeout:
+        raise RuntimeError("DeepSeek API timed out after 30 s.")
+    except requests.RequestException as exc:
+        raise RuntimeError(f"DeepSeek API request failed: {exc}") from exc
+
+    raw = resp.json()["choices"][0]["message"]["content"].strip()
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"AI returned invalid JSON ({exc}). Preview: {raw[:200]}"
+        ) from exc
+
+    return {
+        "layer_index":  result.get("layer_index"),
+        "matched_items": result.get("matched_items", []),
+    }
+
+
 def render_sector_layers(theme: dict, key_prefix: str = "sl") -> None:
     """
     Render a sector theme as horizontal upstream→downstream columns.

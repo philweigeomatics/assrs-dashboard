@@ -3576,6 +3576,73 @@ def delete_sector_theme(theme_id):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# CHAIN POSITIONS — maps (ticker, theme_id) → layer the company sits in
+# ══════════════════════════════════════════════════════════════════════════════
+
+def ensure_chain_positions_table() -> None:
+    """Idempotent migration for SQLite; Supabase users add the table manually."""
+    from db_config import USE_SQLITE
+    if not USE_SQLITE:
+        return
+    from db_config import DBNAME
+    import sqlite3
+    with sqlite3.connect(DBNAME) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS chain_positions (
+                ticker         TEXT    NOT NULL,
+                theme_id       INTEGER NOT NULL,
+                layer_index    INTEGER,
+                matched_items  TEXT    NOT NULL DEFAULT '[]',
+                generated_at   TEXT    NOT NULL,
+                PRIMARY KEY (ticker, theme_id)
+            )
+        """)
+        conn.commit()
+
+
+def get_chain_position(ticker: str, theme_id: int) -> dict | None:
+    """Return the cached chain position for (ticker, theme_id), or None."""
+    import json as _json
+    if not db.table_exists("chain_positions"):
+        return None
+    df = db.read_table(
+        "chain_positions",
+        filters={"ticker": ticker, "theme_id": int(theme_id)},
+        limit=1,
+    )
+    if df is None or df.empty:
+        return None
+    row = df.iloc[0].to_dict()
+    try:
+        row["matched_items"] = _json.loads(row.get("matched_items") or "[]")
+    except Exception:
+        row["matched_items"] = []
+    return row
+
+
+def upsert_chain_position(
+    ticker: str,
+    theme_id: int,
+    layer_index: int | None,
+    matched_items: list,
+) -> None:
+    """Insert or replace the chain position for (ticker, theme_id)."""
+    import json as _json
+    from datetime import datetime as _dt
+    if not db.table_exists("chain_positions"):
+        ensure_chain_positions_table()
+    db.delete_records("chain_positions",
+                      filters={"ticker": ticker, "theme_id": int(theme_id)})
+    db.insert_records("chain_positions", [{
+        "ticker":        ticker,
+        "theme_id":      int(theme_id),
+        "layer_index":   layer_index,
+        "matched_items": _json.dumps(matched_items, ensure_ascii=False),
+        "generated_at":  _dt.utcnow().isoformat(),
+    }])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PRODUCT PEERS (Phase 1 of lead-lag analysis)
 # ══════════════════════════════════════════════════════════════════════════════
 #

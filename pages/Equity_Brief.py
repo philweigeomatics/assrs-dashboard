@@ -21,12 +21,14 @@ import streamlit.components.v1 as components
 import auth_manager
 import data_manager
 import equity_brief
+import sector_themes as sector_themes_mod
 import supply_chain_ui
 import trading_strategy
 from analysis_engine import run_single_stock_analysis
 
 auth_manager.require_login()
 equity_brief.ensure_equity_brief_cache_table()
+data_manager.ensure_chain_positions_table()
 
 st.set_page_config(page_title="Equity Report | 个股研报", page_icon="📄", layout="wide")
 
@@ -455,13 +457,79 @@ try:
     _render_html(f"""
     <div class="eb-card" style="margin-bottom:14px">
       {f'<div class="eb-eyebrow" style="margin-bottom:6px">{tagline}</div>' if tagline else ''}
-      <div style="font-size:14.5px;line-height:1.6;color:var(--ink);max-width:780px">
+      <div style="font-size:14.5px;line-height:1.6;color:var(--ink)">
         {summary}
       </div>
     </div>
     """)
 except RuntimeError as exc:
     st.warning(f"Overview unavailable: {exc}")
+
+# ── Supply chain: layer strip helper ─────────────────────────────────────────
+
+def _render_chain_position_strip(
+    layers: list,
+    active_layer_index: int | None,
+    company_short: str,
+    matched_items: list | None = None,
+) -> None:
+    """
+    Render all layers of a sector theme as a horizontal strip.
+    The company's layer (active_layer_index) is highlighted with a blue border
+    and background; all other layers are dimmed.
+    If active_layer_index is None, all layers render at equal opacity (unclassified).
+    """
+    cards = ""
+    for layer in sorted(layers, key=lambda x: x.get("layer_index", 0)):
+        idx         = layer.get("layer_index", 0)
+        is_active   = (active_layer_index is not None and idx == active_layer_index)
+        layer_name  = (layer.get("layer_name") or f"Layer {idx}").split("/")[0].strip()
+        items       = layer.get("items", [])
+
+        items_html = "".join(
+            f'<div style="font-size:10px;color:{"#1a1916" if is_active else "#807a70"};'
+            f'margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
+            f'· {it.split("/")[0].strip()}</div>'
+            for it in items[:5]
+        )
+
+        if is_active:
+            box_style    = "border:2px solid #2563a8;background:#d6e4f4;"
+            eyebrow_col  = "#2563a8"
+            company_html = (
+                f'<div style="font-size:9px;font-family:monospace;color:#2563a8;'
+                f'font-weight:700;margin-top:8px;letter-spacing:0.06em">'
+                f'▶ {company_short}</div>'
+            )
+            matches_html = "".join(
+                f'<div style="font-size:9px;color:#2563a8;margin-top:2px">'
+                f'✓ {m.split("/")[0].strip()}</div>'
+                for m in (matched_items or [])
+            )
+        else:
+            opacity      = "0.55" if active_layer_index is not None else "1"
+            box_style    = f"border:1px solid #d6cebe;background:#fff;opacity:{opacity};"
+            eyebrow_col  = "#807a70"
+            company_html = ""
+            matches_html = ""
+
+        cards += (
+            f'<div style="flex:1;min-width:120px;max-width:240px;border-radius:6px;'
+            f'padding:10px 12px;{box_style}">'
+            f'<div style="font-family:monospace;font-size:9px;letter-spacing:0.12em;'
+            f'text-transform:uppercase;color:{eyebrow_col}">Layer {idx}</div>'
+            f'<div style="font-size:11.5px;font-weight:600;color:#1a1916;'
+            f'margin:4px 0 2px 0;line-height:1.3">{layer_name}</div>'
+            f'{items_html}{company_html}{matches_html}'
+            f'</div>'
+        )
+
+    _render_html(
+        f'<div style="display:flex;gap:8px;overflow-x:auto;'
+        f'padding:2px 0 10px 0;align-items:flex-start;margin-top:8px">'
+        f'{cards}</div>'
+    )
+
 
 # ── Supply chain graph (existing or admin-generated) ─────────────────────────
 graph = data_manager.get_supply_chain_graph(ticker)
@@ -490,6 +558,133 @@ if graph:
                 except RuntimeError as exc:
                     st.error(str(exc))
     supply_chain_ui.render_supply_chain_graph(graph, height=520)
+
+    # ── Sector theme positions ────────────────────────────────────────────────
+    # For each macro-sector the company sells into, find a matching stored sector
+    # theme and show which layer the company occupies — or offer to classify it.
+    macro_sectors = graph.get("macro_sectors", [])
+    sc_products   = graph.get("products", [])
+    all_themes    = data_manager.get_all_sector_themes()
+
+    if macro_sectors and all_themes is not None:
+        _render_html(
+            '<div class="eb-eyebrow" style="margin:20px 0 4px 0">'
+            'Sector Theme Positions · 产业链位置</div>'
+            '<div style="font-size:12px;color:var(--ink-3);margin-bottom:10px">'
+            'Where this company fits within stored supply chain themes — '
+            'based on its end-markets and products.</div>'
+        )
+
+        for _sector in macro_sectors:
+            # Match this macro-sector to a stored theme (cached per session)
+            _mkey = f"cp_match_{ticker}_{_sector}"
+            if _mkey not in st.session_state:
+                st.session_state[_mkey] = sector_themes_mod.match_sector_theme(
+                    _sector, all_themes
+                )
+            _matched = st.session_state[_mkey]
+
+            if _matched is None:
+                # No theme in DB matches this sector
+                with st.expander(
+                    f"📦 {_sector.split('/')[0].strip()} — no theme loaded",
+                    expanded=False,
+                ):
+                    st.caption(
+                        "No sector theme in the database matches this market yet."
+                    )
+                    if is_admin:
+                        _raw = _sector.split("/")[0].strip().lower()
+                        if st.button(
+                            f"🌱 Generate theme for '{_sector.split('/')[0].strip()}'",
+                            key=f"cp_gen_{ticker}_{_sector[:24]}",
+                        ):
+                            with st.spinner("Generating sector theme…"):
+                                try:
+                                    _tdata = sector_themes_mod.generate_sector_theme(_raw)
+                                    data_manager.add_sector_theme(
+                                        raw_input=_raw,
+                                        formal_name=_tdata["name"],
+                                        layers_data=_tdata,
+                                        created_by=user.get("username", "admin"),
+                                    )
+                                    del st.session_state[_mkey]
+                                    st.success(
+                                        f"✅ Theme generated. Reload to see the position.")
+                                    st.rerun()
+                                except RuntimeError as exc:
+                                    st.error(str(exc))
+                continue
+
+            # Theme found — load full record with layers
+            _theme_full = data_manager.get_sector_theme_by_id(_matched["id"])
+            _layers = (_theme_full or {}).get("layers", [])
+            if not _layers:
+                continue
+
+            _pos = data_manager.get_chain_position(ticker, _matched["id"])
+
+            with st.expander(
+                f"🔗 {_matched['formal_name'].split('/')[0].strip()} "
+                f"— Layer {_pos['layer_index']} / {len(_layers)}"
+                if _pos and _pos.get("layer_index") else
+                f"🔗 {_matched['formal_name'].split('/')[0].strip()} — position unknown",
+                expanded=True,
+            ):
+                if _pos is None:
+                    st.caption(
+                        "Layer position not yet classified for this stock in this theme."
+                    )
+                    if is_admin and st.button(
+                        "🔍 Classify layer position",
+                        key=f"cp_cls_{ticker}_{_matched['id']}",
+                    ):
+                        with st.spinner("Classifying layer…"):
+                            try:
+                                _result = sector_themes_mod.classify_ticker_in_theme(
+                                    ticker, company, sc_products, _theme_full,
+                                )
+                                data_manager.upsert_chain_position(
+                                    ticker, _matched["id"],
+                                    _result.get("layer_index"),
+                                    _result.get("matched_items", []),
+                                )
+                                st.rerun()
+                            except RuntimeError as exc:
+                                st.error(str(exc))
+                    # Show unclassified strip so user can see the theme structure
+                    _render_chain_position_strip(_layers, None, company)
+                else:
+                    _render_chain_position_strip(
+                        _layers,
+                        _pos.get("layer_index"),
+                        company,
+                        _pos.get("matched_items", []),
+                    )
+                    if is_admin and st.button(
+                        "🔄 Reclassify", key=f"cp_recls_{ticker}_{_matched['id']}",
+                        help="Re-run AI classification for this theme"
+                    ):
+                        with st.spinner("Reclassifying…"):
+                            try:
+                                _result = sector_themes_mod.classify_ticker_in_theme(
+                                    ticker, company, sc_products, _theme_full,
+                                )
+                                data_manager.upsert_chain_position(
+                                    ticker, _matched["id"],
+                                    _result.get("layer_index"),
+                                    _result.get("matched_items", []),
+                                )
+                                st.rerun()
+                            except RuntimeError as exc:
+                                st.error(str(exc))
+
+    elif macro_sectors and not all_themes:
+        st.caption(
+            "No sector themes loaded yet. "
+            "Build themes in Sector Explorer first — they'll appear here automatically."
+        )
+
 elif is_admin:
     st.markdown(
         '<div class="eb-card" style="margin-top:8px">'
