@@ -226,7 +226,8 @@ def _bundle_fundamentals(ticker: str, periods: int = 8):
         "cashflow": data_manager.fetch_cashflow(ticker, periods),
         "fina":     data_manager.fetch_full_fina_indicator(ticker, periods),
         "daily":    data_manager.get_latest_daily_basic(ticker),
-        "mainbz":   data_manager.fetch_fina_mainbz(ticker, "P"),
+        "mainbz":     data_manager.fetch_fina_mainbz(ticker, "P"),
+        "mainbz_geo": data_manager.fetch_fina_mainbz(ticker, "D"),
     }
 
 
@@ -383,9 +384,9 @@ is_admin = auth_manager.is_admin()
 # the brief is already loaded.
 bundle = _bundle_fundamentals(ticker)
 
-inc, bal, cf, fina, daily, mainbz = (
+inc, bal, cf, fina, daily, mainbz, mainbz_geo = (
     bundle["income"], bundle["balance"], bundle["cashflow"],
-    bundle["fina"], bundle["daily"], bundle["mainbz"],
+    bundle["fina"], bundle["daily"], bundle["mainbz"], bundle["mainbz_geo"],
 )
 metrics = data_manager.compute_derived_metrics(inc, bal, cf, daily or {})
 
@@ -1129,11 +1130,36 @@ def _filing_status(filing_period_str):
     if filing_period_str == latest_reported_period: return "past",     "Past Quarter · already reported"
     return "stale", ""
 
+
+def _filing_too_old(row: "pd.Series") -> bool:
+    """
+    Return True when the filing is more than 90 days old by wall-clock time.
+    We prefer ann_date (announcement date) over end_date (reporting period end)
+    because ann_date is when the filing became public information.
+    Falls back to end_date if ann_date is absent.
+    Date format from Tushare: YYYYMMDD (8-char string).
+    """
+    _today = datetime.utcnow().date()
+    for col in ("ann_date", "end_date"):
+        raw = str(row.get(col) or "")
+        if len(raw) == 8 and raw.isdigit():
+            try:
+                filing_date = datetime.strptime(raw, "%Y%m%d").date()
+                return (_today - filing_date).days > 90
+            except ValueError:
+                continue
+    return False  # unknown → assume fresh enough
+
+
 # Pre-filter both DataFrames so we never render stale rows
 def _filter_status(df):
     if df is None or df.empty:
         return df, None  # (df, status)
-    end_date_str = str(df.iloc[0].get("end_date") or "")
+    row0 = df.iloc[0]
+    # Wall-clock recency check — supersedes the formal-report comparison
+    if _filing_too_old(row0):
+        return None, "stale"
+    end_date_str = str(row0.get("end_date") or "")
     status, _label = _filing_status(end_date_str)
     if status == "stale":
         return None, "stale"
@@ -1433,43 +1459,98 @@ except RuntimeError as exc:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 05 — PRODUCT SEGMENTS
+# SECTION 05 — REVENUE SEGMENTATION
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.markdown("""
 <div class="eb-section">
-  <div class="eb-eyebrow">05 · Product Segments</div>
+  <div class="eb-eyebrow">05 · Revenue Segmentation</div>
   <div class="eb-h2">Where the revenue actually comes from.</div>
-  <div class="eb-kicker">Latest annual main-business breakdown from Tushare fina_mainbz,
-    with year-over-year comparison if available.</div>
+  <div class="eb-kicker">Product and geographic breakdown from Tushare fina_mainbz,
+    with year-over-year changes where prior-year data is available.</div>
 </div>
 """, unsafe_allow_html=True)
 
-if mainbz is not None and not mainbz.empty:
-    latest_period = mainbz["end_date"].iloc[0]
-    latest = mainbz[mainbz["end_date"] == latest_period].copy()
-    latest["pct"] = latest["bz_sales"] / latest["bz_sales"].sum() * 100
+
+def _seg_table_html(df: "pd.DataFrame", heading: str) -> str | None:
+    """
+    Build an HTML table card for one mainbz slice (product OR geographic).
+    Returns None if df is empty. Includes YoY column when prior-year period exists.
+    """
+    if df is None or df.empty:
+        return None
+
+    latest_period = str(df["end_date"].iloc[0])
+    latest = df[df["end_date"] == latest_period].copy()
+    total = latest["bz_sales"].sum()
+    latest["_pct"] = (latest["bz_sales"] / total * 100) if total > 0 else 0.0
     latest = latest.sort_values("bz_sales", ascending=False).head(10)
 
-    rows_html = "".join(
-        f"""<tr>
-          <td>{r['bz_item']}</td>
-          <td class="num">{_fmt_yi(r['bz_sales']/1e8)}</td>
-          <td class="num">{_fmt_pct(r['pct'], 1)}</td>
-        </tr>"""
-        for _, r in latest.iterrows()
+    # Prior-year same period (YYYYMMDD → (YYYY-1)MMDD)
+    prior_map: dict = {}
+    try:
+        prior_period = f"{int(latest_period[:4]) - 1}{latest_period[4:]}"
+        prior_df = df[df["end_date"] == prior_period]
+        if not prior_df.empty:
+            prior_map = prior_df.set_index("bz_item")["bz_sales"].to_dict()
+    except Exception:
+        pass
+
+    has_yoy = bool(prior_map)
+
+    # Header
+    header_cols = (
+        "<th>Segment</th><th>Revenue (亿)</th><th>Share</th><th>YoY</th>"
+        if has_yoy else
+        "<th>Segment</th><th>Revenue (亿)</th><th>Share</th>"
     )
-    st.markdown(f"""
-    <div class="eb-card">
-      <div class="eb-eyebrow" style="margin-bottom:10px">Period · {latest_period}</div>
-      <table class="eb-table">
-        <thead><tr><th>Segment</th><th>Revenue (亿)</th><th>Share</th></tr></thead>
-        <tbody>{rows_html}</tbody>
-      </table>
-    </div>
-    """, unsafe_allow_html=True)
+
+    rows = ""
+    for _, r in latest.iterrows():
+        item  = r["bz_item"]
+        sales = float(r["bz_sales"])
+        pct   = float(r["_pct"])
+        yoy_td = ""
+        if has_yoy:
+            prev = prior_map.get(item)
+            if prev and prev > 0:
+                yoy = (sales - prev) / prev * 100
+                cls = "pos" if yoy > 0 else ("neg" if yoy < 0 else "")
+                yoy_td = f'<td class="num {cls}">{_fmt_pct(yoy, 1, signed=True)}</td>'
+            else:
+                yoy_td = '<td class="num">—</td>'
+        rows += (
+            f"<tr>"
+            f"<td>{item}</td>"
+            f'<td class="num">{_fmt_yi(sales / 1e8)}</td>'
+            f'<td class="num">{_fmt_pct(pct, 1)}</td>'
+            f"{yoy_td}"
+            f"</tr>"
+        )
+
+    period_fmt = (
+        f"{latest_period[:4]}-{latest_period[4:6]}-{latest_period[6:]}"
+        if len(latest_period) == 8 else latest_period
+    )
+
+    return f"""
+<div class="eb-card" style="margin-bottom:16px">
+  <div class="eb-eyebrow" style="margin-bottom:6px">{heading} · Period {period_fmt}</div>
+  <table class="eb-table">
+    <thead><tr>{header_cols}</tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>
+"""
+
+
+_seg_prod = _seg_table_html(mainbz,     "By Product")
+_seg_geo  = _seg_table_html(mainbz_geo, "By Geography")
+
+if _seg_prod or _seg_geo:
+    _render_html((_seg_prod or "") + (_seg_geo or ""))
 else:
-    st.info("No segment breakdown available for this company.")
+    st.info("No revenue segmentation data available for this company.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
