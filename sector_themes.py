@@ -221,6 +221,250 @@ def match_sector_theme(sector_name: str, all_themes: list) -> dict | None:
     return candidates[0] if candidates else None
 
 
+# ── Batch sector → theme matcher ──────────────────────────────────────────────
+
+_BATCH_MATCH_PROMPT = """\
+Match multiple industry sector labels to the closest entries in a list of stored themes.
+
+Input JSON:
+{"sectors": ["sector1", "sector2", ...],
+ "themes": [{"id": 1, "formal_name": "...", "raw_input": "..."}, ...]}
+
+Rules:
+- Return ONLY raw JSON (start { end }). No markdown.
+- Return {"matches": {"sector1": <integer or null>, ...}} — one key per sector.
+- Each value is the id of the best-matching theme, or null if none fits well.
+- A match is good if the theme clearly covers the same industry (different wording is fine).
+- Do NOT force a match when nothing is close enough.
+"""
+
+
+def match_sectors_to_themes_batch(sectors: list, all_themes: list) -> dict:
+    """
+    Batch-match a list of sector names to stored themes with at most ONE AI call.
+
+    Strategy:
+      1. Substring match (free) per sector — unique candidate → resolved immediately.
+      2. Collect all ambiguous (zero or multi-candidate) sectors.
+      3. ONE AI call resolves all ambiguous sectors together.
+
+    Returns {sector_name: theme_dict_or_None} for every sector in `sectors`.
+    """
+    if not all_themes or not sectors:
+        return {s: None for s in sectors}
+
+    resolved: dict = {}
+    ambiguous: list = []  # [(sector_name, candidate_list), ...]
+
+    for sector in sectors:
+        low = sector.strip().lower()
+        candidates = [
+            t for t in all_themes
+            if low in t["formal_name"].lower()
+            or low in t["raw_input"].lower()
+            or t["formal_name"].lower() in low
+            or t["raw_input"].lower() in low
+        ]
+        if len(candidates) == 1:
+            resolved[sector] = candidates[0]
+        else:
+            # 0 candidates → send all_themes to AI; multiple → send just candidates
+            ambiguous.append((sector, candidates if candidates else []))
+
+    if not ambiguous:
+        return resolved
+
+    # ONE AI call for all ambiguous sectors
+    try:
+        api_key = _api_key()
+    except ValueError:
+        for sector, candidates in ambiguous:
+            resolved[sector] = candidates[0] if candidates else None
+        return resolved
+
+    # Build a union pool of relevant themes
+    seen_ids: set = set()
+    pool_union: list = []
+    has_zero_match = any(len(c) == 0 for _, c in ambiguous)
+
+    for _, candidates in ambiguous:
+        for t in candidates:
+            if t["id"] not in seen_ids:
+                seen_ids.add(t["id"])
+                pool_union.append(t)
+
+    # Zero-match sectors need the full theme list sent to the AI
+    if has_zero_match:
+        for t in all_themes:
+            if t["id"] not in seen_ids:
+                seen_ids.add(t["id"])
+                pool_union.append(t)
+
+    payload = {
+        "model": _MODEL,
+        "messages": [
+            {"role": "system", "content": _BATCH_MATCH_PROMPT},
+            {"role": "user", "content": json.dumps({
+                "sectors": [s for s, _ in ambiguous],
+                "themes": [
+                    {"id": t["id"], "formal_name": t["formal_name"],
+                     "raw_input": t["raw_input"]}
+                    for t in pool_union
+                ],
+            })},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 300,
+    }
+
+    try:
+        resp = requests.post(
+            _ENDPOINT, json=payload,
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "application/json"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
+        result = json.loads(raw)
+        matches = result.get("matches", {})
+        theme_by_id = {t["id"]: t for t in pool_union}
+        for sector, candidates in ambiguous:
+            mid = matches.get(sector)
+            if mid is not None:
+                try:
+                    resolved[sector] = theme_by_id.get(int(mid))
+                except (ValueError, TypeError):
+                    resolved[sector] = None
+            else:
+                resolved[sector] = None
+    except Exception:
+        for sector, candidates in ambiguous:
+            resolved[sector] = candidates[0] if candidates else None
+
+    return resolved
+
+
+# ── Batch theme classifier ────────────────────────────────────────────────────
+
+_CLASSIFY_BATCH_PROMPT = """\
+You are an expert Chinese A-share supply chain analyst.
+
+A company's details and MULTIPLE sector supply chains are provided.
+For each theme, determine which single layer the company PRIMARILY operates in.
+Focus on the company's main revenue-generating activities, not aspirational ones.
+
+OUTPUT RULES:
+- Return ONLY raw JSON (start { end }). No markdown.
+- Return {"results": [...]} — one entry per theme_id provided.
+- layer_index must be an integer matching one of the provided layer_index values,
+  or null if the company does not fit any layer for that theme.
+- matched_items: list of 1–3 items FROM that layer matching the company's products.
+  Empty list if layer_index is null.
+
+Schema:
+{
+  "results": [
+    {
+      "theme_id": <integer>,
+      "layer_index": <integer or null>,
+      "matched_items": ["item / 项目", ...]
+    }
+  ]
+}
+"""
+
+
+def classify_ticker_across_themes(
+    ticker: str,
+    company_name: str,
+    products: list,
+    themes_list: list,
+) -> list:
+    """
+    ONE AI call to classify the company across ALL provided themes simultaneously.
+
+    `themes_list` — list of full theme dicts (each with "id", "formal_name", "layers").
+
+    Returns [{"theme_id": int, "layer_index": int|None, "matched_items": [...]}, ...].
+    Raises RuntimeError on failure.
+    """
+    if not themes_list:
+        return []
+
+    try:
+        api_key = _api_key()
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    themes_blocks = []
+    for theme in themes_list:
+        layers_text = "\n".join(
+            f"    Layer {l['layer_index']} — {l.get('layer_name', '')}: "
+            + ", ".join(l.get("items", []))
+            for l in sorted(
+                theme.get("layers", []), key=lambda x: x.get("layer_index", 0)
+            )
+        )
+        themes_blocks.append(
+            f"Theme id={theme['id']}: {theme.get('formal_name') or theme.get('name', '')}\n"
+            f"{layers_text}"
+        )
+
+    user_msg = (
+        f"Company: {company_name} ({ticker})\n"
+        f"Products/Services: {', '.join(products) if products else 'Unknown'}\n\n"
+        + "\n\n".join(themes_blocks)
+    )
+
+    payload = {
+        "model": _MODEL,
+        "messages": [
+            {"role": "system", "content": _CLASSIFY_BATCH_PROMPT},
+            {"role": "user",   "content": user_msg},
+        ],
+        "temperature": 0.1,
+        "max_tokens":  400,
+    }
+
+    try:
+        resp = requests.post(
+            _ENDPOINT, json=payload,
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type":  "application/json"},
+            timeout=60,
+        )
+        resp.raise_for_status()
+    except requests.Timeout:
+        raise RuntimeError("DeepSeek API timed out after 60 s.")
+    except requests.RequestException as exc:
+        raise RuntimeError(f"DeepSeek API request failed: {exc}") from exc
+
+    raw = resp.json()["choices"][0]["message"]["content"].strip()
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
+
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"AI returned invalid JSON ({exc}). Preview: {raw[:300]}"
+        ) from exc
+
+    return [
+        {
+            "theme_id":     entry.get("theme_id"),
+            "layer_index":  entry.get("layer_index"),
+            "matched_items": entry.get("matched_items", []),
+        }
+        for entry in result.get("results", [])
+    ]
+
+
 # ── Layer classifier ──────────────────────────────────────────────────────────
 
 _CLASSIFY_PROMPT = """\
