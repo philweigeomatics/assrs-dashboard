@@ -234,29 +234,60 @@ def compute_signal_score(analysis_df: pd.DataFrame) -> dict:
         elif ma5 < ma20 < ma50:         trend_score, trend_label = -18, "Bearish"
         else:                            trend_score, trend_label =   0, "Neutral"
 
-    # ── 2. Momentum (MACD) — 20 pts max
-    macd      = last.get("MACD")
-    macd_sig  = last.get("MACD_Signal")
-    macd_hist = last.get("MACD_Hist")
+    # ── 2. Momentum (MACD scenarios) — 20 pts max ───────────────────────────────
+    # Scenario-based scoring: we use the richer MACD signals computed by
+    # analysis_engine (Bottoming, ClassicCrossover, Approaching, MomentumBuilding,
+    # Peaking, BearishCrossover) rather than the raw MACD position.
+    #
+    # Key insight: MACD_Bottoming (negative MACD turning up with volume) is a
+    # *buy* signal — the stock is cheap and early.  The old position-based system
+    # would penalise it as -20, which is the opposite of correct.
+    # MACD_Peaking (positive but decelerating) is a *sell* signal — the old
+    # system would score it +10 to +20, also wrong.
     macd_score = 0
-    if all(pd.notna(x) for x in (macd, macd_sig, macd_hist)):
-        if macd > macd_sig and macd_hist > 0: macd_score = +20
-        elif macd > macd_sig:                  macd_score = +10
-        elif macd < macd_sig and macd_hist < 0: macd_score = -20
-        elif macd < macd_sig:                  macd_score = -10
+    macd_label = "MACD"
 
-    # China context: in a confirmed long-term uptrend (price > MA50 > MA200),
-    # bearish MACD is typically a healthy pullback inside a bull cycle, not a
-    # trend reversal.  Policy/SOE/sector-driven A-share names rarely collapse
-    # indefinitely — a very low MACD is often a bottoming signal.
-    # Halve the bearish penalty when the structural trend is clearly bullish.
-    if macd_score < 0:
+    if last.get("MACD_Bottoming", False):
+        macd_score = +15
+        macd_label = "MACD Bottoming ↑"
+    elif last.get("MACD_ClassicCrossover", False):
+        macd_score = +20
+        macd_label = "MACD Crossover ✓"
+    elif last.get("MACD_Approaching", False):
+        macd_score = +10
+        macd_label = "MACD Approaching"
+    elif last.get("MACD_MomentumBuilding", False):
+        macd_score = +15
+        macd_label = "MACD Momentum"
+    elif last.get("MACD_Peaking", False):
+        macd_score = -15
+        macd_label = "MACD Peaking ↓"
+    elif last.get("MACD_BearishCrossover", False):
+        macd_score = -20
+        macd_label = "MACD Bear Cross"
+    else:
+        # No scenario active — fall back to raw position (half weight vs. a scenario)
+        macd      = last.get("MACD")
+        macd_sig  = last.get("MACD_Signal")
+        macd_hist = last.get("MACD_Hist")
+        if all(pd.notna(x) for x in (macd, macd_sig, macd_hist)):
+            if   macd > macd_sig and macd_hist > 0: macd_score = +10
+            elif macd > macd_sig:                    macd_score =  +5
+            elif macd < macd_sig and macd_hist < 0:  macd_score = -10
+            elif macd < macd_sig:                    macd_score =  -5
+        macd_label = "MACD"
+
+    # China uptrend dampening — halve bearish penalty when price > MA50 > MA200
+    # (structural bull trend = healthy pullback, not collapse).
+    # Intentionally excluded for MACD_Peaking: a peaking divergence is a real
+    # warning even inside a bull trend and should NOT be softened.
+    if macd_score < 0 and not last.get("MACD_Peaking", False):
         close_v = last.get("Close")
         ma50_v  = last.get("MA50")
         ma200_v = last.get("MA200")
         if all(pd.notna(x) for x in (close_v, ma50_v, ma200_v)):
             if close_v > ma50_v and ma50_v > ma200_v:
-                macd_score = macd_score // 2  # -20 → -10, -10 → -5
+                macd_score = macd_score // 2  # e.g. -20 → -10
 
     # ── 3. RSI — 15 pts max (mean-reversion bias: extremes favour reversal)
     rsi = last.get("RSI_14")
@@ -308,7 +339,7 @@ def compute_signal_score(analysis_df: pd.DataFrame) -> dict:
         "label": label,
         "components": {
             "trend":      {"value": trend_score, "max": 25, "label": trend_label},
-            "momentum":   {"value": macd_score,  "max": 20, "label": "MACD"},
+            "momentum":   {"value": macd_score,  "max": 20, "label": macd_label},
             "rsi":        {"value": rsi_score,   "max": 15, "label": f"RSI {rsi:.0f}" if pd.notna(rsi) else "RSI —"},
             "volatility": {"value": bb_score,    "max": 15, "label": "BB position"},
             "custom":     {"value": custom,      "max": 25, "label": "Custom signals"},

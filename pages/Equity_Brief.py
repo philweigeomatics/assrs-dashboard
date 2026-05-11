@@ -931,10 +931,27 @@ if analysis_df is not None and not analysis_df.empty:
                 f'border-right:1px solid rgba(0,0,0,0.15)">{label_html}</div>'
             )
 
+        # Build anchor note — shows which S/R levels were used as zone boundaries
+        _s1p = sups[0]["price"] if len(sups) >= 1 else price - 2 * atr
+        _s2p = sups[1]["price"] if len(sups) >= 2 else _s1p - 2 * atr
+        _r1p = res[0]["price"]  if len(res)  >= 1 else price + 2 * atr
+        _r2p = res[1]["price"]  if len(res)  >= 2 else _r1p + 2 * atr
+        anchor_note = (
+            f'<div style="font-family:JetBrains Mono,monospace;font-size:10px;'
+            f'color:var(--ink-3);margin-bottom:10px;letter-spacing:0.03em">'
+            f'Anchored to: '
+            f'<span style="color:var(--pos)">S2 ¥{_s2p:.2f}</span>'
+            f' · <span style="color:var(--pos)">S1 ¥{_s1p:.2f}</span>'
+            f' · <span style="color:var(--neg)">R1 ¥{_r1p:.2f}</span>'
+            f' · <span style="color:var(--neg)">R2 ¥{_r2p:.2f}</span>'
+            f' · ATR ¥{atr:.2f}</div>'
+        )
+
         marker_left = (price - z_min) / z_range * 100
         zone_bar_html = f"""
         <div class="eb-card">
-          <div class="eb-eyebrow" style="margin-bottom:10px">Entry Zone</div>
+          <div class="eb-eyebrow" style="margin-bottom:8px">Entry Zone</div>
+          {anchor_note}
           <div style="display:flex;justify-content:space-between;
                       font-size:13px;margin-bottom:8px;gap:8px">
             <div>Current sits in <strong>{zone['label']}</strong></div>
@@ -1027,7 +1044,7 @@ body {{ margin:0; padding:0; background:var(--bg); color:var(--ink);
 
 </body></html>
 """
-        components.html(strategy_doc, height=740, scrolling=False)
+        components.html(strategy_doc, height=650, scrolling=False)
 else:
     st.warning("No technical data available.")
 
