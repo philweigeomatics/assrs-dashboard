@@ -1692,31 +1692,48 @@ def _competitors_section():
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Admin curation panel — placed BELOW the table so toggles don't
-    #    visually disturb the comparison.  Checkbox changes do NOT rebuild
-    #    the table; only clicking Save does (via fragment rerun).
+    # ── Admin curation panel ─────────────────────────────────────────────────
+    # WHY st.form here:
+    #   Any st.widget outside a form inside a @st.fragment triggers an
+    #   immediate fragment rerun on every interaction.  Checkboxes are widgets,
+    #   so every toggle was causing a full table rebuild — expensive and jarring.
+    #
+    #   st.form batches all widget changes: nothing fires until the submit
+    #   button is clicked.  Result:
+    #     • Toggling checkboxes  → zero reruns, zero Tushare calls
+    #     • Clicking Save        → exactly one fragment rerun; DB is written
+    #                             first, then a second rerun re-reads the new
+    #                             peer list and rebuilds the table
     if is_admin:
         with st.expander("🛠 Edit peer set (admin)", expanded=False):
             st.markdown(
-                '<div style="margin-bottom:8px;font-size:13px;color:var(--ink-2)">'
-                'Uncheck any wrong peers, then click <strong>Save</strong>. '
-                'Toggling checkboxes does not refresh the table — only Save does.'
+                '<div style="margin-bottom:10px;font-size:13px;color:var(--ink-2)">'
+                'Uncheck any incorrect peers then click <strong>Save</strong>. '
+                'Checkbox changes are <em>batched</em> — the comparison table '
+                'will not refresh until you save.'
                 '</div>',
                 unsafe_allow_html=True,
             )
             sel_key_root = f"eb_peer_chk_{ticker}"
-            for p in peer_list:
-                st.checkbox(
-                    f"`{p['ticker']}` {p['name']} — {p.get('why','')}",
-                    value=True, key=f"{sel_key_root}_{p['ticker']}",
+            with st.form(key=f"eb_peers_form_{ticker}"):
+                for p in peer_list:
+                    st.checkbox(
+                        f"`{p['ticker']}` {p['name']} — {p.get('why', '')}",
+                        value=True,
+                        key=f"{sel_key_root}_{p['ticker']}",
+                    )
+                submitted = st.form_submit_button(
+                    "💾 Save curated peer set",
+                    type="primary",
+                    use_container_width=True,
                 )
-            if st.button("💾 Save curated peer set", key="eb_save_peers",
-                         type="primary"):
-                # Read final checkbox state at save time
-                selected = [p for p in peer_list
-                            if st.session_state.get(f"{sel_key_root}_{p['ticker']}", True)]
+            # Intentionally OUTSIDE the form block so session_state is readable
+            if submitted:
+                selected = [
+                    p for p in peer_list
+                    if st.session_state.get(f"{sel_key_root}_{p['ticker']}", True)
+                ]
                 equity_brief.save_competitors_curated(ticker, selected)
-                st.success(f"✅ Saved {len(selected)} peers.")
                 st.rerun(scope="fragment")
 
 
