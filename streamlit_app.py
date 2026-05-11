@@ -45,8 +45,8 @@ pages = {
         st.Page("pages/sector_performance_rotation.py", title="Rotation 轮动"),
     ],
     "📈 Stock 股票": [
-        st.Page("pages/2_Single_Stock_Analysis_个股分析.py", title="Stock Analysis 个股分析"),
         st.Page("pages/Equity_Brief.py", title="Equity Report 个股研报"),
+        st.Page("pages/2_Single_Stock_Analysis_个股分析.py", title="Stock Analysis 个股分析"),
         st.Page("pages/sector_stock_selector.py", title="Stock Selector 选股器"),
         st.Page("pages/watchlist.py", title="Watchlist 观察名单"),
         st.Page("pages/watchlist_earnings_calendar.py", title="Earnings Calendar 财报日历"),

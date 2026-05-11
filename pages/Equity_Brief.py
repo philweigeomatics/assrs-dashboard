@@ -1277,6 +1277,19 @@ body {{ margin:0; padding:0; background:var(--bg); color:var(--ink);
 else:
     st.warning("No technical data available.")
 
+# ── Link to full Stock Analysis page ─────────────────────────────────────────
+_tc1, _tc2 = st.columns([6, 1])
+with _tc2:
+    if st.button(
+        "Full Analysis →",
+        key="eb_goto_ssa",
+        use_container_width=True,
+        help="Open Stock Analysis page pre-loaded with this stock",
+    ):
+        st.session_state["active_ticker"]  = ticker
+        st.session_state["ssa_stock_pick"] = ticker
+        st.switch_page("pages/2_Single_Stock_Analysis_个股分析.py")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 03 — FUNDAMENTALS & YOY GROWTH
