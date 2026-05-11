@@ -560,8 +560,8 @@ if graph:
     supply_chain_ui.render_supply_chain_graph(graph, height=520)
 
     # ── Sector theme positions ────────────────────────────────────────────────
-    # For each macro-sector the company sells into, find a matching stored sector
-    # theme and show which layer the company occupies — or offer to classify it.
+    # Batch-match all macro_sectors to stored themes (ONE AI call max), then
+    # show which supply-chain layer this company occupies in each matched theme.
     macro_sectors = graph.get("macro_sectors", [])
     sc_products   = graph.get("products", [])
     all_themes    = data_manager.get_all_sector_themes()
@@ -575,86 +575,77 @@ if graph:
             'based on its end-markets and products.</div>'
         )
 
-        for _sector in macro_sectors:
-            # Match this macro-sector to a stored theme (cached per session)
-            _mkey = f"cp_match_{ticker}_{_sector}"
-            if _mkey not in st.session_state:
-                st.session_state[_mkey] = sector_themes_mod.match_sector_theme(
-                    _sector, all_themes
+        # ── 1. Batch match all sectors → themes (cached per ticker + theme count) ──
+        _batch_key = f"cp_batch_{ticker}_{len(all_themes)}"
+        if _batch_key not in st.session_state:
+            st.session_state[_batch_key] = (
+                sector_themes_mod.match_sectors_to_themes_batch(
+                    macro_sectors, all_themes
                 )
-            _matched = st.session_state[_mkey]
+            )
+        _sector_to_theme: dict = st.session_state[_batch_key]
 
-            if _matched is None:
-                # No theme in DB matches this sector
-                with st.expander(
-                    f"📦 {_sector.split('/')[0].strip()} — no theme loaded",
-                    expanded=False,
-                ):
-                    st.caption(
-                        "No sector theme in the database matches this market yet."
-                    )
-                    if is_admin:
-                        _raw = _sector.split("/")[0].strip().lower()
-                        if st.button(
-                            f"🌱 Generate theme for '{_sector.split('/')[0].strip()}'",
-                            key=f"cp_gen_{ticker}_{_sector[:24]}",
-                        ):
-                            with st.spinner("Generating sector theme…"):
-                                try:
-                                    _tdata = sector_themes_mod.generate_sector_theme(_raw)
-                                    data_manager.add_sector_theme(
-                                        raw_input=_raw,
-                                        formal_name=_tdata["name"],
-                                        layers_data=_tdata,
-                                        created_by=user.get("username", "admin"),
-                                    )
-                                    del st.session_state[_mkey]
-                                    st.success(
-                                        f"✅ Theme generated. Reload to see the position.")
-                                    st.rerun()
-                                except RuntimeError as exc:
-                                    st.error(str(exc))
+        # ── 2. Deduplicate matched themes by theme_id ──
+        _seen_ids:        set  = set()
+        _matched_themes:  list = []   # [(theme_full, pos), ...]
+        _unmatched_secs:  list = []   # [sector_str, ...]
+
+        for _sector in macro_sectors:
+            _tm = _sector_to_theme.get(_sector)
+            if _tm is None:
+                if _sector not in _unmatched_secs:
+                    _unmatched_secs.append(_sector)
                 continue
-
-            # Theme found — load full record with layers
-            _theme_full = data_manager.get_sector_theme_by_id(_matched["id"])
-            _layers = (_theme_full or {}).get("layers", [])
-            if not _layers:
+            if _tm["id"] in _seen_ids:
                 continue
+            _seen_ids.add(_tm["id"])
+            _tf = data_manager.get_sector_theme_by_id(_tm["id"])
+            if not _tf or not _tf.get("layers"):
+                continue
+            _pos = data_manager.get_chain_position(ticker, _tm["id"])
+            _matched_themes.append((_tf, _pos))
 
-            _pos = data_manager.get_chain_position(ticker, _matched["id"])
-
-            with st.expander(
-                f"🔗 {_matched['formal_name'].split('/')[0].strip()} "
-                f"— Layer {_pos['layer_index']} / {len(_layers)}"
-                if _pos and _pos.get("layer_index") else
-                f"🔗 {_matched['formal_name'].split('/')[0].strip()} — position unknown",
-                expanded=True,
+        # ── 3. Single "Classify All" button for unclassified themes ──
+        _unclassified = [tf for tf, pos in _matched_themes if pos is None]
+        if is_admin and _unclassified:
+            _n = len(_unclassified)
+            if st.button(
+                f"🔍 Classify All Layer Positions ({_n} theme{'s' if _n > 1 else ''})",
+                key=f"cp_cls_all_{ticker}",
+                type="primary",
             ):
-                if _pos is None:
-                    st.caption(
-                        "Layer position not yet classified for this stock in this theme."
-                    )
-                    if is_admin and st.button(
-                        "🔍 Classify layer position",
-                        key=f"cp_cls_{ticker}_{_matched['id']}",
-                    ):
-                        with st.spinner("Classifying layer…"):
-                            try:
-                                _result = sector_themes_mod.classify_ticker_in_theme(
-                                    ticker, company, sc_products, _theme_full,
-                                )
+                with st.spinner(f"Classifying across {_n} theme(s) — one AI call…"):
+                    try:
+                        _results = sector_themes_mod.classify_ticker_across_themes(
+                            ticker, company, sc_products, _unclassified
+                        )
+                        _saved = 0
+                        for _r in _results:
+                            if _r.get("theme_id") is not None:
                                 data_manager.upsert_chain_position(
-                                    ticker, _matched["id"],
-                                    _result.get("layer_index"),
-                                    _result.get("matched_items", []),
+                                    ticker, _r["theme_id"],
+                                    _r.get("layer_index"),
+                                    _r.get("matched_items", []),
                                 )
-                                st.rerun()
-                            except RuntimeError as exc:
-                                st.error(str(exc))
-                    # Show unclassified strip so user can see the theme structure
-                    _render_chain_position_strip(_layers, None, company)
-                else:
+                                _saved += 1
+                        st.success(f"✅ Classified {_saved} theme(s).")
+                        st.rerun()
+                    except RuntimeError as exc:
+                        st.error(str(exc))
+
+        # ── 4. Render each matched theme in an expander ──
+        for _tf, _pos in _matched_themes:
+            _layers   = _tf.get("layers", [])
+            _formal   = _tf.get("formal_name") or _tf.get("name", "")
+            _theme_id = _tf["id"]
+
+            _exp_label = (
+                f"🔗 {_formal} — Layer {_pos['layer_index']} / {len(_layers)}"
+                if _pos and _pos.get("layer_index") else
+                f"🔗 {_formal} — position unknown"
+            )
+            with st.expander(_exp_label, expanded=(_pos is not None)):
+                if _pos is not None:
                     _render_chain_position_strip(
                         _layers,
                         _pos.get("layer_index"),
@@ -662,19 +653,54 @@ if graph:
                         _pos.get("matched_items", []),
                     )
                     if is_admin and st.button(
-                        "🔄 Reclassify", key=f"cp_recls_{ticker}_{_matched['id']}",
-                        help="Re-run AI classification for this theme"
+                        "🔄 Reclassify",
+                        key=f"cp_recls_{ticker}_{_theme_id}",
+                        help="Re-run AI classification for this theme",
                     ):
                         with st.spinner("Reclassifying…"):
                             try:
                                 _result = sector_themes_mod.classify_ticker_in_theme(
-                                    ticker, company, sc_products, _theme_full,
+                                    ticker, company, sc_products, _tf,
                                 )
                                 data_manager.upsert_chain_position(
-                                    ticker, _matched["id"],
+                                    ticker, _theme_id,
                                     _result.get("layer_index"),
                                     _result.get("matched_items", []),
                                 )
+                                st.rerun()
+                            except RuntimeError as exc:
+                                st.error(str(exc))
+                else:
+                    st.caption(
+                        "Layer position not yet classified. "
+                        "Use the button above to classify all themes at once."
+                    )
+                    _render_chain_position_strip(_layers, None, company)
+
+        # ── 5. Unmatched sectors — offer to generate a theme (admins only) ──
+        for _sector in _unmatched_secs:
+            with st.expander(
+                f"📦 {_sector} — no theme loaded", expanded=False
+            ):
+                st.caption("No sector theme in the database matches this market yet.")
+                if is_admin:
+                    _raw_inp = _sector.split("/")[0].strip().lower()
+                    if st.button(
+                        f"🌱 Generate theme for '{_sector.split('/')[0].strip()}'",
+                        key=f"cp_gen_{ticker}_{_sector[:24]}",
+                    ):
+                        with st.spinner("Generating sector theme…"):
+                            try:
+                                _tdata = sector_themes_mod.generate_sector_theme(_raw_inp)
+                                data_manager.add_sector_theme(
+                                    raw_input=_raw_inp,
+                                    formal_name=_tdata["name"],
+                                    layers_data=_tdata,
+                                    created_by=user.get("username", "admin"),
+                                )
+                                # Bust batch-match cache so the new theme is picked up
+                                st.session_state.pop(_batch_key, None)
+                                st.success("✅ Theme generated.")
                                 st.rerun()
                             except RuntimeError as exc:
                                 st.error(str(exc))
