@@ -375,6 +375,7 @@ company  = basic["name"]
 industry = basic.get("industry") or "—"
 
 is_admin = auth_manager.is_admin()
+user     = auth_manager.get_current_user()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
