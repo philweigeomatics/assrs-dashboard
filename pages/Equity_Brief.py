@@ -794,9 +794,13 @@ if analysis_df is not None and not analysis_df.empty:
                 bar_left, bar_color = 50, "#2f8a4f"
             else:
                 bar_left, bar_color = 50 - width_pct, "#c6432a"
+            reason = c.get("reason", "")
             comp_rows.append(
                 f'<div class="bar-row">'
+                f'<div>'
                 f'<div class="bar-label">{c["label"]}</div>'
+                f'<div class="bar-reason">{reason}</div>'
+                f'</div>'
                 f'<div class="bar-track">'
                 f'<div class="bar-mid"></div>'
                 f'<div class="bar-fill" style="left:{bar_left}%;width:{width_pct}%;background:{bar_color}"></div>'
@@ -1014,10 +1018,13 @@ body {{ margin:0; padding:0; background:var(--bg); color:var(--ink);
 .eb-table .neg {{ color:var(--neg); }}
 .row {{ display:grid; grid-template-columns:1fr 1fr; gap:14px;
        margin-bottom:14px; }}
-.bar-row {{ display:grid; grid-template-columns:90px 1fr 50px; gap:10px;
-           align-items:center; padding:5px 0; font-size:12px; }}
+.bar-row {{ display:grid; grid-template-columns:130px 1fr 42px; gap:8px;
+           align-items:center; padding:6px 0; font-size:12px; }}
 .bar-label {{ font-family:ui-monospace,monospace; font-size:10.5px;
              letter-spacing:0.08em; color:var(--ink-3); text-transform:uppercase; }}
+.bar-reason {{ font-size:9px; color:var(--ink-3); margin-top:3px; opacity:0.75;
+              font-style:italic; white-space:nowrap; overflow:hidden;
+              text-overflow:ellipsis; font-family:Georgia,serif; }}
 .bar-track {{ position:relative; height:10px; background:var(--bg-2);
              border-radius:2px; }}
 .bar-mid {{ position:absolute; left:50%; top:-2px; width:1px; height:14px;
@@ -1044,7 +1051,7 @@ body {{ margin:0; padding:0; background:var(--bg); color:var(--ink);
 
 </body></html>
 """
-        components.html(strategy_doc, height=650, scrolling=False)
+        components.html(strategy_doc, height=680, scrolling=False)
 else:
     st.warning("No technical data available.")
 
