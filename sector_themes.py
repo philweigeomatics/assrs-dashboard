@@ -7,13 +7,9 @@ All DB interactions go through data_manager (not this module).
 
 import json
 
-import requests
 import streamlit as st
 
-# ── DeepSeek config ───────────────────────────────────────────────────────────
-
-_ENDPOINT = "https://api.deepseek.com/chat/completions"
-_MODEL    = "deepseek-v4-flash"
+import ai_client
 
 # Hardened version of the user's prompt — same intent, stricter output rules.
 _SYSTEM_PROMPT = """\
@@ -65,11 +61,6 @@ Rules:
 """
 
 
-def _api_key() -> str:
-    from api_config import _get_secret
-    return _get_secret("DEEPSEEK_API_KEY")
-
-
 def generate_sector_theme(raw_input: str) -> dict:
     """
     Expand a rough industry theme into chronological supply-chain layers.
@@ -80,50 +71,12 @@ def generate_sector_theme(raw_input: str) -> dict:
     if not raw_input or not raw_input.strip():
         raise RuntimeError("Empty theme — please enter something to expand.")
 
-    try:
-        api_key = _api_key()
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
-
-    payload = {
-        "model": _MODEL,
-        "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user",   "content": f"Industry theme: {raw_input.strip()}"},
-        ],
-        "temperature": 0.2,
-        "max_tokens": 1500,
-    }
-
-    try:
-        resp = requests.post(
-            _ENDPOINT,
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type":  "application/json",
-            },
-            timeout=45,
-        )
-        resp.raise_for_status()
-    except requests.Timeout:
-        raise RuntimeError("DeepSeek API timed out after 45 s.")
-    except requests.RequestException as exc:
-        raise RuntimeError(f"DeepSeek API request failed: {exc}") from exc
-
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
-
-    # Strip accidental markdown fences if the model adds them anyway
-    if raw.startswith("```"):
-        parts = raw.split("```")
-        raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"DeepSeek returned invalid JSON ({exc}). Preview: {raw[:200]}"
-        ) from exc
+    data = ai_client.call_json(
+        _SYSTEM_PROMPT,
+        f"Industry theme: {raw_input.strip()}",
+        max_tokens=3000,
+        temperature=0.2,
+    )
 
     # ── Light validation so the UI never receives malformed data ──
     if not isinstance(data, dict):
@@ -174,42 +127,21 @@ def match_sector_theme(sector_name: str, all_themes: list) -> dict | None:
         return candidates[0]
 
     # Multiple or zero candidates — ask DeepSeek
-    try:
-        api_key = _api_key()
-    except ValueError:
-        return candidates[0] if candidates else None
-
     pool = candidates if candidates else all_themes
-    payload = {
-        "model": _MODEL,
-        "messages": [
-            {"role": "system", "content": _MATCH_PROMPT},
-            {"role": "user", "content": json.dumps({
+    try:
+        result = ai_client.call_json(
+            _MATCH_PROMPT,
+            json.dumps({
                 "sector": sector_name,
                 "themes": [
                     {"id": t["id"], "formal_name": t["formal_name"],
                      "raw_input": t["raw_input"]}
                     for t in pool
                 ],
-            })},
-        ],
-        "temperature": 0.0,
-        "max_tokens": 50,
-    }
-
-    try:
-        resp = requests.post(
-            _ENDPOINT, json=payload,
-            headers={"Authorization": f"Bearer {api_key}",
-                     "Content-Type": "application/json"},
-            timeout=20,
+            }),
+            max_tokens=800,
+            temperature=0.0,
         )
-        resp.raise_for_status()
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
-        if raw.startswith("```"):
-            parts = raw.split("```")
-            raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
-        result = json.loads(raw)
         matched_id = result.get("matched_id")
         if matched_id is not None:
             for t in pool:
@@ -275,13 +207,6 @@ def match_sectors_to_themes_batch(sectors: list, all_themes: list) -> dict:
         return resolved
 
     # ONE AI call for all ambiguous sectors
-    try:
-        api_key = _api_key()
-    except ValueError:
-        for sector, candidates in ambiguous:
-            resolved[sector] = candidates[0] if candidates else None
-        return resolved
-
     # Build a union pool of relevant themes
     seen_ids: set = set()
     pool_union: list = []
@@ -300,36 +225,20 @@ def match_sectors_to_themes_batch(sectors: list, all_themes: list) -> dict:
                 seen_ids.add(t["id"])
                 pool_union.append(t)
 
-    payload = {
-        "model": _MODEL,
-        "messages": [
-            {"role": "system", "content": _BATCH_MATCH_PROMPT},
-            {"role": "user", "content": json.dumps({
+    try:
+        result = ai_client.call_json(
+            _BATCH_MATCH_PROMPT,
+            json.dumps({
                 "sectors": [s for s, _ in ambiguous],
                 "themes": [
                     {"id": t["id"], "formal_name": t["formal_name"],
                      "raw_input": t["raw_input"]}
                     for t in pool_union
                 ],
-            })},
-        ],
-        "temperature": 0.0,
-        "max_tokens": 300,
-    }
-
-    try:
-        resp = requests.post(
-            _ENDPOINT, json=payload,
-            headers={"Authorization": f"Bearer {api_key}",
-                     "Content-Type": "application/json"},
-            timeout=30,
+            }),
+            max_tokens=1500,
+            temperature=0.0,
         )
-        resp.raise_for_status()
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
-        if raw.startswith("```"):
-            parts = raw.split("```")
-            raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
-        result = json.loads(raw)
         matches = result.get("matches", {})
         theme_by_id = {t["id"]: t for t in pool_union}
         for sector, candidates in ambiguous:
@@ -395,11 +304,6 @@ def classify_ticker_across_themes(
     if not themes_list:
         return []
 
-    try:
-        api_key = _api_key()
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
-
     themes_blocks = []
     for theme in themes_list:
         layers_text = "\n".join(
@@ -420,45 +324,16 @@ def classify_ticker_across_themes(
         + "\n\n".join(themes_blocks)
     )
 
-    payload = {
-        "model": _MODEL,
-        "messages": [
-            {"role": "system", "content": _CLASSIFY_BATCH_PROMPT},
-            {"role": "user",   "content": user_msg},
-        ],
-        "temperature": 0.1,
-        "max_tokens":  400,
-    }
-
-    try:
-        resp = requests.post(
-            _ENDPOINT, json=payload,
-            headers={"Authorization": f"Bearer {api_key}",
-                     "Content-Type":  "application/json"},
-            timeout=60,
-        )
-        resp.raise_for_status()
-    except requests.Timeout:
-        raise RuntimeError("DeepSeek API timed out after 60 s.")
-    except requests.RequestException as exc:
-        raise RuntimeError(f"DeepSeek API request failed: {exc}") from exc
-
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
-    if raw.startswith("```"):
-        parts = raw.split("```")
-        raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
-
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"AI returned invalid JSON ({exc}). Preview: {raw[:300]}"
-        ) from exc
+    result = ai_client.call_json(
+        _CLASSIFY_BATCH_PROMPT, user_msg,
+        max_tokens=3000,
+        temperature=0.1,
+    )
 
     return [
         {
-            "theme_id":     entry.get("theme_id"),
-            "layer_index":  entry.get("layer_index"),
+            "theme_id":      entry.get("theme_id"),
+            "layer_index":   entry.get("layer_index"),
             "matched_items": entry.get("matched_items", []),
         }
         for entry in result.get("results", [])
@@ -504,11 +379,6 @@ def classify_ticker_in_theme(
     Returns {"layer_index": int|None, "matched_items": list[str]}.
     Raises RuntimeError on failure.
     """
-    try:
-        api_key = _api_key()
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
-
     layers_text = "\n".join(
         f"  Layer {l['layer_index']} — {l.get('layer_name', '')}: "
         + ", ".join(l.get("items", []))
@@ -521,41 +391,14 @@ def classify_ticker_in_theme(
         f"Layers:\n{layers_text}"
     )
 
-    payload = {
-        "model": _MODEL,
-        "messages": [
-            {"role": "system", "content": _CLASSIFY_PROMPT},
-            {"role": "user",   "content": user_msg},
-        ],
-        "temperature": 0.1,
-        "max_tokens":  200,
-    }
-    try:
-        resp = requests.post(
-            _ENDPOINT, json=payload,
-            headers={"Authorization": f"Bearer {api_key}",
-                     "Content-Type":  "application/json"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-    except requests.Timeout:
-        raise RuntimeError("DeepSeek API timed out after 30 s.")
-    except requests.RequestException as exc:
-        raise RuntimeError(f"DeepSeek API request failed: {exc}") from exc
-
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
-    if raw.startswith("```"):
-        parts = raw.split("```")
-        raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"AI returned invalid JSON ({exc}). Preview: {raw[:200]}"
-        ) from exc
+    result = ai_client.call_json(
+        _CLASSIFY_PROMPT, user_msg,
+        max_tokens=1500,
+        temperature=0.1,
+    )
 
     return {
-        "layer_index":  result.get("layer_index"),
+        "layer_index":   result.get("layer_index"),
         "matched_items": result.get("matched_items", []),
     }
 

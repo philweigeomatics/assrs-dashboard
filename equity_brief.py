@@ -16,18 +16,8 @@ import json
 from datetime import datetime
 from typing import Any
 
-import requests
-
+import ai_client
 import data_manager
-
-
-_ENDPOINT = "https://api.deepseek.com/chat/completions"
-_MODEL    = "deepseek-v4-flash"
-
-
-def _api_key() -> str:
-    from api_config import _get_secret
-    return _get_secret("DEEPSEEK_API_KEY")
 
 
 # ── DB cache ──────────────────────────────────────────────────────────────────
@@ -85,93 +75,6 @@ def _write_cache(ticker: str, section: str, payload: Any) -> None:
         "generated_at": datetime.utcnow().isoformat(),
     }])
 
-
-# ── DeepSeek call helper ──────────────────────────────────────────────────────
-
-def _call_deepseek(system_prompt: str, user_msg: str, max_tokens: int = 2000) -> dict:
-    """
-    Calls DeepSeek and returns parsed JSON dict.
-    Raises RuntimeError on transport / parse failure.
-    """
-    api_key = _api_key()
-    payload = {
-        "model": _MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_msg},
-        ],
-        "temperature": 0.3,
-        "max_tokens":  max_tokens,
-    }
-    try:
-        resp = requests.post(
-            _ENDPOINT, json=payload,
-            headers={"Authorization": f"Bearer {api_key}",
-                     "Content-Type":  "application/json"},
-            timeout=60,
-        )
-        resp.raise_for_status()
-    except requests.Timeout:
-        raise RuntimeError("AI API timed out after 60 s.")
-    except requests.RequestException as exc:
-        raise RuntimeError(f"AI API failed: {exc}") from exc
-
-    try:
-        resp_json = resp.json()
-    except Exception as exc:
-        raise RuntimeError(
-            f"DeepSeek response was not JSON. Status {resp.status_code}. "
-            f"Body preview: {resp.text[:400]}"
-        ) from exc
-
-    # Surface any API-level error (wrong model name, quota, etc.)
-    if "error" in resp_json:
-        err = resp_json["error"]
-        raise RuntimeError(
-            f"DeepSeek API error — {err.get('type', 'unknown')}: "
-            f"{err.get('message', err)}"
-        )
-
-    try:
-        choice  = resp_json["choices"][0]
-        message = choice["message"]
-        raw     = message.get("content", "").strip()
-    except (KeyError, IndexError) as exc:
-        raise RuntimeError(
-            f"Unexpected DeepSeek response shape. Full response: {resp_json}"
-        ) from exc
-
-    if not raw:
-        finish_reason    = choice.get("finish_reason", "unknown")
-        reasoning_tokens = (
-            resp_json.get("usage", {})
-                     .get("completion_tokens_details", {})
-                     .get("reasoning_tokens", 0)
-        )
-        # Reasoning model (e.g. deepseek-v4-flash) exhausted max_tokens on
-        # its thinking trace before writing any output.
-        if finish_reason == "length" and reasoning_tokens > 0:
-            raise RuntimeError(
-                f"Model ran out of tokens before writing output "
-                f"({reasoning_tokens} tokens consumed by reasoning trace). "
-                f"Increase max_tokens and try again."
-            )
-        raise RuntimeError(
-            f"DeepSeek returned empty content "
-            f"(finish_reason={finish_reason!r}). Full response: {resp_json}"
-        )
-
-    if raw.startswith("```"):
-        parts = raw.split("```")
-        raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
-
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"AI returned invalid JSON ({exc}).\n"
-            f"Full raw response:\n{raw[:600]}"
-        ) from exc
 
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
@@ -320,7 +223,7 @@ def get_company_overview(ticker, name, industry, force_refresh=False):
         if cached:
             return cached
     user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
-    payload  = _call_deepseek(_OVERVIEW_PROMPT, user_msg, max_tokens=1500)
+    payload  = ai_client.call_json(_OVERVIEW_PROMPT, user_msg, max_tokens=1500)
     _write_cache(ticker, "overview", payload)
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
@@ -332,7 +235,7 @@ def get_pestel(ticker: str, name: str, industry: str, force_refresh: bool = Fals
         if cached:
             return cached
     user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
-    payload  = _call_deepseek(_PESTEL_PROMPT, user_msg, max_tokens=2500)
+    payload  = ai_client.call_json(_PESTEL_PROMPT, user_msg, max_tokens=2500)
     _write_cache(ticker, "pestel", payload)
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
@@ -343,7 +246,7 @@ def get_porters(ticker: str, name: str, industry: str, force_refresh: bool = Fal
         if cached:
             return cached
     user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
-    payload  = _call_deepseek(_PORTERS_PROMPT, user_msg, max_tokens=2000)
+    payload  = ai_client.call_json(_PORTERS_PROMPT, user_msg, max_tokens=2000)
     _write_cache(ticker, "porters", payload)
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
@@ -360,7 +263,7 @@ def get_swot(ticker: str, name: str, industry: str,
         f"Industry: {industry}\n\n"
         f"Key metrics:\n{metrics_summary}"
     )
-    payload = _call_deepseek(_SWOT_PROMPT, user_msg, max_tokens=2500)
+    payload = ai_client.call_json(_SWOT_PROMPT, user_msg, max_tokens=2500)
     _write_cache(ticker, "swot", payload)
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
@@ -397,7 +300,7 @@ def get_competitors(
         f"Industry: {industry}"
         f"{products_line}"
     )
-    raw      = _call_deepseek(_COMPETITORS_PROMPT, user_msg, max_tokens=3000)
+    raw      = ai_client.call_json(_COMPETITORS_PROMPT, user_msg, max_tokens=3000)
 
     # Validate each peer against stock_basic
     raw_peers = raw.get("competitors", [])

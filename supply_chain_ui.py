@@ -11,15 +11,10 @@ All DB interactions are delegated to data_manager.
 
 import json
 
-import requests
 import streamlit.components.v1 as components
 
+import ai_client
 import data_manager  # noqa: F401  (available to callers for convenience)
-
-# ── DeepSeek API config ───────────────────────────────────────────────────────
-
-_ENDPOINT = "https://api.deepseek.com/chat/completions"
-_MODEL    = "deepseek-v4-flash"
 
 _SYSTEM_PROMPT = """\
 You are an elite quantitative supply chain analyst specialising in Chinese A-Shares.
@@ -67,11 +62,6 @@ Q&A on cninfo.com.cn, or industry association reports as your primary source of 
 """
 
 
-def _deepseek_api_key() -> str:
-    from api_config import _get_secret
-    return _get_secret("DEEPSEEK_API_KEY")
-
-
 def generate_supply_chain_graph(ticker: str, company_name: str) -> dict:
     """
     Call DeepSeek to produce a supply chain knowledge graph for *ticker*.
@@ -79,57 +69,16 @@ def generate_supply_chain_graph(ticker: str, company_name: str) -> dict:
     Returns the parsed graph dict.
     Raises RuntimeError with a user-friendly message on any failure.
     """
-    try:
-        api_key = _deepseek_api_key()
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
-
     user_msg = (
         f"Generate the supply chain knowledge graph for this Chinese A-share company:\n"
         f"Ticker: {ticker}\n"
         f"Company Name: {company_name}"
     )
-
-    payload = {
-        "model": _MODEL,
-        "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user",   "content": user_msg},
-        ],
-        "temperature": 0.3,
-        "max_tokens": 1200,
-    }
-
-    try:
-        resp = requests.post(
-            _ENDPOINT,
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type":  "application/json",
-            },
-            timeout=45,
-        )
-        resp.raise_for_status()
-    except requests.Timeout:
-        raise RuntimeError("DeepSeek API timed out after 45 s. Try again.")
-    except requests.RequestException as exc:
-        raise RuntimeError(f"DeepSeek API request failed: {exc}") from exc
-
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
-
-    # Strip accidental markdown fences that some models still produce
-    if raw.startswith("```"):
-        parts = raw.split("```")
-        raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
-
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"DeepSeek returned invalid JSON ({exc}). "
-            f"Preview: {raw[:200]}"
-        ) from exc
+    return ai_client.call_json(
+        _SYSTEM_PROMPT, user_msg,
+        max_tokens=3000,
+        temperature=0.3,
+    )
 
 
 # ── D3.js Force-Directed Graph ────────────────────────────────────────────────

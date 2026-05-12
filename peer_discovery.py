@@ -12,14 +12,10 @@ pages/lead_lag_analysis.py wires these together.
 import json
 from datetime import datetime, timedelta
 
-import requests
 import pytz
 
+import ai_client
 import data_manager
-
-# ── DeepSeek ──────────────────────────────────────────────────────────────────
-_ENDPOINT = "https://api.deepseek.com/chat/completions"
-_MODEL    = "deepseek-v4-flash"
 
 _SYSTEM_PROMPT = """\
 You are an elite Chinese A-share equity analyst.
@@ -62,11 +58,6 @@ Schema:
 """
 
 
-def _api_key():
-    from api_config import _get_secret
-    return _get_secret("DEEPSEEK_API_KEY")
-
-
 def composite_key(product, sector):
     """Display + cache key for a (product, sector) pair, or just product if no sector."""
     p = (product or "").strip()
@@ -93,49 +84,15 @@ def discover_peers(product, sector=None, force_refresh=False):
         if cached and cached.get("peers"):
             return cached["peers"]
 
-    try:
-        api_key = _api_key()
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
-
     user_msg = f"Product: {product}"
     if sector:
         user_msg += f"\nDownstream sector: {sector}"
 
-    payload = {
-        "model": _MODEL,
-        "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user",   "content": user_msg},
-        ],
-        "temperature": 0.2,
-        "max_tokens": 800,
-    }
-
-    try:
-        resp = requests.post(
-            _ENDPOINT, json=payload,
-            headers={"Authorization": f"Bearer {api_key}",
-                     "Content-Type":  "application/json"},
-            timeout=40,
-        )
-        resp.raise_for_status()
-    except requests.Timeout:
-        raise RuntimeError("DeepSeek API timed out after 40 s.")
-    except requests.RequestException as exc:
-        raise RuntimeError(f"DeepSeek API failed: {exc}") from exc
-
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
-    if raw.startswith("```"):
-        parts = raw.split("```")
-        raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"DeepSeek returned invalid JSON ({exc}). Preview: {raw[:200]}"
-        ) from exc
+    data = ai_client.call_json(
+        _SYSTEM_PROMPT, user_msg,
+        max_tokens=2500,
+        temperature=0.2,
+    )
 
     raw_peers = data.get("peers", [])
     cleaned = []
@@ -267,11 +224,6 @@ def discover_layer_stocks(
         if peers:
             return peers
 
-    try:
-        api_key = _api_key()
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
-
     position  = "upstream" if layer_idx <= (total_layers // 2) else "downstream"
     items_str = " | ".join(layer_items) if layer_items else "unspecified"
 
@@ -281,40 +233,11 @@ def discover_layer_stocks(
         f"Key items in this layer: {items_str}"
     )
 
-    payload = {
-        "model": _MODEL,
-        "messages": [
-            {"role": "system", "content": _LAYER_STOCK_PROMPT},
-            {"role": "user",   "content": user_msg},
-        ],
-        "temperature": 0.2,
-        "max_tokens": 400,
-    }
-
-    try:
-        resp = requests.post(
-            _ENDPOINT, json=payload,
-            headers={"Authorization": f"Bearer {api_key}",
-                     "Content-Type": "application/json"},
-            timeout=40,
-        )
-        resp.raise_for_status()
-    except requests.Timeout:
-        raise RuntimeError("DeepSeek API timed out after 40 s.")
-    except requests.RequestException as exc:
-        raise RuntimeError(f"DeepSeek API failed: {exc}") from exc
-
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
-    if raw.startswith("```"):
-        parts = raw.split("```")
-        raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"DeepSeek returned invalid JSON ({exc}). Preview: {raw[:200]}"
-        ) from exc
+    data = ai_client.call_json(
+        _LAYER_STOCK_PROMPT, user_msg,
+        max_tokens=2000,
+        temperature=0.2,
+    )
 
     raw_stocks = data.get("stocks", [])
     cleaned, seen = [], set()
@@ -406,51 +329,17 @@ def discover_product_stocks(
     if not product or not product.strip():
         return []
 
-    try:
-        api_key = _api_key()
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
-
     user_msg = (
         f"Sector: {sector_name}\n"
         f"Layer: {layer_name}\n"
         f"Product/Service: {product}"
     )
 
-    payload = {
-        "model": _MODEL,
-        "messages": [
-            {"role": "system", "content": _PRODUCT_STOCK_PROMPT},
-            {"role": "user",   "content": user_msg},
-        ],
-        "temperature": 0.2,
-        "max_tokens": 500,
-    }
-
-    try:
-        resp = requests.post(
-            _ENDPOINT, json=payload,
-            headers={"Authorization": f"Bearer {api_key}",
-                     "Content-Type": "application/json"},
-            timeout=40,
-        )
-        resp.raise_for_status()
-    except requests.Timeout:
-        raise RuntimeError("DeepSeek API timed out after 40 s.")
-    except requests.RequestException as exc:
-        raise RuntimeError(f"DeepSeek API failed: {exc}") from exc
-
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
-    if raw.startswith("```"):
-        parts = raw.split("```")
-        raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"DeepSeek returned invalid JSON ({exc}). Preview: {raw[:200]}"
-        ) from exc
+    data = ai_client.call_json(
+        _PRODUCT_STOCK_PROMPT, user_msg,
+        max_tokens=2000,
+        temperature=0.2,
+    )
 
     raw_stocks = data.get("stocks", [])
     cleaned, seen = [], set()
