@@ -116,7 +116,34 @@ def _call_deepseek(system_prompt: str, user_msg: str, max_tokens: int = 900) -> 
     except requests.RequestException as exc:
         raise RuntimeError(f"AI API failed: {exc}") from exc
 
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
+    try:
+        resp_json = resp.json()
+    except Exception as exc:
+        raise RuntimeError(
+            f"DeepSeek response was not JSON. Status {resp.status_code}. "
+            f"Body preview: {resp.text[:400]}"
+        ) from exc
+
+    # Surface any API-level error (wrong model name, quota, etc.)
+    if "error" in resp_json:
+        err = resp_json["error"]
+        raise RuntimeError(
+            f"DeepSeek API error — {err.get('type', 'unknown')}: "
+            f"{err.get('message', err)}"
+        )
+
+    try:
+        raw = resp_json["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError) as exc:
+        raise RuntimeError(
+            f"Unexpected DeepSeek response shape. Full response: {resp_json}"
+        ) from exc
+
+    if not raw:
+        raise RuntimeError(
+            f"DeepSeek returned empty content. Full response: {resp_json}"
+        )
+
     if raw.startswith("```"):
         parts = raw.split("```")
         raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
@@ -125,7 +152,8 @@ def _call_deepseek(system_prompt: str, user_msg: str, max_tokens: int = 900) -> 
         return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise RuntimeError(
-            f"AI returned invalid JSON ({exc}). Preview: {raw[:200]}"
+            f"AI returned invalid JSON ({exc}).\n"
+            f"Full raw response:\n{raw[:600]}"
         ) from exc
 
 
