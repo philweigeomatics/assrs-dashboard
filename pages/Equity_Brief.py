@@ -1277,8 +1277,8 @@ body {{ margin:0; padding:0; background:var(--bg); color:var(--ink);
 else:
     st.warning("No technical data available.")
 
-# ── Link to full Stock Analysis page ─────────────────────────────────────────
-_tc1, _tc2 = st.columns([6, 1])
+# ── Links to related pages ───────────────────────────────────────────────────
+_tc1, _tc2, _tc3 = st.columns([4, 1, 1])
 with _tc2:
     if st.button(
         "Full Analysis →",
@@ -1289,6 +1289,15 @@ with _tc2:
         st.session_state["active_ticker"]  = ticker
         st.session_state["ssa_stock_pick"] = ticker
         st.switch_page("pages/2_Single_Stock_Analysis_个股分析.py")
+with _tc3:
+    if st.button(
+        "Lead-Lag →",
+        key="eb_goto_ll",
+        use_container_width=True,
+        help="Open Lead-Lag Analysis pre-loaded with this stock",
+    ):
+        st.session_state["ll_active_ticker"] = ticker
+        st.switch_page("pages/lead_lag_analysis.py")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1968,8 +1977,18 @@ def _competitors_section():
                     p for p in peer_list
                     if st.session_state.get(f"{sel_key_root}_{p['ticker']}", True)
                 ]
-                equity_brief.save_competitors_curated(ticker, selected)
-                st.rerun(scope="fragment")
+                current_tickers  = {p["ticker"] for p in peer_list}
+                selected_tickers = {p["ticker"] for p in selected}
+                if selected_tickers == current_tickers:
+                    st.info("No changes — all peers are still checked.")
+                else:
+                    removed = current_tickers - selected_tickers
+                    equity_brief.save_competitors_curated(ticker, selected)
+                    st.success(
+                        f"✅ Saved — removed {len(removed)} peer(s): "
+                        + ", ".join(sorted(removed))
+                    )
+                    st.rerun(scope="fragment")
 
 
 _competitors_section()
