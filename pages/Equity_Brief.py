@@ -533,7 +533,8 @@ def _render_chain_position_strip(
 
 
 # ── Supply chain graph (existing or admin-generated) ─────────────────────────
-graph = data_manager.get_supply_chain_graph(ticker)
+graph       = data_manager.get_supply_chain_graph(ticker)
+sc_products = (graph or {}).get("products", [])   # available to the whole page
 
 if graph:
     sc_col1, sc_col2 = st.columns([5, 1])
@@ -564,7 +565,6 @@ if graph:
     # Batch-match all macro_sectors to stored themes (ONE AI call max), then
     # show which supply-chain layer this company occupies in each matched theme.
     macro_sectors = graph.get("macro_sectors", [])
-    sc_products   = graph.get("products", [])
     all_themes    = data_manager.get_all_sector_themes()
 
     if macro_sectors and all_themes is not None:
@@ -1858,14 +1858,16 @@ def _competitors_section():
             with st.spinner("Regenerating peer set…"):
                 try:
                     equity_brief.get_competitors(ticker, company, industry,
-                                                 force_refresh=True)
+                                                 force_refresh=True,
+                                                 core_products=sc_products)
                     st.rerun(scope="fragment")
                 except RuntimeError as exc:
                     st.error(str(exc))
 
     try:
         with st.spinner("Loading peers…"):
-            comps = equity_brief.get_competitors(ticker, company, industry)
+            comps = equity_brief.get_competitors(ticker, company, industry,
+                                                core_products=sc_products)
         peer_list = comps["payload"].get("competitors", [])
     except RuntimeError as exc:
         st.error(f"Peer discovery failed: {exc}")
