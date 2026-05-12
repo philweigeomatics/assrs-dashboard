@@ -13,7 +13,7 @@ import streamlit as st
 # ── DeepSeek config ───────────────────────────────────────────────────────────
 
 _ENDPOINT = "https://api.deepseek.com/chat/completions"
-_MODEL    = "deepseek-v3-0324"
+_MODEL    = "deepseek-v4-flash"
 
 # Hardened version of the user's prompt — same intent, stricter output rules.
 _SYSTEM_PROMPT = """\
