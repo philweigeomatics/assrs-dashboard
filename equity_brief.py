@@ -22,7 +22,7 @@ import data_manager
 
 
 _ENDPOINT = "https://api.deepseek.com/chat/completions"
-_MODEL    = "deepseek-v3-0324"
+_MODEL    = "deepseek-v4-flash"
 
 
 def _api_key() -> str:
@@ -305,10 +305,19 @@ def get_swot(ticker: str, name: str, industry: str,
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
 
-def get_competitors(ticker: str, name: str, industry: str,
-                    force_refresh: bool = False) -> dict:
+def get_competitors(
+    ticker: str,
+    name: str,
+    industry: str,
+    force_refresh: bool = False,
+    core_products: list | None = None,
+) -> dict:
     """
     Returns {payload, generated_at}. payload = {"competitors": [...]}.
+
+    core_products: optional list of product/service strings from the supply
+    chain graph — passed to the AI so it can identify substitutable competitors
+    rather than same-space-but-different-product peers.
 
     All returned tickers are validated against stock_basic — any unknown
     ticker is silently dropped before caching. The caller can rely on
@@ -319,7 +328,15 @@ def get_competitors(ticker: str, name: str, industry: str,
         if cached:
             return cached
 
-    user_msg = f"Target company: {name} ({ticker})\nIndustry: {industry}"
+    products_line = ""
+    if core_products:
+        products_line = "\nCore products/services: " + ", ".join(core_products[:8])
+
+    user_msg = (
+        f"Target company: {name} ({ticker})\n"
+        f"Industry: {industry}"
+        f"{products_line}"
+    )
     raw      = _call_deepseek(_COMPETITORS_PROMPT, user_msg, max_tokens=700)
 
     # Validate each peer against stock_basic
