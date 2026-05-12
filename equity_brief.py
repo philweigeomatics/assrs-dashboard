@@ -225,42 +225,27 @@ Schema:
 _COMPETITORS_PROMPT = """\
 You are an elite Chinese A-share equity analyst.
 
-Given a target company and its core business segment, return EXACTLY 4 \
-A-share listed competitors that operate in the SAME segment and compete \
-for the SAME purchasing decisions.
+Given a target company, return EXACTLY 4 A-share listed competitors that
+operate in the SAME end-market and compete for the SAME customers.
 
-UNIVERSE RULES:
-- A-share only (Shanghai or Shenzhen, 6-digit tickers).
-- Exclude ETFs, indices, B-shares, HK/US listings.
-
-DIRECT COMPETITOR DEFINITION (BOTH conditions must hold):
-1. Must sell products/services that can DIRECTLY REPLACE the target's \
-offering in the SAME use-case or project type.
-2. Must compete for the SAME contracts/tenders or purchasing decisions \
-from the SAME type of customers (e.g. same ministries, operators, OEMs).
-
-EXCLUSIONS — do NOT include:
-- Suppliers to the target (different value-chain layer upstream).
-- Customers of the target (different value-chain layer downstream).
-- Companies mainly in a different layer: raw materials, foundry, \
-contract manufacturing, pure system integrators when the target is a \
-component vendor (or vice versa).
-- Companies that are only 同赛道 concept peers without substitutable products.
+QUALIFICATION RULES:
+- A-share only (Shanghai or Shenzhen, 6-digit ticker).
+- Excludes ETFs, indices, HK/US stocks.
+- Direct competitor — not a supplier, not a customer, not "adjacent".
+- Currently shipping product/service today, not pre-revenue.
 
 OUTPUT RULES:
-- Return ONLY raw JSON (start { end }). No markdown fences.
-- Return EXACTLY 4 competitors. Each ticker MUST be exactly 6 digits.
-- "why" must follow this template: \
-"Both provide [product/solution] to [customer type or key customers] \
-for [use-case/project], and can be chosen as substitutes in the same tenders."
+- Return ONLY raw JSON (start { end }). No markdown.
+- Each ticker MUST be exactly 6 digits.
+- "why" is one sentence explaining the competitive overlap.
 
 Schema:
 {
   "competitors": [
-    {"ticker": "000001", "name": "公司名", "why": "Both provide ..."},
-    {"ticker": "000002", "name": "公司名", "why": "Both provide ..."},
-    {"ticker": "000003", "name": "公司名", "why": "Both provide ..."},
-    {"ticker": "000004", "name": "公司名", "why": "Both provide ..."}
+    {"ticker": "000001", "name": "公司名", "why": "..."},
+    {"ticker": "000002", "name": "公司名", "why": "..."},
+    {"ticker": "000003", "name": "公司名", "why": "..."},
+    {"ticker": "000004", "name": "公司名", "why": "..."}
   ]
 }
 """
@@ -320,19 +305,10 @@ def get_swot(ticker: str, name: str, industry: str,
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
 
-def get_competitors(
-    ticker: str,
-    name: str,
-    industry: str,
-    force_refresh: bool = False,
-    core_products: list | None = None,
-) -> dict:
+def get_competitors(ticker: str, name: str, industry: str,
+                    force_refresh: bool = False) -> dict:
     """
     Returns {payload, generated_at}. payload = {"competitors": [...]}.
-
-    core_products: optional list of product/service strings from the supply
-    chain graph — passed to the AI so it can identify substitutable competitors
-    rather than same-space-but-different-product peers.
 
     All returned tickers are validated against stock_basic — any unknown
     ticker is silently dropped before caching. The caller can rely on
@@ -343,15 +319,7 @@ def get_competitors(
         if cached:
             return cached
 
-    products_line = ""
-    if core_products:
-        products_line = "\nCore products/services: " + ", ".join(core_products[:8])
-
-    user_msg = (
-        f"Target company: {name} ({ticker})\n"
-        f"Industry: {industry}"
-        f"{products_line}"
-    )
+    user_msg = f"Target company: {name} ({ticker})\nIndustry: {industry}"
     raw      = _call_deepseek(_COMPETITORS_PROMPT, user_msg, max_tokens=700)
 
     # Validate each peer against stock_basic
