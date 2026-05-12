@@ -19,7 +19,7 @@ import data_manager  # noqa: F401  (available to callers for convenience)
 # ── DeepSeek API config ───────────────────────────────────────────────────────
 
 _ENDPOINT = "https://api.deepseek.com/chat/completions"
-_MODEL    = "deepseek-chat"
+_MODEL    = "deepseek-v3-0324"
 
 _SYSTEM_PROMPT = """\
 You are an elite quantitative supply chain analyst specialising in Chinese A-Shares.
