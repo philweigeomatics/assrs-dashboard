@@ -88,7 +88,7 @@ def _write_cache(ticker: str, section: str, payload: Any) -> None:
 
 # ── DeepSeek call helper ──────────────────────────────────────────────────────
 
-def _call_deepseek(system_prompt: str, user_msg: str, max_tokens: int = 900) -> dict:
+def _call_deepseek(system_prompt: str, user_msg: str, max_tokens: int = 2000) -> dict:
     """
     Calls DeepSeek and returns parsed JSON dict.
     Raises RuntimeError on transport / parse failure.
@@ -133,15 +133,32 @@ def _call_deepseek(system_prompt: str, user_msg: str, max_tokens: int = 900) -> 
         )
 
     try:
-        raw = resp_json["choices"][0]["message"]["content"].strip()
+        choice  = resp_json["choices"][0]
+        message = choice["message"]
+        raw     = message.get("content", "").strip()
     except (KeyError, IndexError) as exc:
         raise RuntimeError(
             f"Unexpected DeepSeek response shape. Full response: {resp_json}"
         ) from exc
 
     if not raw:
+        finish_reason    = choice.get("finish_reason", "unknown")
+        reasoning_tokens = (
+            resp_json.get("usage", {})
+                     .get("completion_tokens_details", {})
+                     .get("reasoning_tokens", 0)
+        )
+        # Reasoning model (e.g. deepseek-v4-flash) exhausted max_tokens on
+        # its thinking trace before writing any output.
+        if finish_reason == "length" and reasoning_tokens > 0:
+            raise RuntimeError(
+                f"Model ran out of tokens before writing output "
+                f"({reasoning_tokens} tokens consumed by reasoning trace). "
+                f"Increase max_tokens and try again."
+            )
         raise RuntimeError(
-            f"DeepSeek returned empty content. Full response: {resp_json}"
+            f"DeepSeek returned empty content "
+            f"(finish_reason={finish_reason!r}). Full response: {resp_json}"
         )
 
     if raw.startswith("```"):
@@ -303,7 +320,7 @@ def get_company_overview(ticker, name, industry, force_refresh=False):
         if cached:
             return cached
     user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
-    payload  = _call_deepseek(_OVERVIEW_PROMPT, user_msg, max_tokens=400)
+    payload  = _call_deepseek(_OVERVIEW_PROMPT, user_msg, max_tokens=1500)
     _write_cache(ticker, "overview", payload)
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
@@ -315,7 +332,7 @@ def get_pestel(ticker: str, name: str, industry: str, force_refresh: bool = Fals
         if cached:
             return cached
     user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
-    payload  = _call_deepseek(_PESTEL_PROMPT, user_msg, max_tokens=900)
+    payload  = _call_deepseek(_PESTEL_PROMPT, user_msg, max_tokens=2500)
     _write_cache(ticker, "pestel", payload)
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
@@ -326,7 +343,7 @@ def get_porters(ticker: str, name: str, industry: str, force_refresh: bool = Fal
         if cached:
             return cached
     user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
-    payload  = _call_deepseek(_PORTERS_PROMPT, user_msg, max_tokens=600)
+    payload  = _call_deepseek(_PORTERS_PROMPT, user_msg, max_tokens=2000)
     _write_cache(ticker, "porters", payload)
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
@@ -343,7 +360,7 @@ def get_swot(ticker: str, name: str, industry: str,
         f"Industry: {industry}\n\n"
         f"Key metrics:\n{metrics_summary}"
     )
-    payload = _call_deepseek(_SWOT_PROMPT, user_msg, max_tokens=900)
+    payload = _call_deepseek(_SWOT_PROMPT, user_msg, max_tokens=2500)
     _write_cache(ticker, "swot", payload)
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
@@ -380,7 +397,7 @@ def get_competitors(
         f"Industry: {industry}"
         f"{products_line}"
     )
-    raw      = _call_deepseek(_COMPETITORS_PROMPT, user_msg, max_tokens=700)
+    raw      = _call_deepseek(_COMPETITORS_PROMPT, user_msg, max_tokens=3000)
 
     # Validate each peer against stock_basic
     raw_peers = raw.get("competitors", [])
