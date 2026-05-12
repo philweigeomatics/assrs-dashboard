@@ -19,7 +19,7 @@ import data_manager
 
 # ── DeepSeek ──────────────────────────────────────────────────────────────────
 _ENDPOINT = "https://api.deepseek.com/chat/completions"
-_MODEL    = "deepseek-v3-0324"
+_MODEL    = "deepseek-v4-flash"
 
 _SYSTEM_PROMPT = """\
 You are an elite Chinese A-share equity analyst.

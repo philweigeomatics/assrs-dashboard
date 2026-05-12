@@ -22,7 +22,7 @@ import data_manager
 
 
 _ENDPOINT = "https://api.deepseek.com/chat/completions"
-_MODEL    = "deepseek-v3-0324"
+_MODEL    = "deepseek-v4-flash"
 
 
 def _api_key() -> str:
