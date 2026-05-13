@@ -143,7 +143,7 @@ def call_text(
     system_prompt: str,
     user_msg: str,
     *,
-    max_tokens: int   = 2000,
+    max_tokens: int   = 4000,
     temperature: float = 0.2,
     timeout: int       = 60,
 ) -> str:
@@ -165,7 +165,7 @@ def call_json(
     system_prompt: str,
     user_msg: str,
     *,
-    max_tokens: int    = 2000,
+    max_tokens: int    = 4000,
     temperature: float = 0.2,
     timeout: int       = 60,
 ) -> dict:
