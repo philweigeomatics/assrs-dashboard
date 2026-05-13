@@ -1861,7 +1861,7 @@ def _competitors_section():
                                                  force_refresh=True,
                                                  core_products=sc_products)
                     st.rerun(scope="fragment")
-                except RuntimeError as exc:
+                except Exception as exc:
                     st.error(str(exc))
 
     try:
@@ -1869,7 +1869,7 @@ def _competitors_section():
             comps = equity_brief.get_competitors(ticker, company, industry,
                                                 core_products=sc_products)
         peer_list = comps["payload"].get("competitors", [])
-    except RuntimeError as exc:
+    except Exception as exc:
         st.error(f"Peer discovery failed: {exc}")
         peer_list = []
 

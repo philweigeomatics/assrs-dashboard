@@ -2832,22 +2832,26 @@ def process_fund_nav(fund_id: int, target_date_sql: str, daily_returns: dict):
     CORE ENGINE 1: The Accounting Module.
     Takes a dictionary of {ticker: pct_return} for a specific date, applies active weights,
     calculates the new AUM, and preserves idempotency.
+
+    Also computes and stores actual market-value weights (fund_daily_weights) so that
+    weight drift — the divergence of actual holdings from the target mandate — is tracked
+    daily without assuming continuous rebalancing.
     """
-    
+
     # Fetch active holdings for this fund
     positions_df = db.read_table('fund_positions', filters={'fund_id': fund_id})
     if positions_df.empty:
         return False, 0, 0, 0
-        
+
     active_mask = (positions_df['effective_date'] <= target_date_sql) & \
                   (positions_df['end_date'].isna() | (positions_df['end_date'] > target_date_sql))
     fund_holdings = positions_df[active_mask]
-    
+
     if fund_holdings.empty:
         return False, 0, 0, 0
 
     all_metrics = db.read_table('fund_daily_metrics', filters={'fund_id': fund_id})
-    
+
     # SAFEGUARD 2: Preserve user-inputted net_flow if overwriting a failed/duplicate run
     current_net_flow = 0.0
     if not all_metrics.empty:
@@ -2856,38 +2860,91 @@ def process_fund_nav(fund_id: int, target_date_sql: str, daily_returns: dict):
             current_net_flow = today_record.iloc[0].get('net_flow', 0.0)
 
     # SAFEGUARD 3: Strictly grab yesterday's AUM to prevent double-compounding
-    starting_aum = 10000000.0  
+    starting_aum = 10000000.0
+    prev_date_sql = None
     if not all_metrics.empty:
         past_metrics = all_metrics[all_metrics['trade_date'] < target_date_sql].sort_values(by='trade_date', ascending=False)
         if not past_metrics.empty:
             starting_aum = past_metrics.iloc[0]['total_aum']
-            
+            prev_date_sql = past_metrics.iloc[0]['trade_date']
+
     starting_capital = starting_aum + current_net_flow
 
-    # Apply Weights
+    # Apply target weights to compute portfolio return
     portfolio_daily_return = 0.0
     for _, pos in fund_holdings.iterrows():
         ticker = pos['ts_code']
         weight = pos['weight']
         stock_ret = daily_returns.get(ticker, 0.0)
         portfolio_daily_return += (weight * stock_ret)
-        
+
     new_aum = starting_capital * (1 + portfolio_daily_return)
     daily_pnl = new_aum - starting_capital
-    
+
     # Save Accounting Data (Risk metrics default to None, updated by Risk Module next)
     metric_record = {
         'fund_id': fund_id,
         'trade_date': target_date_sql,
         'total_aum': new_aum,
         'daily_pnl': daily_pnl,
-        'net_flow': current_net_flow,  
-        'beta_30d': None, 
+        'net_flow': current_net_flow,
+        'beta_30d': None,
         'var_95': None,
         'volatility_annualized': None
     }
-    
     db.insert_records('fund_daily_metrics', [metric_record], upsert=True)
+
+    # ── Weight Drift Tracking ─────────────────────────────────────────────────
+    # Fetch the previous day's REAL (non-simulated) actual weights.
+    # Simulated backfill records are intentionally excluded so the nightly
+    # rollup always starts fresh from target weights on its very first run,
+    # rather than chaining onto the retroactive simulation.
+    prev_actual_weights = {}
+    if prev_date_sql:
+        prev_w_df = db.read_table(
+            'fund_daily_weights',
+            filters={'fund_id': fund_id, 'trade_date': prev_date_sql}
+        )
+        if not prev_w_df.empty:
+            # Keep only real rows — ignore any simulated backfill rows
+            if 'is_simulated' in prev_w_df.columns:
+                prev_w_df = prev_w_df[prev_w_df['is_simulated'].astype(int) == 0]
+            if not prev_w_df.empty:
+                prev_actual_weights = dict(zip(prev_w_df['ts_code'], prev_w_df['actual_weight']))
+
+    # Drift formula: aw_i(t) = aw_i(t-1) * (1 + r_i(t)) / (1 + r_port(t))
+    # On the first day (no prior record) aw_i(t-1) = target_weight_i
+    actual_weights = {}
+    divisor = 1.0 + portfolio_daily_return if portfolio_daily_return != -1.0 else 1.0
+    for _, pos in fund_holdings.iterrows():
+        ticker = pos['ts_code']
+        target_w = float(pos['weight'])
+        prev_aw = prev_actual_weights.get(ticker, target_w)
+        stock_ret = daily_returns.get(ticker, 0.0)
+        actual_weights[ticker] = prev_aw * (1.0 + stock_ret) / divisor
+
+    # Normalise to guard against floating-point drift (theoretically already sums to 1)
+    total_aw = sum(actual_weights.values())
+    if total_aw > 0:
+        actual_weights = {k: v / total_aw for k, v in actual_weights.items()}
+
+    weight_records = []
+    for _, pos in fund_holdings.iterrows():
+        ticker = pos['ts_code']
+        target_w = float(pos['weight'])
+        actual_w = actual_weights.get(ticker, target_w)
+        weight_records.append({
+            'fund_id':        fund_id,
+            'trade_date':     target_date_sql,
+            'ts_code':        ticker,
+            'target_weight':  target_w,
+            'actual_weight':  actual_w,
+            'drift_pct':      round(actual_w - target_w, 6),
+            'is_simulated':   0,  # Real nightly rollup — not a retroactive simulation
+        })
+    if weight_records:
+        db.insert_records('fund_daily_weights', weight_records, upsert=True)
+
     return True, new_aum, portfolio_daily_return, current_net_flow
 
 
@@ -2934,7 +2991,8 @@ def update_fund_risk_metrics(fund_id: int, target_date_sql: str, pre_fetched_ben
     fund_rets = np.array(fund_rets)
     
     # --- RISK MATH 1: Volatility & VaR ---
-    volatility_ann = np.std(fund_rets) * np.sqrt(252)
+    # A-shares trade ~242 days/year (not the US/global 252)
+    volatility_ann = np.std(fund_rets) * np.sqrt(242)
     var_95 = np.percentile(fund_rets, 5) 
     
     # --- RISK MATH 2: Beta ---
@@ -3045,123 +3103,204 @@ def backfill_fund_history(fund_id, positions, initial_aum=10000000.0, lookback_d
     """
     No-compromise backfill. Calculates base NAV instantly, then brute-forces
     the institutional risk metrics (Beta, VaR, Vol) for EVERY SINGLE historical day.
+
+    Price source: Tushare pro_bar with adj='qfq' (forward-adjusted) via
+    get_single_stock_data_live() — same basis as the Portfolio Optimizer, so
+    backtest returns are directly comparable to optimisation outputs.
+
+    Also populates fund_daily_weights with the actual market-value weight for
+    every stock on every day so weight drift is visible from day one.
     """
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
     import pandas as pd
     import numpy as np
-    
+
     CHINA_TZ = ZoneInfo("Asia/Shanghai")
     end_date = datetime.now(CHINA_TZ).date()
-    
-    # Add 30 extra days of lookback buffer so the first day of the 180-day window 
-    # has enough history to calculate the 30-day rolling risk metrics!
+
+    # Add 30 extra days of lookback buffer so the first day of the 180-day window
+    # has enough history to calculate the 30-day rolling risk metrics.
     start_date = end_date - timedelta(days=lookback_days + 30)
-    
+
     print(f"[data_manager] ⚙️ Starting COMPLETE historical backfill for Fund ID {fund_id}...")
-    
-    # 1. Fetch historical data for all stocks in the mandate
+
+    # 1. Fetch historical data for all stocks in the mandate via live qfq API
     ts_codes = list(positions.keys())
     historical_data = {}
-    
+
     for ticker in ts_codes:
-        clean_ticker = ticker.split('.')[0] 
-        df = get_single_stock_data(clean_ticker)
-        
+        clean_ticker = ticker.split('.')[0]
+        # get_single_stock_data_live uses pro_bar adj='qfq' — same basis as the optimizer
+        df = get_single_stock_data_live(
+            clean_ticker,
+            start_date=start_date.strftime('%Y%m%d'),
+            end_date=end_date.strftime('%Y%m%d'),
+        )
+
         if df is not None and not df.empty:
             df.index = pd.to_datetime(df.index)
-            df_window = df.loc[(df.index >= pd.to_datetime(start_date)) & (df.index <= pd.to_datetime(end_date))].copy()
-            
+            df_window = df.loc[
+                (df.index >= pd.to_datetime(start_date)) &
+                (df.index <= pd.to_datetime(end_date))
+            ].copy()
+
             if not df_window.empty:
+                # pct_change from qfq Close gives the correct dividend/split-adjusted return
                 df_window['pct_chg'] = df_window['Close'].pct_change().fillna(0)
                 historical_data[ticker] = df_window['pct_chg']
-    
+
     if not historical_data:
         print("[data_manager] ⚠️ No historical data found for backfill.")
         return False
-        
+
     # 2. Combine all stock returns into a single DataFrame
     pivot_df = pd.DataFrame(historical_data).fillna(0)
     for code in ts_codes:
         if code not in pivot_df.columns:
             pivot_df[code] = 0.0
-            
-    # 3. Calculate Portfolio Daily Return & AUM
+
+    # 3. Calculate Portfolio Daily Return & AUM (using target weights — no rebalancing assumed)
     weights = pd.Series(positions)
     weights = weights.reindex(pivot_df.columns).fillna(0)
-    pivot_df['portfolio_return'] = pivot_df.dot(weights)
+    pivot_df['portfolio_return'] = pivot_df[list(weights.index)].dot(weights)
     pivot_df['cumulative_return'] = (1 + pivot_df['portfolio_return']).cumprod()
     pivot_df['total_aum'] = initial_aum * pivot_df['cumulative_return']
-    
+
     # 4. Insert Base AUM Records into Database (Risk metrics temporarily None)
     records = []
     for date, row in pivot_df.iterrows():
         records.append({
-            'fund_id': fund_id,
+            'fund_id':    fund_id,
             'trade_date': date.strftime('%Y-%m-%d'),
-            'total_aum': float(row['total_aum']),
-            'daily_pnl': float(row['total_aum'] - (row['total_aum'] / (1 + row['portfolio_return'])) if row['portfolio_return'] != 0 else 0),
-            'net_flow': 0.0,
-            'beta_30d': None,
-            'var_95': None,
-            'volatility_annualized': None
+            'total_aum':  float(row['total_aum']),
+            'daily_pnl':  float(
+                row['total_aum'] - (row['total_aum'] / (1 + row['portfolio_return']))
+                if row['portfolio_return'] != 0 else 0
+            ),
+            'net_flow':   0.0,
+            'beta_30d':   None,
+            'var_95':     None,
+            'volatility_annualized': None,
         })
-        
+
     if not records:
         return False
-        
-    db.insert_records('fund_daily_metrics', records, upsert=True)
-    print(f"[data_manager] ✅ Base AUM inserted for {len(records)} days. Starting Risk Engine...")
 
-    # 5. Pre-fetch Benchmark for the Risk Engine 
-    # (We fetch this once and pass it down so Tushare doesn't block you for duplicate calls)
+    db.insert_records('fund_daily_metrics', records, upsert=True)
+    print(f"[data_manager] ✅ Base AUM inserted for {len(records)} days. Starting Weight Drift Engine...")
+
+    # 5. Compute and store daily weight drift for every backfill date ──────────
+    # Weight drift model (buy-and-hold between rebalances):
+    #   actual_weight_i(t) = target_i × ∏_{s=1..t} [(1+r_i(s)) / (1+r_port(s))]
+    #
+    # Using vectorised cumprod:
+    #   daily_drift_factor_i(t) = (1+r_i(t)) / (1+r_port(t))
+    #   cum_drift_i(t)           = ∏ daily_drift_factor_i(1..t)
+    #   actual_weight_i(t)       = target_i × cum_drift_i(t)
+    #
+    # On t=0 (inception day, after first day's return) the formula correctly shows the
+    # weight after the first market move.  Row 0's 'pct_chg' is 0 (fillna), so
+    # cum_drift = 1 there — effectively actual = target on the first row.
+
+    stock_cols = [c for c in ts_codes if c in pivot_df.columns]
+
+    daily_drift_factor = (1 + pivot_df[stock_cols]).div(
+        (1 + pivot_df['portfolio_return']), axis=0
+    )
+    cum_drift = daily_drift_factor.cumprod()
+
+    weight_records = []
+    for date, drift_row in cum_drift.iterrows():
+        date_str = date.strftime('%Y-%m-%d')
+        for code in stock_cols:
+            target_w = float(weights.get(code, 0.0))
+            actual_w = target_w * float(drift_row[code])
+            weight_records.append({
+                'fund_id':        fund_id,
+                'trade_date':     date_str,
+                'ts_code':        code,
+                'target_weight':  target_w,
+                'actual_weight':  actual_w,
+                'drift_pct':      round(actual_w - target_w, 6),
+                'is_simulated':   1,  # Retroactive simulation — NOT real forward drift
+            })
+
+    if weight_records:
+        db.insert_records('fund_daily_weights', weight_records, upsert=True)
+        print(f"[data_manager] ✅ Simulated weight drift stored for {len(weight_records)} position-days.")
+
+    # 6. Pre-fetch Benchmark for the Risk Engine
+    # (Fetch once and pass it down so Tushare doesn't block for duplicate calls)
     fund_df = db.read_table('funds', filters={'id': fund_id})
     benchmark = fund_df.iloc[0]['benchmark'] if not fund_df.empty else '000300.SH'
     if benchmark and " " in benchmark:
         benchmark = benchmark.split(" ")[0]
-        
+
     bench_start = start_date.strftime('%Y%m%d')
-    bench_end = end_date.strftime('%Y%m%d')
+    bench_end   = end_date.strftime('%Y%m%d')
     bench_df = get_index_data_live(benchmark, start_date=bench_start, end_date=bench_end)
-    
+
     pre_fetched_bench = {}
     if bench_df is not None and not bench_df.empty:
         bench_df['date_str'] = bench_df.index.strftime('%Y-%m-%d')
         pre_fetched_bench = dict(zip(bench_df['date_str'], bench_df['Pct_Change'] / 100.0))
 
-    # 6. BRUTE FORCE: Calculate Risk Metrics for EVERY SINGLE DAY
-    # We only loop through the days in the actual lookback_window (ignoring the 30-day buffer)
+    # 7. BRUTE FORCE: Calculate Risk Metrics for EVERY SINGLE DAY
+    # Only loop through the actual lookback window (ignoring the 30-day buffer)
     actual_start_date = end_date - timedelta(days=lookback_days)
-    target_dates = [r['trade_date'] for r in records if pd.to_datetime(r['trade_date']).date() >= actual_start_date]
-    
+    target_dates = [
+        r['trade_date'] for r in records
+        if pd.to_datetime(r['trade_date']).date() >= actual_start_date
+    ]
+
     print(f"[data_manager] 🧮 Calculating historical risk metrics for {len(target_dates)} days...")
     for date_sql in target_dates:
-        # This will securely calculate the stats and UPDATE the database row for each specific day
         update_fund_risk_metrics(fund_id, date_sql, pre_fetched_bench_returns=pre_fetched_bench)
-        
-    print(f"[data_manager] ✅ 100% COMPLETE. All historical data and risk metrics filled.")
+
+    print(f"[data_manager] ✅ 100% COMPLETE. All historical data, weight drift, and risk metrics filled.")
     return True
 
 
 def init_portfolio_tables():
     """
     Initialize tables for Institutional Portfolio Management.
-    
+
     ====================================================================
     DOCUMENTATION: TOTAL RETURN (TR) & DRIP ASSUMPTION
     ====================================================================
-    This portfolio tracker operates as a Total Return Index using daily 
-    percentage changes (`pct_chg`), rather than absolute accounting of 
-    shares and cash. 
-    
-    Because Tushare adjusts the `pre_close` on ex-dividend dates, the 
-    `pct_chg` intrinsically captures the value of the distribution. By 
-    applying this `pct_chg` directly to the active AUM, the system 
-    mathematically assumes Automatic Dividend Reinvestment (DRIP) with 
-    zero cash drag. 
-    
-    Forward-adjusted prices (qfq) are EXPLICITLY NOT STORED to prevent 
+    This portfolio tracker operates as a Total Return Index using daily
+    percentage changes (`pct_chg`), rather than absolute accounting of
+    shares and cash.
+
+    Because Tushare adjusts the `pre_close` on ex-dividend dates, the
+    `pct_chg` intrinsically captures the value of the distribution. By
+    applying this `pct_chg` directly to the active AUM, the system
+    mathematically assumes Automatic Dividend Reinvestment (DRIP) with
+    zero cash drag.
+
+    Forward-adjusted prices (qfq) are EXPLICITLY NOT STORED to prevent
     historical database corruption during stock splits.
+    ====================================================================
+
+    ====================================================================
+    SUPABASE MIGRATION — fund_daily_weights (run once in SQL Editor)
+    ====================================================================
+    CREATE TABLE IF NOT EXISTS fund_daily_weights (
+        id            BIGSERIAL PRIMARY KEY,
+        fund_id       INTEGER NOT NULL REFERENCES funds(id),
+        trade_date    DATE NOT NULL,
+        ts_code       TEXT NOT NULL,
+        target_weight REAL NOT NULL,
+        actual_weight REAL NOT NULL,
+        drift_pct     REAL NOT NULL,
+        is_simulated  BOOLEAN NOT NULL DEFAULT FALSE,
+        UNIQUE(fund_id, trade_date, ts_code)
+    );
+
+    -- If the table already exists, add the column with:
+    ALTER TABLE fund_daily_weights
+        ADD COLUMN IF NOT EXISTS is_simulated BOOLEAN NOT NULL DEFAULT FALSE;
     ====================================================================
     """
     
@@ -3209,7 +3348,25 @@ def init_portfolio_tables():
     );
     """
     
-    # 4. Themes Mapping (Many-to-Many)
+    # 4. Daily Weight Drift — actual market-value weights vs. target mandate weights
+    # is_simulated=1 → retroactive backfill (hypothetical demo history)
+    # is_simulated=0 → real forward drift recorded by the nightly rollup
+    daily_weights_schema = """
+    CREATE TABLE IF NOT EXISTS fund_daily_weights (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fund_id INTEGER NOT NULL,
+        trade_date DATE NOT NULL,
+        ts_code TEXT NOT NULL,
+        target_weight REAL NOT NULL,
+        actual_weight REAL NOT NULL,
+        drift_pct REAL NOT NULL,
+        is_simulated INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (fund_id) REFERENCES funds(id),
+        UNIQUE(fund_id, trade_date, ts_code)
+    );
+    """
+
+    # 5. Themes Mapping (Many-to-Many)
     themes_schema = """
     CREATE TABLE IF NOT EXISTS stock_themes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3235,8 +3392,21 @@ def init_portfolio_tables():
         db.create_table_sqlite(funds_schema)
         db.create_table_sqlite(positions_schema)
         db.create_table_sqlite(metrics_schema)
+        db.create_table_sqlite(daily_weights_schema)
         db.create_table_sqlite(themes_schema)
         db.create_table_sqlite(cache_schema)
+
+        # ── Column migration: add is_simulated if this is an existing DB ──────
+        # ALTER TABLE ADD COLUMN is idempotent here — the except swallows
+        # "duplicate column name" from SQLite so re-runs are safe.
+        try:
+            db.execute_raw_sql(
+                "ALTER TABLE fund_daily_weights "
+                "ADD COLUMN is_simulated INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass  # Column already present — nothing to do
+
         print("✅ Portfolio & TR Cache tables initialized in SQLite.")
 
 

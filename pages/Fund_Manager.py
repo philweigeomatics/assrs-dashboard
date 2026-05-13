@@ -13,6 +13,12 @@ from zoneinfo import ZoneInfo
 auth_manager.require_login()
 user_id = auth_manager.get_current_user_id()
 
+# Idempotent migration — creates fund_daily_weights if it doesn't exist yet
+try:
+    data_manager.init_portfolio_tables()
+except Exception:
+    pass
+
 st.set_page_config(page_title="Portfolio Manager | 机构级管理", page_icon="🏦", layout="wide")
 
 st.title("🏦 Institutional Portfolio Manager")
@@ -162,7 +168,7 @@ if not metrics_df.empty and len(metrics_df) > 1:
     
     if pd.notna(vol) and vol > 0 and days_active > 0:
         # Convert total return into an annualized return
-        ann_return = (1 + portfolio_total_ret) ** (252 / days_active) - 1
+        ann_return = (1 + portfolio_total_ret) ** (242 / days_active) - 1
         sharpe_ratio = (ann_return - risk_free_rate) / vol
 
     # 4. Format strings safely
@@ -438,33 +444,167 @@ with tab_holdings:
             st.plotly_chart(fig_ind, use_container_width=True)
 
         # ==========================================
-        # DATA TABLE: ENRICHED HOLDINGS
+        # DATA TABLE: ENRICHED HOLDINGS WITH WEIGHT DRIFT
         # ==========================================
         st.markdown("---")
-        
+
+        # Fetch all weight-drift records for this fund and split into real vs simulated
+        dw_df = db.read_table('fund_daily_weights', filters={'fund_id': fund_id})
+
+        real_dw_df = pd.DataFrame()
+        sim_dw_df  = pd.DataFrame()
+        if not dw_df.empty:
+            if 'is_simulated' in dw_df.columns:
+                real_dw_df = dw_df[dw_df['is_simulated'].astype(int) == 0].copy()
+                sim_dw_df  = dw_df[dw_df['is_simulated'].astype(int) == 1].copy()
+            else:
+                # Legacy data without the flag — treat as real
+                real_dw_df = dw_df.copy()
+
+        # Holdings table uses only REAL drift (from the nightly rollup).
+        # If no nightly run has happened yet, the Actual Wgt % column shows "—".
+        if not real_dw_df.empty:
+            latest_real = (
+                real_dw_df.sort_values('trade_date', ascending=False)
+                .drop_duplicates(subset='ts_code')
+                [['ts_code', 'actual_weight', 'drift_pct', 'trade_date']]
+                .rename(columns={'trade_date': 'drift_date'})
+            )
+            active_positions = active_positions.merge(latest_real, on='ts_code', how='left')
+        else:
+            active_positions['actual_weight'] = None
+            active_positions['drift_pct'] = None
+            active_positions['drift_date'] = None
+
+        # Build display columns (actual_weight / drift may be NaN if nightly rollup
+        # hasn't run yet for this fund — displayed gracefully as blank cells)
         display_df = active_positions[[
-            'ts_code', 'name', 'industry', 'weight', 
+            'ts_code', 'name', 'industry', 'weight',
+            'actual_weight', 'drift_pct',
             'close', 'pe', 'pe_ttm', 'pb', 'ps', 'ps_ttm', 'trade_date'
         ]].copy()
-        
+
+        # Scale weights to % for nicer display
+        for col in ['weight', 'actual_weight', 'drift_pct']:
+            if col in display_df.columns and display_df[col].notna().any():
+                display_df[col] = display_df[col] * 100
+
         st.dataframe(
             display_df,
             column_config={
-                "ts_code": "Ticker",
-                "name": "Company",
-                "industry": "Industry",
-                "weight": st.column_config.NumberColumn("Target Wgt", format="%.2f%%", help="Target allocation percentage"),
-                "close": st.column_config.NumberColumn("Close (¥)", format="%.2f"),
-                "pe": st.column_config.NumberColumn("PE", format="%.2f", help="Price to Earnings"),
-                "pe_ttm": st.column_config.NumberColumn("PE (TTM)", format="%.2f", help="Trailing Twelve Months PE"),
-                "pb": st.column_config.NumberColumn("PB", format="%.2f", help="Price to Book"),
-                "ps": st.column_config.NumberColumn("PS", format="%.2f", help="Price to Sales"),
-                "ps_ttm": st.column_config.NumberColumn("PS (TTM)", format="%.2f"),
-                "trade_date": "Trade Date"
+                "ts_code":        "Ticker",
+                "name":           "Company",
+                "industry":       "Industry",
+                "weight":         st.column_config.NumberColumn(
+                    "Target Wgt %", format="%.2f",
+                    help="Mandate target weight"
+                ),
+                "actual_weight":  st.column_config.NumberColumn(
+                    "Actual Wgt %", format="%.2f",
+                    help="Market-value weight after real price drift recorded by the nightly rollup. "
+                         "Blank until the first nightly run after fund inception."
+                ),
+                "drift_pct":      st.column_config.NumberColumn(
+                    "Drift (pp)", format="%.2f",
+                    help="Actual − Target in percentage points. Positive = over-weight. "
+                         "Blank until the first nightly run after fund inception."
+                ),
+                "close":    st.column_config.NumberColumn("Close (¥)", format="%.2f"),
+                "pe":       st.column_config.NumberColumn("PE", format="%.2f"),
+                "pe_ttm":   st.column_config.NumberColumn("PE (TTM)", format="%.2f"),
+                "pb":       st.column_config.NumberColumn("PB", format="%.2f"),
+                "ps":       st.column_config.NumberColumn("PS", format="%.2f"),
+                "ps_ttm":   st.column_config.NumberColumn("PS (TTM)", format="%.2f"),
+                "trade_date": "Price Date",
             },
             hide_index=True,
             use_container_width=True
         )
+
+        # ── Helper: build a stock-label map once ───────────────────────────
+        stock_basic_df2 = db.read_table('stock_basic', columns='ts_code,name')
+        def _add_labels(df):
+            """Merge stock names into df and add a 'label' column."""
+            if not stock_basic_df2.empty:
+                df = df.merge(stock_basic_df2, on='ts_code', how='left')
+                df['label'] = df['name'].fillna('') + ' (' + df['ts_code'].str[:6] + ')'
+            else:
+                df['label'] = df['ts_code']
+            return df
+
+        def _drift_chart(df, title="", height=360):
+            """Return a Plotly figure showing drift-in-pp for each stock."""
+            df = df.copy()
+            df['drift_pp'] = (df['actual_weight'] - df['target_weight']) * 100
+            df = _add_labels(df)
+            fig = go.Figure()
+            for label, grp in df.groupby('label'):
+                grp = grp.sort_values('trade_date')
+                fig.add_trace(go.Scatter(
+                    x=grp['trade_date'], y=grp['drift_pp'],
+                    mode='lines', name=label,
+                    hovertemplate='%{x}<br>Drift: %{y:.2f} pp<extra>' + label + '</extra>',
+                ))
+            fig.add_hline(
+                y=0, line_dash='dash', line_color='rgba(156,163,175,0.6)',
+                annotation_text='Target', annotation_position='right'
+            )
+            fig.update_layout(
+                height=height, hovermode='x unified',
+                xaxis_title='', yaxis_title='Drift (percentage points)',
+                yaxis_ticksuffix=' pp', template='plotly_white',
+                margin=dict(l=0, r=0, t=20, b=0),
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+            )
+            return fig
+
+        # ── Weight Drift toggle ──────────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("📊 Weight Drift")
+
+        has_real = not real_dw_df.empty
+        has_sim  = not sim_dw_df.empty
+
+        # Build toggle options based on what data actually exists
+        _drift_options = []
+        if has_real: _drift_options.append("📡 Live Tracking")
+        if has_sim:  _drift_options.append("🔬 Simulated Backtest (180d)")
+
+        if not _drift_options:
+            st.info(
+                "⏳ No drift data yet. The nightly rollup (1 AM China time) will begin "
+                "recording real weight drift from tonight. Check back tomorrow."
+            )
+        else:
+            # Default to Live if available, otherwise Simulated
+            _default_idx = 0
+            drift_view = st.radio(
+                "View",
+                options=_drift_options,
+                index=_default_idx,
+                horizontal=True,
+                key="drift_view_toggle",
+                label_visibility="collapsed",
+            )
+
+            if drift_view == "📡 Live Tracking":
+                st.caption(
+                    "Real drift recorded by the nightly rollup starting from the fund's "
+                    "inception date. Each line shows how a position's actual market-value "
+                    "weight has diverged from its mandate target under buy-and-hold. "
+                    "A rebalance resets all lines to zero."
+                )
+                st.plotly_chart(_drift_chart(real_dw_df), use_container_width=True)
+
+            else:  # Simulated Backtest
+                st.warning(
+                    "⚠️ **Retroactive simulation — not real historical data.** "
+                    "Shows how weights *would have* drifted if this exact mandate had been "
+                    "running for the past 180 days, starting from zero drift on day 0. "
+                    "The nightly rollup always starts fresh from inception and does **not** "
+                    "chain onto this simulation."
+                )
+                st.plotly_chart(_drift_chart(sim_dw_df), use_container_width=True)
 
 # --- TAB 3: THE REBALANCING ENGINE ---
 with tab_rebalance:

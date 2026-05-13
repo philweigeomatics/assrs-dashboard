@@ -19,6 +19,12 @@ import api_config
 import auth_manager
 auth_manager.require_login()
 
+# Idempotent migration — creates fund_daily_weights (and other portfolio tables)
+# if they don't exist yet. Safe to call on every page load.
+try:
+    data_manager.init_portfolio_tables()
+except Exception:
+    pass
 
 st.set_page_config(
     page_title="💼 Portfolio | 投资组合优化",
@@ -136,31 +142,46 @@ def get_stock_display_name(ticker: str) -> str:
 # ==========================================
 
 @st.cache_data(ttl=600)
-def calculate_returns_covariance(tickers: list, lookback: int = 252, return_duration: int = 1):
-    """Calculate returns and covariance matrix using LIVE qfq-adjusted data."""
+def calculate_returns_covariance(tickers: list, lookback: int = 242, return_duration: int = 1):
+    """
+    Calculate returns and covariance matrix using LIVE qfq-adjusted data.
+
+    Returns (returns, mean_returns, cov_matrix, daily_returns):
+      - returns        N-day overlapping returns used for MVO (period = return_duration)
+      - mean_returns   Annualised expected return per stock (A-share: 242 trading days/yr)
+      - cov_matrix     Annualised covariance matrix
+      - daily_returns  Always daily (period=1) — used for the simulation chart and daily
+                       risk metrics (VaR, CVaR, worst-day) regardless of return_duration.
+    """
     price_data = {}
     for ticker in tickers:
         # Use get_single_stock_data_live for qfq-adjusted prices
         df = data_manager.get_single_stock_data_live(ticker, lookback_years=2)
         if df is not None and not df.empty:
             price_data[ticker] = df['Close']
-    
+
     if not price_data:
-        return None, None, None
-    
+        return None, None, None, None
+
     prices = pd.DataFrame(price_data).dropna()
-    
-    # 1. Calculate N-day overlapping returns
+
+    # ── Daily returns (period=1) ──────────────────────────────────────────────
+    # Used for: simulation chart, VaR/CVaR/worst-day (all labelled "Daily").
+    daily_returns = prices.pct_change(periods=1).dropna().tail(lookback)
+
+    # ── N-day overlapping returns (period = return_duration) ──────────────────
+    # Used for: MVO covariance matrix and annualised expected returns only.
+    # When return_duration > 1 the observations overlap heavily — correct for
+    # the optimizer but NOT for cumulative-return compounding in a chart.
     returns = prices.pct_change(periods=return_duration).dropna().tail(lookback)
-    
-    # 2. Dynamic Annualization Factor (e.g., 252 / 5 for weekly returns)
-    annualization_factor = 252 / return_duration
-    
-    # 3. Scale Expected Returns and Covariance
+
+    # Annualise — A-shares trade ~242 days/year (not 252)
+    annualization_factor = 242 / return_duration
+
     mean_returns = returns.mean() * annualization_factor
-    cov_matrix = returns.cov() * annualization_factor
-    
-    return returns, mean_returns, cov_matrix
+    cov_matrix   = returns.cov() * annualization_factor
+
+    return returns, mean_returns, cov_matrix, daily_returns
 
 
 
@@ -227,12 +248,35 @@ def optimize_portfolio(mean_returns, cov_matrix, target_return=None,
     return result
 
 
-def calculate_efficient_frontier(mean_returns, cov_matrix, n_points=50, 
+def calculate_efficient_frontier(mean_returns, cov_matrix, n_points=50,
                                  max_weight=0.3, min_weight=0.0):
-    """Calculate efficient frontier points."""
-    min_return = mean_returns.min()
+    """
+    Calculate efficient frontier points.
+
+    The lower bound of the frontier is the GLOBAL MINIMUM-VARIANCE portfolio
+    return (not the worst individual stock return) — points below the min-var
+    portfolio are on the inefficient half of the parabola and should not appear.
+    """
+    n_assets = len(mean_returns)
+    bounds = tuple((min_weight, max_weight) for _ in range(n_assets))
+    init_guess = np.array([1.0 / n_assets] * n_assets)
+    sum_constraint = [{'type': 'eq', 'fun': lambda x: np.sum(x) - 1}]
+
+    # Find the true lower bound: global minimum-variance portfolio return
+    min_var_result = minimize(
+        lambda x: portfolio_performance(x, mean_returns, cov_matrix)[1],
+        init_guess,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=sum_constraint,
+    )
+    if min_var_result.success:
+        min_return, _ = portfolio_performance(min_var_result.x, mean_returns, cov_matrix)
+    else:
+        min_return = mean_returns.min()  # safe fallback
+
     max_return = mean_returns.max()
-    
+
     target_returns = np.linspace(min_return, max_return, n_points)
     
     frontier_volatility = []
@@ -695,19 +739,31 @@ col1, col2, col3, col4 = st.columns(4)
 with col1:
     lookback_days = st.selectbox(
         "Lookback Period (days):",
-        [60, 90, 120, 180, 252],
+        [60, 90, 120, 180, 242],
         index=4,
-        help="Historical period for calculating returns and covariance"
+        help=(
+            "How many trading days of history to use for the covariance matrix and "
+            "expected returns. 242 ≈ 1 full A-share trading year.\n\n"
+            "Shorter = more recent but noisier. Longer = more stable but may include "
+            "outdated market regimes."
+        )
     )
 
 with col2:
     return_duration = st.number_input(
-        "Return Duration (Days):", 
-        min_value=1, 
-        max_value=30, 
-        value=1, 
-        step=1, 
-        help="1 = Daily Returns, 5 = Weekly Returns, 20 = Monthly Returns."
+        "Return Duration (Days):",
+        min_value=1,
+        max_value=30,
+        value=1,
+        step=1,
+        help=(
+            "Sets the holding period used to build the covariance matrix and expected returns "
+            "for the optimizer only.\n\n"
+            "1 = daily, 5 = weekly, 20 = monthly.\n\n"
+            "Longer durations smooth out short-term noise and can produce a less correlated "
+            "covariance matrix. The Historical Simulation always uses daily returns regardless "
+            "of this setting, so the equity curve is never affected by this choice."
+        )
     )
 
 with col3:
@@ -791,14 +847,16 @@ def create_mandate_ui(tickers_to_use, optimal_weights):
                 st.error("Please enter a Fund Name.")
             else:
                 with st.spinner("Writing mandate to database..."):
-                    # Convert the edited grid back to a dictionary of valid ts_codes
+                    # Convert the edited grid back to a dictionary of valid ts_codes.
+                    # Skip any row the user zeroed out (≥ 0.1% threshold).
                     final_positions = {}
                     for _, row in edited_portfolio.iterrows():
                         ticker = str(row['ticker']).strip()
-                        if ticker:
-                            ts_code = ticker_to_ts_code(ticker) 
-                            final_positions[ts_code] = float(row['Final_Weight'])
-                    
+                        w = float(row['Final_Weight'])
+                        if ticker and w >= 0.001:
+                            ts_code = ticker_to_ts_code(ticker)
+                            final_positions[ts_code] = w
+
                     # Save to DB tied to the logged-in user
                     success, msg = data_manager.save_fund_mandate(fund_name, benchmark_ticker, final_positions)
                     
@@ -815,12 +873,12 @@ def create_mandate_ui(tickers_to_use, optimal_weights):
 if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True):
     
     with st.spinner("📊 Calculating returns and covariance..."):
-        returns_df, mean_returns, cov_matrix = calculate_returns_covariance(
-            tickers_to_use, 
+        returns_df, mean_returns, cov_matrix, daily_returns_df = calculate_returns_covariance(
+            tickers_to_use,
             lookback=lookback_days,
-            return_duration=return_duration  # Pass the newly added UI parameter
+            return_duration=return_duration,
         )
-    
+
     if returns_df is None or mean_returns is None:
         st.error("❌ Failed to load price data. Please check if tickers are valid.")
         st.stop()
@@ -864,9 +922,12 @@ if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True
     # GENERATE PORTFOLIO ASSESSMENT
     # ==========================================
     
+    # Use daily_returns_df for all risk metrics labelled "(Daily)" — VaR, CVaR,
+    # worst-day, tail ratio.  returns_df may contain N-day overlapping returns
+    # when return_duration > 1, which would give inflated risk numbers.
     assessment = generate_portfolio_assessment(
         optimal_return, optimal_vol, optimal_sharpe,
-        optimal_weights, returns_df, cov_matrix, tickers_to_use
+        optimal_weights, daily_returns_df, cov_matrix, tickers_to_use
     )
     
     # ==========================================
@@ -1204,26 +1265,42 @@ if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True
     # INTERACTIVE PRE-TRADE PANEL (FRAGMENT)
     # ==========================================
     @st.fragment
-    def interactive_pre_trade_panel(returns_data, base_weights):
-        
+    def interactive_pre_trade_panel(returns_data, base_weights, daily_returns_data, opt_return_duration):
+        """
+        returns_data        — N-day overlapping returns (used only for the weight editor column count)
+        base_weights        — optimal weights from MVO
+        daily_returns_data  — always 1-day returns; used for the simulation chart
+        opt_return_duration — the Return Duration setting, shown in the UI explanation
+        """
         # --- 1. EDITABLE TABLE ---
         st.markdown("---")
         st.subheader("⚖️ Adjust Target Allocations")
         st.write("Fine-tune the optimizer's suggested weights. Set a stock's weight to `0.0` to drop it. **Weights must sum to exactly 100% to save the mandate.**")
-        
+
+        # Pre-filter: only show stocks the optimizer gave a meaningful weight (≥ 0.1%).
+        # SLSQP often leaves numerical residuals like 1e-9 on "excluded" stocks — we
+        # drop those here so the editor is clean and the round-trip save is correct.
+        _MIN_DISPLAY_WEIGHT = 0.001  # 0.1%
         weights_df = pd.DataFrame({
             'Ticker': returns_data.columns,
-            'Weight': base_weights
+            'Weight': base_weights,
         })
-        
+        weights_df = weights_df[weights_df['Weight'] >= _MIN_DISPLAY_WEIGHT].copy()
+        weights_df['Weight'] = weights_df['Weight'].round(4)
+
+        # Renormalise displayed weights so they still sum to 1 after dropping near-zeros
+        _w_sum = weights_df['Weight'].sum()
+        if _w_sum > 0:
+            weights_df['Weight'] = (weights_df['Weight'] / _w_sum).round(4)
+
         edited_df = st.data_editor(
             weights_df,
             column_config={
-                "Ticker": st.column_config.TextColumn("Ticker", disabled=True), 
+                "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
                 "Weight": st.column_config.NumberColumn("Target Weight", min_value=0.0, max_value=1.0, format="%.4f", step=0.01)
             },
             hide_index=True,
-            num_rows="fixed", # Prevents adding/deleting rows to keep the matrix intact
+            num_rows="fixed",  # Prevents adding/deleting rows to keep the matrix intact
             use_container_width=True,
             key="weight_editor"
         )
@@ -1242,62 +1319,126 @@ if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True
         if is_valid_weights:
             st.markdown("---")
             st.subheader("📈 Historical Simulation vs Benchmark")
-            
+            st.caption(
+                "Buy-and-hold backtest applying the weights above to actual daily price history. "
+                "**Always uses daily returns** — independent of the Return Duration parameter "
+                f"(currently set to {opt_return_duration}d, which only affects the optimizer above). "
+                "Past performance does not guarantee future results."
+            )
+
             col_bench, col_window = st.columns(2)
             with col_bench:
-                bench_choice = st.selectbox("Benchmark for Simulation:", ["000300.SH", "000905.SH", "000852.SH"], index=0, key="sim_bench")
+                bench_choice = st.selectbox(
+                    "Benchmark for Simulation:",
+                    ["000300.SH (CSI 300)", "000905.SH (CSI 500)", "000852.SH (CSI 1000)"],
+                    index=0, key="sim_bench"
+                )
+                bench_ticker = bench_choice.split(" ")[0]
             with col_window:
-                rolling_window = st.select_slider("Rolling Window (Days):", options=[5, 10, 20, 30, 60], value=30, key="sim_window")
-            
-            start_dt = returns_data.index.min().strftime('%Y%m%d')
-            end_dt = returns_data.index.max().strftime('%Y%m%d')
-            
-            with st.spinner(f"Fetching {bench_choice} data..."):
-                bench_df = data_manager.get_index_data_live(bench_choice, start_date=start_dt, end_date=end_dt)
-                
+                rolling_window = st.select_slider(
+                    "Rolling Window (Days):",
+                    options=[5, 10, 20, 30, 60], value=30, key="sim_window"
+                )
+
+            # Simulation always uses daily returns — no matter what return_duration
+            # was used for optimization.  Using N-day overlapping returns in cumprod
+            # would overcount by ~return_duration× and inflate the curve massively.
+            sim_returns = daily_returns_data
+
+            start_dt = sim_returns.index.min().strftime('%Y%m%d')
+            end_dt   = sim_returns.index.max().strftime('%Y%m%d')
+
+            with st.spinner(f"Fetching {bench_ticker} benchmark data..."):
+                bench_df = data_manager.get_index_data_live(bench_ticker, start_date=start_dt, end_date=end_dt)
+
             if bench_df is not None and not bench_df.empty:
-                # Apply the EDITED weights to the historical returns
-                port_returns = returns_data.dot(edited_weights)
+                # Align edited weights to sim_returns columns.
+                # edited_df may have fewer rows than sim_returns has columns because
+                # stocks below the 0.1% display threshold are pre-filtered out of the
+                # editor — those tickers get weight 0 here.
+                w_aligned = (
+                    pd.Series(edited_df['Weight'].values, index=edited_df['Ticker'])
+                    .reindex(sim_returns.columns, fill_value=0.0)
+                )
+                port_returns = sim_returns.dot(w_aligned)
                 port_returns.name = 'Portfolio'
-                
+
                 bench_returns = bench_df['Pct_Change'] / 100.0
                 bench_returns.index = pd.to_datetime(bench_returns.index)
-                
+
                 sim_df = pd.concat([port_returns, bench_returns.rename('Benchmark')], axis=1).dropna()
-                
-                sim_df['Port_Cum'] = (1 + sim_df['Portfolio']).cumprod() - 1
-                sim_df['Bench_Cum'] = (1 + sim_df['Benchmark']).cumprod() - 1
+
+                sim_df['Port_Cum']      = (1 + sim_df['Portfolio']).cumprod() - 1
+                sim_df['Bench_Cum']     = (1 + sim_df['Benchmark']).cumprod() - 1
                 sim_df['Active_Spread'] = sim_df['Portfolio'] - sim_df['Benchmark']
-                
+
                 sim_df['Rolling_Corr'] = sim_df['Portfolio'].rolling(window=rolling_window).corr(sim_df['Benchmark'])
                 roll_cov = sim_df['Portfolio'].rolling(window=rolling_window).cov(sim_df['Benchmark'])
                 roll_var = sim_df['Benchmark'].rolling(window=rolling_window).var()
                 sim_df['Rolling_Beta'] = roll_cov / roll_var
 
-                fig_sim = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
-                fig_sim.add_trace(go.Scatter(x=sim_df.index, y=sim_df['Port_Cum'], mode='lines', name='Portfolio', line=dict(color='#3b82f6')), row=1, col=1)
-                fig_sim.add_trace(go.Scatter(x=sim_df.index, y=sim_df['Bench_Cum'], mode='lines', name='Benchmark', line=dict(color='#9ca3af', dash='dot')), row=1, col=1)
+                # ── Main chart: cumulative return + daily active spread ────────
+                fig_sim = make_subplots(
+                    rows=2, cols=1, shared_xaxes=True,
+                    row_heights=[0.7, 0.3], vertical_spacing=0.05,
+                    subplot_titles=["Cumulative Return", "Daily Active Spread (Portfolio − Benchmark)"]
+                )
+                fig_sim.add_trace(go.Scatter(x=sim_df.index, y=sim_df['Port_Cum'],  mode='lines', name='Portfolio',  line=dict(color='#3b82f6')), row=1, col=1)
+                fig_sim.add_trace(go.Scatter(x=sim_df.index, y=sim_df['Bench_Cum'], mode='lines', name=bench_choice, line=dict(color='#9ca3af', dash='dot')), row=1, col=1)
                 colors = np.where(sim_df['Active_Spread'] > 0, '#10b981', '#ef4444')
                 fig_sim.add_trace(go.Bar(x=sim_df.index, y=sim_df['Active_Spread'], name='Daily Active Spread', marker_color=colors), row=2, col=1)
-                
-                fig_sim.update_layout(height=500, title="Cumulative Return & Daily Active Spread", template='plotly_white', hovermode='x unified')
+
+                fig_sim.update_layout(height=520, template='plotly_white', hovermode='x unified',
+                                      margin=dict(t=40, b=0, l=0, r=0))
                 fig_sim.update_yaxes(tickformat=".1%", row=1, col=1)
                 fig_sim.update_yaxes(tickformat=".2%", title_text="Spread", row=2, col=1)
                 st.plotly_chart(fig_sim, use_container_width=True)
-                
+
+                # ── Rolling Correlation & Beta ────────────────────────────────
                 col_corr, col_beta = st.columns(2)
                 with col_corr:
                     fig_corr_roll = go.Figure()
-                    fig_corr_roll.add_trace(go.Scatter(x=sim_df.index, y=sim_df['Rolling_Corr'], mode='lines', fill='tozeroy', name='Correlation', line=dict(color='#8b5cf6')))
+                    fig_corr_roll.add_trace(go.Scatter(
+                        x=sim_df.index, y=sim_df['Rolling_Corr'],
+                        mode='lines', fill='tozeroy', name='Correlation',
+                        line=dict(color='#8b5cf6')
+                    ))
                     fig_corr_roll.add_hline(y=0, line_dash="dash", line_color="gray")
-                    fig_corr_roll.update_layout(height=280, title=f"{rolling_window}-Day Rolling Correlation", template='plotly_white', hovermode='x unified', margin=dict(t=40, b=0, l=0, r=0))
+                    fig_corr_roll.update_layout(
+                        height=300,
+                        title=f"{rolling_window}-Day Rolling Correlation vs {bench_choice}",
+                        yaxis=dict(range=[-1.1, 1.1], tickvals=[-1, -0.5, 0, 0.5, 1]),
+                        template='plotly_white', hovermode='x unified',
+                        margin=dict(t=50, b=0, l=0, r=0)
+                    )
                     st.plotly_chart(fig_corr_roll, use_container_width=True)
+                    st.caption(
+                        f"Pearson correlation of daily portfolio returns vs {bench_choice} over the past {rolling_window} trading days. "
+                        "**+1** = perfectly tracks the benchmark. **0** = uncorrelated. **−1** = mirror opposite. "
+                        "Lower correlation means the portfolio is generating returns independently from the market."
+                    )
                 with col_beta:
                     fig_beta = go.Figure()
-                    fig_beta.add_trace(go.Scatter(x=sim_df.index, y=sim_df['Rolling_Beta'], mode='lines', name='Beta', line=dict(color='#f59e0b')))
-                    fig_beta.add_hline(y=1, line_dash="dash", line_color="gray")
-                    fig_beta.update_layout(height=280, title=f"{rolling_window}-Day Rolling Beta", template='plotly_white', hovermode='x unified', margin=dict(t=40, b=0, l=0, r=0))
+                    fig_beta.add_trace(go.Scatter(
+                        x=sim_df.index, y=sim_df['Rolling_Beta'],
+                        mode='lines', name='Beta', line=dict(color='#f59e0b')
+                    ))
+                    fig_beta.add_hline(y=1, line_dash="dash", line_color="gray",
+                                       annotation_text="Beta = 1 (moves with market)",
+                                       annotation_position="right")
+                    fig_beta.update_layout(
+                        height=300,
+                        title=f"{rolling_window}-Day Rolling Beta vs {bench_choice}",
+                        template='plotly_white', hovermode='x unified',
+                        margin=dict(t=50, b=0, l=0, r=0)
+                    )
                     st.plotly_chart(fig_beta, use_container_width=True)
+                    st.caption(
+                        f"Regression coefficient of portfolio daily returns on {bench_choice} over the past {rolling_window} trading days. "
+                        "**Beta > 1** = amplifies market moves (more volatile). "
+                        "**Beta < 1** = dampens market moves (defensive). "
+                        "**Beta ≈ 0** = returns are driven by stock selection, not market direction."
+                    )
 
         # --- 3. SAVE MANDATE UI (Tied to the Live Editor) ---
         st.markdown("---")
@@ -1315,14 +1456,16 @@ if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True
             if st.button("💾 Save Mandate", type="primary", disabled=not is_valid_weights or not fund_name, use_container_width=True):
                 with st.spinner("Locking in mandate..."):
                     
-                    # Build the clean database entry from EDITED weights
+                    # Build the clean database entry from EDITED weights.
+                    # Threshold matches _MIN_DISPLAY_WEIGHT (0.1%) so no stock the
+                    # user can see as "0.0000" in the editor sneaks into the mandate.
                     final_positions = {}
                     for _, row in edited_df.iterrows():
                         w = float(row['Weight'])
-                        if w > 0: # This elegantly drops any stock you set to 0.0
+                        if w >= 0.001:  # ≥ 0.1% — same threshold as the display filter
                             try:
                                 formatted_ticker = ticker_to_ts_code(str(row['Ticker']))
-                            except:
+                            except Exception:
                                 formatted_ticker = str(row['Ticker'])
                             final_positions[formatted_ticker] = w
                     
@@ -1344,7 +1487,9 @@ if st.button("🚀 Optimize Portfolio", type="primary", use_container_width=True
                         st.error(msg)
 
     # Call the panel to render it on the page
-    interactive_pre_trade_panel(returns_df, optimal_weights)
+    # Pass daily_returns_df separately — the simulation always uses daily returns
+    # regardless of the Return Duration parameter used for optimization.
+    interactive_pre_trade_panel(returns_df, optimal_weights, daily_returns_df, return_duration)
 else:
     st.info("👆 Click 'Optimize Portfolio' to run mean-variance optimization")
 

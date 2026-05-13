@@ -47,33 +47,39 @@ def ensure_equity_brief_cache_table() -> None:
 
 
 def _read_cache(ticker: str, section: str) -> dict | None:
-    df = data_manager.db.read_table(
-        "equity_brief_cache",
-        filters={"ticker": ticker, "section": section},
-    )
-    if df is None or df.empty:
-        return None
-    row = df.iloc[0].to_dict()
     try:
+        df = data_manager.db.read_table(
+            "equity_brief_cache",
+            filters={"ticker": ticker, "section": section},
+        )
+        if df is None or df.empty:
+            return None
+        row = df.iloc[0].to_dict()
         return {
             "payload":      json.loads(row["payload"]),
             "generated_at": row.get("generated_at"),
         }
-    except (json.JSONDecodeError, TypeError):
+    except Exception:
+        # Table missing, schema mismatch, Supabase API error, JSON decode error, etc.
+        # Treat any failure as a cache miss — the caller will regenerate.
         return None
 
 
 def _write_cache(ticker: str, section: str, payload: Any) -> None:
-    data_manager.db.delete_records(
-        "equity_brief_cache",
-        filters={"ticker": ticker, "section": section},
-    )
-    data_manager.db.insert_records("equity_brief_cache", [{
-        "ticker":       ticker,
-        "section":      section,
-        "payload":      json.dumps(payload, ensure_ascii=False),
-        "generated_at": datetime.utcnow().isoformat(),
-    }])
+    try:
+        data_manager.db.delete_records(
+            "equity_brief_cache",
+            filters={"ticker": ticker, "section": section},
+        )
+        data_manager.db.insert_records("equity_brief_cache", [{
+            "ticker":       ticker,
+            "section":      section,
+            "payload":      json.dumps(payload, ensure_ascii=False),
+            "generated_at": datetime.utcnow().isoformat(),
+        }])
+    except Exception as exc:
+        # Non-fatal — content was generated successfully; caching is best-effort.
+        print(f"[equity_brief] ⚠️ Cache write failed for {ticker}/{section}: {exc}")
 
 
 
