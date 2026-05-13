@@ -15,7 +15,7 @@ from scipy import stats
 from scipy.signal import find_peaks
 from streamlit_plotly_events import plotly_events
 
-from analysis_engine import run_single_stock_analysis
+from analysis_engine import run_single_stock_analysis, simulate_next_day_indicators
 
 import auth_manager
 auth_manager.require_login()
@@ -603,85 +603,6 @@ def analyze_stock_personality(df: pd.DataFrame) -> dict:
     return results
 
 
-def calculate_trend_forecast(df: pd.DataFrame, lookback: int = 60, forecast_days: int = 30, 
-                             degree: int = 1, model_type: str = 'Linear') -> tuple:
-    """
-    Calculate trend forecast using multiple methods.
-    Returns (forecast_series, upper_bound, lower_bound).
-    """
-    if df.empty or len(df) < lookback:
-        return None, None, None
-    
-    recent = df.tail(lookback).copy()
-    
-    # Use VWAP instead of Close for volume-weighted price
-    vwap = (recent['Close'] * recent['Volume']).sum() / recent['Volume'].sum()
-    prices = recent['Close'].values
-    
-    try:
-        if model_type == 'Linear' or model_type == 'Quadratic':
-            # Polynomial regression
-            x = np.arange(len(prices))
-            coeffs = np.polyfit(x, prices, deg=degree)
-            poly = np.poly1d(coeffs)
-            
-            # Extend to forecast
-            x_future = np.arange(len(prices) + forecast_days)
-            forecast = poly(x_future)
-            
-            # Estimate bounds based on residual std
-            residuals = prices - poly(x)
-            std = np.std(residuals)
-            
-            forecast_only = forecast[-forecast_days:]
-            upper = forecast_only + 2 * std
-            lower = forecast_only - 2 * std
-            
-            return forecast_only, upper, lower
-        
-        elif model_type == 'Holt-Winters' and HAS_STATSMODELS:
-            # Exponential Smoothing
-            model = ExponentialSmoothing(
-                prices,
-                trend='add',
-                seasonal=None,
-                initialization_method='estimated'
-            )
-            fit = model.fit()
-            forecast = fit.forecast(steps=forecast_days)
-            
-            # Simple bounds
-            std = np.std(prices)
-            upper = forecast + 2 * std
-            lower = forecast - 2 * std
-            
-            return forecast, upper, lower
-        
-        elif model_type == 'ARIMA' and HAS_STATSMODELS:
-            # ARIMA with volume as exogenous variable
-            vol_norm = (recent['Volume'] - recent['Volume'].mean()) / recent['Volume'].std()
-            
-            model = ARIMA(prices, exog=vol_norm, order=(1, 1, 1))
-            fit = model.fit()
-            
-            # Forecast (need future exog - use mean)
-            exog_forecast = np.zeros(forecast_days)
-            forecast_result = fit.forecast(steps=forecast_days, exog=exog_forecast)
-            
-            # Get confidence intervals
-            forecast_obj = fit.get_forecast(steps=forecast_days, exog=exog_forecast)
-            conf_int = forecast_obj.conf_int()
-            
-            return forecast_result, conf_int[:, 1], conf_int[:, 0]
-        
-        else:
-            return None, None, None
-    
-    except Exception as e:
-        st.warning(f"Forecast failed: {str(e)}")
-        return None, None, None
-
-
 def create_single_stock_chart_analysis(
     df: pd.DataFrame,
     fundamentals_df: pd.DataFrame = None,
@@ -749,22 +670,14 @@ def create_single_stock_chart_analysis(
         specs=_specs,
     )
 
-    # Create a custom hover string that reads the historical parameter columns
+    # Build custom hover text once — used by the MACD trace in ROW 3
     macd_hover_text = [
-        f"MACD ({fast}, {slow}, {sign}): {macd:.3f}" 
-        for fast, slow, sign, macd in zip(df['MACD_Fast_Param'], df['MACD_Slow_Param'], df['MACD_Sign_Param'], df['MACD'])
+        f"MACD ({fast}, {slow}, {sign}): {macd:.3f}"
+        for fast, slow, sign, macd in zip(
+            df['MACD_Fast_Param'], df['MACD_Slow_Param'],
+            df['MACD_Sign_Param'], df['MACD']
+        )
     ]
-    
-    fig.add_trace(
-        go.Scatter(
-            x=dates, y=df['MACD'], 
-            name='MACD', 
-            line=dict(color='#2962FF', width=1.5),
-            hoverinfo='text',
-            hovertext=macd_hover_text  # <-- This adds the dynamic params to your tooltip!
-        ),
-        row=3, col=1
-    )
 
     # ====== ADD REGIME SHADING HERE (right after make_subplots, before any traces) ======
     
@@ -1076,11 +989,13 @@ def create_single_stock_chart_analysis(
         showlegend=True
     ), row=3, col=1)
 
-    # MACD Line
+    # MACD Line (with dynamic param hover)
     fig.add_trace(go.Scatter(
         x=dates, y=df['MACD'], name='MACD',
         line=dict(color='#2563eb', width=2),
-        showlegend=True
+        showlegend=True,
+        hoverinfo='text',
+        hovertext=macd_hover_text,
     ), row=3, col=1)
 
     # Signal Line
@@ -1653,6 +1568,16 @@ def create_single_stock_chart_analysis(
     
     
     # ==================== UPDATE LAYOUT ====================
+    # Y-axis index note: secondary_y=True on row 1 allocates yaxis2 for the
+    # comparison stock's right-hand axis, pushing every subsequent panel up by 1:
+    #   yaxis1  = Row 1 primary (Price)
+    #   yaxis2  = Row 1 secondary (comparison stock — managed separately)
+    #   yaxis3  = Row 2 (Volume)
+    #   yaxis4  = Row 3 (MACD)
+    #   yaxis5  = Row 4 (RSI)
+    #   yaxis6  = Row 5 (ADX)
+    #   yaxis7  = Row 6 (P/E  — managed by update_yaxes above)
+    #   yaxis8  = Row 7 (Rel Perf, if has_comp — managed by update_yaxes above)
     _bottom_xaxis = f'xaxis{n_rows}_title'
     fig.update_layout(
         height=1500 + (150 if has_comp else 0),
@@ -1661,12 +1586,12 @@ def create_single_stock_chart_analysis(
         hovermode='x unified',
         **{_bottom_xaxis: 'Date'},
         yaxis1_title='Price (¥)',
-        yaxis2_title='Volume',
-        yaxis3_title='MACD',
-        yaxis4_title='RSI',
-        yaxis5_title='ADX',
-        yaxis4_range=[0, 100],
-        yaxis5_range=[0, 60],
+        yaxis3_title='Volume',
+        yaxis4_title='MACD',
+        yaxis5_title='RSI',
+        yaxis5_range=[0, 100],
+        yaxis6_title='ADX',
+        yaxis6_range=[0, 60],
         showlegend=True,
         legend=dict(
             orientation="v",
@@ -1705,69 +1630,6 @@ def create_single_stock_chart_analysis(
     for row in range(1, n_rows):
         fig.update_xaxes(type='category', showticklabels=False, row=row, col=1)
 
-    return fig
-
-
-def create_forecast_chart(df: pd.DataFrame, forecast: np.ndarray, upper: np.ndarray, 
-                         lower: np.ndarray, model_name: str = 'Linear') -> go.Figure:
-    """Create forecast chart with confidence bands."""
-    
-    recent = df.tail(60).copy()
-    dates_hist = recent.index
-    last_date = dates_hist[-1]
-    
-    # Generate future dates
-    future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=len(forecast), freq='B')
-    
-    fig = go.Figure()
-    
-    # Historical prices
-    fig.add_trace(go.Scatter(
-        x=dates_hist,
-        y=recent['Close'],
-        mode='lines',
-        name='Historical',
-        line=dict(color='#3b82f6', width=2)
-    ))
-    
-    # Forecast
-    fig.add_trace(go.Scatter(
-        x=future_dates,
-        y=forecast,
-        mode='lines',
-        name=f'{model_name} Forecast',
-        line=dict(color='#ef4444', width=2, dash='dash')
-    ))
-    
-    # Confidence bands
-    fig.add_trace(go.Scatter(
-        x=future_dates,
-        y=upper,
-        mode='lines',
-        name='Upper Bound',
-        line=dict(width=0),
-        showlegend=False
-    ))
-    
-    fig.add_trace(go.Scatter(
-        x=future_dates,
-        y=lower,
-        mode='lines',
-        name='Lower Bound',
-        fill='tonexty',
-        fillcolor='rgba(239, 68, 68, 0.2)',
-        line=dict(width=0)
-    ))
-    
-    fig.update_layout(
-        title=f'{model_name} Trend Forecast (30 Days)',
-        height=400,
-        template='plotly_white',
-        xaxis_title='Date',
-        yaxis_title='Price',
-        hovermode='x unified'
-    )
-    
     return fig
 
 
@@ -2099,207 +1961,6 @@ def analyze_return_distribution(df, ticker_name="Stock"):
     )
 
     return fig, metrics_df
-
-
-
-def analyze_conditional_entry_signals(df, ticker_name="Stock"):
-    """
-    Analyze T+1 entry signals based on today's drop.
-
-    Answers: "If stock drops X% today, what's the probability and expected return
-    if I buy at close today and sell at close tomorrow?"
-
-    Args:
-        df: DataFrame with 'Close' column and DatetimeIndex
-        ticker_name: Name of the stock for display
-
-    Returns:
-        fig: Plotly figure with analysis
-        entry_df: DataFrame with entry signal recommendations
-        summary_stats: Dict with key insights
-    """
-
-    # Calculate daily returns
-    df_analysis = df.copy()
-    df_analysis['Return'] = df_analysis['Close'].pct_change()
-    df_analysis['Next_Return'] = df_analysis['Return'].shift(-1)
-    
-    # FIX: Filter out limit-down days (-9.5% or worse) as they lack liquidity to buy at close
-    df_analysis = df_analysis[df_analysis['Return'] > -0.095]
-    df_analysis = df_analysis[['Close', 'Return', 'Next_Return']].dropna()
-    
-    if len(df_analysis) < 50:
-        return None, None, None
-
-    # Adjusted bucket floor to align with the liquidity filter
-    drop_buckets = [
-        (-0.01, 0.00, "0% to -1%"),
-        (-0.02, -0.01, "-1% to -2%"),
-        (-0.03, -0.02, "-2% to -3%"),
-        (-0.04, -0.03, "-3% to -4%"),
-        (-0.05, -0.04, "-4% to -5%"),
-        (-0.095, -0.05, "-5% to -9.5%"), 
-    ]
-
-    results = []
-
-    for lower, upper, label in drop_buckets:
-        mask = (df_analysis['Return'] >= lower) & (df_analysis['Return'] < upper)
-        bucket_data = df_analysis[mask]
-        if len(bucket_data) < 3:
-            continue
-            
-        next_returns = bucket_data['Next_Return']
-        win_rate      = (next_returns > 0).sum() / len(next_returns)
-        avg_return    = next_returns.mean()
-        
-        losing_trades = next_returns[next_returns < 0]
-        avg_loss  = losing_trades.mean() if len(losing_trades) > 0 else 0
-        
-        winning_trades = next_returns[next_returns > 0]
-        avg_win   = winning_trades.mean() if len(winning_trades) > 0 else 0
-        
-        # FIX: Assign a high ratio for perfect setups instead of 0
-        risk_reward = abs(avg_win / avg_loss) if avg_loss != 0 else 99.0 
-        
-        confidence_factor = min(1.0, len(bucket_data) / 20)
-        
-        # FIX: Score is now pure weighted Expectancy
-        score = avg_return * 100 * confidence_factor
-        
-        results.append({
-            'Entry Signal': label, 'Sample Size': len(bucket_data),
-            'Win Rate': win_rate, 'Avg T+1 Return': avg_return,
-            'Median T+1 Return': next_returns.median(),
-            'Best Case': next_returns.max(), 'Worst Case': next_returns.min(),
-            'Avg Win': avg_win, 'Avg Loss': avg_loss,
-            'Risk/Reward': risk_reward, 'Expected Value': avg_return, 'Score': score
-        })
-
-    if not results:
-        return None, None, None
-
-    entry_df = pd.DataFrame(results).sort_values('Score', ascending=False)
-    best_entries = entry_df[
-        (entry_df['Sample Size'] >= 5) &
-        (entry_df['Win Rate'] > 0.5) &
-        (entry_df['Expected Value'] > 0)
-    ]
-    
-    summary_stats = {
-        'total_samples':       len(df_analysis),
-        'best_entry':          best_entries.iloc[0]['Entry Signal'] if len(best_entries) > 0 else 'None',
-        'best_win_rate':       best_entries.iloc[0]['Win Rate']     if len(best_entries) > 0 else 0,
-        'best_avg_return':     best_entries.iloc[0]['Avg T+1 Return'] if len(best_entries) > 0 else 0,
-        'profitable_entries':  len(best_entries)
-    }
-
-    # ========================================
-    # CREATE VISUALIZATIONS
-    # ========================================
-
-    fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=(
-            'Win Rate by Entry Signal',
-            'Average T+1 Return by Entry Signal',
-            'Risk/Reward Ratio by Entry Signal',
-            'Sample Distribution'
-        ),
-        specs=[[{"type": "bar"}, {"type": "bar"}],
-               [{"type": "bar"}, {"type": "bar"}]],
-        vertical_spacing=0.15,
-        horizontal_spacing=0.12
-    )
-
-    # Color code: green if profitable, red if not
-    colors_win = ['green' if w > 0.5 else 'red' for w in entry_df['Win Rate']]
-    colors_return = ['green' if r > 0 else 'red' for r in entry_df['Avg T+1 Return']]
-    colors_rr = ['green' if rr > 1 else 'red' for rr in entry_df['Risk/Reward']]
-
-    # Plot 1: Win Rate
-    fig.add_trace(
-        go.Bar(
-            x=entry_df['Entry Signal'],
-            y=entry_df['Win Rate'] * 100,
-            text=[f"{v:.1f}%" for v in entry_df['Win Rate'] * 100],
-            textposition='outside',
-            marker=dict(color=colors_win),
-            showlegend=False
-        ),
-        row=1, col=1
-    )
-    fig.add_hline(y=50, line_dash="dash", line_color="gray", 
-                  annotation_text="50% (Random)", row=1, col=1)
-
-    # Plot 2: Average Return
-    fig.add_trace(
-        go.Bar(
-            x=entry_df['Entry Signal'],
-            y=entry_df['Avg T+1 Return'] * 100,
-            text=[f"{v:.2f}%" for v in entry_df['Avg T+1 Return'] * 100],
-            textposition='outside',
-            marker=dict(color=colors_return),
-            showlegend=False
-        ),
-        row=1, col=2
-    )
-    fig.add_hline(y=0, line_dash="dash", line_color="gray", row=1, col=2)
-
-    # Plot 3: Risk/Reward Ratio
-    fig.add_trace(
-        go.Bar(
-            x=entry_df['Entry Signal'],
-            y=entry_df['Risk/Reward'],
-            text=[f"{v:.2f}" for v in entry_df['Risk/Reward']],
-            textposition='outside',
-            marker=dict(color=colors_rr),
-            showlegend=False
-        ),
-        row=2, col=1
-    )
-    fig.add_hline(y=1, line_dash="dash", line_color="gray",
-                  annotation_text="1:1 (Break-even)", row=2, col=1)
-
-    # Plot 4: Sample Size
-    fig.add_trace(
-        go.Bar(
-            x=entry_df['Entry Signal'],
-            y=entry_df['Sample Size'],
-            text=entry_df['Sample Size'],
-            textposition='outside',
-            marker=dict(color='rgba(59, 130, 246, 0.6)'),
-            showlegend=False
-        ),
-        row=2, col=2
-    )
-
-    # Update axes
-    fig.update_xaxes(title_text="Today's Drop", tickangle=-45, row=1, col=1)
-    fig.update_yaxes(title_text="Win Rate (%)", row=1, col=1)
-
-    fig.update_xaxes(title_text="Today's Drop", tickangle=-45, row=1, col=2)
-    fig.update_yaxes(title_text="Avg T+1 Return (%)", row=1, col=2)
-
-    fig.update_xaxes(title_text="Today's Drop", tickangle=-45, row=2, col=1)
-    fig.update_yaxes(title_text="Risk/Reward Ratio", row=2, col=1)
-
-    fig.update_xaxes(title_text="Today's Drop", tickangle=-45, row=2, col=2)
-    fig.update_yaxes(title_text="Number of Occurrences", row=2, col=2)
-
-    fig.update_layout(
-        height=800,
-        showlegend=False,
-        template='plotly_white',
-        title=dict(
-            text=f"{ticker_name} - Conditional T+1 Entry Analysis<br><sub>Historical Performance by Entry Signal</sub>",
-            x=0.5,
-            xanchor='center',
-            font=dict(size=18)
-        )
-    )
-
-    return fig, entry_df, summary_stats
 
 
 def analyze_realistic_t1_trading(df, ticker_name="Stock"):
@@ -3306,11 +2967,6 @@ if st.session_state.active_ticker:
 
             chart_with_comparison(analysis_df, fundamentals_df, blocks)
 
-            # ================================
-            # CORRECT SIMULATOR - Proper column naming and only 4 ADX patterns
-
-            from analysis_engine import simulate_next_day_indicators
-
             st.markdown("---")
 
             @st.fragment
@@ -3702,14 +3358,14 @@ if st.session_state.active_ticker:
 
                 # Recommendation box
                 st.info(f"""
-                **💼 T+1 Trading Recommendation | T+1交易建议:**
+                **💼 T+1 Risk Summary:**
 
-                - **Expected Return | 预期收益:** {mean_return*100:.3f}% per trade
-                - **Maximum Risk (95% confidence) | 最大风险 (95%置信度):** {cvar_95*100:.2f}%
-                - **Suggested Position Size | 建议仓位:** {min(100, max(10, int(50 * (1 - abs(cvar_95)*10))))}% of capital
+                - **Expected daily return:** {mean_return*100:.3f}% per trade
+                - **Worst-case 1-day loss (95% CVaR):** {cvar_95*100:.2f}%
+                {f"⚠️ **High tail risk** — CVaR exceeds 5%. Reduce position size accordingly." if abs(cvar_95) > 0.05 else ""}
+                {f"⚠️ **Fat tails detected** (kurtosis {kurtosis:.1f}) — widen stop losses beyond normal ATR estimates." if kurtosis > 3 else ""}
 
-                {'⚠️ **High volatility - use smaller position sizes** | **高波动 - 使用较小仓位**' if abs(cvar_95) > 0.03 else ''}
-                {'⚠️ **Fat tails detected - widen stop loss** | **检测到肥尾 - 放宽止损**' if kurtosis > 3 else ''}
+                📌 **Position sizing:** Use the Kelly Criterion in the Down Day Bounce section below — it is calibrated to this stock's actual bounce probabilities and win/loss ratios.
                 """)
 
             else:
@@ -3723,29 +3379,11 @@ if st.session_state.active_ticker:
 
             st.markdown("---")
             st.subheader("🎯 Realistic T+1 Trading Analysis | 真实T+1交易分析")
-
-            col_en, col_cn = st.columns(2)
-            with col_en:
-                st.markdown("""
-                **Real Trading Scenarios:**
-
-                Most analyses only look at close-to-close, but in reality:
-                - **T+0 (Today):** Stock may dip below close → You can buy cheaper
-                - **T+1 (Tomorrow):** Stock may spike above close → You can sell higher
-
-                This analysis compares 4 realistic scenarios.
-                """)
-
-            with col_cn:
-                st.markdown("""
-                **真实交易场景：**
-
-                大多数分析只看收盘到收盘，但实际上：
-                - **T+0 (今天)：** 股价可能低于收盘价 → 可以更便宜买入
-                - **T+1 (明天)：** 股价可能高于收盘价 → 可以更高卖出
-
-                此分析比较4种真实场景。
-                """)
+            st.caption(
+                "Close-to-close ignores intraday opportunity. "
+                "T+0 dips let you buy cheaper; T+1 spikes let you sell higher. "
+                "Compares 4 realistic entry/exit scenarios using this stock's actual intraday history."
+            )
 
             # Generate analysis
             fig_realistic, scenarios_df, entry_df = analyze_realistic_t1_trading(stock_df, ticker_name=ticker)
@@ -3798,125 +3436,21 @@ if st.session_state.active_ticker:
                     )
                     st.caption("Low→Close vs Close→Close")
 
-                # Conditional entry with realistic scenarios
-                st.markdown("#### 🎯 Entry Signals with Realistic Returns | 入场信号与真实收益")
-
-                if not entry_df.empty:
-                    display_entry = entry_df.copy()
-
-                    # Format percentages
-                    pct_cols = ['Avg T0 Discount', 'Avg T1 Premium', 
-                                'Close→Close Return', 'Close→High Return', 
-                                'Low→High Return', 'Low→Close Return',
-                                'Close→Close Win%', 'Close→High Win%',
-                                'Low→High Win%', 'Low→Close Win%']
-
-                    for col in pct_cols:
-                        if col in display_entry.columns:
-                            display_entry[col] = (display_entry[col] * 100).map('{:.2f}%'.format)
-
-                    st.dataframe(display_entry, use_container_width=True, hide_index=True)
-
-                    # Best entry recommendation
-                    # Find entry with best Low→Close return (realistic best scenario)
-                    best_idx = entry_df['Low→Close Return'].idxmax()
-                    best_entry = entry_df.loc[best_idx]
-
-                    st.markdown("### 💡 Recommended Strategy | 推荐策略")
-
-                    col_a, col_b, col_c, col_d = st.columns(4)
-
-                    with col_a:
-                        st.success(f"**Best Entry Signal**")
-                        st.metric("Drop Range", best_entry['Entry Signal'])
-
-                    with col_b:
-                        st.metric("Realistic Return", 
-                                f"{best_entry['Low→Close Return']*100:.2f}%")
-                        st.caption("Buy at LOW, sell at close")
-
-                    with col_c:
-                        st.metric("Win Rate",
-                                f"{best_entry['Low→Close Win%']*100:.1f}%")
-                        st.caption("Historical success rate")
-
-                    with col_d:
-                        st.metric("Avg Entry Discount",
-                                f"{best_entry['Avg T0 Discount']*100:.2f}%")
-                        st.caption("Low vs close today")
-
-                    # Trading guide
-                    st.info(f"""
-                    📋 **Practical Trading Guide:**
-
-                    **Scenario 1: Conservative (Close → Close)**
-                    - Entry: Buy at close today
-                    - Exit: Sell at close tomorrow
-                    - Expected: {scenarios_df.iloc[0]['Avg Return']*100:.2f}% avg return
-                    - Best for: Automated trading, can't watch intraday
-
-                    **Scenario 2: Improved Exit (Close → High)**
-                    - Entry: Buy at close today
-                    - Exit: Set limit order at +{intraday_stats['T1_Avg_Premium']*100:.1f}% above close
-                    - Expected: {scenarios_df.iloc[1]['Avg Return']*100:.2f}% avg return
-                    - Best for: Can monitor T+1 day, capture intraday spike
-
-                    **Scenario 3: Realistic Best (Low → Close)**
-                    - Entry: Set limit order at -{intraday_stats['T0_Avg_Discount']*100:.1f}% below close today
-                    - Exit: Sell at close tomorrow
-                    - Expected: {scenarios_df.iloc[3]['Avg Return']*100:.2f}% avg return
-                    - Best for: Patient, can wait for dip today
-
-                    **Scenario 4: Optimal (Low → High)** ⚠️ *Unrealistic*
-                    - Perfect timing on both entry and exit
-                    - Expected: {scenarios_df.iloc[2]['Avg Return']*100:.2f}% avg return
-                    - Reference only - shows maximum potential
-
-                    ---
-
-                    **💰 Expected Improvement:**
-                    If you can catch today's dip (buy at LOW instead of CLOSE), you improve returns by approximately **{improvement:.2f}%** per trade.
-
-                    **On {intraday_stats['T0_Days_Discount_1pct']} out of {intraday_stats['Total_Days']} days** ({intraday_stats['T0_Days_Discount_1pct']/intraday_stats['Total_Days']*100:.1f}%), the stock dipped >1% below close, giving you a better entry.
-                    """)
+                st.caption(
+                    "💡 For per-drop-bucket win rates and Kelly-optimal position sizing, "
+                    "see the **Down Day Bounce Analysis** section below."
+                )
 
             else:
                 st.warning("Not enough data for realistic T+1 analysis (need 50+ days)")
 
             st.markdown("---")
-
-
-
-            # ========================================
-            # ADD THIS AFTER YOUR REALISTIC T+1 TRADING SECTION
-            # THIS IS THE MISSING PIECE
-            # ========================================
-
-            st.markdown("---")
             st.subheader("📉➡️📈 Down Day Bounce Analysis | 下跌反弹分析")
-
-            col_en, col_cn = st.columns(2)
-            with col_en:
-                st.markdown("""
-                **The Missing Link:** Given today IS a down day, what happens tomorrow?
-
-                This answers:
-                - Probability tomorrow bounces vs continues down
-                - Expected magnitude of bounce/continuation
-                - Mean reversion vs momentum behavior
-                - Optimal position sizing (Kelly Criterion)
-                """)
-
-            with col_cn:
-                st.markdown("""
-                **缺失的环节：** 既然今天是下跌日，明天会怎样？
-
-                此分析回答：
-                - 明天反弹vs继续下跌的概率
-                - 反弹/下跌的预期幅度
-                - 均值回归vs动量行为
-                - 最优仓位大小（凯利公式）
-                """)
+            st.caption(
+                "Given today is a down day — what happens tomorrow? "
+                "Bounce probability, expected magnitude, mean-reversion vs momentum behaviour, "
+                "and Kelly-optimal position sizing, all bucketed by today's drop size."
+            )
 
             # Generate bounce analysis
             fig_bounce, bounce_df, recommendation = analyze_down_day_bounce_probability(stock_df, ticker_name=ticker)
@@ -4208,6 +3742,177 @@ if st.session_state.active_ticker:
                     "数据窗口可能\u8fc7\u77ed\uff0c\u5efa\u8bae\u83b7\u53d6\u66f4\u591a\u5386\u53f2\u6570\u636e\u518d\u8fd0\u884c\u3002"
                 )
 
+
+            # ── Sector Affinity Analysis ──────────────────────────────────────────
+            st.markdown("---")
+
+            @st.fragment
+            def sector_affinity_section(analysis_df):
+                st.subheader("🧲 Sector Affinity Analysis | 板块相关性分析")
+                st.caption(
+                    "Rolling Pearson correlation between this stock's daily returns and each sector's "
+                    "market-cap weighted index (PPI). Higher = this stock moves more like that sector's basket. "
+                    "Useful even if the stock doesn't directly supply that sector."
+                )
+
+                window = st.select_slider(
+                    "Rolling window (trading days)",
+                    options=[20, 30, 60],
+                    value=30,
+                    key="sector_affinity_window",
+                )
+
+                # ── Target stock daily returns ────────────────────────────────────
+                stock_ret = analysis_df["Close"].pct_change().dropna()
+
+                # ── Load PPI sector indices from DB ───────────────────────────────
+                sector_returns: dict = {}
+                for sector_name in data_manager.SECTOR_STOCK_MAP.keys():
+                    table_name = f"PPI_{sector_name}"
+                    try:
+                        if not data_manager.db.table_exists(table_name):
+                            continue
+                        ppi_df = data_manager.db.read_table(
+                            table_name, columns="Date,Close", order_by="Date"
+                        )
+                        if ppi_df is None or ppi_df.empty:
+                            continue
+                        ppi_df["Date"] = pd.to_datetime(ppi_df["Date"])
+                        ppi_df = ppi_df.set_index("Date").sort_index()
+                        sec_ret = ppi_df["Close"].pct_change().dropna()
+                        if len(sec_ret) > 10:
+                            sector_returns[sector_name] = sec_ret
+                    except Exception:
+                        continue
+
+                if not sector_returns:
+                    st.warning("No PPI sector data found in database. Run main.py to build sector indices first.")
+                    return
+
+                # ── Rolling Pearson correlation per sector ────────────────────────
+                all_rolling: dict = {}
+                for sector, sec_ret in sector_returns.items():
+                    aligned = pd.concat(
+                        [stock_ret.rename("stock"), sec_ret.rename(sector)], axis=1
+                    ).dropna()
+                    if len(aligned) < window + 5:
+                        continue
+                    rolling_corr = aligned["stock"].rolling(window=window).corr(aligned[sector])
+                    all_rolling[sector] = rolling_corr.reindex(stock_ret.index)
+
+                if not all_rolling:
+                    st.warning("Not enough overlapping data to compute correlations.")
+                    return
+
+                # Current correlations — last non-NaN value in each series
+                current_corr: dict = {}
+                for s, series in all_rolling.items():
+                    valid = series.dropna()
+                    if not valid.empty:
+                        current_corr[s] = valid.iloc[-1]
+
+                if not current_corr:
+                    st.warning("Could not compute current correlations.")
+                    return
+
+                corr_series = pd.Series(current_corr).sort_values(ascending=True)
+
+                # ── Bar chart + side panel ────────────────────────────────────────
+                col_bar, col_info = st.columns([3, 1])
+
+                with col_bar:
+                    bar_colors = [
+                        "rgba(34,197,94,0.85)" if v >= 0 else "rgba(239,68,68,0.85)"
+                        for v in corr_series.values
+                    ]
+                    fig_bar = go.Figure(go.Bar(
+                        x=corr_series.values,
+                        y=corr_series.index.tolist(),
+                        orientation="h",
+                        marker_color=bar_colors,
+                        text=[f"{v:+.3f}" for v in corr_series.values],
+                        textposition="outside",
+                    ))
+                    fig_bar.update_layout(
+                        title=f"Current Sector Correlations (last {window}-day window)",
+                        xaxis=dict(
+                            range=[-1.15, 1.15],
+                            zeroline=True,
+                            zerolinecolor="rgba(200,200,200,0.4)",
+                            title="Pearson r",
+                        ),
+                        yaxis=dict(title=""),
+                        height=530,
+                        margin=dict(l=10, r=90, t=40, b=20),
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="white"),
+                    )
+                    st.plotly_chart(fig_bar, use_container_width=True)
+
+                with col_info:
+                    top3 = corr_series.sort_values(ascending=False).head(3)
+                    bot3 = corr_series.sort_values(ascending=True).head(3)
+                    st.markdown("**🔝 Most correlated**")
+                    for s, v in top3.items():
+                        st.markdown(f"- {s} `{v:+.3f}`")
+                    st.markdown("")
+                    st.markdown("**🔻 Least / negative**")
+                    for s, v in bot3.items():
+                        st.markdown(f"- {s} `{v:+.3f}`")
+
+                # ── Rolling heatmap — last 252 trading days ───────────────────────
+                rolling_df = pd.DataFrame(all_rolling)
+                sector_order = corr_series.sort_values(ascending=False).index.tolist()
+                valid_cols = [c for c in sector_order if c in rolling_df.columns]
+                rolling_df = rolling_df[valid_cols].dropna(how="all").tail(252)
+
+                date_labels = [
+                    d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+                    for d in rolling_df.index
+                ]
+
+                fig_heat = go.Figure(go.Heatmap(
+                    z=rolling_df.values.T,
+                    x=date_labels,
+                    y=rolling_df.columns.tolist(),
+                    colorscale="RdYlGn",
+                    zmid=0,
+                    zmin=-1,
+                    zmax=1,
+                    colorbar=dict(title="r", tickvals=[-1, -0.5, 0, 0.5, 1]),
+                ))
+                fig_heat.update_layout(
+                    title=f"Rolling {window}-Day Correlation Heatmap (last 252 trading days)",
+                    height=540,
+                    margin=dict(l=10, r=20, t=40, b=70),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="white"),
+                    xaxis=dict(showticklabels=True, tickangle=45, nticks=12),
+                )
+                st.plotly_chart(fig_heat, use_container_width=True)
+
+                # ── Trend insight: is top-sector affinity strengthening? ───────────
+                if current_corr:
+                    top_sector = corr_series.sort_values(ascending=False).index[0]
+                    if top_sector in all_rolling:
+                        top_series = all_rolling[top_sector].dropna().tail(60)
+                        if len(top_series) >= 10:
+                            recent_5  = top_series.tail(5).mean()
+                            recent_20 = top_series.tail(20).mean()
+                            trend_str = (
+                                "📈 strengthening"
+                                if recent_5 > recent_20 + 0.05
+                                else ("📉 weakening" if recent_5 < recent_20 - 0.05 else "➡️ stable")
+                            )
+                            st.info(
+                                f"**Dominant sector**: {top_sector} "
+                                f"(r = {current_corr[top_sector]:+.3f})  "
+                                f"— affinity is **{trend_str}** over the past 5 vs 20 days."
+                            )
+
+            sector_affinity_section(analysis_df)
 
 else:
     st.info("👆 Enter a stock code above to begin analysis")
