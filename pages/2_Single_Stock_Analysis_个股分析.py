@@ -682,34 +682,71 @@ def calculate_trend_forecast(df: pd.DataFrame, lookback: int = 60, forecast_days
         return None, None, None
 
 
-def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.DataFrame = None, blocks: list = None) -> go.Figure:
-   
+def create_single_stock_chart_analysis(
+    df: pd.DataFrame,
+    fundamentals_df: pd.DataFrame = None,
+    blocks: list = None,
+    comp_df: pd.DataFrame = None,
+    comp_name: str = "Comparison",
+    scale_mode: str = "pct",  # "pct" = Same % Scale  |  "new" = New Price Scale
+) -> go.Figure:
+
     """
-    Create 5-panel chart with trading blocks.
-    Blocks drawn as horizontal rectangles during their active period.
+    Create 6-panel (or 7-panel when a comparison stock is active) chart.
+
+    comp_df    : Optional price DataFrame for a second stock ('Close' col + DatetimeIndex).
+    comp_name  : Legend label for the comparison stock.
+    scale_mode : "pct" — both stocks rebased to the main stock's first price so they share
+                          the same ¥ axis (TradingView "Same % Scale" equivalent).
+                 "new" — comparison stock plotted on its own secondary y-axis with absolute
+                          price (TradingView "New Price Scale").
+    When a comparison stock is active a 7th panel is added showing relative performance
+    (comparison % return minus main % return) as a green/red filled area.
     """
-    df = df.tail(250).sort_index()  # Make sure this is df, not analysis_df
+    df = df.tail(250).sort_index()
     dates = df.index.strftime('%Y-%m-%d').tolist()
-    
-    # Extract the dynamic MACD parameters we saved in the engine
+
+    # Pre-align comparison data so has_comp is stable before make_subplots
+    has_comp = False
+    comp_aligned = pd.DataFrame()
+    if comp_df is not None and not comp_df.empty and 'Close' in comp_df.columns:
+        _cdf = comp_df.copy()
+        _cdf.index = pd.to_datetime(_cdf.index)
+        _aligned = _cdf[['Close']].reindex(df.index, method='ffill').dropna()
+        if not _aligned.empty and _aligned['Close'].iloc[0] != 0:
+            has_comp = True
+            comp_aligned = _aligned
+
+    # Extract the dynamic MACD parameters
     p_fast = int(df['MACD_Fast_Param'].iloc[-1]) if 'MACD_Fast_Param' in df.columns else 12
     p_slow = int(df['MACD_Slow_Param'].iloc[-1]) if 'MACD_Slow_Param' in df.columns else 26
     p_sign = int(df['MACD_Sign_Param'].iloc[-1]) if 'MACD_Sign_Param' in df.columns else 9
-    
-    # ==================== CHANGE: 4 rows -> 5 rows ====================
+
+    n_rows   = 7 if has_comp else 6
+    comp_row = 7  # relative-performance panel lives here when active
+
+    _titles_base = (
+        'Price & Trading Blocks + Signals',
+        'Volume & OBV',
+        f'MACD ({p_fast}, {p_slow}, {p_sign})',
+        'RSI',
+        'ADX Trend Analysis',
+        'P/E Ratio',
+    )
+    _subplot_titles = _titles_base + (f'Relative Performance vs {comp_name}',) if has_comp else _titles_base
+
+    _heights_base  = [0.40, 0.10, 0.18, 0.10, 0.18, 0.08]
+    _row_heights   = _heights_base + [0.14] if has_comp else _heights_base[:-1] + [0.10]
+
+    _specs = [[{"secondary_y": True}]] + [[{"secondary_y": False}]] * (n_rows - 1)
+
     fig = make_subplots(
-        rows=6, cols=1,  
+        rows=n_rows, cols=1,
         shared_xaxes=True,
         vertical_spacing=0.03,
-        subplot_titles=(
-            'Price & Trading Blocks + Signals',
-            'Volume & OBV',
-            f'MACD ({p_fast}, {p_slow}, {p_sign})',  # <-- This will now display dynamically!
-            'RSI',  
-            'ADX Trend Analysis',  
-            'P/E Ratio'
-        ),
-        row_heights=[0.45, 0.12, 0.22, 0.12, 0.22, 0.10] 
+        subplot_titles=_subplot_titles,
+        row_heights=_row_heights,
+        specs=_specs,
     )
 
     # Create a custom hover string that reads the historical parameter columns
@@ -1499,6 +1536,78 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
 
 
 
+    # ── Comparison stock overlay + Relative Performance panel ───────────────────
+    if has_comp:
+        comp_dates  = comp_aligned.index.strftime('%Y-%m-%d').tolist()
+        main_first  = df['Close'].iloc[0]
+        comp_first  = comp_aligned['Close'].iloc[0]
+
+        if scale_mode == "pct":
+            # ── Same % Scale ──────────────────────────────────────────────────
+            # Rebase comparison to main stock's first price so both sit on the
+            # same ¥ axis.  The gap between the candlestick and this line is the
+            # pure relative performance (same as TradingView "Same % Scale").
+            comp_rebased = comp_aligned['Close'] / comp_first * main_first
+            fig.add_trace(go.Scatter(
+                x=comp_dates,
+                y=comp_rebased.tolist(),
+                name=f'{comp_name} (same % scale)',
+                line=dict(color='#f97316', width=2),
+                opacity=0.85,
+                hovertemplate='%{x}<br>' + comp_name + ' (rebased ¥): %{y:.2f}<extra></extra>',
+            ), row=1, col=1, secondary_y=False)
+            # Hide unused secondary axis
+            fig.update_yaxes(visible=False, secondary_y=True, row=1, col=1)
+
+        else:
+            # ── New Price Scale ───────────────────────────────────────────────
+            # Comparison stock's actual price on its own right-hand y-axis.
+            fig.add_trace(go.Scatter(
+                x=comp_dates,
+                y=comp_aligned['Close'].tolist(),
+                name=f'{comp_name} (¥)',
+                line=dict(color='#f97316', width=2),
+                opacity=0.85,
+                hovertemplate='%{x}<br>' + comp_name + ': ¥%{y:.2f}<extra></extra>',
+            ), row=1, col=1, secondary_y=True)
+            fig.update_yaxes(
+                title_text=f'{comp_name} (¥)',
+                secondary_y=True, row=1, col=1,
+                showgrid=False,
+                tickprefix='¥',
+            )
+
+        # ── Row 7: Relative Performance (comp % − main %) ─────────────────
+        # Green = comparison outperforming, Red = main outperforming
+        main_pct = (df['Close'] / main_first - 1) * 100
+        comp_pct = (comp_aligned['Close'] / comp_first - 1) * 100
+        rel      = comp_pct.reindex(main_pct.index).fillna(method='ffill') - main_pct
+
+        rel_vals = rel.fillna(0)
+        pos_vals = rel_vals.clip(lower=0)
+        neg_vals = rel_vals.clip(upper=0)
+
+        fig.add_trace(go.Scatter(
+            x=dates, y=pos_vals.tolist(),
+            fill='tozeroy', fillcolor='rgba(34,197,94,0.35)',
+            line=dict(width=0), showlegend=False,
+            hovertemplate='%{x}<br>+%{y:.1f} pp (comp ahead)<extra></extra>',
+        ), row=comp_row, col=1)
+        fig.add_trace(go.Scatter(
+            x=dates, y=neg_vals.tolist(),
+            fill='tozeroy', fillcolor='rgba(239,68,68,0.35)',
+            line=dict(width=0), showlegend=False,
+            hovertemplate='%{x}<br>%{y:.1f} pp (main ahead)<extra></extra>',
+        ), row=comp_row, col=1)
+        fig.add_hline(y=0, line_color='#9ca3af', line_dash='dash', row=comp_row, col=1)
+        fig.update_yaxes(
+            title_text='Outperf (pp)',
+            ticksuffix=' pp',
+            zeroline=False,
+            showgrid=True,
+            row=comp_row, col=1,
+        )
+
     # Reference lines
     fig.add_hline(
         y=25, line_dash='dot', line_color='#6b7280',
@@ -1544,13 +1653,14 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
     
     
     # ==================== UPDATE LAYOUT ====================
+    _bottom_xaxis = f'xaxis{n_rows}_title'
     fig.update_layout(
-        height=1500,  # ← Increased from 1300 to 1500 to accommodate new panel
+        height=1500 + (150 if has_comp else 0),
         template='plotly_white',
         xaxis_rangeslider_visible=False,
         hovermode='x unified',
-        xaxis6_title='Date',  # ← Changed from xaxis5 to xaxis6
-        yaxis1_title='Price',
+        **{_bottom_xaxis: 'Date'},
+        yaxis1_title='Price (¥)',
         yaxis2_title='Volume',
         yaxis3_title='MACD',
         yaxis4_title='RSI',
@@ -1570,40 +1680,30 @@ def create_single_stock_chart_analysis(df: pd.DataFrame, fundamentals_df: pd.Dat
         )
     )
 
-
     # Smart tick selection
     total_dates = len(dates)
-
     if total_dates <= 30:
-        tick_interval = 1  # Show all dates
+        tick_interval = 1
     elif total_dates <= 60:
-        tick_interval = 3  # Show every 3rd
+        tick_interval = 3
     elif total_dates <= 120:
-        tick_interval = 5  # Show every 5th
+        tick_interval = 5
     else:
-        tick_interval = max(5, total_dates // 20)  # Show ~20 ticks
+        tick_interval = max(5, total_dates // 20)
 
-    # Select dates to display
     tick_vals = dates[::tick_interval]
-    tick_text = tick_vals
 
-    # Update only the bottom x-axis with labels
+    # Bottom row shows x-axis labels; all rows above it are hidden
     fig.update_xaxes(
         type='category',
         tickangle=-45,
         tickmode='array',
         tickvals=tick_vals,
-        ticktext=tick_text,
-        row=6, col=1
+        ticktext=tick_vals,
+        row=n_rows, col=1,
     )
-
-    # Hide tick labels on upper panels (but keep grid aligned)
-    for row in range(1, 6):
-        fig.update_xaxes(
-            type='category',
-            showticklabels=False,
-            row=row, col=1
-        )
+    for row in range(1, n_rows):
+        fig.update_xaxes(type='category', showticklabels=False, row=row, col=1)
 
     return fig
 
@@ -3141,10 +3241,70 @@ if st.session_state.active_ticker:
             # ==================== END MARKET STATUS ====================
 
             
-            with st.spinner("Generating chart...生成分析图表"):
-                # Display chart
-                fig_stock = create_single_stock_chart_analysis(analysis_df, fundamentals_df=fundamentals_df, blocks=blocks)
+            # ── Chart section wrapped in a fragment so the comparison picker
+            #    only rerenders the chart — NOT the analysis above it.
+            @st.fragment
+            def chart_with_comparison(analysis_df, fundamentals_df, blocks):
+                # ── Controls row ─────────────────────────────────────────────
+                ctrl_l, ctrl_r = st.columns([3, 2])
+                with ctrl_l:
+                    comp_input = st.text_input(
+                        "📊 Compare with another stock (optional — 6-digit code)",
+                        value="",
+                        placeholder="e.g. 600036",
+                        key="comp_ticker_input",
+                        help="Overlay a second stock on the price chart. "
+                             "Changing the ticker or scale mode only rerenders the chart.",
+                    )
+                with ctrl_r:
+                    scale_choice = st.radio(
+                        "Price scale",
+                        options=["Same % Scale", "New Price Scale"],
+                        index=0,
+                        horizontal=True,
+                        key="comp_scale_mode",
+                        help=(
+                            "**Same % Scale**: comparison stock rebased to the main stock's "
+                            "first price — both share the left ¥ axis. The gap between the "
+                            "lines is pure relative performance.\n\n"
+                            "**New Price Scale**: comparison stock plotted on its own right-hand "
+                            "axis at actual price."
+                        ),
+                    )
+                scale_mode = "pct" if scale_choice == "Same % Scale" else "new"
+
+                # ── Load comparison data ──────────────────────────────────────
+                comp_df_overlay   = None
+                comp_name_overlay = "Comparison"
+                _comp = comp_input.strip().split()[0] if comp_input.strip() else ""
+                if _comp and _comp.isdigit() and len(_comp) == 6:
+                    try:
+                        with st.spinner(f"Loading {_comp}…"):
+                            comp_df_overlay = load_single_stock(_comp, date.today())
+                        try:
+                            _ts = data_manager.get_tushare_ticker(_comp)
+                            _sb = data_manager.db.read_table(
+                                'stock_basic', filters={'ts_code': _ts}, columns='name', limit=1)
+                            _cname = _sb.iloc[0]['name'] if (_sb is not None and not _sb.empty) else _comp
+                        except Exception:
+                            _cname = _comp
+                        comp_name_overlay = f"{_cname} ({_comp})"
+                    except Exception as _e:
+                        st.warning(f"Could not load {_comp}: {_e}")
+
+                # ── Render ────────────────────────────────────────────────────
+                with st.spinner("Generating chart..."):
+                    fig_stock = create_single_stock_chart_analysis(
+                        analysis_df,
+                        fundamentals_df=fundamentals_df,
+                        blocks=blocks,
+                        comp_df=comp_df_overlay,
+                        comp_name=comp_name_overlay,
+                        scale_mode=scale_mode,
+                    )
                 st.plotly_chart(fig_stock, use_container_width=True)
+
+            chart_with_comparison(analysis_df, fundamentals_df, blocks)
 
             # ================================
             # CORRECT SIMULATOR - Proper column naming and only 4 ADX patterns
