@@ -75,15 +75,36 @@ with tab_overview:
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
         with st.expander("Show full composition table"):
-            st.dataframe(active[['sector', 'ticker', 'added_at']].rename(
-                columns={'sector': 'Sector', 'ticker': 'Ticker', 'added_at': 'Added At'}
-            ), use_container_width=True, hide_index=True)
+            name_map_ov = _build_name_map()
+            full = active[['sector', 'ticker', 'added_at']].copy()
+            full.insert(2, 'name', full['ticker'].map(lambda t: name_map_ov.get(t, '—')))
+            st.dataframe(full.rename(columns={'sector': 'Sector', 'ticker': 'Ticker',
+                                              'name': 'Name', 'added_at': 'Added At'}),
+                         use_container_width=True, hide_index=True)
 
         if not inactive.empty:
             with st.expander(f"Removed stocks ({len(inactive)})"):
                 st.dataframe(inactive[['sector', 'ticker', 'removed_at']].rename(
                     columns={'sector': 'Sector', 'ticker': 'Ticker', 'removed_at': 'Removed At'}
                 ), use_container_width=True, hide_index=True)
+
+
+# ── Stock lookup cache (shared across Edit and New Sector tabs) ──────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def _all_stock_options():
+    """All stocks from stock_basic as 'CODE · 名称' strings for selectbox."""
+    stocks = dm.get_all_stock_basic()
+    return [""] + [f"{s['ticker']} · {s['name']}" for s in stocks]
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _build_name_map():
+    """Dict of {6-digit ticker: company name} from stock_basic."""
+    stocks = dm.get_all_stock_basic()
+    return {s['ticker']: s['name'] for s in stocks}
+
+def _label(ticker, name_map):
+    name = name_map.get(ticker, "")
+    return f"{ticker} · {name}" if name else ticker
 
 
 # ============================================================
@@ -102,50 +123,60 @@ with tab_edit:
 
         if selected_sector:
             current_tickers = sector_map[selected_sector]
+            name_map = _build_name_map()
 
             col_add, col_remove = st.columns(2)
 
             # ── Add a stock ─────────────────────────────────────────────────
             with col_add:
                 st.markdown("**Add a stock**")
-                new_ticker = st.text_input(
-                    "Ticker (6-digit A-share code)",
-                    placeholder="e.g. 600519",
-                    key="add_ticker_input",
-                ).strip()
+                all_opts = _all_stock_options()
+                picked = st.selectbox(
+                    "Search by code or name",
+                    options=all_opts,
+                    key="add_ticker_select",
+                    format_func=lambda x: "Type to search… (code or name)" if x == "" else x,
+                )
+                new_ticker = picked.split(" · ")[0].strip() if picked else ""
 
                 if st.button("Add stock", key="btn_add_stock"):
                     if not new_ticker:
-                        st.error("Please enter a ticker.")
+                        st.error("Please select a stock.")
                     elif new_ticker in current_tickers:
-                        st.warning(f"{new_ticker} is already in {selected_sector}.")
+                        st.warning(f"{_label(new_ticker, name_map)} is already in {selected_sector}.")
                     else:
                         dm.add_stock_to_sector(selected_sector, new_ticker)
-                        st.success(f"Added {new_ticker} to {selected_sector}. "
+                        st.success(f"Added {_label(new_ticker, name_map)} to {selected_sector}. "
                                    "Trigger a rebuild when ready.")
                         st.rerun()
 
             # ── Remove a stock ───────────────────────────────────────────────
             with col_remove:
                 st.markdown("**Remove a stock**")
-                ticker_to_remove = st.selectbox(
+                remove_opts = [f"{t} · {name_map[t]}" if t in name_map else t
+                               for t in current_tickers]
+                remove_pick = st.selectbox(
                     "Select stock to remove",
-                    options=current_tickers,
+                    options=remove_opts,
                     key="remove_ticker_select",
                 )
+                ticker_to_remove = remove_pick.split(" · ")[0].strip() if remove_pick else ""
 
                 if st.button("Remove stock", type="primary", key="btn_remove_stock"):
                     if len(current_tickers) <= 2:
                         st.error("A sector needs at least 2 stocks for the PPI model.")
                     else:
                         dm.remove_stock_from_sector(selected_sector, ticker_to_remove)
-                        st.success(f"Removed {ticker_to_remove} from {selected_sector}. "
+                        st.success(f"Removed {_label(ticker_to_remove, name_map)} from {selected_sector}. "
                                    "Trigger a rebuild when ready.")
                         st.rerun()
 
             st.divider()
+
+            # ── Current stock list with names ────────────────────────────────
             st.markdown(f"**Current stocks in {selected_sector}** ({len(current_tickers)} total)")
-            st.write(", ".join(current_tickers))
+            stock_rows = [{"Ticker": t, "Name": name_map.get(t, "—")} for t in current_tickers]
+            st.dataframe(pd.DataFrame(stock_rows), use_container_width=True, hide_index=True)
 
             st.divider()
             st.markdown("**Trigger rebuild for this sector only**")
