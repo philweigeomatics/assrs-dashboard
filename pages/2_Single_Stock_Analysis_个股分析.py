@@ -3767,7 +3767,7 @@ if st.session_state.active_ticker:
 
                 # ── Load PPI sector indices from DB ───────────────────────────────
                 sector_returns: dict = {}
-                for sector_name in data_manager.SECTOR_STOCK_MAP.keys():
+                for sector_name in data_manager.get_sector_stock_map().keys():
                     table_name = f"PPI_{sector_name}"
                     try:
                         if not data_manager.db.table_exists(table_name):
