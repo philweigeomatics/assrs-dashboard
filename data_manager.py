@@ -1087,7 +1087,7 @@ def aggregate_ppi_data(sector_start_dates=None, sector_stock_map=None):
     end_str = datetime.today().strftime('%Y%m%d')
 
     if sector_stock_map is None:
-        sector_stock_map = SECTOR_STOCK_MAP
+        sector_stock_map = get_sector_stock_map()
 
     if sector_start_dates is None:
         sector_start_dates = {sector: None for sector in sector_stock_map.keys()}
