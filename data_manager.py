@@ -1060,7 +1060,7 @@ def get_ohlcv_for_wave(ticker: str, granularity: str = "Weekly", start_date: str
     return df if not df.empty else None
 
 
-def aggregate_ppi_data(sector_start_dates=None):
+def aggregate_ppi_data(sector_start_dates=None, sector_stock_map=None):
     """
     Builds sector-level PPIs using market-cap weighted returns.
 
@@ -1086,10 +1086,13 @@ def aggregate_ppi_data(sector_start_dates=None):
     all_sector_ppi_data = {}
     end_str = datetime.today().strftime('%Y%m%d')
 
-    if sector_start_dates is None:
-        sector_start_dates = {sector: None for sector in SECTOR_STOCK_MAP.keys()}
+    if sector_stock_map is None:
+        sector_stock_map = SECTOR_STOCK_MAP
 
-    for sector, stock_list in SECTOR_STOCK_MAP.items():
+    if sector_start_dates is None:
+        sector_start_dates = {sector: None for sector in sector_stock_map.keys()}
+
+    for sector, stock_list in sector_stock_map.items():
         if sector not in sector_start_dates:
             continue
 
@@ -1648,13 +1651,27 @@ def save_ppi_data_to_db(all_ppi_data):
 
 
 
+def _get_all_ppi_sector_names():
+    """Return list of sector names that have PPI_ tables in the DB."""
+    if db.use_supabase:
+        # Supabase: fall back to the dynamic sector map
+        return list(get_sector_stock_map().keys())
+    else:
+        import sqlite3
+        with sqlite3.connect(db.dbname) as conn:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'PPI_%'"
+            ).fetchall()
+        return [r[0][len('PPI_'):] for r in rows]
+
+
 def load_ppi_data_from_db():
     """Loads all 'PPI_' tables from the DB into a dictionary of DataFrames."""
     print("\n--- Loading Pre-Calculated PPIs from Database ---")
-    
+
     all_ppi_data = {}
-    
-    for sector_name in SECTOR_STOCK_MAP.keys():
+
+    for sector_name in _get_all_ppi_sector_names():
         table_name = f"PPI_{sector_name}"
         try:
             if not db.table_exists(table_name):
@@ -2209,21 +2226,18 @@ def save_market_breadth_to_db(breadth_data_by_date):
                 print(f"CREATE TABLE market_breadth (")
                 print(f'  "Date" TEXT PRIMARY KEY,')
 
-                # Get all sectors from SECTOR_STOCK_MAP
-                sectors = [s for s in SECTOR_STOCK_MAP.keys() if s != 'MARKET_PROXY']
+                sectors = [s for s in breadth_data_by_date[next(iter(breadth_data_by_date))].keys()]
                 for sector in sectors:
-                    # Replace Chinese characters with safe column names if needed
                     print(f'  "{sector}" REAL,')
                 print(f");")
                 print(f"")
                 return
             else:
-                # SQLite - create table automatically
+                # SQLite - create table automatically with whatever sectors we have now
                 columns = ['Date TEXT PRIMARY KEY']
-                sectors = [s for s in SECTOR_STOCK_MAP.keys() if s != 'MARKET_PROXY']
+                sectors = [s for s in breadth_data_by_date[next(iter(breadth_data_by_date))].keys()]
                 for sector in sectors:
                     columns.append(f'"{sector}" REAL')
-
                 schema = f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(columns)})"
                 db.create_table_sqlite(schema)
                 print(f"✓ Created table: {table_name}")
@@ -4062,6 +4076,308 @@ def fetch_adjusted_daily(ticker: str, start_date: str, end_date: str,
 
     import pandas as _pd
     return _pd.DataFrame()
+
+
+# ============================================================
+# ADMIN: SECTOR-STOCK MAP (dynamic, DB-backed)
+# ============================================================
+
+def ensure_admin_tables_exist():
+    """
+    Create admin tables if they don't exist.
+    SQLite: created automatically.
+    Supabase: print SQL for manual creation in dashboard.
+    """
+    schemas = {
+        'sector_stock_map': """
+            CREATE TABLE IF NOT EXISTS sector_stock_map (
+                sector TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                is_active INTEGER DEFAULT 1,
+                added_at TEXT,
+                removed_at TEXT,
+                PRIMARY KEY (sector, ticker)
+            )""",
+        'rebuild_jobs': """
+            CREATE TABLE IF NOT EXISTS rebuild_jobs (
+                job_id TEXT PRIMARY KEY,
+                job_type TEXT,
+                sectors TEXT,
+                status TEXT DEFAULT 'pending',
+                progress INTEGER DEFAULT 0,
+                progress_message TEXT,
+                created_at TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                error_message TEXT
+            )""",
+        'regime_scores': """
+            CREATE TABLE IF NOT EXISTS regime_scores (
+                Date TEXT NOT NULL,
+                Sector TEXT NOT NULL,
+                TOTAL_SCORE REAL,
+                Bull_Prob_Raw REAL,
+                Volume_Z REAL,
+                "Open" REAL,
+                "High" REAL,
+                "Low" REAL,
+                "Close" REAL,
+                Volume_Metric REAL,
+                Fit_Type TEXT,
+                ACTION TEXT,
+                Position_Size REAL,
+                Market_Score REAL,
+                Market_Regime TEXT,
+                Market_Source TEXT,
+                Strategy TEXT,
+                Threshold_Buy REAL,
+                Threshold_Sell REAL,
+                Excess_Prob REAL,
+                Rotation_Status TEXT,
+                Dispersion REAL,
+                PRIMARY KEY (Date, Sector)
+            )""",
+    }
+
+    if db.use_supabase:
+        missing = [name for name in schemas if not db.table_exists(name)]
+        if missing:
+            print("⚠️  Supabase: create these tables in the dashboard:")
+            for name in missing:
+                print(f"   - {name}")
+        return
+
+    for name, schema in schemas.items():
+        if not db.table_exists(name):
+            db.create_table_sqlite(schema)
+            print(f"✅ Created table: {name}")
+
+
+def seed_sector_stock_map():
+    """Seed sector_stock_map from hardcoded SECTOR_STOCK_MAP if the table is empty."""
+    ensure_admin_tables_exist()
+    try:
+        existing = db.read_table('sector_stock_map', limit=1)
+        if not existing.empty:
+            return
+    except Exception:
+        pass
+
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    records = []
+    for sector, tickers in SECTOR_STOCK_MAP.items():
+        for ticker in tickers:
+            records.append({
+                'sector': sector,
+                'ticker': ticker,
+                'is_active': 1,
+                'added_at': now,
+                'removed_at': None,
+            })
+
+    db.insert_records('sector_stock_map', records)
+    print(f"✅ Seeded sector_stock_map: {len(records)} entries across {len(SECTOR_STOCK_MAP)} sectors")
+
+
+def get_sector_stock_map():
+    """
+    Load active sector-to-stock mapping from DB.
+    Falls back to hardcoded SECTOR_STOCK_MAP if DB is unavailable or empty.
+    """
+    try:
+        ensure_admin_tables_exist()
+        seed_sector_stock_map()
+        df = db.read_table('sector_stock_map', filters={'is_active': 1})
+        if df.empty:
+            return SECTOR_STOCK_MAP.copy()
+        result = {}
+        for _, row in df.iterrows():
+            result.setdefault(row['sector'], []).append(row['ticker'])
+        return result
+    except Exception as e:
+        print(f"⚠️  get_sector_stock_map failed ({e}), using hardcoded map")
+        return SECTOR_STOCK_MAP.copy()
+
+
+def add_stock_to_sector(sector, ticker):
+    """Add (or reactivate) a stock in a sector."""
+    ensure_admin_tables_exist()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    existing = db.read_table('sector_stock_map', filters={'sector': sector, 'ticker': ticker})
+    if not existing.empty:
+        db.update_records('sector_stock_map',
+                          {'is_active': 1, 'added_at': now, 'removed_at': None},
+                          {'sector': sector, 'ticker': ticker})
+        print(f"✅ Reactivated {ticker} in sector '{sector}'")
+    else:
+        db.insert_records('sector_stock_map', [{
+            'sector': sector, 'ticker': ticker,
+            'is_active': 1, 'added_at': now, 'removed_at': None,
+        }])
+        print(f"✅ Added {ticker} to sector '{sector}'")
+
+
+def remove_stock_from_sector(sector, ticker):
+    """Soft-delete a stock from a sector (marks is_active=0)."""
+    ensure_admin_tables_exist()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    db.update_records('sector_stock_map',
+                      {'is_active': 0, 'removed_at': now},
+                      {'sector': sector, 'ticker': ticker})
+    print(f"✅ Removed {ticker} from sector '{sector}'")
+
+
+def add_new_sector(sector_name, tickers):
+    """Create a new sector and seed it with an initial stock list."""
+    ensure_admin_tables_exist()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    records = [{'sector': sector_name, 'ticker': t,
+                'is_active': 1, 'added_at': now, 'removed_at': None}
+               for t in tickers]
+    db.insert_records('sector_stock_map', records)
+    print(f"✅ Created sector '{sector_name}' with {len(tickers)} stocks")
+
+
+def get_all_sector_stock_map_raw():
+    """Return full sector_stock_map table (active + inactive) as DataFrame."""
+    ensure_admin_tables_exist()
+    return db.read_table('sector_stock_map', order_by='sector')
+
+
+# ============================================================
+# ADMIN: REGIME SCORES (DB-backed, replaces CSV)
+# ============================================================
+
+def save_regime_scores_to_db(df_scores):
+    """Upsert regime scores DataFrame into the regime_scores table."""
+    ensure_admin_tables_exist()
+    if df_scores is None or df_scores.empty:
+        return
+    records = df_scores.copy()
+    records['Date'] = pd.to_datetime(records['Date']).dt.strftime('%Y-%m-%d')
+    db.insert_records('regime_scores', records.to_dict('records'), upsert=True)
+    print(f"✅ Saved {len(records)} regime score rows to DB")
+
+
+def load_regime_scores_from_db(start_date=None, end_date=None, sectors=None):
+    """
+    Load regime scores from DB.  Returns a DataFrame or None if no data.
+    """
+    ensure_admin_tables_exist()
+    try:
+        if db.use_supabase:
+            from db_manager import supabase_client
+            query = supabase_client.table('regime_scores').select('*')
+            if start_date:
+                query = query.gte('Date', start_date)
+            if end_date:
+                query = query.lte('Date', end_date)
+            if sectors:
+                query = query.in_('Sector', sectors)
+            df = pd.DataFrame(query.order('Date').order('Sector').execute().data)
+        else:
+            import sqlite3
+            conditions, params = [], []
+            if start_date:
+                conditions.append('Date >= ?'); params.append(start_date)
+            if end_date:
+                conditions.append('Date <= ?'); params.append(end_date)
+            if sectors:
+                placeholders = ','.join(['?'] * len(sectors))
+                conditions.append(f'Sector IN ({placeholders})')
+                params.extend(sectors)
+            where = f'WHERE {" AND ".join(conditions)}' if conditions else ''
+            sql = f'SELECT * FROM regime_scores {where} ORDER BY Date, Sector'
+            with sqlite3.connect(db.dbname) as conn:
+                df = pd.read_sql_query(sql, conn, params=params or None)
+
+        if df.empty:
+            return None
+        df['Date'] = pd.to_datetime(df['Date'])
+        return df
+    except Exception as e:
+        print(f"⚠️  load_regime_scores_from_db failed: {e}")
+        return None
+
+
+def delete_regime_scores_for_sectors(sectors, from_date=None):
+    """Delete regime scores for the given sectors (used before a rebuild)."""
+    ensure_admin_tables_exist()
+    if db.use_supabase:
+        from db_manager import supabase_client
+        for sector in sectors:
+            q = supabase_client.table('regime_scores').delete().eq('Sector', sector)
+            if from_date:
+                q = q.gte('Date', from_date)
+            q.execute()
+    else:
+        import sqlite3
+        with sqlite3.connect(db.dbname) as conn:
+            for sector in sectors:
+                if from_date:
+                    conn.execute('DELETE FROM regime_scores WHERE Sector=? AND Date>=?',
+                                 (sector, from_date))
+                else:
+                    conn.execute('DELETE FROM regime_scores WHERE Sector=?', (sector,))
+            conn.commit()
+    print(f"✅ Cleared regime scores for {len(sectors)} sectors"
+          + (f" from {from_date}" if from_date else ""))
+
+
+def get_latest_regime_scores():
+    """Return regime scores for the most recent date available."""
+    df = load_regime_scores_from_db()
+    if df is None or df.empty:
+        return None
+    latest = df['Date'].max()
+    return df[df['Date'] == latest].copy()
+
+
+# ============================================================
+# ADMIN: REBUILD JOBS
+# ============================================================
+
+def create_rebuild_job(job_type, sectors):
+    """Insert a new rebuild_jobs row and return the job_id."""
+    import uuid, json
+    ensure_admin_tables_exist()
+    job_id = str(uuid.uuid4())[:8]
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    db.insert_records('rebuild_jobs', [{
+        'job_id': job_id,
+        'job_type': job_type,
+        'sectors': json.dumps(sectors, ensure_ascii=False),
+        'status': 'pending',
+        'progress': 0,
+        'progress_message': 'Job created',
+        'created_at': now,
+        'started_at': None,
+        'completed_at': None,
+        'error_message': None,
+    }])
+    return job_id
+
+
+def update_rebuild_job(job_id, **kwargs):
+    """Patch a rebuild_jobs row with arbitrary field updates."""
+    if not kwargs:
+        return
+    try:
+        db.update_records('rebuild_jobs', kwargs, {'job_id': job_id})
+    except Exception as e:
+        print(f"⚠️  update_rebuild_job({job_id}): {e}")
+
+
+def get_rebuild_job(job_id):
+    """Return a rebuild_jobs row as a dict, or None."""
+    df = db.read_table('rebuild_jobs', filters={'job_id': job_id})
+    return df.iloc[0].to_dict() if not df.empty else None
+
+
+def get_recent_rebuild_jobs(limit=15):
+    """Return the most recent rebuild_jobs rows as a DataFrame."""
+    ensure_admin_tables_exist()
+    return db.read_table('rebuild_jobs', order_by='-created_at', limit=limit)
 
 
 # ── Equity Brief — Financial statement fetchers ───────────────────────────────

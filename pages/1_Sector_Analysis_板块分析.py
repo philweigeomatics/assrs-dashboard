@@ -23,32 +23,40 @@ st.set_page_config(
 # DATA LOADING
 # ==========================================
 
-V2_REGIME_FILE = 'assrs_backtest_results_SECTORS_V2_Regime.csv'
+V2_REGIME_FILE = 'assrs_backtest_results_SECTORS_V2_Regime.csv'   # legacy fallback
 
 @st.cache_data(ttl=600)
 def load_v2_data():
-    """Load V2 Enhanced data."""
+    """Load V2 regime scores — primary source is DB, falls back to legacy CSV."""
+    numeric_cols = ['TOTAL_SCORE', 'Open', 'High', 'Low', 'Close',
+                    'Volume_Metric', 'Market_Score', 'Excess_Prob',
+                    'Position_Size', 'Dispersion', 'Market_Breadth']
+
+    # ── Primary: database ────────────────────────────────────────────────────
+    try:
+        df = data_manager.load_regime_scores_from_db()
+        if df is not None and not df.empty:
+            for col in numeric_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+            latest_date = df['Date'].max()
+            latest = df[df['Date'] == latest_date].copy()
+            return latest, df.copy(), latest_date.strftime('%Y-%m-%d'), None
+    except Exception:
+        pass
+
+    # ── Fallback: legacy CSV ─────────────────────────────────────────────────
     try:
         df = pd.read_csv(V2_REGIME_FILE)
         df['Date'] = pd.to_datetime(df['Date'])
-        
-        numeric_cols = ['TOTAL_SCORE', 'Open', 'High', 'Low', 'Close', 
-                       'Volume_Metric', 'Market_Score', 'Excess_Prob', 
-                       'Position_Size', 'Dispersion','Market_Breadth']
-        
         for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
-        
         if df.empty:
             return None, None, None, "No data"
-        
         latest_date = df['Date'].max()
         latest = df[df['Date'] == latest_date].copy()
-        history = df.copy()
-        
-        return latest, history, latest_date.strftime('%Y-%m-%d'), None
-    
+        return latest, df.copy(), latest_date.strftime('%Y-%m-%d'), None
     except Exception as e:
         return None, None, None, str(e)
     

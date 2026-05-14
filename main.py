@@ -156,8 +156,12 @@ def run_daily_ppi_and_market_breadth():
     print("✓ Volume = dollar value traded (volume × mid_price)")
     print()
 
+    # Load dynamic sector map from DB (falls back to hardcoded if empty)
+    sector_map = dm.get_sector_stock_map()
+    print(f"✓ Loaded sector map: {len(sector_map)} sectors")
+
     sector_start_dates = {}
-    for sector in dm.SECTOR_STOCK_MAP.keys():
+    for sector in sector_map.keys():
         table_name = f"PPI_{sector}"
 
         ppi_latest_date = None
@@ -184,7 +188,10 @@ def run_daily_ppi_and_market_breadth():
         print("✓ All PPIs are up-to-date, nothing to aggregate")
         all_ppi_data = {}
     else:
-        all_ppi_data = dm.aggregate_ppi_data(sector_start_dates=sector_start_dates)
+        all_ppi_data = dm.aggregate_ppi_data(
+            sector_start_dates=sector_start_dates,
+            sector_stock_map=sector_map,
+        )
 
         if all_ppi_data:
             dm.save_ppi_data_to_db(all_ppi_data)
@@ -279,10 +286,9 @@ def run_daily_ppi_and_market_breadth():
 
             breadth_data_by_date[date] = {}
 
-            for sector in dm.SECTOR_STOCK_MAP.keys():
+            for sector in sector_map.keys():
                 if sector in all_ppi_data_loaded:
                     ppi_df = all_ppi_data_loaded[sector]
-                    # Use PPI-based breadth proxy
                     breadth = calculate_ppi_breadth_proxy(ppi_df, date)
                     breadth_data_by_date[date][sector] = breadth
                 else:
@@ -398,40 +404,59 @@ def run_sector_backtest_v2():
     print(f"  Range: {backtest_date_range[0].strftime('%Y-%m-%d')} to {backtest_date_range[-1].strftime('%Y-%m-%d')}")
     print()
 
-    # === STEP 5: Run V2 Enhanced Backtest ===
+    # === STEP 5: Run V2 Enhanced Backtest (incremental) ===
     print(f"{'='*60}")
-    print(f"STEP 5: Running V2 Enhanced Backtest (CSV Generation)")
+    print(f"STEP 5: Running V2 Enhanced Regime Scoring (incremental → DB)")
     print(f"{'='*60}")
-    print(f"Features:")
     print(f"  • CSI300 index for market regime (real benchmark)")
     print(f"  • Market context, volume confirmation, momentum")
     print(f"  • Adaptive thresholds")
-    print(f"ℹ️  Note: Market_Breadth stored separately in DB, NOT in CSV")
+    print(f"  • Results stored in regime_scores DB table (not CSV)")
+    print()
+
+    # Only score dates not yet in the DB
+    existing_scores = dm.load_regime_scores_from_db()
+    if existing_scores is not None and not existing_scores.empty:
+        latest_scored = existing_scores['Date'].max()
+        print(f"✓ Existing regime scores up to: {latest_scored.strftime('%Y-%m-%d')}")
+        dates_to_score = backtest_date_range[backtest_date_range > latest_scored]
+        # Seed historical_scores from DB for adaptive thresholds
+        historical_scores = existing_scores[['Date', 'Sector', 'TOTAL_SCORE']].copy()
+        historical_scores['Date'] = historical_scores['Date'].dt.strftime('%Y-%m-%d')
+    else:
+        print("✓ No existing regime scores — will score full date range")
+        dates_to_score = backtest_date_range
+        historical_scores = None
+
+    if len(dates_to_score) == 0:
+        print("✓ Regime scores already up-to-date.")
+        print()
+        print(f"{'='*60}")
+        print(f"✅ REGIME SCORING COMPLETE (no new dates to score)")
+        print(f"{'='*60}\n")
+        return
+
+    print(f"✓ Scoring {len(dates_to_score)} new trading days...")
     print()
 
     all_sector_scores_v2 = []
-    historical_scores = None
-    total_days = len(backtest_date_range)
+    total_days = len(dates_to_score)
 
-    for idx, date in enumerate(backtest_date_range, 1):
-        # Progress indicator
+    for idx, date in enumerate(dates_to_score, 1):
         if idx % 10 == 0 or idx == total_days:
             print(f"   Progress: {idx}/{total_days} ({idx/total_days*100:.1f}%) - {date.strftime('%Y-%m-%d')}")
 
         try:
-            # Call enhanced V2 with optional historical scores
             daily_scorecard_v2 = calculate_regime_scores(
                 all_ppi_data_loaded,
                 date,
                 historical_scores=historical_scores,
-                market_index_df=csi300_df  # ← PASS CSI300 HERE
+                market_index_df=csi300_df,
             )
 
             if not daily_scorecard_v2.empty:
-
                 all_sector_scores_v2.append(daily_scorecard_v2.reset_index(drop=True))
 
-                # Build historical scores for adaptive thresholds
                 if historical_scores is None:
                     historical_scores = daily_scorecard_v2[['Date', 'Sector', 'TOTAL_SCORE']].copy()
                 else:
@@ -446,76 +471,36 @@ def run_sector_backtest_v2():
 
     print()
 
-    # === STEP 6: Save Results ===
+    # === STEP 6: Save to database ===
     print(f"{'='*60}")
-    print(f"STEP 6: Saving backtest results")
+    print(f"STEP 6: Saving regime scores to database")
     print(f"{'='*60}")
 
     if not all_sector_scores_v2:
-        print("!! ERROR: V2 backtest finished with no results. Check logs above.")
-        sys.exit(1)
+        print("!! WARNING: No regime scores generated for new dates.")
+        return
 
     full_results_v2 = pd.concat(all_sector_scores_v2, ignore_index=True)
+    dm.save_regime_scores_to_db(full_results_v2)
 
-    # Output path
-    output_filename_v2 = os.path.join(PROJECT_PATH, 'assrs_backtest_results_SECTORS_V2_Regime.csv')
-
-    # Save CSV
-    full_results_v2.to_csv(output_filename_v2, index=False, encoding='utf-8-sig')
-
-    print(f"✅ V2 Enhanced backtest complete!")
-    print(f"   Total rows: {len(full_results_v2):,}")
+    print(f"✅ Regime scoring complete!")
+    print(f"   New rows saved: {len(full_results_v2):,}")
     print(f"   Date range: {full_results_v2['Date'].min()} to {full_results_v2['Date'].max()}")
     print(f"   Sectors: {full_results_v2['Sector'].nunique()}")
-    print(f"   Output file: {output_filename_v2}")
-    print()
 
-    # === STEP 7: Validation Checks ===
-    print(f"{'='*60}")
-    print(f"STEP 7: Validation checks")
-    print(f"{'='*60}")
-
-    # Check expected columns (excluding Market_Breadth)
-    expected_cols = ['Date', 'Sector', 'TOTAL_SCORE', 'ACTION', 
-                     'Market_Score', 'Market_Regime', 'Market_Source',
-                     'Excess_Prob', 'Position_Size', 'Dispersion']
-    missing_cols = [col for col in expected_cols if col not in full_results_v2.columns]
-
-    if missing_cols:
-        print(f"⚠️  WARNING: Missing expected columns: {missing_cols}")
-    else:
-        print(f"✅ All expected columns present (excluding Market_Breadth)")
-
-    # Verify Market_Breadth is NOT in CSV
-    if 'Market_Breadth' in full_results_v2.columns:
-        print(f"⚠️  WARNING: Market_Breadth found in CSV! Should be in database only.")
-    else:
-        print(f"✅ Confirmed: Market_Breadth NOT in CSV (correct)")
-
-    # Check Market_Source distribution
     if 'Market_Source' in full_results_v2.columns:
-        source_counts = full_results_v2['Market_Source'].value_counts()
-        print(f"\n📊 Market regime data sources:")
-        for source, count in source_counts.items():
-            print(f"  {source}: {count} days ({count/len(full_results_v2)*100:.1f}%)")
-
-    # Show sample stats
-    print(f"\n📊 Sample statistics:")
-    print(f"  Avg TOTAL_SCORE: {full_results_v2['TOTAL_SCORE'].mean():.3f}")
-    print(f"  Score range: {full_results_v2['TOTAL_SCORE'].min():.3f} to {full_results_v2['TOTAL_SCORE'].max():.3f}")
+        src_counts = full_results_v2['Market_Source'].value_counts()
+        print(f"\n📊 Market regime sources: {src_counts.to_dict()}")
 
     if 'Market_Score' in full_results_v2.columns:
         latest_date = full_results_v2['Date'].max()
-        latest_rows = full_results_v2[full_results_v2['Date'] == latest_date]
-        if not latest_rows.empty:
-            latest_market = latest_rows.iloc[0]
-            print(f"  Latest market regime: {latest_market.get('Market_Regime', 'N/A')}")
-            print(f"  Latest market score: {latest_market.get('Market_Score', 0):.3f}")
-            print(f"  Market data source: {latest_market.get('Market_Source', 'N/A')}")
+        latest_row = full_results_v2[full_results_v2['Date'] == latest_date].iloc[0]
+        print(f"  Latest regime: {latest_row.get('Market_Regime', 'N/A')} "
+              f"(score {latest_row.get('Market_Score', 0):.3f})")
 
     print()
     print(f"{'='*60}")
-    print(f"✅ CSV GENERATION COMPLETE!")
+    print(f"✅ REGIME SCORING COMPLETE!")
     print(f"{'='*60}\n")
 
 
@@ -541,9 +526,9 @@ if __name__ == "__main__":
         run_daily_ppi_and_market_breadth()
 
 
-        # Task 2: Generate CSV with regime scores (WITHOUT Market_Breadth)
+        # Task 2: Incremental regime scoring → saved to DB (not CSV)
         print("\n" + "="*60)
-        print("TASK 2: CSV Generation (Regime Scores with CSI300)")
+        print("TASK 2: Regime Scoring (incremental, stored in DB)")
         print("="*60 + "\n")
         run_sector_backtest_v2()
 
