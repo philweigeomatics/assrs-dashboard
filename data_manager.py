@@ -2200,62 +2200,102 @@ def get_financial_indicators(ticker, quarters=8):
 
 ## Add these functions to data_manager.py (REPLACE the separate table versions)
 
+def _get_market_breadth_columns():
+    """Return the set of sector columns currently in the market_breadth table."""
+    if db.use_supabase:
+        try:
+            row = db.read_table('market_breadth', limit=1)
+            return set(row.columns) - {'Date'} if not row.empty else set()
+        except Exception:
+            return set()
+    else:
+        import sqlite3
+        with sqlite3.connect(db.dbname) as conn:
+            cursor = conn.execute('PRAGMA table_info(market_breadth)')
+            return {r[1] for r in cursor.fetchall()} - {'Date'}
+
+
+def get_missing_breadth_columns(new_sectors):
+    """
+    Return list of sectors that don't yet have a column in market_breadth.
+    Used by the admin page to warn before a rebuild.
+    """
+    if not db.table_exists('market_breadth'):
+        return list(new_sectors)
+    existing = _get_market_breadth_columns()
+    return [s for s in new_sectors if s not in existing]
+
+
 def save_market_breadth_to_db(breadth_data_by_date):
     """
     Save market breadth data for all sectors in a single wide table.
-    Works with both SQLite and Supabase via DatabaseManager.
 
-    Args:
-        breadth_data_by_date: Dict of {date: {sector: breadth_value}}
-
-    Example:
-        breadth_data_by_date = {
-            datetime(2025, 1, 15): {'消费': 0.65, '科技': 0.42, '医药': 0.58},
-            datetime(2025, 1, 16): {'消费': 0.67, '科技': 0.44, '医药': 0.60}
-        }
+    For SQLite: automatically creates or alters the table to add missing
+    sector columns.
+    For Supabase: raises a clear RuntimeError with the SQL to run manually
+    if any columns are missing — Supabase columns must be added in the
+    dashboard before a rebuild is triggered.
     """
     table_name = "market_breadth"
 
+    if not breadth_data_by_date:
+        return
+
+    incoming_sectors = list(next(iter(breadth_data_by_date.values())).keys())
+
     try:
-        # Supabase requires table to be created manually first
         if not db.table_exists(table_name):
             if db_config.USE_SUPABASE:
-                print(f"⚠️  Table '{table_name}' doesn't exist in Supabase.")
-                print(f"Please create it manually in Supabase dashboard with this schema:")
-                print(f"")
-                print(f"CREATE TABLE market_breadth (")
-                print(f'  "Date" TEXT PRIMARY KEY,')
-
-                sectors = [s for s in breadth_data_by_date[next(iter(breadth_data_by_date))].keys()]
-                for sector in sectors:
-                    print(f'  "{sector}" REAL,')
-                print(f");")
-                print(f"")
-                return
+                sql_lines = ['CREATE TABLE market_breadth (', '  "Date" TEXT PRIMARY KEY,']
+                sql_lines += [f'  "{s}" DOUBLE PRECISION,' for s in incoming_sectors]
+                sql_lines.append(');')
+                sql = '\n'.join(sql_lines)
+                raise RuntimeError(
+                    f"market_breadth table does not exist in Supabase.\n"
+                    f"Run this in the SQL editor first:\n\n{sql}"
+                )
             else:
-                # SQLite - create table automatically with whatever sectors we have now
-                columns = ['Date TEXT PRIMARY KEY']
-                sectors = [s for s in breadth_data_by_date[next(iter(breadth_data_by_date))].keys()]
-                for sector in sectors:
-                    columns.append(f'"{sector}" REAL')
-                schema = f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(columns)})"
-                db.create_table_sqlite(schema)
+                columns = ['Date TEXT PRIMARY KEY'] + [f'"{s}" REAL' for s in incoming_sectors]
+                db.create_table_sqlite(
+                    f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(columns)})"
+                )
                 print(f"✓ Created table: {table_name}")
+        else:
+            # Table exists — check for missing sector columns
+            existing_cols = _get_market_breadth_columns()
+            missing = [s for s in incoming_sectors if s not in existing_cols]
 
-        # Prepare records for insertion
+            if missing:
+                if db_config.USE_SUPABASE:
+                    alter_stmts = '\n'.join(
+                        f'ALTER TABLE market_breadth ADD COLUMN "{s}" DOUBLE PRECISION;'
+                        for s in missing
+                    )
+                    raise RuntimeError(
+                        f"market_breadth is missing columns for: {missing}\n"
+                        f"Run this in the Supabase SQL editor before rebuilding:\n\n{alter_stmts}"
+                    )
+                else:
+                    import sqlite3
+                    with sqlite3.connect(db.dbname) as conn:
+                        for s in missing:
+                            conn.execute(f'ALTER TABLE market_breadth ADD COLUMN "{s}" REAL')
+                        conn.commit()
+                    print(f"✓ Added {len(missing)} new column(s) to market_breadth: {missing}")
+
         records = []
         for date, breadth_dict in breadth_data_by_date.items():
-            record = {
+            records.append({
                 'Date': date.strftime('%Y-%m-%d') if isinstance(date, (pd.Timestamp, datetime)) else date,
-                **breadth_dict  # Unpack all sector breadths
-            }
-            records.append(record)
+                **breadth_dict,
+            })
 
-        # Batch insert with upsert (uses your db_manager)
         if records:
             db.insert_records(table_name, records, upsert=True)
             print(f"✓ Saved {len(records)} breadth records to database")
 
+    except RuntimeError:
+        raise   # re-raise so callers (rebuild runner, admin page) can surface it
     except Exception as e:
         print(f"Failed to save market breadth: {e}")
         import traceback

@@ -146,7 +146,11 @@ def run_full_rebuild(job_id, sectors_to_rebuild, tushare_token):
                 breadth_by_date[date] = row
 
         if breadth_by_date:
-            dm.save_market_breadth_to_db(breadth_by_date)
+            try:
+                dm.save_market_breadth_to_db(breadth_by_date)
+            except RuntimeError as e:
+                # Missing Supabase column — surface the SQL and abort
+                raise RuntimeError(str(e))
         progress(78, 'Market breadth saved.')
 
         # ── Step 7: Regime scores ────────────────────────────────────────────

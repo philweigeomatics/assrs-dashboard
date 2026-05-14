@@ -17,6 +17,7 @@ import pandas as pd
 
 import auth_manager
 import data_manager as dm
+import db_config
 import api_config
 from rebuild_runner import start_rebuild_thread
 
@@ -180,10 +181,9 @@ with tab_new_sector:
         if not sector_name:
             st.error("Sector name cannot be empty.")
         else:
-            # Parse tickers
             import re
             tickers = [t.strip() for t in re.split(r'[,\n\r]+', tickers_raw) if t.strip()]
-            tickers = list(dict.fromkeys(tickers))   # deduplicate, preserve order
+            tickers = list(dict.fromkeys(tickers))
 
             existing_sectors = dm.get_sector_stock_map()
             if sector_name in existing_sectors:
@@ -191,17 +191,27 @@ with tab_new_sector:
             elif len(tickers) < 2:
                 st.error("Please provide at least 2 tickers.")
             else:
-                dm.add_new_sector(sector_name, tickers)
-                st.success(f"Created sector '{sector_name}' with {len(tickers)} stocks: "
-                           f"{', '.join(tickers)}")
-                st.info("Now go to **Rebuild Jobs** and trigger a rebuild for this new sector "
-                        "to calculate its PPI, breadth, and regime scores.")
+                # Check if market_breadth needs a new column before we start
+                missing_cols = dm.get_missing_breadth_columns([sector_name])
+                if missing_cols and db_config.USE_SUPABASE:
+                    st.error(
+                        f"**Supabase requires a manual step before this rebuild can run.**\n\n"
+                        f"The `market_breadth` table needs a new column for `{sector_name}`. "
+                        f"Run this in the **Supabase SQL editor** first, then come back and create the sector:"
+                    )
+                    st.code(
+                        f'ALTER TABLE market_breadth ADD COLUMN "{sector_name}" DOUBLE PRECISION;',
+                        language="sql",
+                    )
+                else:
+                    dm.add_new_sector(sector_name, tickers)
+                    st.success(f"Created sector '{sector_name}' with {len(tickers)} stocks: "
+                               f"{', '.join(tickers)}")
 
-                job_id = dm.create_rebuild_job('sector_rebuild', [sector_name])
-                thread = start_rebuild_thread(job_id, [sector_name])
-                st.session_state['_rebuild_threads'][job_id] = thread
-                st.success(f"Rebuild job `{job_id}` started automatically. "
-                           "Switch to **Rebuild Jobs** to monitor.")
+                    job_id = dm.create_rebuild_job('sector_rebuild', [sector_name])
+                    thread = start_rebuild_thread(job_id, [sector_name])
+                    st.session_state['_rebuild_threads'][job_id] = thread
+                    st.success(f"Rebuild job `{job_id}` started. Switch to **Rebuild Jobs** to monitor.")
 
 
 # ============================================================
