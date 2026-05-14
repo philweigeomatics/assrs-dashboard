@@ -197,10 +197,19 @@ with tab_new_sector:
     if '_new_sector_stocks' not in st.session_state:
         st.session_state['_new_sector_stocks'] = []
 
+    # Pre-seeded from Sector Explorer Sankey
+    _preseed_name = st.session_state.pop("_preseed_sector_name", "")
+    if _preseed_name and st.session_state.get('_new_sector_stocks'):
+        st.success(
+            f"Pre-loaded **{len(st.session_state['_new_sector_stocks'])} companies** "
+            f"from Sector Explorer. Review the list below, then click **Create sector**."
+        )
+
     new_sector_name = st.text_input(
         "Sector name (Chinese or English)",
         placeholder="e.g. 储能 or Energy_Storage",
         key="new_sector_name_input",
+        value=_preseed_name,
     ).strip()
 
     st.markdown("**Add stocks to this sector**")

@@ -8,6 +8,7 @@ Display chronological supply-chain layers for industry themes.
 
 import hashlib as _hashlib
 
+import pandas as _pd
 import streamlit as st
 
 import auth_manager
@@ -131,6 +132,7 @@ chosen_id = opts[chosen_label]
 if st.session_state.get("_sector_explorer_last_theme") != chosen_id:
     st.session_state.pop("sector_selected_item", None)
     st.session_state.pop("sector_selected_layer", None)
+    st.session_state.pop("se_sankey_layer_idx", None)
     st.session_state["_sector_explorer_last_theme"] = chosen_id
 
 # ── Load theme ─────────────────────────────────────────────────────────────────
@@ -167,6 +169,22 @@ for layer_pos, (col, layer) in enumerate(zip(cols, layers)):
             f"margin-bottom:6px;line-height:1.2;'>{layer_name}</div>",
             unsafe_allow_html=True,
         )
+        sankey_active = st.session_state.get("se_sankey_layer_idx") == idx
+        if st.button(
+            "🔬 Sankey" if not sankey_active else "✖ Sankey",
+            key=f"se_sankey_btn_{chosen_id}_{idx}",
+            use_container_width=True,
+            type="primary" if sankey_active else "secondary",
+            help="View many-to-many company relationships for this layer as a Sankey diagram.",
+        ):
+            if sankey_active:
+                st.session_state.pop("se_sankey_layer_idx", None)
+            else:
+                st.session_state["se_sankey_layer_idx"]   = idx
+                st.session_state["se_sankey_layer_name"]  = layer_name
+                st.session_state["se_sankey_layer_items"] = items
+                st.session_state.pop("sector_selected_item", None)
+            st.rerun()
         st.divider()
 
         for item_idx, item in enumerate(items):
@@ -192,6 +210,213 @@ for layer_pos, (col, layer) in enumerate(zip(cols, layers)):
                 st.rerun()
 
 st.markdown("---")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Layer Sankey Panel  (shown when a layer's 🔬 Sankey button is active)
+# ══════════════════════════════════════════════════════════════════════════════
+_sankey_layer_idx   = st.session_state.get("se_sankey_layer_idx")
+_sankey_layer_name  = st.session_state.get("se_sankey_layer_name", "")
+_sankey_layer_items = st.session_state.get("se_sankey_layer_items", [])
+
+if _sankey_layer_idx is not None and _PLOTLY_OK:
+    _go = go  # alias so inner code is readable
+
+    _sk_data_key    = f"se_m2m_data_{chosen_id}_{_sankey_layer_idx}"
+    _sk_trigger_key = f"se_m2m_trigger_{chosen_id}_{_sankey_layer_idx}"
+
+    # Header row
+    sk_hdr, sk_requery, sk_close = st.columns([5, 1, 1])
+    sk_hdr.markdown(
+        f"### 🔬 Layer Sankey: {_sankey_layer_name}\n"
+        f"<span style='color:#9ca3af;font-size:12px;'>"
+        f"{theme['formal_name']}  ·  Layer {_sankey_layer_idx}</span>",
+        unsafe_allow_html=True,
+    )
+    if is_admin and sk_requery.button("🔄 Re-query", key="sk_requery"):
+        st.session_state.pop(_sk_data_key, None)
+        st.session_state[_sk_trigger_key] = True
+        st.rerun()
+    if sk_close.button("✖ Close", key="sk_close"):
+        st.session_state.pop("se_sankey_layer_idx", None)
+        st.rerun()
+
+    # Trigger AI if no data yet
+    if _sk_data_key not in st.session_state:
+        st.session_state[_sk_trigger_key] = True
+
+    if st.session_state.get(_sk_trigger_key):
+        with st.spinner(f"Querying AI for M2M relationships in '{_sankey_layer_name}'…"):
+            try:
+                m2m = peer_discovery.discover_layer_m2m(
+                    sector_name  = theme["formal_name"],
+                    layer_name   = _sankey_layer_name,
+                    layer_items  = _sankey_layer_items,
+                )
+                st.session_state[_sk_data_key] = m2m
+                st.session_state.pop(_sk_trigger_key, None)
+                st.rerun()
+            except Exception as _exc:
+                st.error(f"AI query failed: {_exc}")
+                st.session_state.pop(_sk_trigger_key, None)
+                st.stop()
+
+    _m2m = st.session_state.get(_sk_data_key, {})
+    if not _m2m:
+        st.info("No results returned — try Re-query.")
+    else:
+        # ── Build unique company list ─────────────────────────────────────
+        _all_cos: dict[str, str] = {}   # {ticker: name}
+        for _stocks in _m2m.values():
+            for _s in _stocks:
+                _all_cos[_s["ticker"]] = _s.get("name", "")
+
+        _products  = list(_m2m.keys())
+        _col_keys  = list(_all_cos.keys())            # ticker list, stable order
+        _col_labels = {t: f"{t} · {_all_cos[t]}" for t in _col_keys}
+
+        # ── Build boolean matrix ──────────────────────────────────────────
+        _matrix_rows = {}
+        for _prod in _products:
+            _prod_tickers = {_s["ticker"] for _s in _m2m[_prod]}
+            _matrix_rows[_prod] = {_col_labels[t]: (t in _prod_tickers) for t in _col_keys}
+        _df = _pd.DataFrame(_matrix_rows).T    # rows=products, cols=company labels
+
+        # ── Editable table (admin) / read-only (viewer) ───────────────────
+        st.markdown("**M2M Relationships** — uncheck to remove a link from the Sankey and peer saves")
+        if is_admin:
+            _edited = st.data_editor(
+                _df,
+                use_container_width=True,
+                key=f"sk_table_{chosen_id}_{_sankey_layer_idx}",
+            )
+        else:
+            st.dataframe(_df, use_container_width=True)
+            _edited = _df
+
+        # ── Admin: save per-product to peers DB ──────────────────────────
+        if is_admin:
+            if st.button("💾 Save peers per product", key="sk_save_peers", type="primary"):
+                _saved_n = 0
+                for _prod in _products:
+                    _db_key_prod = (
+                        f"__sector_product__"
+                        f"|{theme['formal_name'].strip().lower()}"
+                        f"|{_sankey_layer_name.strip().lower()}"
+                        f"|{_prod.strip().lower()}"
+                    )
+                    _checked_tickers = [
+                        t for t in _col_keys
+                        if _edited.loc[_prod, _col_labels[t]]
+                    ]
+                    _to_save = [
+                        {"ticker": t, "name": _all_cos[t], "primary_product": _prod}
+                        for t in _checked_tickers
+                    ]
+                    data_manager.upsert_product_peers(
+                        _db_key_prod, _to_save, source_method="admin_curated"
+                    )
+                    _saved_n += len(_to_save)
+                st.success(f"✅ Saved {_saved_n} product-company links across {len(_products)} products.")
+
+        st.markdown("---")
+
+        # ── Sankey diagram ────────────────────────────────────────────────
+        _n_prod = len(_products)
+        _node_labels = _products + [_all_cos[t] for t in _col_keys]
+        _node_colors = (
+            ["#3b82f6"] * _n_prod +
+            ["#10b981"] * len(_col_keys)
+        )
+
+        _sources, _targets, _vals, _link_labels = [], [], [], []
+        for _pi, _prod in enumerate(_products):
+            for _ci, _t in enumerate(_col_keys):
+                if _edited.loc[_prod, _col_labels[_t]]:
+                    _sources.append(_pi)
+                    _targets.append(_n_prod + _ci)
+                    _vals.append(1)
+                    _link_labels.append(f"{_prod} → {_all_cos[_t]}")
+
+        if _sources:
+            _sk_fig = _go.Figure(_go.Sankey(
+                arrangement="snap",
+                node=dict(
+                    label=_node_labels,
+                    color=_node_colors,
+                    pad=20, thickness=18,
+                    line=dict(color="#1e293b", width=0.5),
+                ),
+                link=dict(
+                    source=_sources,
+                    target=_targets,
+                    value=_vals,
+                    label=_link_labels,
+                    color="rgba(59,130,246,0.18)",
+                ),
+            ))
+            _sk_fig.update_layout(
+                height=max(300, _n_prod * 60 + 100),
+                margin=dict(l=10, r=10, t=10, b=10),
+                paper_bgcolor="#ffffff",
+                font=dict(size=12, color="#1e293b"),
+            )
+            st.plotly_chart(_sk_fig, use_container_width=True)
+        else:
+            st.info("No checked relationships to display in the Sankey.")
+
+        st.markdown("---")
+
+        # ── Action bar ────────────────────────────────────────────────────
+        _unique_cos = sorted({
+            t for t in _col_keys
+            if any(_edited.loc[_prod, _col_labels[t]] for _prod in _products)
+        })
+        _co_opts = [f"{t} · {_all_cos[t]}" for t in _unique_cos]
+
+        st.markdown("**Select companies for actions**")
+        _sk_selected = st.multiselect(
+            "Companies",
+            options=_co_opts,
+            default=_co_opts,
+            key=f"sk_multisel_{chosen_id}_{_sankey_layer_idx}",
+            label_visibility="collapsed",
+        )
+        _sk_tickers = [x.split(" · ")[0].strip() for x in _sk_selected]
+        _n_sk = len(_sk_tickers)
+
+        _sk_act_cols = st.columns([2, 2, 3]) if is_admin else st.columns([2, 5])
+        with _sk_act_cols[0]:
+            if st.button(
+                f"🔗 Pair Trader ({_n_sk})",
+                key="sk_to_pt",
+                disabled=_n_sk < 2,
+                use_container_width=True,
+            ):
+                st.session_state["pt_preload_tickers"]  = "\n".join(_sk_tickers)
+                st.session_state["pt_from_sector"]      = True
+                st.session_state["pt_from_sector_name"] = f"{_sankey_layer_name}  ·  {theme['formal_name']}"
+                st.switch_page("pages/pair_trader.py")
+
+        if is_admin:
+            with _sk_act_cols[1]:
+                _sector_input = st.text_input(
+                    "New sector name",
+                    placeholder="e.g. 液冷散热",
+                    key="sk_sector_name_input",
+                    label_visibility="collapsed",
+                )
+                if st.button(
+                    f"⚙️ Create Sector ({_n_sk})",
+                    key="sk_to_sm",
+                    disabled=(_n_sk < 2 or not _sector_input.strip()),
+                    use_container_width=True,
+                    help="Pre-load these companies into the New Sector tab of Sector Management.",
+                ):
+                    st.session_state["_new_sector_stocks"]     = _sk_tickers
+                    st.session_state["_preseed_sector_name"]   = _sector_input.strip()
+                    st.switch_page("pages/Admin_Sector_Management.py")
+
+    st.markdown("---")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Product Stock Discovery Panel

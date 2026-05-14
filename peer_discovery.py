@@ -253,6 +253,92 @@ def discover_layer_stocks(
     return cleaned
 
 
+# ── Layer-Level M2M Discovery (Sector Explorer Sankey) ───────────────────────
+
+_LAYER_M2M_PROMPT = """\
+You are an elite Chinese A-share equity analyst with deep knowledge of every A-share listed company.
+
+You will receive a supply-chain LAYER that contains multiple specific PRODUCTS or SERVICES.
+Your task: for EACH product, find the A-share listed companies that actively supply it.
+A company may appear under MULTIPLE products if it genuinely supplies all of them.
+
+QUALIFICATION — a company qualifies for a product if ALL of the following are true:
+  1. It actively manufactures or supplies that exact product TODAY with paying customers.
+  2. Its end customers for this product operate in the named sector.
+  Revenue share need not be dominant — a company ramping fast is fine if genuinely shipping.
+
+DISQUALIFICATION — exclude if ANY of the following:
+  - Makes a related but different product (e.g. AI accelerator ≠ server CPU).
+  - Buyer, integrator, or distributor only — not a direct manufacturer.
+  - Announced plans but not yet shipping to paying customers.
+
+QUANTITY per product: 2–5 companies. Empty list [] if none genuinely qualify.
+
+CRITICAL OUTPUT RULES:
+- Return ONLY raw JSON. No markdown fences. Start with { and end with }.
+- Each ticker MUST be exactly 6 digits (A-share only; no ETFs, no HK/US stocks).
+- Company name MUST be the official Chinese short name.
+
+Schema:
+{
+  "products": [
+    {
+      "product": "exact product name from the input list",
+      "stocks": [
+        {"ticker": "000001", "name": "公司名", "primary_product": "specific item they supply"}
+      ]
+    }
+  ]
+}
+"""
+
+
+def discover_layer_m2m(
+    sector_name: str,
+    layer_name: str,
+    layer_items: list,
+) -> dict:
+    """
+    Return M2M mapping {product_name: [{ticker, name, primary_product}]} for
+    all products in a layer in a single AI call.
+
+    Results are NOT auto-saved to DB — the caller manages persistence per product.
+    Uses session-state caching only (no DB round-trip).
+    """
+    if not layer_items:
+        return {}
+
+    items_str = " | ".join(layer_items)
+    user_msg = (
+        f"Sector: {sector_name}\n"
+        f"Layer: {layer_name}\n"
+        f"Products/services in this layer: {items_str}"
+    )
+
+    data = ai_client.call_json(
+        _LAYER_M2M_PROMPT, user_msg,
+        max_tokens=3000,
+        temperature=0.2,
+    )
+
+    result = {}
+    for p_data in data.get("products", []):
+        product_name = (p_data.get("product") or "").strip()
+        if not product_name:
+            continue
+        cleaned, seen = [], set()
+        for s in p_data.get("stocks", []):
+            t  = str(s.get("ticker", "")).strip().zfill(6)
+            n  = (s.get("name", "") or "").strip()
+            pp = (s.get("primary_product", "") or "").strip()
+            if len(t) == 6 and t.isdigit() and t not in seen:
+                cleaned.append({"ticker": t, "name": n, "primary_product": pp})
+                seen.add(t)
+        result[product_name] = cleaned
+
+    return result
+
+
 # ── Product-Level Stock Discovery (Sector Explorer) ───────────────────────────
 
 _PRODUCT_STOCK_PROMPT = """\
