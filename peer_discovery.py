@@ -262,6 +262,12 @@ You will receive a supply-chain LAYER that contains multiple specific PRODUCTS o
 Your task: for EACH product, find the A-share listed companies that actively supply it.
 A company may appear under MULTIPLE products if it genuinely supplies all of them.
 
+MANDATORY COVERAGE: You MUST return one entry for EVERY product in the input list — even if
+you can find only 1 qualifying company, or even if none qualify (return [] in that case).
+Never omit a product. Never skip niche, emerging, or memory-related products like HBM, CoWoS,
+advanced packaging, optical interconnects, liquid cooling, etc. — these have dedicated A-share
+suppliers; find them.
+
 QUALIFICATION — a company qualifies for a product if ALL of the following are true:
   1. It actively manufactures or supplies that exact product TODAY with paying customers.
   2. Its end customers for this product operate in the named sector.
@@ -272,12 +278,14 @@ DISQUALIFICATION — exclude if ANY of the following:
   - Buyer, integrator, or distributor only — not a direct manufacturer.
   - Announced plans but not yet shipping to paying customers.
 
-QUANTITY per product: 2–5 companies. Empty list [] if none genuinely qualify.
+QUANTITY per product: 2–5 companies. If fewer than 2 genuinely qualify, return however many do.
+Return [] only when truly no A-share company qualifies for that specific product.
 
 CRITICAL OUTPUT RULES:
 - Return ONLY raw JSON. No markdown fences. Start with { and end with }.
 - Each ticker MUST be exactly 6 digits (A-share only; no ETFs, no HK/US stocks).
 - Company name MUST be the official Chinese short name.
+- The "products" array MUST contain exactly one entry per product in the input list.
 
 Schema:
 {
@@ -317,7 +325,7 @@ def discover_layer_m2m(
 
     data = ai_client.call_json(
         _LAYER_M2M_PROMPT, user_msg,
-        max_tokens=3000,
+        max_tokens=5000,
         temperature=0.2,
     )
 
