@@ -37,9 +37,26 @@ dm.ensure_admin_tables_exist()
 dm.seed_sector_stock_map()
 
 # ── thread registry (per Streamlit session) ─────────────────────────────────
-# Keeps track of running thread objects so we can check liveness
 if '_rebuild_threads' not in st.session_state:
-    st.session_state['_rebuild_threads'] = {}   # {job_id: thread}
+    st.session_state['_rebuild_threads'] = {}
+
+
+# ── Stock lookup helpers (used by multiple tabs) ─────────────────────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def _all_stock_options():
+    """All stocks from stock_basic as 'CODE · 名称' strings for selectbox."""
+    stocks = dm.get_all_stock_basic()
+    return [""] + [f"{s['ticker']} · {s['name']}" for s in stocks]
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _build_name_map():
+    """Dict of {6-digit ticker: company name} from stock_basic."""
+    stocks = dm.get_all_stock_basic()
+    return {s['ticker']: s['name'] for s in stocks}
+
+def _label(ticker, name_map):
+    name = name_map.get(ticker, "")
+    return f"{ticker} · {name}" if name else ticker
 
 
 # ============================================================
@@ -87,24 +104,6 @@ with tab_overview:
                 st.dataframe(inactive[['sector', 'ticker', 'removed_at']].rename(
                     columns={'sector': 'Sector', 'ticker': 'Ticker', 'removed_at': 'Removed At'}
                 ), use_container_width=True, hide_index=True)
-
-
-# ── Stock lookup cache (shared across Edit and New Sector tabs) ──────────────
-@st.cache_data(ttl=3600, show_spinner=False)
-def _all_stock_options():
-    """All stocks from stock_basic as 'CODE · 名称' strings for selectbox."""
-    stocks = dm.get_all_stock_basic()
-    return [""] + [f"{s['ticker']} · {s['name']}" for s in stocks]
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _build_name_map():
-    """Dict of {6-digit ticker: company name} from stock_basic."""
-    stocks = dm.get_all_stock_basic()
-    return {s['ticker']: s['name'] for s in stocks}
-
-def _label(ticker, name_map):
-    name = name_map.get(ticker, "")
-    return f"{ticker} · {name}" if name else ticker
 
 
 # ============================================================
