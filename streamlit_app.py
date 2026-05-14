@@ -74,6 +74,7 @@ pages = {
 if auth_manager.is_admin():
     pages["⚙️ Admin"] = [
         st.Page("pages/Admin_Invite_Users.py", title="Invite Users 邀请用户", icon="👥"),
+        st.Page("pages/Admin_Sector_Management.py", title="Sector Management 板块管理", icon="⚙️"),
     ]
 
 # Create navigation
