@@ -192,56 +192,92 @@ with tab_edit:
 # ============================================================
 with tab_new_sector:
     st.subheader("Create a New Sector")
+    st.info("After creating the sector, a rebuild job starts automatically.")
 
-    with st.form("new_sector_form"):
-        sector_name = st.text_input(
-            "Sector name (Chinese or English)",
-            placeholder="e.g. 储能 or Energy_Storage",
-        ).strip()
+    if '_new_sector_stocks' not in st.session_state:
+        st.session_state['_new_sector_stocks'] = []
 
-        tickers_raw = st.text_area(
-            "Initial stock list",
-            placeholder="One ticker per line, or comma-separated\ne.g.\n300750\n002594\n600886",
-            height=150,
+    new_sector_name = st.text_input(
+        "Sector name (Chinese or English)",
+        placeholder="e.g. 储能 or Energy_Storage",
+        key="new_sector_name_input",
+    ).strip()
+
+    st.markdown("**Add stocks to this sector**")
+    col_pick, col_add_btn = st.columns([4, 1])
+    with col_pick:
+        all_opts_ns = _all_stock_options()
+        ns_picked = st.selectbox(
+            "Search by code or name",
+            options=all_opts_ns,
+            key="new_sector_stock_pick",
+            format_func=lambda x: "Type to search… (code or name)" if x == "" else x,
         )
-
-        submitted = st.form_submit_button("Create sector")
-
-    if submitted:
-        if not sector_name:
-            st.error("Sector name cannot be empty.")
-        else:
-            import re
-            tickers = [t.strip() for t in re.split(r'[,\n\r]+', tickers_raw) if t.strip()]
-            tickers = list(dict.fromkeys(tickers))
-
-            existing_sectors = dm.get_sector_stock_map()
-            if sector_name in existing_sectors:
-                st.error(f"Sector '{sector_name}' already exists. Use the Edit tab to modify it.")
-            elif len(tickers) < 2:
-                st.error("Please provide at least 2 tickers.")
+        ns_ticker = ns_picked.split(" · ")[0].strip() if ns_picked else ""
+    with col_add_btn:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Add", key="btn_ns_add"):
+            if not ns_ticker:
+                st.warning("Select a stock first.")
+            elif ns_ticker in st.session_state['_new_sector_stocks']:
+                st.warning(f"{ns_ticker} already in list.")
             else:
-                # Check if market_breadth needs a new column before we start
-                missing_cols = dm.get_missing_breadth_columns([sector_name])
-                if missing_cols and db_config.USE_SUPABASE:
-                    st.error(
-                        f"**Supabase requires a manual step before this rebuild can run.**\n\n"
-                        f"The `market_breadth` table needs a new column for `{sector_name}`. "
-                        f"Run this in the **Supabase SQL editor** first, then come back and create the sector:"
-                    )
-                    st.code(
-                        f'ALTER TABLE market_breadth ADD COLUMN "{sector_name}" DOUBLE PRECISION;',
-                        language="sql",
-                    )
-                else:
-                    dm.add_new_sector(sector_name, tickers)
-                    st.success(f"Created sector '{sector_name}' with {len(tickers)} stocks: "
-                               f"{', '.join(tickers)}")
+                st.session_state['_new_sector_stocks'].append(ns_ticker)
+                st.rerun()
 
-                    job_id = dm.create_rebuild_job('sector_rebuild', [sector_name])
-                    thread = start_rebuild_thread(job_id, [sector_name])
-                    st.session_state['_rebuild_threads'][job_id] = thread
-                    st.success(f"Rebuild job `{job_id}` started. Switch to **Rebuild Jobs** to monitor.")
+    # Display current stock list
+    stocks = st.session_state['_new_sector_stocks']
+    if stocks:
+        name_map_ns = _build_name_map()
+        st.markdown(f"**Stock list** ({len(stocks)} stocks)")
+        for i, t in enumerate(stocks):
+            col_t, col_del = st.columns([5, 1])
+            with col_t:
+                st.text(_label(t, name_map_ns))
+            with col_del:
+                if st.button("✕", key=f"ns_del_{i}"):
+                    st.session_state['_new_sector_stocks'].pop(i)
+                    st.rerun()
+    else:
+        st.caption("No stocks added yet.")
+
+    st.divider()
+
+    col_create, col_clear = st.columns([3, 1])
+    with col_create:
+        if st.button("Create sector", type="primary", key="btn_create_sector"):
+            if not new_sector_name:
+                st.error("Sector name cannot be empty.")
+            elif len(stocks) < 2:
+                st.error("Please add at least 2 stocks.")
+            else:
+                existing_sectors = dm.get_sector_stock_map()
+                if new_sector_name in existing_sectors:
+                    st.error(f"Sector '{new_sector_name}' already exists. Use the Edit tab to modify it.")
+                else:
+                    missing_cols = dm.get_missing_breadth_columns([new_sector_name])
+                    if missing_cols and db_config.USE_SUPABASE:
+                        st.error(
+                            f"**Supabase requires a manual step before this rebuild can run.**\n\n"
+                            f"The `market_breadth` table needs a new column for `{new_sector_name}`. "
+                            f"Run this in the **Supabase SQL editor** first, then come back and create the sector:"
+                        )
+                        st.code(
+                            f'ALTER TABLE market_breadth ADD COLUMN "{new_sector_name}" DOUBLE PRECISION;',
+                            language="sql",
+                        )
+                    else:
+                        dm.add_new_sector(new_sector_name, stocks)
+                        st.success(f"Created sector '{new_sector_name}' with {len(stocks)} stocks.")
+                        job_id = dm.create_rebuild_job('sector_rebuild', [new_sector_name])
+                        thread = start_rebuild_thread(job_id, [new_sector_name])
+                        st.session_state['_rebuild_threads'][job_id] = thread
+                        st.session_state['_new_sector_stocks'] = []
+                        st.success(f"Rebuild job `{job_id}` started. Switch to **Rebuild Jobs** to monitor.")
+    with col_clear:
+        if st.button("Clear list", key="btn_ns_clear"):
+            st.session_state['_new_sector_stocks'] = []
+            st.rerun()
 
 
 # ============================================================
