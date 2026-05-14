@@ -253,7 +253,7 @@ with tab_jobs:
     # ── Trigger full rebuild ─────────────────────────────────────────────────
     with st.expander("🔴 Trigger full rebuild (all sectors)", expanded=False):
         st.warning(
-            "This rebuilds PPI, market breadth, and regime scores for **every** sector "
+            "This rebuilds PPI and market breadth for **every** sector "
             "from the data start date. It runs in the background and takes 20–60 minutes "
             "depending on API rate limits. The dashboard remains live during the rebuild."
         )
