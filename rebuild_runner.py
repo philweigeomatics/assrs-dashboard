@@ -145,10 +145,28 @@ def run_full_rebuild(job_id, sectors_to_rebuild, tushare_token):
         # ── Step 6: Rebuild market breadth for the rebuilt sectors ───────────
         progress(64, 'Rebuilding market breadth...')
 
+        # Cap breadth to the last date that non-rebuilt sectors already have.
+        # Without this, a new sector rebuilt during the trading day would get
+        # today's data while all others still end at yesterday, leaving a
+        # partial breadth row that main.py can't cleanly fill later.
+        if sectors_to_rebuild != '__all__':
+            non_rebuilt = {s: df for s, df in all_ppi_db.items()
+                           if s not in rebuild_sectors}
+            alignment_date = (min(df.index.max() for df in non_rebuilt.values())
+                              if non_rebuilt else None)
+            if alignment_date is not None:
+                _log(job_id, f"Aligning breadth to {alignment_date.date()} "
+                             f"(latest date shared by all non-rebuilt sectors)")
+        else:
+            alignment_date = None   # full rebuild — all sectors move together
+
         all_dates: set = set()
         for s in rebuild_sectors:
             if s in all_ppi_db:
-                all_dates.update(all_ppi_db[s].index)
+                dates = all_ppi_db[s].index
+                if alignment_date is not None:
+                    dates = dates[dates <= alignment_date]
+                all_dates.update(dates)
 
         date_range = pd.DatetimeIndex(sorted(all_dates))
         breadth_by_date: dict = {}
