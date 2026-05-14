@@ -1,7 +1,7 @@
 """
 rebuild_runner.py
 
-Background thread that performs a full PPI → breadth → regime-score rebuild
+Background thread that performs a full PPI → market breadth rebuild
 for a set of sectors.  All progress is written to the rebuild_jobs table so
 the admin UI can poll without holding an HTTP connection open.
 
@@ -18,8 +18,6 @@ import pandas as pd
 
 import data_manager as dm
 import api_config
-
-REGIME_START_DATE = '2025-07-01'   # oldest date for regime scoring
 
 
 # ---------------------------------------------------------------------------
@@ -151,56 +149,7 @@ def run_full_rebuild(job_id, sectors_to_rebuild, tushare_token):
             except RuntimeError as e:
                 # Missing Supabase column — surface the SQL and abort
                 raise RuntimeError(str(e))
-        progress(78, 'Market breadth saved.')
-
-        # ── Step 7: Regime scores ────────────────────────────────────────────
-        progress(80, f'Clearing old regime scores for {len(rebuild_sectors)} sectors...')
-        dm.delete_regime_scores_for_sectors(rebuild_sectors)
-
-        progress(82, 'Fetching CSI300 for regime model...')
-        regime_start = pd.to_datetime(REGIME_START_DATE)
-        today = datetime.now()
-        days_needed = (today - regime_start.to_pydatetime()).days + 250
-        csi300 = dm.get_index_data_live('000300.SH', lookback_days=days_needed, freq='daily')
-
-        regime_calendar = date_range[date_range >= regime_start]
-        total_r = len(regime_calendar)
-        progress(84, f'Running regime model for {total_r} dates...')
-
-        from assrs_logic_V2_enhanced import calculate_regime_scores
-        all_rows = []
-        hist_scores = None
-
-        for ri, date in enumerate(regime_calendar):
-            if ri % 10 == 0:
-                pct = 84 + int((ri / total_r) * 14)   # 84 → 98 %
-                progress(pct, f'Regime scoring [{ri}/{total_r}]...')
-            try:
-                daily = calculate_regime_scores(
-                    all_ppi_db, date,
-                    historical_scores=hist_scores,
-                    market_index_df=csi300,
-                )
-                if not daily.empty:
-                    all_rows.append(daily.reset_index(drop=True))
-                    hist_slice = daily[['Date', 'Sector', 'TOTAL_SCORE']]
-                    if hist_scores is None:
-                        hist_scores = hist_slice.copy()
-                    else:
-                        hist_scores = pd.concat(
-                            [hist_scores.tail(120 * len(all_ppi_db)), hist_slice],
-                            ignore_index=True,
-                        )
-            except Exception as e:
-                _log(job_id, f"  ⚠️  Regime error on {date}: {e}")
-                continue
-
-        if all_rows:
-            full_df = pd.concat(all_rows, ignore_index=True)
-            dm.save_regime_scores_to_db(full_df)
-            progress(99, f'Saved {len(full_df)} regime score rows.')
-        else:
-            progress(99, 'No regime scores generated (check date range / PPI data).')
+        progress(99, 'Market breadth saved.')
 
         # ── Done ─────────────────────────────────────────────────────────────
         dm.update_rebuild_job(job_id, status='completed', progress=100,

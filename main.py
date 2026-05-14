@@ -2,7 +2,6 @@ import pandas as pd
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import data_manager as dm
-from assrs_logic_V2_enhanced import calculate_regime_scores
 import time
 import sys
 import os
@@ -308,203 +307,7 @@ def run_daily_ppi_and_market_breadth():
     print("=" * 60)
 
 
-
-# --- 3. MAIN EXECUTION ---
-def run_sector_backtest_v2():
-    """
-    Orchestrates the entire backtest for V2 Enhanced (Regime-Switching)
-    sector model with market context awareness.
-
-    ✅ NEW: No local database for stock data
-    ✅ NEW: Uses live qfq data from Tushare API
-    ✅ NEW: Only stores PPIs in database
-    ✅ NEW: PPI-based breadth proxy (fast, no extra API calls)
-    """
-
-    # === STEP 1: Initialize Tushare ===
-    print("=" * 60)
-    print("STEP 1: Initializing Tushare API")
-    print("=" * 60)
-
-    if not dm.init_tushare(TUSHARE_API_TOKEN):
-        print("!! ERROR: Tushare token appears to be invalid. Exiting.")
-        sys.exit(1)
-
-    print("✅ Tushare API initialized.\n")
-
-
-    # === STEP 2: Fetch CSI300 Index ===
-    print(f"{'='*60}")
-    print(f"STEP 2: Fetching CSI300 index for market regime")
-    print(f"{'='*60}")
-
-    # Calculate lookback to cover backtest period + model fitting
-    backtest_start = pd.to_datetime(BACKTEST_START_DATE)
-    yesterday_naive = YESTERDAY_DATE.replace(tzinfo=None)
-    days_needed = (yesterday_naive  - backtest_start).days + 200  # +200 for model fitting
-    print(f"ℹ️  Beijing time: {TODAY_DATE.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-
-    print(f"ℹ️  Fetching {days_needed} days of CSI300 data...")
-    csi300_df = dm.get_index_data_live('000300.SH', lookback_days=days_needed, freq='daily')
-
-    if csi300_df is None or csi300_df.empty:
-        print("⚠️  WARNING: Could not fetch CSI300 data.")
-        print("   Will use sector median as fallback for market regime.")
-        csi300_df = None
-    else:
-        print(f"✅ Fetched CSI300 data: {len(csi300_df)} days")
-        print(f"   Date range: {csi300_df.index[0].strftime('%Y-%m-%d')} to {csi300_df.index[-1].strftime('%Y-%m-%d')}")
-
-        # Verify CSI300 has required columns
-        required_cols = ['Close']
-        missing_cols = [col for col in required_cols if col not in csi300_df.columns]
-        if missing_cols:
-            print(f"⚠️  WARNING: CSI300 missing columns: {missing_cols}")
-            print("   Will use sector median as fallback.")
-            csi300_df = None
-
-    print()
-
-
-    # === STEP 3: Load PPIs from DB ===
-    print(f"{'='*60}")
-    print(f"STEP 3: Loading PPIs from database")
-    print(f"{'='*60}")
-
-    all_ppi_data_loaded = dm.load_ppi_data_from_db()
-
-    if not all_ppi_data_loaded:
-        print("!! ERROR: Failed to load PPIs from database. Exiting.")
-        sys.exit(1)
-
-    print(f"✅ Loaded {len(all_ppi_data_loaded)} PPIs from database.")
-    print(f"  Sectors: {', '.join(list(all_ppi_data_loaded.keys())[:5])}...")
-    print()
-
-    # === STEP 4: Build Trading Calendar ===
-    print(f"{'='*60}")
-    print(f"STEP 3: Building trading calendar from PPI data")
-    print(f"{'='*60}")
-
-    all_dates = set()
-    for sector_ppi in all_ppi_data_loaded.values():
-        all_dates.update(sector_ppi.index)
-
-    market_calendar = pd.DatetimeIndex(sorted(all_dates))
-    backtest_date_range = market_calendar[
-        (market_calendar >= pd.to_datetime(BACKTEST_START_DATE)) &
-        (market_calendar <= pd.to_datetime(BACKTEST_END_DATE))
-    ]
-
-    if backtest_date_range.empty:
-        print(f"!! ERROR: No valid trading days found between {BACKTEST_START_DATE} and {BACKTEST_END_DATE}.")
-        sys.exit(1)
-
-    print(f"✅ Found {len(backtest_date_range)} trading days for backtest.")
-    print(f"  Range: {backtest_date_range[0].strftime('%Y-%m-%d')} to {backtest_date_range[-1].strftime('%Y-%m-%d')}")
-    print()
-
-    # === STEP 5: Run V2 Enhanced Backtest (incremental) ===
-    print(f"{'='*60}")
-    print(f"STEP 5: Running V2 Enhanced Regime Scoring (incremental → DB)")
-    print(f"{'='*60}")
-    print(f"  • CSI300 index for market regime (real benchmark)")
-    print(f"  • Market context, volume confirmation, momentum")
-    print(f"  • Adaptive thresholds")
-    print(f"  • Results stored in regime_scores DB table (not CSV)")
-    print()
-
-    # Only score dates not yet in the DB
-    existing_scores = dm.load_regime_scores_from_db()
-    if existing_scores is not None and not existing_scores.empty:
-        latest_scored = existing_scores['Date'].max()
-        print(f"✓ Existing regime scores up to: {latest_scored.strftime('%Y-%m-%d')}")
-        dates_to_score = backtest_date_range[backtest_date_range > latest_scored]
-        # Seed historical_scores from DB for adaptive thresholds
-        historical_scores = existing_scores[['Date', 'Sector', 'TOTAL_SCORE']].copy()
-        historical_scores['Date'] = historical_scores['Date'].dt.strftime('%Y-%m-%d')
-    else:
-        print("✓ No existing regime scores — will score full date range")
-        dates_to_score = backtest_date_range
-        historical_scores = None
-
-    if len(dates_to_score) == 0:
-        print("✓ Regime scores already up-to-date.")
-        print()
-        print(f"{'='*60}")
-        print(f"✅ REGIME SCORING COMPLETE (no new dates to score)")
-        print(f"{'='*60}\n")
-        return
-
-    print(f"✓ Scoring {len(dates_to_score)} new trading days...")
-    print()
-
-    all_sector_scores_v2 = []
-    total_days = len(dates_to_score)
-
-    for idx, date in enumerate(dates_to_score, 1):
-        if idx % 10 == 0 or idx == total_days:
-            print(f"   Progress: {idx}/{total_days} ({idx/total_days*100:.1f}%) - {date.strftime('%Y-%m-%d')}")
-
-        try:
-            daily_scorecard_v2 = calculate_regime_scores(
-                all_ppi_data_loaded,
-                date,
-                historical_scores=historical_scores,
-                market_index_df=csi300_df,
-            )
-
-            if not daily_scorecard_v2.empty:
-                all_sector_scores_v2.append(daily_scorecard_v2.reset_index(drop=True))
-
-                if historical_scores is None:
-                    historical_scores = daily_scorecard_v2[['Date', 'Sector', 'TOTAL_SCORE']].copy()
-                else:
-                    historical_scores = pd.concat([
-                        historical_scores.tail(120 * len(all_ppi_data_loaded)),
-                        daily_scorecard_v2[['Date', 'Sector', 'TOTAL_SCORE']]
-                    ], ignore_index=True)
-
-        except Exception as e:
-            print(f"   !! ERROR processing {date.strftime('%Y-%m-%d')}: {str(e)}")
-            continue
-
-    print()
-
-    # === STEP 6: Save to database ===
-    print(f"{'='*60}")
-    print(f"STEP 6: Saving regime scores to database")
-    print(f"{'='*60}")
-
-    if not all_sector_scores_v2:
-        print("!! WARNING: No regime scores generated for new dates.")
-        return
-
-    full_results_v2 = pd.concat(all_sector_scores_v2, ignore_index=True)
-    dm.save_regime_scores_to_db(full_results_v2)
-
-    print(f"✅ Regime scoring complete!")
-    print(f"   New rows saved: {len(full_results_v2):,}")
-    print(f"   Date range: {full_results_v2['Date'].min()} to {full_results_v2['Date'].max()}")
-    print(f"   Sectors: {full_results_v2['Sector'].nunique()}")
-
-    if 'Market_Source' in full_results_v2.columns:
-        src_counts = full_results_v2['Market_Source'].value_counts()
-        print(f"\n📊 Market regime sources: {src_counts.to_dict()}")
-
-    if 'Market_Score' in full_results_v2.columns:
-        latest_date = full_results_v2['Date'].max()
-        latest_row = full_results_v2[full_results_v2['Date'] == latest_date].iloc[0]
-        print(f"  Latest regime: {latest_row.get('Market_Regime', 'N/A')} "
-              f"(score {latest_row.get('Market_Score', 0):.3f})")
-
-    print()
-    print(f"{'='*60}")
-    print(f"✅ REGIME SCORING COMPLETE!")
-    print(f"{'='*60}\n")
-
-
-# --- 4. ENTRY POINT ---
+# --- 3. ENTRY POINT ---
 if __name__ == "__main__":
     start_time = time.time()
 
@@ -519,18 +322,10 @@ if __name__ == "__main__":
         # updated = dm.add_new_sector_breadth(sector, stock_list)
         # print(f"✅ Backfilled {updated} rows")
 
-        #Task 1: Calculate and store market breadth in database
         print("\n" + "="*60)
-        print("TASK 1: Market Breadth Calculation (Store in Database)")
+        print("TASK: Market Breadth Calculation (Store in Database)")
         print("="*60 + "\n")
         run_daily_ppi_and_market_breadth()
-
-
-        # Task 2: Incremental regime scoring → saved to DB (not CSV)
-        print("\n" + "="*60)
-        print("TASK 2: Regime Scoring (incremental, stored in DB)")
-        print("="*60 + "\n")
-        run_sector_backtest_v2()
 
     except Exception as e:
         print(f"\n!! FATAL ERROR: {str(e)}")

@@ -2291,7 +2291,26 @@ def save_market_breadth_to_db(breadth_data_by_date):
             })
 
         if records:
-            db.insert_records(table_name, records, upsert=True)
+            if db_config.USE_SUPABASE:
+                # PostgREST merge-upsert updates only the columns provided, leaving others intact
+                db.insert_records(table_name, records, upsert=True)
+            else:
+                # SQLite: INSERT OR REPLACE wipes the whole row — use column-level ON CONFLICT upsert
+                import sqlite3
+                with sqlite3.connect(db.dbname) as conn:
+                    for record in records:
+                        sector_cols = [k for k in record if k != 'Date']
+                        if not sector_cols:
+                            continue
+                        col_names = ', '.join(['"Date"'] + [f'"{c}"' for c in sector_cols])
+                        placeholders = ', '.join(['?'] * (len(sector_cols) + 1))
+                        set_clause = ', '.join([f'"{c}" = excluded."{c}"' for c in sector_cols])
+                        sql = (
+                            f'INSERT INTO {table_name} ({col_names}) VALUES ({placeholders}) '
+                            f'ON CONFLICT ("Date") DO UPDATE SET {set_clause}'
+                        )
+                        conn.execute(sql, [record['Date']] + [record[c] for c in sector_cols])
+                    conn.commit()
             print(f"✓ Saved {len(records)} breadth records to database")
 
     except RuntimeError:
@@ -4151,32 +4170,6 @@ def ensure_admin_tables_exist():
                 completed_at TEXT,
                 error_message TEXT
             )""",
-        'regime_scores': """
-            CREATE TABLE IF NOT EXISTS regime_scores (
-                Date TEXT NOT NULL,
-                Sector TEXT NOT NULL,
-                TOTAL_SCORE REAL,
-                Bull_Prob_Raw REAL,
-                Volume_Z REAL,
-                "Open" REAL,
-                "High" REAL,
-                "Low" REAL,
-                "Close" REAL,
-                Volume_Metric REAL,
-                Fit_Type TEXT,
-                ACTION TEXT,
-                Position_Size REAL,
-                Market_Score REAL,
-                Market_Regime TEXT,
-                Market_Source TEXT,
-                Strategy TEXT,
-                Threshold_Buy REAL,
-                Threshold_Sell REAL,
-                Excess_Prob REAL,
-                Rotation_Status TEXT,
-                Dispersion REAL,
-                PRIMARY KEY (Date, Sector)
-            )""",
     }
 
     if db.use_supabase:
@@ -4288,91 +4281,6 @@ def get_all_sector_stock_map_raw():
 # ADMIN: REGIME SCORES (DB-backed, replaces CSV)
 # ============================================================
 
-def save_regime_scores_to_db(df_scores):
-    """Upsert regime scores DataFrame into the regime_scores table."""
-    ensure_admin_tables_exist()
-    if df_scores is None or df_scores.empty:
-        return
-    records = df_scores.copy()
-    records['Date'] = pd.to_datetime(records['Date']).dt.strftime('%Y-%m-%d')
-    db.insert_records('regime_scores', records.to_dict('records'), upsert=True)
-    print(f"✅ Saved {len(records)} regime score rows to DB")
-
-
-def load_regime_scores_from_db(start_date=None, end_date=None, sectors=None):
-    """
-    Load regime scores from DB.  Returns a DataFrame or None if no data.
-    """
-    ensure_admin_tables_exist()
-    try:
-        if db.use_supabase:
-            from db_manager import supabase_client
-            query = supabase_client.table('regime_scores').select('*')
-            if start_date:
-                query = query.gte('Date', start_date)
-            if end_date:
-                query = query.lte('Date', end_date)
-            if sectors:
-                query = query.in_('Sector', sectors)
-            df = pd.DataFrame(query.order('Date').order('Sector').execute().data)
-        else:
-            import sqlite3
-            conditions, params = [], []
-            if start_date:
-                conditions.append('Date >= ?'); params.append(start_date)
-            if end_date:
-                conditions.append('Date <= ?'); params.append(end_date)
-            if sectors:
-                placeholders = ','.join(['?'] * len(sectors))
-                conditions.append(f'Sector IN ({placeholders})')
-                params.extend(sectors)
-            where = f'WHERE {" AND ".join(conditions)}' if conditions else ''
-            sql = f'SELECT * FROM regime_scores {where} ORDER BY Date, Sector'
-            with sqlite3.connect(db.dbname) as conn:
-                df = pd.read_sql_query(sql, conn, params=params or None)
-
-        if df.empty:
-            return None
-        df['Date'] = pd.to_datetime(df['Date'])
-        return df
-    except Exception as e:
-        print(f"⚠️  load_regime_scores_from_db failed: {e}")
-        return None
-
-
-def delete_regime_scores_for_sectors(sectors, from_date=None):
-    """Delete regime scores for the given sectors (used before a rebuild)."""
-    ensure_admin_tables_exist()
-    if db.use_supabase:
-        from db_manager import supabase_client
-        for sector in sectors:
-            q = supabase_client.table('regime_scores').delete().eq('Sector', sector)
-            if from_date:
-                q = q.gte('Date', from_date)
-            q.execute()
-    else:
-        import sqlite3
-        with sqlite3.connect(db.dbname) as conn:
-            for sector in sectors:
-                if from_date:
-                    conn.execute('DELETE FROM regime_scores WHERE Sector=? AND Date>=?',
-                                 (sector, from_date))
-                else:
-                    conn.execute('DELETE FROM regime_scores WHERE Sector=?', (sector,))
-            conn.commit()
-    print(f"✅ Cleared regime scores for {len(sectors)} sectors"
-          + (f" from {from_date}" if from_date else ""))
-
-
-def get_latest_regime_scores():
-    """Return regime scores for the most recent date available."""
-    df = load_regime_scores_from_db()
-    if df is None or df.empty:
-        return None
-    latest = df['Date'].max()
-    return df[df['Date'] == latest].copy()
-
-
 # ============================================================
 # ADMIN: REBUILD JOBS
 # ============================================================
@@ -4386,7 +4294,7 @@ def create_rebuild_job(job_type, sectors):
     db.insert_records('rebuild_jobs', [{
         'job_id': job_id,
         'job_type': job_type,
-        'sectors': json.dumps(sectors, ensure_ascii=False),
+        'sectors': '__all__' if sectors == '__all__' else json.dumps(sectors, ensure_ascii=False),
         'status': 'pending',
         'progress': 0,
         'progress_message': 'Job created',

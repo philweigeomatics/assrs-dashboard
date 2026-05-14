@@ -9,11 +9,7 @@ import numpy as np
 import data_manager
 from analysis_engine import detect_market_regime
 
-V2_REGIME_FILE = "assrs_backtest_results_SECTORS_V2_Regime.csv"   # legacy fallback
-
-_NUMERIC_COLS = ['TOTAL_SCORE', 'Open', 'High', 'Low', 'Close',
-                 'Volume_Metric', 'Market_Score', 'Excess_Prob',
-                 'Position_Size', 'Dispersion', 'Market_Breadth']
+_NUMERIC_COLS = ['Open', 'High', 'Low', 'Close', 'Volume_Metric']
 
 def _coerce_numerics(df):
     for col in _NUMERIC_COLS:
@@ -23,26 +19,38 @@ def _coerce_numerics(df):
 
 @st.cache_data(ttl=600)
 def load_v2_data():
-    """Load V2 regime scores — DB first, falls back to legacy CSV."""
-    # ── Primary: database ────────────────────────────────────────────────────
+    """Load sector PPI data from DB as long-format DataFrame."""
     try:
-        df = data_manager.load_regime_scores_from_db()
-        if df is not None and not df.empty:
-            df = _coerce_numerics(df)
-            latest_date = df['Date'].max()
-            return df[df['Date'] == latest_date].copy(), df.copy(), latest_date.strftime('%Y-%m-%d'), None
-    except Exception:
-        pass
+        ppi_data = data_manager.load_ppi_data_from_db()
+        if not ppi_data:
+            return None, None, None, "No PPI data found in database — run main.py first"
 
-    # ── Fallback: legacy CSV ─────────────────────────────────────────────────
-    try:
-        df = pd.read_csv(V2_REGIME_FILE)
-        df['Date'] = pd.to_datetime(df['Date'])
-        df = _coerce_numerics(df)
-        if df.empty:
-            return None, None, None, "No data"
-        latest_date = df['Date'].max()
-        return df[df['Date'] == latest_date].copy(), df.copy(), latest_date.strftime('%Y-%m-%d'), None
+        rows = []
+        for sector, df in ppi_data.items():
+            for date, row in df.iterrows():
+                rows.append({
+                    'Date': date,
+                    'Sector': sector,
+                    'Open': row.get('Open', row.get('Close')),
+                    'High': row.get('High', row.get('Close')),
+                    'Low': row.get('Low', row.get('Close')),
+                    'Close': row['Close'],
+                    'Volume_Metric': row.get('Volume_Metric', 0.0),
+                })
+
+        if not rows:
+            return None, None, None, "PPI tables found but contained no rows"
+
+        v2hist = pd.DataFrame(rows)
+        v2hist['Date'] = pd.to_datetime(v2hist['Date'])
+        v2hist = _coerce_numerics(v2hist)
+        v2hist = v2hist.sort_values('Date')
+
+        latest_date = v2hist['Date'].max()
+        v2latest = v2hist[v2hist['Date'] == latest_date].copy()
+
+        return v2latest, v2hist, latest_date.strftime('%Y-%m-%d'), None
+
     except Exception as e:
         return None, None, None, str(e)
 
