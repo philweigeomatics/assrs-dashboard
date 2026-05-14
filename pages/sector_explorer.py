@@ -17,8 +17,10 @@ import streamlit as st
 
 import auth_manager
 import data_manager
+import db_config
 import peer_discovery
 import sector_themes
+from rebuild_runner import start_rebuild_thread
 
 try:
     import plotly.graph_objects as go
@@ -31,6 +33,10 @@ auth_manager.require_login()
 user     = auth_manager.get_current_user()
 is_admin = auth_manager.is_admin()
 
+# ── Rebuild-thread registry (shared with Admin Sector Management) ──────────────
+if '_rebuild_threads' not in st.session_state:
+    st.session_state['_rebuild_threads'] = {}
+
 # ── Page Header ────────────────────────────────────────────────────────────────
 st.title("🌐 Macro Sector Explorer | 行业产业链浏览器")
 st.caption("Click on any node to find related stocks · 点击节点查找相关股票")
@@ -41,7 +47,9 @@ _PRODUCT_COLORS = [
     "#3b82f6", "#10b981", "#f59e0b", "#ef4444",
     "#8b5cf6", "#06b6d4", "#f97316", "#ec4899",
 ]
-_COMPANY_COLOR = "#64748b"
+_COMPANY_COLOR  = "#94a3b8"   # lighter gray — readable on dark Sankey background
+_SANKEY_BG      = "#1e293b"   # dark slate background for Sankey
+_SANKEY_FONT    = "#f1f5f9"   # near-white label text
 
 def _hex_to_rgba(hex_color: str, alpha: float = 0.35) -> str:
     h = hex_color.lstrip("#")
@@ -814,8 +822,8 @@ with _tab2:
                 _sk_fig.update_layout(
                     height=_sk_height,
                     margin=dict(l=20, r=20, t=20, b=20),
-                    paper_bgcolor="#ffffff",
-                    font=dict(size=14, color="#1e293b"),
+                    paper_bgcolor=_SANKEY_BG,
+                    font=dict(size=14, color=_SANKEY_FONT),
                 )
                 st.plotly_chart(_sk_fig, use_container_width=True)
             else:
@@ -841,7 +849,22 @@ with _tab2:
             _sk_tickers = [x.split(" · ")[0].strip() for x in _sk_selected]
             _n_sk = len(_sk_tickers)
 
-            _sk_act_cols = st.columns([2, 2, 3]) if is_admin else st.columns([2, 5])
+            # Persistent feedback from previous Create Sector click
+            _sk_msg_key = f"sk_create_msg_{chosen_id}_{sel_layer_idx}"
+            if st.session_state.get(_sk_msg_key):
+                _sk_msg_type, _sk_msg_txt = st.session_state.pop(_sk_msg_key)
+                if _sk_msg_type == "success":
+                    st.success(_sk_msg_txt)
+                elif _sk_msg_type == "error":
+                    st.error(_sk_msg_txt)
+                else:
+                    st.info(_sk_msg_txt)
+
+            if is_admin:
+                _sk_act_cols = st.columns([2, 3, 2])
+            else:
+                _sk_act_cols = st.columns([2, 5])
+
             with _sk_act_cols[0]:
                 if st.button(
                     f"🔗 Pair Trader ({_n_sk})",
@@ -862,16 +885,51 @@ with _tab2:
                         key=f"sk_sector_name_{chosen_id}_{sel_layer_idx}",
                         label_visibility="collapsed",
                     )
+                with _sk_act_cols[2]:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    _sn_clean = (_sector_input or "").strip()
                     if st.button(
                         f"⚙️ Create Sector ({_n_sk})",
                         key=f"sk_to_sm_{chosen_id}_{sel_layer_idx}",
-                        disabled=(_n_sk < 2 or not _sector_input.strip()),
+                        disabled=(_n_sk < 2 or not _sn_clean),
                         use_container_width=True,
-                        help="Pre-load these companies into the New Sector tab of Sector Management.",
+                        type="primary",
+                        help="Create this sector directly and start a rebuild job.",
                     ):
-                        st.session_state["_new_sector_stocks"]   = _sk_tickers
-                        st.session_state["_preseed_sector_name"] = _sector_input.strip()
-                        st.switch_page("pages/Admin_Sector_Management.py")
+                        _existing = data_manager.get_sector_stock_map()
+                        if _sn_clean in _existing:
+                            st.session_state[_sk_msg_key] = (
+                                "error",
+                                f"Sector '{_sn_clean}' already exists. "
+                                "Use Sector Management → Edit Sector to modify it.",
+                            )
+                            st.rerun()
+                        else:
+                            _miss_ppi = data_manager.get_missing_ppi_tables([_sn_clean])
+                            _miss_brd = data_manager.get_missing_breadth_columns([_sn_clean])
+                            if (_miss_ppi or _miss_brd) and db_config.USE_SUPABASE:
+                                # Supabase needs manual SQL first — redirect to Sector Management
+                                st.session_state["_new_sector_stocks"]   = _sk_tickers
+                                st.session_state["_preseed_sector_name"] = _sn_clean
+                                st.switch_page("pages/Admin_Sector_Management.py")
+                            else:
+                                data_manager.add_new_sector(_sn_clean, _sk_tickers)
+                                _job_id = data_manager.create_rebuild_job(
+                                    'sector_rebuild', [_sn_clean]
+                                )
+                                _thread = start_rebuild_thread(_job_id, [_sn_clean])
+                                st.session_state['_rebuild_threads'][_job_id] = _thread
+                                # Clear the name input for next use
+                                st.session_state.pop(
+                                    f"sk_sector_name_{chosen_id}_{sel_layer_idx}", None
+                                )
+                                st.session_state[_sk_msg_key] = (
+                                    "success",
+                                    f"Sector **'{_sn_clean}'** created with {_n_sk} stocks. "
+                                    f"Rebuild job `{_job_id}` started — monitor in "
+                                    "Sector Management → Rebuild Jobs.",
+                                )
+                                st.rerun()
 
             # ── Phase 2 for Sankey companies ───────────────────────────────────
             st.markdown("---")
