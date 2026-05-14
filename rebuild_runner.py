@@ -18,6 +18,7 @@ import pandas as pd
 
 import data_manager as dm
 import api_config
+import db_config
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +86,28 @@ def run_full_rebuild(job_id, sectors_to_rebuild, tushare_token):
                 raise RuntimeError(f"None of the requested sectors found in DB: {sectors_to_rebuild}")
 
         _log(job_id, f"Rebuilding {len(rebuild_sectors)} sectors: {rebuild_sectors}")
+
+        # ── Step 2b: Supabase pre-flight — all required tables must exist ────
+        if db_config.USE_SUPABASE:
+            missing_ppi = dm.get_missing_ppi_tables(rebuild_sectors)
+            missing_breadth = dm.get_missing_breadth_columns(rebuild_sectors)
+            if missing_ppi or missing_breadth:
+                sql_parts = []
+                for s in missing_ppi:
+                    sql_parts.append(
+                        f'CREATE TABLE IF NOT EXISTS "PPI_{s}" ('
+                        f'"Date" TEXT PRIMARY KEY, "Open" REAL, "High" REAL, '
+                        f'"Low" REAL, "Close" REAL, "Norm_Vol_Metric" REAL);'
+                    )
+                for s in missing_breadth:
+                    sql_parts.append(
+                        f'ALTER TABLE market_breadth ADD COLUMN "{s}" DOUBLE PRECISION;'
+                    )
+                raise RuntimeError(
+                    f"Supabase is missing tables/columns for: "
+                    f"PPI={missing_ppi}, breadth={missing_breadth}.\n"
+                    f"Run in the Supabase SQL editor first:\n\n" + "\n".join(sql_parts)
+                )
 
         # ── Step 3: Wipe existing PPI tables for these sectors ───────────────
         progress(6, f'Clearing old PPI data for {len(rebuild_sectors)} sectors...')

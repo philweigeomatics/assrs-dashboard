@@ -255,17 +255,25 @@ with tab_new_sector:
                 if new_sector_name in existing_sectors:
                     st.error(f"Sector '{new_sector_name}' already exists. Use the Edit tab to modify it.")
                 else:
-                    missing_cols = dm.get_missing_breadth_columns([new_sector_name])
-                    if missing_cols and db_config.USE_SUPABASE:
+                    missing_ppi = dm.get_missing_ppi_tables([new_sector_name])
+                    missing_breadth = dm.get_missing_breadth_columns([new_sector_name])
+                    if (missing_ppi or missing_breadth) and db_config.USE_SUPABASE:
                         st.error(
-                            f"**Supabase requires a manual step before this rebuild can run.**\n\n"
-                            f"The `market_breadth` table needs a new column for `{new_sector_name}`. "
-                            f"Run this in the **Supabase SQL editor** first, then come back and create the sector:"
+                            "**Supabase requires manual steps before this sector can be created.**\n\n"
+                            "Run the SQL below in the **Supabase SQL editor**, then come back and click Create again."
                         )
-                        st.code(
-                            f'ALTER TABLE market_breadth ADD COLUMN "{new_sector_name}" DOUBLE PRECISION;',
-                            language="sql",
-                        )
+                        sql_parts = []
+                        if missing_ppi:
+                            sql_parts.append(
+                                f'CREATE TABLE IF NOT EXISTS "PPI_{new_sector_name}" ('
+                                f'"Date" TEXT PRIMARY KEY, "Open" REAL, "High" REAL, '
+                                f'"Low" REAL, "Close" REAL, "Norm_Vol_Metric" REAL);'
+                            )
+                        if missing_breadth:
+                            sql_parts.append(
+                                f'ALTER TABLE market_breadth ADD COLUMN "{new_sector_name}" DOUBLE PRECISION;'
+                            )
+                        st.code("\n".join(sql_parts), language="sql")
                     else:
                         dm.add_new_sector(new_sector_name, stocks)
                         st.success(f"Created sector '{new_sector_name}' with {len(stocks)} stocks.")

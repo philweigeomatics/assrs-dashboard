@@ -2226,6 +2226,18 @@ def get_missing_breadth_columns(new_sectors):
     return [s for s in new_sectors if s not in existing]
 
 
+def get_missing_ppi_tables(sectors):
+    """Return list of sectors whose PPI_{sector} table doesn't exist yet."""
+    return [s for s in sectors if not db.table_exists(f'PPI_{s}')]
+
+
+_PPI_CREATE_SQL = (
+    'CREATE TABLE IF NOT EXISTS "PPI_{sector}" ('
+    '"Date" TEXT PRIMARY KEY, "Open" REAL, "High" REAL, '
+    '"Low" REAL, "Close" REAL, "Norm_Vol_Metric" REAL);'
+)
+
+
 def save_market_breadth_to_db(breadth_data_by_date):
     """
     Save market breadth data for all sectors in a single wide table.
