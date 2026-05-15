@@ -588,6 +588,7 @@ if graph:
 
         # ── 2. Deduplicate matched themes by theme_id ──
         _seen_ids:        set  = set()
+        _no_layer_ids:    set  = set()   # theme IDs that matched but have no layers
         _matched_themes:  list = []   # [(theme_full, pos), ...]
         _unmatched_secs:  list = []   # [sector_str, ...]
 
@@ -599,10 +600,18 @@ if graph:
                 continue
             if _tm["id"] in _seen_ids:
                 continue
-            _seen_ids.add(_tm["id"])
+            # Themes with no layers: treat as unmatched so the sector stays visible
+            if _tm["id"] in _no_layer_ids:
+                if _sector not in _unmatched_secs:
+                    _unmatched_secs.append(_sector)
+                continue
             _tf = data_manager.get_sector_theme_by_id(_tm["id"])
             if not _tf or not _tf.get("layers"):
+                _no_layer_ids.add(_tm["id"])
+                if _sector not in _unmatched_secs:
+                    _unmatched_secs.append(_sector)
                 continue
+            _seen_ids.add(_tm["id"])
             _pos = data_manager.get_chain_position(ticker, _tm["id"])
             _matched_themes.append((_tf, _pos))
 
@@ -699,7 +708,15 @@ if graph:
                                     layers_data=_tdata,
                                     created_by=user.get("username", "admin"),
                                 )
-                                # Bust batch-match cache so the new theme is picked up
+                                # Preserve existing batch matches; inject the new one
+                                # so the re-render doesn't trigger a fresh AI batch-match
+                                # (which would scramble other sectors' assignments).
+                                _new_theme_rec = data_manager.get_sector_theme_by_raw_input(_raw_inp)
+                                _carried = dict(st.session_state.get(_batch_key, {}))
+                                if _new_theme_rec:
+                                    _carried[_sector] = {"id": _new_theme_rec["id"]}
+                                _future_key = f"cp_batch_{ticker}_{len(all_themes) + 1}"
+                                st.session_state[_future_key] = _carried
                                 st.session_state.pop(_batch_key, None)
                                 st.success("✅ Theme generated.")
                                 st.rerun()
