@@ -47,9 +47,7 @@ _PRODUCT_COLORS = [
     "#3b82f6", "#10b981", "#f59e0b", "#ef4444",
     "#8b5cf6", "#06b6d4", "#f97316", "#ec4899",
 ]
-_COMPANY_COLOR  = "#94a3b8"   # lighter gray — readable on dark Sankey background
-_SANKEY_BG      = "#1e293b"   # dark slate background for Sankey
-_SANKEY_FONT    = "#f1f5f9"   # near-white label text
+_COMPANY_COLOR = "#64748b"    # neutral gray for company nodes
 
 def _hex_to_rgba(hex_color: str, alpha: float = 0.35) -> str:
     h = hex_color.lstrip("#")
@@ -777,53 +775,143 @@ with _tab2:
             _n_prod = len(_products)
             _n_cos  = len(_col_keys)
 
-            # Per-product colors; companies use neutral gray
+            # Per-product colour palette
             _prod_color_map = {
                 p: _PRODUCT_COLORS[i % len(_PRODUCT_COLORS)]
                 for i, p in enumerate(_products)
             }
-            _node_colors = (
-                [_prod_color_map[p] for p in _products] +
-                [_COMPANY_COLOR] * _n_cos
-            )
             _node_labels = _products + [_all_cos[t] for t in _col_keys]
 
-            _sources, _targets, _vals, _link_colors, _link_labels = [], [], [], [], []
+            # ── Market-cap weights ──────────────────────────────────────────────
+            _mcap_df  = data_manager.get_daily_basic_for_tickers(_col_keys)
+            _mcap_map: dict[str, float] = {}
+            if not _mcap_df.empty and "ticker" in _mcap_df.columns:
+                _mcap_map = dict(zip(_mcap_df["ticker"],
+                                     _mcap_df["total_mv_yi"].fillna(0)))
+            _mcap_fallback = (
+                float(_mcap_df["total_mv_yi"].median())
+                if not _mcap_df.empty else 50.0
+            )
+
+            # ── Focus / isolation selector ──────────────────────────────────────
+            _focus_key  = f"sk_focus_{chosen_id}_{sel_layer_idx}"
+            _focus_opts = (
+                ["(Show all nodes)"]
+                + _products
+                + [f"{t} · {_all_cos[t]}" for t in _col_keys]
+            )
+            _focus_raw = st.selectbox(
+                "🔍 Isolate node — select to highlight only its connections",
+                _focus_opts,
+                key=_focus_key,
+                format_func=lambda x: x,
+            )
+            _focus_prod      = _focus_raw if _focus_raw in set(_products) else None
+            _focus_co_ticker = (
+                _focus_raw.split(" · ")[0].strip()
+                if _focus_raw not in set(_products) and _focus_raw != "(Show all nodes)"
+                else None
+            )
+
+            # Which products/companies are "connected" to the focused node?
+            if _focus_prod is None and _focus_co_ticker is None:
+                _conn_prods: set[str]  = set(_products)
+                _conn_cos:   set[str]  = set(_col_keys)
+            else:
+                _conn_prods, _conn_cos = set(), set()
+                if _focus_prod:
+                    _conn_prods.add(_focus_prod)
+                    for _t in _col_keys:
+                        if _edited.loc[_focus_prod, _col_labels[_t]]:
+                            _conn_cos.add(_t)
+                elif _focus_co_ticker and _focus_co_ticker in _col_labels:
+                    _conn_cos.add(_focus_co_ticker)
+                    for _p in _products:
+                        if _edited.loc[_p, _col_labels[_focus_co_ticker]]:
+                            _conn_prods.add(_p)
+
+            # ── Node colours (dim unconnected when a node is focused) ───────────
+            _DIM_NODE = "#c8d0dc"
+            def _ncolor(name, is_prod, ticker=None):
+                if _focus_prod is None and _focus_co_ticker is None:
+                    return _prod_color_map[name] if is_prod else _COMPANY_COLOR
+                if is_prod:
+                    return _prod_color_map[name] if name in _conn_prods else _DIM_NODE
+                return _COMPANY_COLOR if ticker in _conn_cos else _DIM_NODE
+
+            _node_colors = (
+                [_ncolor(p, True)         for p in _products] +
+                [_ncolor("", False, t)    for t in _col_keys]
+            )
+
+            # ── Node hover templates ────────────────────────────────────────────
+            _node_htmpl = (
+                [
+                    f"<b>{p}</b><br>"
+                    f"Suppliers checked: "
+                    f"{sum(1 for t in _col_keys if _edited.loc[p, _col_labels[t]])}"
+                    f"<extra></extra>"
+                    for p in _products
+                ] + [
+                    f"<b>{_all_cos[t]}</b>&nbsp;&nbsp;{t}<br>"
+                    f"Market Cap: "
+                    f"{'%.1f 亿' % _mcap_map[t] if t in _mcap_map and _mcap_map[t] else '—'}"
+                    f"<extra></extra>"
+                    for t in _col_keys
+                ]
+            )
+
+            # ── Links (market-cap weighted, dimmed when not in focus) ───────────
+            _sources, _targets, _vals  = [], [], []
+            _link_colors, _link_htmpl  = [], []
+
             for _pi, _prod in enumerate(_products):
                 _pc = _prod_color_map[_prod]
-                _link_rgba = _hex_to_rgba(_pc, 0.35)
                 for _ci, _t in enumerate(_col_keys):
-                    if _edited.loc[_prod, _col_labels[_t]]:
-                        _sources.append(_pi)
-                        _targets.append(_n_prod + _ci)
-                        _vals.append(1)
-                        _link_colors.append(_link_rgba)
-                        _link_labels.append(f"{_prod} → {_all_cos[_t]}")
+                    if not _edited.loc[_prod, _col_labels[_t]]:
+                        continue
+                    _in_focus = _prod in _conn_prods and _t in _conn_cos
+                    _mcap_v   = _mcap_map.get(_t, _mcap_fallback) or _mcap_fallback
+                    _sources.append(_pi)
+                    _targets.append(_n_prod + _ci)
+                    _vals.append(max(_mcap_v, 1.0))
+                    _link_colors.append(
+                        _hex_to_rgba(_pc, 0.55) if _in_focus
+                        else "rgba(180,190,205,0.06)"
+                    )
+                    _link_htmpl.append(
+                        f"<b>{_prod}</b> → <b>{_all_cos[_t]}</b>&nbsp;({_t})<br>"
+                        f"Market Cap: "
+                        f"{'%.1f 亿' % _mcap_map[_t] if _t in _mcap_map and _mcap_map[_t] else '—'}"
+                        f"<extra></extra>"
+                    )
 
             if _sources:
-                _sk_height = max(500, _n_prod * 80 + _n_cos * 30 + 150)
+                _sk_height = max(550, _n_prod * 90 + _n_cos * 35 + 160)
                 _sk_fig = go.Figure(go.Sankey(
                     arrangement="snap",
                     node=dict(
                         label=_node_labels,
                         color=_node_colors,
-                        pad=25,
-                        thickness=25,
-                        line=dict(color="#1e293b", width=0.5),
+                        pad=30,
+                        thickness=28,
+                        line=dict(color="#ffffff", width=1.5),
+                        hovertemplate=_node_htmpl,
                     ),
                     link=dict(
                         source=_sources,
                         target=_targets,
                         value=_vals,
-                        label=_link_labels,
                         color=_link_colors,
+                        hovertemplate=_link_htmpl,
                     ),
                 ))
                 _sk_fig.update_layout(
                     height=_sk_height,
-                    margin=dict(l=20, r=20, t=20, b=20),
-                    paper_bgcolor=_SANKEY_BG,
-                    font=dict(size=14, color=_SANKEY_FONT),
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    paper_bgcolor="#ffffff",
+                    font=dict(size=15, color="#1e293b",
+                              family="system-ui, -apple-system, sans-serif"),
                 )
                 st.plotly_chart(_sk_fig, use_container_width=True)
             else:
