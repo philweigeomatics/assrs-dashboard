@@ -3941,10 +3941,11 @@ if st.session_state.active_ticker:
                 st.markdown("---")
                 st.markdown("#### 🔄 Sector Rotation | 板块轮动")
                 st.caption(
-                    "**Top panel**: rolling correlation of the 5 highest-affinity sectors "
-                    "(grey = remaining sectors).  "
-                    "**Bottom strip**: which sector 'owns' this stock's price action each day — "
-                    "a colour change = a rotation event."
+                    "**Top panel**: rolling Pearson correlation for the 5 highest-affinity sectors "
+                    "(faint grey lines = remaining sectors).  "
+                    "**Bottom strip**: a coloured timeline — each colour is a sector, and the strip "
+                    "shows which sector had the highest correlation with this stock on each day. "
+                    "Where the colour changes, the stock shifted its dominant theme."
                 )
 
                 rolling_df_rot = pd.DataFrame(all_rolling).dropna(how="all").tail(252)
@@ -4015,25 +4016,31 @@ if st.session_state.active_ticker:
 
                         _legend_shown: set = set()
                         for _t0_r, _t1_r, _sector in _runs:
-                            # Invisible scatter so the sector appears in the legend strip
+                            _col = color_map.get(_sector, "#64748b")
+                            # Legend entry for sectors not already shown in the top-5 lines
                             _show_leg = _sector not in top5 and _sector not in _legend_shown
                             if _show_leg:
                                 _legend_shown.add(_sector)
                                 fig_rot.add_trace(go.Scatter(
                                     x=[None], y=[None],
                                     mode="markers",
-                                    marker=dict(color=color_map.get(_sector, "#64748b"), size=10, symbol="square"),
+                                    marker=dict(color=_col, size=10, symbol="square"),
                                     name=_sector,
                                     legendgroup=_sector,
                                 ), row=1, col=1)
-                            fig_rot.add_shape(
-                                type="rect",
-                                x0=_t0_r, x1=_t1_r,
-                                y0=0, y1=1,
-                                fillcolor=color_map.get(_sector, "#64748b"),
-                                line_width=0,
-                                row=2, col=1,
-                            )
+                            # Filled polygon rectangle — reliable alternative to add_shape in subplots
+                            fig_rot.add_trace(go.Scatter(
+                                x=[_t0_r, _t0_r, _t1_r, _t1_r, _t0_r],
+                                y=[0, 1, 1, 0, 0],
+                                fill="toself",
+                                fillcolor=_col,
+                                mode="none",
+                                line=dict(width=0),
+                                name=_sector,
+                                legendgroup=_sector,
+                                showlegend=False,
+                                hovertemplate=f"{_sector}<extra></extra>",
+                            ), row=2, col=1)
 
                     fig_rot.update_layout(
                         height=540,
