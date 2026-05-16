@@ -720,13 +720,18 @@ if graph:
                                 # Preserve existing batch matches; inject the new one
                                 # so the re-render doesn't trigger a fresh AI batch-match
                                 # (which would scramble other sectors' assignments).
+                                # Re-fetch all_themes so _future_key reflects the ACTUAL
+                                # DB count — guards against UNIQUE-constraint conflicts
+                                # where the insert silently fails and count is unchanged.
+                                _themes_now    = data_manager.get_all_sector_themes()
                                 _new_theme_rec = data_manager.get_sector_theme_by_raw_input(_raw_inp)
                                 _carried = dict(st.session_state.get(_batch_key, {}))
                                 if _new_theme_rec:
                                     _carried[_sector] = {"id": _new_theme_rec["id"]}
-                                _future_key = f"cp_batch_{ticker}_{len(all_themes) + 1}"
+                                _future_key = f"cp_batch_{ticker}_{len(_themes_now)}"
                                 st.session_state[_future_key] = _carried
-                                st.session_state.pop(_batch_key, None)
+                                if _future_key != _batch_key:
+                                    st.session_state.pop(_batch_key, None)
                                 st.success("✅ Theme generated.")
                                 st.rerun()
                             except RuntimeError as exc:

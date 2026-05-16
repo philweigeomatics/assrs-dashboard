@@ -263,16 +263,24 @@ _CLASSIFY_BATCH_PROMPT = """\
 You are an expert Chinese A-share supply chain analyst.
 
 A company's details and MULTIPLE sector supply chains are provided.
-For each theme, determine which single layer the company PRIMARILY operates in.
+The company has ALREADY been verified to operate within EACH of these sectors —
+your sole task is to identify the SPECIFIC LAYER inside each theme where the
+company primarily operates.
+
 Focus on the company's main revenue-generating activities, not aspirational ones.
 
 OUTPUT RULES:
 - Return ONLY raw JSON (start { end }). No markdown.
-- Return {"results": [...]} — one entry per theme_id provided.
-- layer_index must be an integer matching one of the provided layer_index values,
-  or null if the company does not fit any layer for that theme.
-- matched_items: list of 1–3 items FROM that layer matching the company's products.
-  Empty list if layer_index is null.
+- Return {"results": [...]} — MUST contain exactly one entry per theme_id provided.
+  Never skip a theme. Never truncate the list.
+- layer_index: integer matching one of the provided layer_index values.
+  Strongly prefer a layer over returning null — since the company is known to
+  operate in this sector, at least ONE layer should fit. Return null only as a
+  last resort when the company's products are entirely unrelated to every layer's
+  items, AND you have considered all of them.
+- matched_items: 1–3 items FROM that layer that best match the company's products.
+  If the products don't exactly match named items, pick the items most analogous
+  to what the company produces. Empty list only if layer_index is null.
 
 Schema:
 {
@@ -326,7 +334,7 @@ def classify_ticker_across_themes(
 
     result = ai_client.call_json(
         _CLASSIFY_BATCH_PROMPT, user_msg,
-        max_tokens=3000,
+        max_tokens=5000,
         temperature=0.1,
     )
 
