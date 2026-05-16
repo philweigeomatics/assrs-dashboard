@@ -19,20 +19,30 @@ auth_manager.require_login()
 SECTOR_STOCK_MAP = data_manager.get_sector_stock_map()
 
 # Sector selector
-st.sidebar.header("🎯 Select Sector")
 available_sectors = [s for s in SECTOR_STOCK_MAP.keys() if s != "MARKET_PROXY"]
-selected_sector = st.sidebar.selectbox(
-    "Choose a sector to analyze",
-    available_sectors,
-    index=0,
-)
 
-# Get stocks in selected sector
-stock_list = SECTOR_STOCK_MAP[selected_sector]
-st.sidebar.info(f"**{len(stock_list)}** stocks in {selected_sector}")
+with st.container(border=True):
+    _sel_col, _info_col, _btn_col = st.columns([3, 1, 1])
+    with _sel_col:
+        selected_sector = st.selectbox(
+            "🎯 Select sector",
+            available_sectors,
+            index=0,
+            label_visibility="collapsed",
+        )
+    # Get stocks in selected sector
+    stock_list = SECTOR_STOCK_MAP[selected_sector]
+    with _info_col:
+        st.metric("Stocks", len(stock_list))
+    with _btn_col:
+        _load_clicked = st.button(
+            "🔄 Load Data",
+            type="primary",
+            use_container_width=True,
+            help="Load 3 years of price and market-cap data for all stocks in this sector",
+        )
 
-# Load data button
-if st.sidebar.button("🔄 Load Data (3 Years)", type="primary"):
+if _load_clicked:
     with st.spinner(f"Loading data for {len(stock_list)} stocks in {selected_sector}..."):
         # Store in session state
         st.session_state.sector_data = {}
@@ -89,7 +99,7 @@ if st.sidebar.button("🔄 Load Data (3 Years)", type="primary"):
 
 # Check if data is loaded
 if 'sector_data' not in st.session_state or not st.session_state.sector_data:
-    st.info("👆 Click **Load Data** in the sidebar to begin analysis")
+    st.info("👆 Select a sector above and click **Load Data** to begin analysis")
     st.stop()
 
 # Data is loaded - show analysis

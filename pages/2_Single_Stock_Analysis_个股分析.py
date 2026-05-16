@@ -3757,8 +3757,8 @@ if st.session_state.active_ticker:
 
                 window = st.select_slider(
                     "Rolling window (trading days)",
-                    options=[20, 30, 60],
-                    value=30,
+                    options=[5, 10, 20, 30, 60],
+                    value=20,
                     key="sector_affinity_window",
                 )
 
@@ -3911,6 +3911,165 @@ if st.session_state.active_ticker:
                                 f"(r = {current_corr[top_sector]:+.3f})  "
                                 f"— affinity is **{trend_str}** over the past 5 vs 20 days."
                             )
+
+                # ── Sector Rotation Analysis ──────────────────────────────────────
+                st.markdown("---")
+                st.markdown("#### 🔄 Sector Rotation | 板块轮动")
+                st.caption(
+                    "**Top panel**: rolling correlation of the 5 highest-affinity sectors "
+                    "(grey = remaining sectors).  "
+                    "**Bottom strip**: which sector 'owns' this stock's price action each day — "
+                    "a colour change = a rotation event."
+                )
+
+                rolling_df_rot = pd.DataFrame(all_rolling).dropna(how="all").tail(252)
+
+                if len(rolling_df_rot.columns) >= 2 and len(rolling_df_rot) >= window + 5:
+                    rolling_filled = rolling_df_rot.ffill()
+                    dominant_series = rolling_filled.idxmax(axis=1).dropna()
+
+                    avg_corr_rot = rolling_filled.mean()
+                    top5 = avg_corr_rot.sort_values(ascending=False).head(5).index.tolist()
+                    sector_all = rolling_df_rot.columns.tolist()
+
+                    _PALETTE = [
+                        "#3b82f6", "#10b981", "#f59e0b", "#ef4444",
+                        "#8b5cf6", "#06b6d4", "#f97316", "#84cc16",
+                        "#ec4899", "#64748b",
+                    ]
+                    color_map = {s: _PALETTE[i % len(_PALETTE)] for i, s in enumerate(sector_all)}
+
+                    fig_rot = make_subplots(
+                        rows=2, cols=1,
+                        shared_xaxes=True,
+                        row_heights=[0.82, 0.18],
+                        vertical_spacing=0.02,
+                    )
+
+                    # Gray background lines for non-top sectors
+                    for _s in [s for s in sector_all if s not in top5]:
+                        if _s in rolling_filled.columns:
+                            fig_rot.add_trace(go.Scatter(
+                                x=rolling_filled.index,
+                                y=rolling_filled[_s],
+                                mode="lines",
+                                line=dict(color="rgba(130,130,130,0.18)", width=0.8),
+                                showlegend=False,
+                                hoverinfo="skip",
+                            ), row=1, col=1)
+
+                    # Top-5 sector lines
+                    for _s in top5:
+                        if _s in rolling_filled.columns:
+                            fig_rot.add_trace(go.Scatter(
+                                x=rolling_filled.index,
+                                y=rolling_filled[_s],
+                                name=_s,
+                                mode="lines",
+                                line=dict(color=color_map[_s], width=2),
+                                legendgroup=_s,
+                            ), row=1, col=1)
+
+                    fig_rot.add_hline(
+                        y=0, line_dash="dash",
+                        line_color="rgba(200,200,200,0.25)",
+                        row=1, col=1,
+                    )
+
+                    # Dominant-sector strip — run-length encode consecutive same-sector spans
+                    if not dominant_series.empty:
+                        _runs: list = []
+                        _prev_sec = dominant_series.iloc[0]
+                        _t0       = dominant_series.index[0]
+                        for _t, _sec in dominant_series.items():
+                            if _sec != _prev_sec:
+                                _runs.append((_t0, _t, _prev_sec))
+                                _t0, _prev_sec = _t, _sec
+                        _runs.append((_t0, dominant_series.index[-1], _prev_sec))
+
+                        _legend_shown: set = set()
+                        for _t0_r, _t1_r, _sector in _runs:
+                            # Invisible scatter so the sector appears in the legend strip
+                            _show_leg = _sector not in top5 and _sector not in _legend_shown
+                            if _show_leg:
+                                _legend_shown.add(_sector)
+                                fig_rot.add_trace(go.Scatter(
+                                    x=[None], y=[None],
+                                    mode="markers",
+                                    marker=dict(color=color_map.get(_sector, "#64748b"), size=10, symbol="square"),
+                                    name=_sector,
+                                    legendgroup=_sector,
+                                ), row=1, col=1)
+                            fig_rot.add_shape(
+                                type="rect",
+                                x0=_t0_r, x1=_t1_r,
+                                y0=0, y1=1,
+                                fillcolor=color_map.get(_sector, "#64748b"),
+                                line_width=0,
+                                row=2, col=1,
+                            )
+
+                    fig_rot.update_layout(
+                        height=540,
+                        margin=dict(l=10, r=20, t=30, b=20),
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="white"),
+                        legend=dict(
+                            orientation="h", yanchor="bottom", y=1.01, x=0,
+                            font=dict(size=11),
+                        ),
+                        hovermode="x unified",
+                    )
+                    fig_rot.update_yaxes(
+                        title_text="Pearson r", row=1, col=1,
+                        range=[-1.05, 1.05],
+                    )
+                    fig_rot.update_yaxes(
+                        showticklabels=False, row=2, col=1, range=[0, 1],
+                    )
+                    fig_rot.update_xaxes(showgrid=False, row=2, col=1)
+
+                    st.plotly_chart(fig_rot, use_container_width=True)
+
+                    # ── Rotation summary ──────────────────────────────────────────
+                    if not dominant_series.empty:
+                        _n_rot = int((dominant_series != dominant_series.shift(1)).sum()) - 1
+                        _dom_counts = dominant_series.value_counts()
+
+                        rc1, rc2 = st.columns(2)
+                        with rc1:
+                            st.metric("Distinct sectors that led", dominant_series.nunique())
+                            st.markdown("**Days in the lead:**")
+                            for _s, _cnt in _dom_counts.head(5).items():
+                                _pct = _cnt / len(dominant_series) * 100
+                                _bar = "█" * max(1, int(_pct / 5))
+                                st.markdown(
+                                    f"<div style='margin:3px 0;font-size:13px'>"
+                                    f"<span style='color:{color_map.get(_s,'#64748b')}"
+                                    f";font-weight:700'>{_s}</span>&nbsp;&nbsp;"
+                                    f"{_bar}&nbsp;{_cnt}d&nbsp;({_pct:.0f}%)</div>",
+                                    unsafe_allow_html=True,
+                                )
+                        with rc2:
+                            st.metric("Rotation events (sector switches)", _n_rot)
+                            if _n_rot > 40:
+                                st.warning(
+                                    "⚠️ High rotation — this stock shifts themes frequently; "
+                                    "treat sector affinity as short-lived signals."
+                                )
+                            elif _n_rot < 8:
+                                st.success(
+                                    "✅ Stable sector identity — price action is consistently "
+                                    "explained by one dominant sector."
+                                )
+                            else:
+                                st.info(
+                                    "ℹ️ Moderate rotation — anchored to a primary sector "
+                                    "with occasional theme-driven shifts."
+                                )
+                else:
+                    st.info("Not enough overlapping data for rotation analysis at the current window size.")
 
             sector_affinity_section(analysis_df)
 
