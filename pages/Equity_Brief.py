@@ -426,6 +426,27 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+# ── Watchlist toggle ─────────────────────────────────────────────────────────
+_wl_col_spacer, _wl_col_btn = st.columns([5, 1])
+with _wl_col_btn:
+    _in_wl = data_manager.is_in_watchlist(ticker)
+    if _in_wl:
+        if st.button("★ In Watchlist — Remove",
+                     key=f"eb_wl_remove_{ticker}",
+                     use_container_width=True):
+            _ok, _msg = data_manager.remove_from_watchlist(ticker)
+            (st.success if _ok else st.warning)(_msg)
+            st.rerun()
+    else:
+        if st.button("☆ Add to Watchlist",
+                     key=f"eb_wl_add_{ticker}",
+                     type="primary",
+                     use_container_width=True):
+            _ok, _msg = data_manager.add_to_watchlist(ticker, company)
+            (st.success if _ok else st.warning)(_msg)
+            if _ok:
+                st.rerun()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 00 — OVERVIEW (what the company does + supply chain graph)
