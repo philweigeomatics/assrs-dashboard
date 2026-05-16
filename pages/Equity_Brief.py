@@ -630,15 +630,21 @@ if graph:
                             ticker, company, sc_products, _unclassified
                         )
                         _saved = 0
+                        _skipped = 0
                         for _r in _results:
-                            if _r.get("theme_id") is not None:
+                            if _r.get("theme_id") is not None and _r.get("layer_index") is not None:
                                 data_manager.upsert_chain_position(
                                     ticker, _r["theme_id"],
                                     _r.get("layer_index"),
                                     _r.get("matched_items", []),
                                 )
                                 _saved += 1
-                        st.success(f"✅ Classified {_saved} theme(s).")
+                            elif _r.get("theme_id") is not None:
+                                _skipped += 1
+                        msg = f"✅ Classified {_saved} theme(s)."
+                        if _skipped:
+                            msg += f" ({_skipped} skipped — AI could not determine layer, existing data preserved.)"
+                        st.success(msg)
                         st.rerun()
                     except RuntimeError as exc:
                         st.error(str(exc))
@@ -672,12 +678,15 @@ if graph:
                                 _result = sector_themes_mod.classify_ticker_in_theme(
                                     ticker, company, sc_products, _tf,
                                 )
-                                data_manager.upsert_chain_position(
-                                    ticker, _theme_id,
-                                    _result.get("layer_index"),
-                                    _result.get("matched_items", []),
-                                )
-                                st.rerun()
+                                if _result.get("layer_index") is not None:
+                                    data_manager.upsert_chain_position(
+                                        ticker, _theme_id,
+                                        _result.get("layer_index"),
+                                        _result.get("matched_items", []),
+                                    )
+                                    st.rerun()
+                                else:
+                                    st.warning("AI could not determine layer — existing classification preserved.")
                             except RuntimeError as exc:
                                 st.error(str(exc))
                 else:
