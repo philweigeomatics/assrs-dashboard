@@ -3804,6 +3804,29 @@ if st.session_state.active_ticker:
                     st.warning("Not enough overlapping data to compute correlations.")
                     return
 
+                # ── CSI 300 broad-market benchmark ────────────────────────────
+                _CSI300_LABEL = "CSI 300 (沪深300)"
+                try:
+                    @st.cache_data(ttl=3600, show_spinner=False)
+                    def _load_csi300_ret(lb):
+                        _df = data_manager.get_index_data_live("000300.SH", lookback_days=lb)
+                        if _df is None or _df.empty:
+                            return None
+                        return _df["Close"].pct_change().dropna()
+
+                    _csi_ret = _load_csi300_ret(900)
+                    if _csi_ret is not None:
+                        _csi_aln = pd.concat(
+                            [stock_ret.rename("stock"), _csi_ret.rename("csi")], axis=1
+                        ).dropna()
+                        if len(_csi_aln) >= window + 5:
+                            _csi_roll = (
+                                _csi_aln["stock"].rolling(window=window).corr(_csi_aln["csi"])
+                            )
+                            all_rolling[_CSI300_LABEL] = _csi_roll.reindex(stock_ret.index)
+                except Exception:
+                    pass
+
                 # Current correlations — last non-NaN value in each series
                 current_corr: dict = {}
                 for s, series in all_rolling.items():
@@ -3821,9 +3844,11 @@ if st.session_state.active_ticker:
                 col_bar, col_info = st.columns([3, 1])
 
                 with col_bar:
+                    _CSI300_BAR_COLOR = "rgba(251,191,36,0.95)"
                     bar_colors = [
-                        "rgba(34,197,94,0.85)" if v >= 0 else "rgba(239,68,68,0.85)"
-                        for v in corr_series.values
+                        _CSI300_BAR_COLOR if s == _CSI300_LABEL
+                        else ("rgba(34,197,94,0.85)" if v >= 0 else "rgba(239,68,68,0.85)")
+                        for s, v in zip(corr_series.index, corr_series.values)
                     ]
                     fig_bar = go.Figure(go.Bar(
                         x=corr_series.values,
@@ -3938,6 +3963,7 @@ if st.session_state.active_ticker:
                         "#ec4899", "#64748b",
                     ]
                     color_map = {s: _PALETTE[i % len(_PALETTE)] for i, s in enumerate(sector_all)}
+                    color_map[_CSI300_LABEL] = "rgba(251,191,36,0.95)"  # amber — distinct from sector lines
 
                     fig_rot = make_subplots(
                         rows=2, cols=1,
