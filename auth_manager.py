@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import streamlit as st
+import streamlit.components.v1 as stc
 from db_manager import db
 
 
@@ -12,18 +13,6 @@ from db_manager import db
 
 COOKIE_NAME  = "assrs_session"   # browser cookie key
 SESSION_DAYS = 30                 # how long a login persists across tabs/restarts
-
-
-# ── Internal cookie-manager accessor ──────────────────────────────────────────
-
-def _cookie_manager():
-    """
-    Return the CookieManager component instance.
-    Using a fixed key means every call in the same render shares the same
-    component state — safe to call from multiple helpers in one render pass.
-    """
-    from extra_streamlit_components import CookieManager
-    return CookieManager(key="assrs_cm")
 
 
 # ── DB migration helpers ───────────────────────────────────────────────────────
@@ -281,10 +270,9 @@ def revoke_all_sessions(user_id: int) -> None:
 
 def _read_cookie_from_headers() -> str | None:
     """
-    Read the session cookie directly from the HTTP request headers.
-    st.context.headers is available in Streamlit ≥ 1.33 and is synchronous —
-    the cookie value is present on the very first render without any rerun.
-    Returns None if the header is absent or the cookie key is not found.
+    Read the session cookie from the HTTP request headers (st.context.headers,
+    Streamlit ≥ 1.33). This is synchronous — the cookie is present on the very
+    first render of a new tab with no async delay or extra rerun required.
     """
     try:
         cookie_header = st.context.headers.get("Cookie", "")
@@ -301,21 +289,37 @@ def _read_cookie_from_headers() -> str | None:
         return None  # st.context not available (Streamlit < 1.33)
 
 
+def _inject_cookie_js(cookie_str: str) -> None:
+    """
+    Write a raw Set-Cookie string to the browser via an inline script.
+    Streamlit component iframes are same-origin, so window.parent.document.cookie
+    is accessible and writes the cookie into the parent page's cookie jar.
+    height=0 keeps the component invisible.
+    """
+    stc.html(
+        f"<script>window.parent.document.cookie = {cookie_str!r};</script>",
+        height=0,
+    )
+
+
 def write_session_cookie(token: str) -> None:
-    """Write the session cookie to the browser via CookieManager."""
+    """Write the 30-day session cookie to the browser."""
     try:
-        cm      = _cookie_manager()
-        expires = datetime.now() + timedelta(days=SESSION_DAYS)
-        cm.set(COOKIE_NAME, token, expires_at=expires)
+        expires = datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)
+        expires_str = expires.strftime("%a, %d %b %Y %H:%M:%S GMT")
+        _inject_cookie_js(
+            f"{COOKIE_NAME}={token}; expires={expires_str}; path=/; SameSite=Lax"
+        )
     except Exception:
         pass
 
 
 def _delete_session_cookie() -> None:
-    """Delete the session cookie from the browser via CookieManager."""
+    """Delete the session cookie from the browser."""
     try:
-        cm = _cookie_manager()
-        cm.delete(COOKIE_NAME)
+        _inject_cookie_js(
+            f"{COOKIE_NAME}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax"
+        )
     except Exception:
         pass
 
@@ -325,33 +329,20 @@ def restore_session_from_cookie() -> bool:
     Try to restore the current_user from the browser session cookie.
     Call this in streamlit_app.py BEFORE the is_logged_in() routing check.
 
-    Reading strategy (most reliable first):
-      1. st.context.headers — reads the cookie from the HTTP request headers
-         synchronously on the very first render. No async delay, no rerun needed.
-      2. CookieManager fallback — for Streamlit < 1.33 only.
+    Reads the cookie directly from the HTTP request headers — synchronous,
+    available on the very first render, no rerun needed.
     """
     if is_logged_in():
         return True
-
     try:
-        # Primary path: read directly from HTTP headers (synchronous)
         token = _read_cookie_from_headers()
-
-        # Fallback: CookieManager iframe (async, needs one extra rerun)
-        if not token:
-            cm    = _cookie_manager()
-            token = cm.get(COOKIE_NAME)
-
         if not token:
             return False
-
         user = validate_session(token)
         if user:
             st.session_state["current_user"]        = user
             st.session_state["assrs_session_token"] = token
             return True
-
-        # Token is invalid or expired — remove the stale cookie
         _delete_session_cookie()
         return False
     except Exception:
