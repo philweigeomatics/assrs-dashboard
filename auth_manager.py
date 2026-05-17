@@ -279,11 +279,30 @@ def revoke_all_sessions(user_id: int) -> None:
 
 # ── Cookie read / write ────────────────────────────────────────────────────────
 
+def _read_cookie_from_headers() -> str | None:
+    """
+    Read the session cookie directly from the HTTP request headers.
+    st.context.headers is available in Streamlit ≥ 1.33 and is synchronous —
+    the cookie value is present on the very first render without any rerun.
+    Returns None if the header is absent or the cookie key is not found.
+    """
+    try:
+        cookie_header = st.context.headers.get("Cookie", "")
+        if not cookie_header:
+            return None
+        for part in cookie_header.split(";"):
+            part = part.strip()
+            if "=" in part:
+                k, v = part.split("=", 1)
+                if k.strip() == COOKIE_NAME:
+                    return v.strip()
+        return None
+    except AttributeError:
+        return None  # st.context not available (Streamlit < 1.33)
+
+
 def write_session_cookie(token: str) -> None:
-    """
-    Schedule writing the session cookie in the browser.
-    Must be followed by st.rerun() for the JS to execute.
-    """
+    """Write the session cookie to the browser via CookieManager."""
     try:
         cm      = _cookie_manager()
         expires = datetime.now() + timedelta(days=SESSION_DAYS)
@@ -293,7 +312,7 @@ def write_session_cookie(token: str) -> None:
 
 
 def _delete_session_cookie() -> None:
-    """Schedule deleting the session cookie in the browser."""
+    """Delete the session cookie from the browser via CookieManager."""
     try:
         cm = _cookie_manager()
         cm.delete(COOKIE_NAME)
@@ -306,20 +325,23 @@ def restore_session_from_cookie() -> bool:
     Try to restore the current_user from the browser session cookie.
     Call this in streamlit_app.py BEFORE the is_logged_in() routing check.
 
-    Returns True if a valid session was found and restored.
-
-    How it works:
-      - CookieManager renders a hidden component that reads browser cookies.
-      - On the very first render after a new tab opens, the component sends
-        cookie data back to Python and triggers an automatic rerun.
-      - On the second render the cookie value is available and the session is
-        restored transparently — the user never sees a login prompt.
+    Reading strategy (most reliable first):
+      1. st.context.headers — reads the cookie from the HTTP request headers
+         synchronously on the very first render. No async delay, no rerun needed.
+      2. CookieManager fallback — for Streamlit < 1.33 only.
     """
     if is_logged_in():
-        return True  # already have a live session in this tab
+        return True
+
     try:
-        cm    = _cookie_manager()
-        token = cm.get(COOKIE_NAME)
+        # Primary path: read directly from HTTP headers (synchronous)
+        token = _read_cookie_from_headers()
+
+        # Fallback: CookieManager iframe (async, needs one extra rerun)
+        if not token:
+            cm    = _cookie_manager()
+            token = cm.get(COOKIE_NAME)
+
         if not token:
             return False
 
@@ -330,7 +352,7 @@ def restore_session_from_cookie() -> bool:
             return True
 
         # Token is invalid or expired — remove the stale cookie
-        cm.delete(COOKIE_NAME)
+        _delete_session_cookie()
         return False
     except Exception:
         return False
