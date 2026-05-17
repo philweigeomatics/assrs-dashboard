@@ -910,7 +910,7 @@ with _tab2:
                     height=_sk_height,
                     margin=dict(l=10, r=10, t=10, b=10),
                     paper_bgcolor="#ffffff",
-                    font=dict(size=15, color="#64748b",
+                    font=dict(size=15, color="#0f172a",
                               family="system-ui, -apple-system, sans-serif"),
                 )
                 st.plotly_chart(_sk_fig, use_container_width=True)
