@@ -890,6 +890,11 @@ with _tab2:
                 _sk_height = max(550, _n_prod * 90 + _n_cos * 35 + 160)
                 _sk_fig = go.Figure(go.Sankey(
                     arrangement="snap",
+                    textfont=dict(
+                        color="#0f172a",
+                        size=14,
+                        family="system-ui, -apple-system, sans-serif",
+                    ),
                     node=dict(
                         label=_node_labels,
                         color=_node_colors,
@@ -910,7 +915,7 @@ with _tab2:
                     height=_sk_height,
                     margin=dict(l=10, r=10, t=10, b=10),
                     paper_bgcolor="#ffffff",
-                    font=dict(size=15, color="#0f172a",
+                    font=dict(size=14, color="#0f172a",
                               family="system-ui, -apple-system, sans-serif"),
                 )
                 st.plotly_chart(_sk_fig, use_container_width=True)
