@@ -348,6 +348,15 @@ if reset:
 if generate and len(ticker) == 6 and ticker.isdigit():
     st.session_state["eb_active_ticker"] = ticker
 
+# ── Peer link navigation — ?ticker=XXXXXX in URL ─────────────────────────────
+# Peer anchor links in the comparison table navigate here by appending
+# ?ticker=XXXXXX to the page URL.  We detect it, set session state, and
+# clear the query string so the URL stays clean on subsequent reruns.
+_qp_ticker = st.query_params.get("ticker", "").strip()
+if _qp_ticker and len(_qp_ticker) == 6 and _qp_ticker.isdigit():
+    st.session_state["eb_active_ticker"] = _qp_ticker
+    st.query_params.clear()
+
 active = st.session_state.get("eb_active_ticker")
 if not active:
     st.markdown(
@@ -1960,9 +1969,18 @@ def _competitors_section():
         annual_yr   = (r.get("roe_annual_period") or "")[:4] or "—"
         q_lbl       = (r.get("roe_q_period") or "")
         q_lbl_short = f"{q_lbl[:4]}-{q_lbl[4:6]}" if len(q_lbl) >= 6 else q_lbl or "—"
+        if r["is_target"]:
+            _name_cell = f'<strong>{r["ticker"]} {r["name"]}</strong>{target_marker}'
+        else:
+            _name_cell = (
+                f'<a href="?ticker={r["ticker"]}" '
+                f'style="color:var(--primary);text-decoration:underline;'
+                f'text-underline-offset:3px;font-weight:600;">'
+                f'{r["ticker"]} {r["name"]}</a>'
+            )
         rows_html += f"""
         <tr>
-          <td><strong>{r['ticker']} {r['name']}</strong>{target_marker}</td>
+          <td>{_name_cell}</td>
           <td class="num">{_fmt_num(r['pe'], 1)}</td>
           <td class="num">{_fmt_num(r['pb'], 2)}</td>
           <td class="num">{_fmt_num(r['ev_ebitda'], 1)}</td>
