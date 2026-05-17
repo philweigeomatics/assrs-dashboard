@@ -6,6 +6,13 @@ A-share Market Analysis Platform
 import streamlit as st
 import auth_manager
 
+# Ensure the app_sessions table exists (no-op on Supabase; auto-creates on SQLite)
+auth_manager.ensure_sessions_table()
+
+# Restore login from browser cookie before any routing decision.
+# On a fresh tab the CookieManager component needs one extra render to send
+# cookie data from the browser — Streamlit triggers that rerun automatically.
+auth_manager.restore_session_from_cookie()
 
 st.set_page_config(
     page_title="ASSRS Dashboard",

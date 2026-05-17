@@ -1,9 +1,80 @@
-"""auth_manager.py — Invitation-only login system"""
+"""auth_manager.py — Invitation-only login system with persistent cookie sessions."""
 import secrets
 import string
+from datetime import datetime, timedelta, timezone
+
 import bcrypt
 import streamlit as st
 from db_manager import db
+
+
+# ── Cookie / session constants ─────────────────────────────────────────────────
+
+COOKIE_NAME  = "assrs_session"   # browser cookie key
+SESSION_DAYS = 30                 # how long a login persists across tabs/restarts
+
+
+# ── Internal cookie-manager accessor ──────────────────────────────────────────
+
+def _cookie_manager():
+    """
+    Return the CookieManager component instance.
+    Using a fixed key means every call in the same render shares the same
+    component state — safe to call from multiple helpers in one render pass.
+    """
+    from extra_streamlit_components import CookieManager
+    return CookieManager(key="assrs_cm")
+
+
+# ── DB migration helpers ───────────────────────────────────────────────────────
+
+def ensure_must_change_password_column() -> None:
+    """
+    Idempotent migration: adds must_change_password column to app_users if missing.
+    Safe to call on every startup — no-ops if the column already exists.
+    SQLite only; Supabase column must be added via the dashboard.
+    """
+    from db_config import USE_SQLITE
+    if not USE_SQLITE:
+        return
+
+    from db_config import DBNAME
+    import sqlite3
+    with sqlite3.connect(DBNAME) as conn:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(app_users)").fetchall()]
+        if "must_change_password" not in cols:
+            conn.execute(
+                "ALTER TABLE app_users ADD COLUMN must_change_password BOOLEAN DEFAULT 0"
+            )
+            conn.commit()
+            print("✅ Added must_change_password column to app_users")
+
+
+def ensure_sessions_table() -> None:
+    """
+    Idempotent migration: creates app_sessions in SQLite if missing.
+    SQLite only — for Supabase run the SQL shown in the UI/README instead.
+    """
+    from db_config import USE_SQLITE
+    if not USE_SQLITE:
+        return
+
+    from db_config import DBNAME
+    import sqlite3
+    with sqlite3.connect(DBNAME) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_sessions (
+                token      TEXT    PRIMARY KEY,
+                user_id    INTEGER NOT NULL,
+                expires_at TEXT    NOT NULL,
+                created_at TEXT    DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sess_uid ON app_sessions(user_id)"
+        )
+        conn.commit()
+    print("✅ app_sessions table ready (SQLite)")
 
 
 # ── Password utilities ─────────────────────────────────────────────────────────
@@ -19,7 +90,6 @@ def verify_password(plain: str, hashed: str) -> bool:
 def generate_temp_password(length: int = 12) -> str:
     """Generates a random alphanumeric temp password (no ambiguous chars)."""
     alphabet = string.ascii_letters + string.digits
-    # Remove visually ambiguous characters: 0, O, I, l
     alphabet = alphabet.translate(str.maketrans("", "", "0OIl"))
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
@@ -43,11 +113,9 @@ def create_user(username: str, password: str, email: str = None, role: str = "us
 def invite_user(username: str, email: str, role: str = "user") -> str:
     """
     Create an invited user with a temporary password.
-
     Returns the plain-text temp password so the caller can email it.
     Raises ValueError if username or email already exists.
     """
-    # Uniqueness checks
     existing_username = db.read_table("app_users", filters={"username": username})
     if not existing_username.empty:
         raise ValueError(f"Username '{username}' is already taken.")
@@ -72,7 +140,14 @@ def invite_user(username: str, email: str, role: str = "user") -> str:
 
 
 def change_password(username: str, new_password: str) -> None:
-    """Update password hash and clear the must_change_password flag."""
+    """
+    Update password hash, clear must_change_password, and revoke all existing
+    sessions so old cookies can no longer be used.
+    """
+    user_df = db.read_table("app_users", filters={"username": username})
+    if not user_df.empty:
+        revoke_all_sessions(int(user_df.iloc[0]["id"]))
+
     db.update_records(
         "app_users",
         update_values={
@@ -84,7 +159,6 @@ def change_password(username: str, new_password: str) -> None:
 
 
 def set_user_active(username: str, is_active: bool) -> None:
-    """Activate or deactivate a user account."""
     db.update_records(
         "app_users",
         update_values={"is_active": is_active},
@@ -93,7 +167,6 @@ def set_user_active(username: str, is_active: bool) -> None:
 
 
 def set_user_role(username: str, role: str) -> None:
-    """Change a user's role (user / admin)."""
     db.update_records(
         "app_users",
         update_values={"role": role},
@@ -134,7 +207,136 @@ def login(username_or_email: str, password: str):
     return None
 
 
-# ── Session helpers ────────────────────────────────────────────────────────────
+# ── Persistent session management ─────────────────────────────────────────────
+
+def create_session(user_id: int) -> str:
+    """
+    Mint a cryptographically random token, persist it in app_sessions, and
+    return the token string. Call immediately after login; pass the token to
+    write_session_cookie() before st.rerun().
+    """
+    token   = secrets.token_hex(32)
+    expires = datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)
+    db.insert_records("app_sessions", [{
+        "token":      token,
+        "user_id":    int(user_id),
+        "expires_at": expires.isoformat(),
+    }])
+    return token
+
+
+def validate_session(token: str) -> dict | None:
+    """
+    Validate a session token: checks existence, expiry, and user status.
+    Deletes expired tokens on the fly.
+    Returns the user dict on success, None otherwise.
+    """
+    if not token:
+        return None
+    try:
+        df = db.read_table("app_sessions", filters={"token": token})
+        if df.empty:
+            return None
+
+        row     = df.iloc[0]
+        exp_raw = str(row["expires_at"]).replace("Z", "+00:00")
+        exp     = datetime.fromisoformat(exp_raw)
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+
+        if datetime.now(timezone.utc) > exp:
+            db.delete_records("app_sessions", {"token": token})
+            return None
+
+        user_df = db.read_table("app_users", filters={"id": int(row["user_id"])})
+        if user_df.empty:
+            return None
+
+        user = user_df.iloc[0].to_dict()
+        return user if user.get("is_active", True) else None
+
+    except Exception:
+        return None
+
+
+def revoke_session(token: str) -> None:
+    """Delete a specific session token from the DB."""
+    if not token:
+        return
+    try:
+        db.delete_records("app_sessions", {"token": token})
+    except Exception:
+        pass
+
+
+def revoke_all_sessions(user_id: int) -> None:
+    """Delete every session for a user (called on password change)."""
+    try:
+        db.delete_records("app_sessions", {"user_id": int(user_id)})
+    except Exception:
+        pass
+
+
+# ── Cookie read / write ────────────────────────────────────────────────────────
+
+def write_session_cookie(token: str) -> None:
+    """
+    Schedule writing the session cookie in the browser.
+    Must be followed by st.rerun() for the JS to execute.
+    """
+    try:
+        cm      = _cookie_manager()
+        expires = datetime.now() + timedelta(days=SESSION_DAYS)
+        cm.set(COOKIE_NAME, token, expires_at=expires)
+    except Exception:
+        pass
+
+
+def _delete_session_cookie() -> None:
+    """Schedule deleting the session cookie in the browser."""
+    try:
+        cm = _cookie_manager()
+        cm.delete(COOKIE_NAME)
+    except Exception:
+        pass
+
+
+def restore_session_from_cookie() -> bool:
+    """
+    Try to restore the current_user from the browser session cookie.
+    Call this in streamlit_app.py BEFORE the is_logged_in() routing check.
+
+    Returns True if a valid session was found and restored.
+
+    How it works:
+      - CookieManager renders a hidden component that reads browser cookies.
+      - On the very first render after a new tab opens, the component sends
+        cookie data back to Python and triggers an automatic rerun.
+      - On the second render the cookie value is available and the session is
+        restored transparently — the user never sees a login prompt.
+    """
+    if is_logged_in():
+        return True  # already have a live session in this tab
+    try:
+        cm    = _cookie_manager()
+        token = cm.get(COOKIE_NAME)
+        if not token:
+            return False
+
+        user = validate_session(token)
+        if user:
+            st.session_state["current_user"]        = user
+            st.session_state["assrs_session_token"] = token
+            return True
+
+        # Token is invalid or expired — remove the stale cookie
+        cm.delete(COOKIE_NAME)
+        return False
+    except Exception:
+        return False
+
+
+# ── Session-state helpers ──────────────────────────────────────────────────────
 
 def get_current_user():
     return st.session_state.get("current_user", None)
@@ -154,45 +356,40 @@ def is_admin() -> bool:
     return user is not None and user.get("role") == "admin"
 
 
-def logout():
+def logout() -> None:
+    """
+    Full logout: revoke the DB session token, delete the browser cookie,
+    and clear session state. The caller should call st.rerun() after this.
+    """
+    token = st.session_state.pop("assrs_session_token", None)
+    if token:
+        revoke_session(token)
     st.session_state.pop("current_user", None)
+    _delete_session_cookie()
 
 
-def require_login():
-    """Call at top of any protected page. Stops rendering if not logged in."""
-    if not is_logged_in():
-        st.warning("🔒 Please log in to access this page.")
-        st.page_link("Login.py", label="Go to Login", icon="🔐")
-        st.stop()
+def require_login() -> None:
+    """
+    Call at the top of any protected page.
+    Stops rendering (st.stop()) if the user is not authenticated and no
+    valid browser cookie can restore the session.
+    """
+    if is_logged_in():
+        return
+
+    # Fallback: try restoring from cookie in case this page was opened
+    # before streamlit_app.py had a chance to run restore_session_from_cookie().
+    if restore_session_from_cookie():
+        return
+
+    st.warning("🔒 Please log in to access this page.")
+    st.page_link("Login.py", label="Go to Login", icon="🔐")
+    st.stop()
 
 
-def require_admin():
+def require_admin() -> None:
     """Call at top of admin-only pages."""
     require_login()
     if not is_admin():
         st.error("⛔ Admin access required.")
         st.stop()
-
-
-# ── DB migration helper ────────────────────────────────────────────────────────
-
-def ensure_must_change_password_column() -> None:
-    """
-    Idempotent migration: adds must_change_password column to app_users if missing.
-    Safe to call on every startup — no-ops if the column already exists.
-    SQLite only; Supabase column must be added via the dashboard.
-    """
-    from db_config import USE_SQLITE
-    if not USE_SQLITE:
-        return  # Supabase: DBNAME isn't defined in this branch — add column manually
-
-    from db_config import DBNAME
-    import sqlite3
-    with sqlite3.connect(DBNAME) as conn:
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(app_users)").fetchall()]
-        if "must_change_password" not in cols:
-            conn.execute(
-                "ALTER TABLE app_users ADD COLUMN must_change_password BOOLEAN DEFAULT 0"
-            )
-            conn.commit()
-            print("✅ Added must_change_password column to app_users")

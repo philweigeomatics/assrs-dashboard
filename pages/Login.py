@@ -2,8 +2,9 @@
 import streamlit as st
 import auth_manager
 
-# Run idempotent migration on every start (no-op after first run)
+# Run idempotent migrations on every start (no-ops after first run)
 auth_manager.ensure_must_change_password_column()
+auth_manager.ensure_sessions_table()
 
 st.set_page_config(page_title="Login | 登录", page_icon="🔐", layout="centered")
 
@@ -38,11 +39,14 @@ if pending:
             st.error("❌ Password must be at least 8 characters.")
         else:
             try:
+                # change_password() revokes all old sessions before updating hash
                 auth_manager.change_password(pending["username"], pw1)
-                # Refresh user row so must_change_password is cleared in session
                 updated = auth_manager.login(pending["username"], pw1)
+                token   = auth_manager.create_session(updated["id"])
                 st.session_state.pop("_pending_user", None)
-                st.session_state["current_user"] = updated
+                st.session_state["current_user"]        = updated
+                st.session_state["assrs_session_token"] = token
+                auth_manager.write_session_cookie(token)
                 st.success("✅ Password set! Logging you in…")
                 st.rerun()
             except Exception as exc:
@@ -74,7 +78,10 @@ if submitted:
             st.session_state["_pending_user"] = user
             st.rerun()
         else:
-            st.session_state["current_user"] = user
+            token = auth_manager.create_session(user["id"])
+            st.session_state["current_user"]        = user
+            st.session_state["assrs_session_token"] = token
+            auth_manager.write_session_cookie(token)
             st.success(f"✅ Welcome, **{user['username']}**!")
             st.rerun()
 
