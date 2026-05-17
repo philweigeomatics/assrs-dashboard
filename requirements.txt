@@ -1,4 +1,5 @@
 streamlit>=1.33.0
+extra-streamlit-components
 pandas
 numpy
 plotly

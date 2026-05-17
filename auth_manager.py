@@ -288,50 +288,41 @@ def _read_cookie_from_headers() -> str | None:
         return None  # st.context not available (Streamlit < 1.33)
 
 
-def _inject_cookie_js(cookie_str: str) -> None:
+def _cookie_manager():
     """
-    Write a cookie to the parent page using an inline event handler.
-
-    Why not st.components.v1.html? On Streamlit Cloud, component iframes are
-    rendered with sandbox restrictions that strip allow-same-origin, so
-    window.parent.document.cookie throws a SecurityError. The cookie write
-    silently fails — works on localhost, breaks in production.
-
-    Why not <script>? Scripts injected via innerHTML never execute (browser
-    restriction). React's dangerouslySetInnerHTML — which st.html uses — has
-    the same limitation.
-
-    Why <img onerror>? Inline event-handler attributes ARE parsed and fired
-    when the element is created via innerHTML. The img attempts to load a bad
-    src, fires onerror, and the JS runs in the parent page's JS context — so
-    document.cookie writes to the actual app's cookie jar.
-
-    cookie_str contains only hex token chars and standard cookie syntax
-    (no quotes), so single-quoting the JS string is safe without escaping.
+    Return the CookieManager component. Fixed key so multiple calls in the
+    same render share state. CookieManager is a real Streamlit component
+    loaded from Streamlit's component endpoint, so it's whitelisted by
+    Streamlit Cloud's Content Security Policy (unlike inline <script> /
+    onerror handlers, which CSP blocks).
     """
-    st.html(
-        f"""<img src="x" onerror="document.cookie='{cookie_str}'; this.remove();" style="display:none">"""
-    )
+    from extra_streamlit_components import CookieManager
+    return CookieManager(key="assrs_cm")
 
 
 def write_session_cookie(token: str) -> None:
-    """Write the 30-day session cookie to the browser."""
+    """
+    Write the 30-day session cookie via the CookieManager component.
+
+    IMPORTANT: do NOT call st.rerun() immediately after this. The component
+    iframe needs the current render to remain mounted long enough for its JS
+    to execute document.cookie. Callers should set st.session_state for the
+    user and let the natural render cycle (or a deferred rerun on the next
+    user action) flush the cookie.
+    """
     try:
-        expires = datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)
-        expires_str = expires.strftime("%a, %d %b %Y %H:%M:%S GMT")
-        _inject_cookie_js(
-            f"{COOKIE_NAME}={token}; expires={expires_str}; path=/; SameSite=Lax"
-        )
+        cm      = _cookie_manager()
+        expires = datetime.now() + timedelta(days=SESSION_DAYS)
+        cm.set(COOKIE_NAME, token, expires_at=expires)
     except Exception:
         pass
 
 
 def _delete_session_cookie() -> None:
-    """Delete the session cookie from the browser."""
+    """Delete the session cookie via the CookieManager component."""
     try:
-        _inject_cookie_js(
-            f"{COOKIE_NAME}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax"
-        )
+        cm = _cookie_manager()
+        cm.delete(COOKIE_NAME)
     except Exception:
         pass
 

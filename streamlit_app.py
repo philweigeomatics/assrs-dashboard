@@ -19,6 +19,15 @@ auth_manager.ensure_sessions_table()
 # Restore login from browser cookie before any routing decision.
 auth_manager.restore_session_from_cookie()
 
+# Flush a deferred cookie write from the previous login render. The
+# CookieManager iframe runs JS to call document.cookie — that JS needs the
+# component to stay mounted long enough to execute. By writing here (on the
+# render right AFTER login's st.rerun), there's no immediate rerun chaser
+# unmounting the iframe before it fires.
+_pending_token = st.session_state.pop("_pending_cookie_write", None)
+if _pending_token:
+    auth_manager.write_session_cookie(_pending_token)
+
 # ── Always define login page ─────────────────────────────────────────
 login_page = st.Page("pages/Login.py", title="Login 登录", icon="🔐")
 

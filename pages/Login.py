@@ -46,7 +46,9 @@ if pending:
                 st.session_state.pop("_pending_user", None)
                 st.session_state["current_user"]        = updated
                 st.session_state["assrs_session_token"] = token
-                auth_manager.write_session_cookie(token)
+                # Defer cookie write to next render (see streamlit_app.py) to
+                # avoid the iframe race with st.rerun().
+                st.session_state["_pending_cookie_write"] = token
                 st.success("✅ Password set! Logging you in…")
                 st.rerun()
             except Exception as exc:
@@ -81,7 +83,9 @@ if submitted:
             token = auth_manager.create_session(user["id"])
             st.session_state["current_user"]        = user
             st.session_state["assrs_session_token"] = token
-            auth_manager.write_session_cookie(token)
+            # Defer cookie write to next render (see streamlit_app.py) to
+            # avoid the iframe race with st.rerun().
+            st.session_state["_pending_cookie_write"] = token
             st.success(f"✅ Welcome, **{user['username']}**!")
             st.rerun()
 
