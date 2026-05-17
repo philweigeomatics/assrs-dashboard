@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import streamlit as st
-import streamlit.components.v1 as stc
 from db_manager import db
 
 
@@ -291,14 +290,27 @@ def _read_cookie_from_headers() -> str | None:
 
 def _inject_cookie_js(cookie_str: str) -> None:
     """
-    Write a raw Set-Cookie string to the browser via an inline script.
-    Streamlit component iframes are same-origin, so window.parent.document.cookie
-    is accessible and writes the cookie into the parent page's cookie jar.
-    height=0 keeps the component invisible.
+    Write a cookie to the parent page using an inline event handler.
+
+    Why not st.components.v1.html? On Streamlit Cloud, component iframes are
+    rendered with sandbox restrictions that strip allow-same-origin, so
+    window.parent.document.cookie throws a SecurityError. The cookie write
+    silently fails — works on localhost, breaks in production.
+
+    Why not <script>? Scripts injected via innerHTML never execute (browser
+    restriction). React's dangerouslySetInnerHTML — which st.html uses — has
+    the same limitation.
+
+    Why <img onerror>? Inline event-handler attributes ARE parsed and fired
+    when the element is created via innerHTML. The img attempts to load a bad
+    src, fires onerror, and the JS runs in the parent page's JS context — so
+    document.cookie writes to the actual app's cookie jar.
+
+    cookie_str contains only hex token chars and standard cookie syntax
+    (no quotes), so single-quoting the JS string is safe without escaping.
     """
-    stc.html(
-        f"<script>window.parent.document.cookie = {cookie_str!r};</script>",
-        height=0,
+    st.html(
+        f"""<img src="x" onerror="document.cookie='{cookie_str}'; this.remove();" style="display:none">"""
     )
 
 
