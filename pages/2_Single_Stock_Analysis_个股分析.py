@@ -1496,7 +1496,7 @@ def create_single_stock_chart_analysis(
         # Green = comparison outperforming, Red = main outperforming
         main_pct = (df['Close'] / main_first - 1) * 100
         comp_pct = (comp_aligned['Close'] / comp_first - 1) * 100
-        rel      = comp_pct.reindex(main_pct.index).fillna(method='ffill') - main_pct
+        rel      = comp_pct.reindex(main_pct.index).ffill() - main_pct
 
         rel_vals = rel.fillna(0)
         pos_vals = rel_vals.clip(lower=0)
@@ -2909,11 +2909,11 @@ if st.session_state.active_ticker:
                 # ── Controls row ─────────────────────────────────────────────
                 ctrl_l, ctrl_r = st.columns([3, 2])
                 with ctrl_l:
-                    comp_input = st.text_input(
-                        "📊 Compare with another stock (optional — 6-digit code)",
-                        value="",
-                        placeholder="e.g. 600036",
-                        key="comp_ticker_input",
+                    comp_pick = st.selectbox(
+                        "📊 Compare with another stock (optional)",
+                        options=_all_stock_options(),
+                        key="comp_ticker_pick",
+                        format_func=lambda x: "Type to search… (code or name)" if x == "" else x,
                         help="Overlay a second stock on the price chart. "
                              "Changing the ticker or scale mode only rerenders the chart.",
                     )
@@ -2937,7 +2937,7 @@ if st.session_state.active_ticker:
                 # ── Load comparison data ──────────────────────────────────────
                 comp_df_overlay   = None
                 comp_name_overlay = "Comparison"
-                _comp = comp_input.strip().split()[0] if comp_input.strip() else ""
+                _comp = (comp_pick or "").split(" · ")[0].strip()
                 if _comp and _comp.isdigit() and len(_comp) == 6:
                     try:
                         with st.spinner(f"Loading {_comp}…"):
