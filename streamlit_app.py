@@ -33,10 +33,30 @@ login_page = st.Page("pages/Login.py", title="Login 登录", icon="🔐")
 
 
 if not auth_manager.is_logged_in():
-    # Only login page available
+    # On the very first render of a new tab, the CookieManager iframe is
+    # still loading and cm.get() returns None. Calling st.navigation here
+    # would force the URL to the login page, losing the user's originally
+    # requested page (e.g. /Interaction_Lab → ends up on default dashboard
+    # after the cookie restore rerun).
+    #
+    # Instead, render only a loading message and stop. The URL stays
+    # untouched. When the CookieManager iframe responds with the cookie
+    # value, Streamlit auto-reruns; on that rerun is_logged_in() is True
+    # and st.navigation routes to whatever the URL says.
+    if not st.session_state.get("_cookie_check_attempted"):
+        st.session_state["_cookie_check_attempted"] = True
+        st.info("🔄 Restoring session…")
+        st.stop()
+
+    # CookieManager has responded with no valid cookie — really need login
     pg = st.navigation([login_page])
     pg.run()
     st.stop()
+
+# Logged in — clear the check flag so logout → re-login still gets a clean
+# restore attempt on any new tabs (those tabs get fresh session_state anyway,
+# but this keeps the same-tab state tidy).
+st.session_state.pop("_cookie_check_attempted", None)
 
 
 user = auth_manager.get_current_user();
