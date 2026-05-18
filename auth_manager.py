@@ -332,20 +332,36 @@ def restore_session_from_cookie() -> bool:
     Try to restore the current_user from the browser session cookie.
     Call this in streamlit_app.py BEFORE the is_logged_in() routing check.
 
-    Reads the cookie directly from the HTTP request headers — synchronous,
-    available on the very first render, no rerun needed.
+    Reading strategy (fast path first, reliable fallback):
+      1. st.context.headers["Cookie"] — synchronous, available on the very
+         first render. Works on localhost. On Streamlit Cloud the reverse
+         proxy may not pass the Cookie header through to the WebSocket app,
+         in which case this returns None.
+      2. CookieManager.get(...) — reads document.cookie via an iframe and
+         sends the value back to Python. Async: returns None on the first
+         render, then the iframe's response triggers a Streamlit rerun, and
+         on that next render the value is cached and available. There is a
+         brief flash of the login page on the very first new-tab render, but
+         subsequent renders restore the session correctly.
     """
     if is_logged_in():
         return True
     try:
         token = _read_cookie_from_headers()
+
+        if not token:
+            cm    = _cookie_manager()
+            token = cm.get(COOKIE_NAME)
+
         if not token:
             return False
+
         user = validate_session(token)
         if user:
             st.session_state["current_user"]        = user
             st.session_state["assrs_session_token"] = token
             return True
+
         _delete_session_cookie()
         return False
     except Exception:
