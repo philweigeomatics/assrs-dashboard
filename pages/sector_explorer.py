@@ -20,6 +20,7 @@ import data_manager
 import db_config
 import peer_discovery
 import sector_themes
+from nav_helpers import page_link_button, join_tickers
 from rebuild_runner import start_rebuild_thread
 
 try:
@@ -90,16 +91,16 @@ def _render_phase2(valid_for_p2: list, validation: dict, pk_suffix: str) -> None
     with p2_nav_col:
         st.write(""); st.write("")
         _p2_cur = (st.session_state.get(p2_select_key) or "").strip()
-        if _p2_cur and st.button(
+        _p2_t = _p2_cur.split(" · ")[0].strip() if _p2_cur else ""
+        page_link_button(
+            "single-stock-analysis",
             "📈 Single Stock Analysis",
-            key=f"se_p2_goto_ssa_{pk_suffix}",
+            params={"ticker": _p2_t},
+            disabled=not _p2_t,
             use_container_width=True,
-            help="Open this stock in Single Stock Analysis.",
-        ):
-            _p2_t = _p2_cur.split(" · ")[0].strip()
-            st.session_state["active_ticker"]  = _p2_t
-            st.session_state["ssa_stock_pick"] = _p2_cur
-            st.switch_page("pages/2_Single_Stock_Analysis_个股分析.py")
+            help="Open this stock in Single Stock Analysis. "
+                 "Middle-click / right-click → Open in new tab.",
+        )
 
     p2_pick = (st.session_state.get(p2_select_key) or "").strip()
     if not p2_pick:
@@ -602,21 +603,22 @@ with _tab1:
                                 st.error("Save failed — check DB connection.")
 
                 with pt_col:
-                    if st.button(
+                    page_link_button(
+                        "pair-trader",
                         f"🔗 Analyse {n_act} in Pair Trader",
-                        key="se_to_pt_btn",
+                        params={
+                            "tickers": join_tickers(act_tickers),
+                            "from":    f"{selected}  ·  {sector_name}",
+                        },
                         disabled=n_act < 2,
                         use_container_width=True,
                         help=(
                             "Need at least 2 checked ✅ stocks for pair analysis."
                             if n_act < 2 else
-                            f"Send {n_act} checked stocks to Pair Trader."
+                            f"Send {n_act} checked stocks to Pair Trader. "
+                            "Middle-click / right-click → Open in new tab."
                         ),
-                    ):
-                        st.session_state["pt_preload_tickers"]  = "\n".join(act_tickers)
-                        st.session_state["pt_from_sector"]      = True
-                        st.session_state["pt_from_sector_name"] = f"{selected}  ·  {sector_name}"
-                        st.switch_page("pages/pair_trader.py")
+                    )
 
                 with cap_col:
                     if n_act == 0:
@@ -959,16 +961,17 @@ with _tab2:
                 _sk_act_cols = st.columns([2, 5])
 
             with _sk_act_cols[0]:
-                if st.button(
+                page_link_button(
+                    "pair-trader",
                     f"🔗 Pair Trader ({_n_sk})",
-                    key=f"sk_to_pt_{chosen_id}_{sel_layer_idx}",
+                    params={
+                        "tickers": join_tickers(_sk_tickers),
+                        "from":    f"{sel_tab2_layer}  ·  {theme['formal_name']}",
+                    },
                     disabled=_n_sk < 2,
                     use_container_width=True,
-                ):
-                    st.session_state["pt_preload_tickers"]  = "\n".join(_sk_tickers)
-                    st.session_state["pt_from_sector"]      = True
-                    st.session_state["pt_from_sector_name"] = f"{sel_tab2_layer}  ·  {theme['formal_name']}"
-                    st.switch_page("pages/pair_trader.py")
+                    help="Middle-click / right-click → Open in new tab.",
+                )
 
             if is_admin:
                 with _sk_act_cols[1]:

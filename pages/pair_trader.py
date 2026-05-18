@@ -946,6 +946,16 @@ def run_all_pairs(
 # PAGE LAYOUT
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ── Cross-page deep link: ?tickers=600036,000001&from=Banks ──────────────────
+from nav_helpers import consume_query_params as _consume_qp, split_tickers as _split_t
+_qp = _consume_qp("tickers", "from")
+if _qp.get("tickers"):
+    _ts = _split_t(_qp["tickers"])
+    if _ts:
+        st.session_state["pt_preload_tickers"]  = "\n".join(_ts)
+        st.session_state["pt_from_sector"]      = True
+        st.session_state["pt_from_sector_name"] = _qp.get("from", "Cross-page link")
+
 if "pt_preload_tickers" in st.session_state:
     st.session_state["pt_ticker_input"] = st.session_state.pop("pt_preload_tickers")
 

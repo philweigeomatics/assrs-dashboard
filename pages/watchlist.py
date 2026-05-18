@@ -17,6 +17,7 @@ import pandas as pd
 import data_manager
 import auth_manager
 import supply_chain_ui
+from nav_helpers import page_link_button
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _all_stock_options_wl():
@@ -127,12 +128,6 @@ with st.expander("📥 Bulk Import | 批量导入", expanded=False):
             st.warning("⚠️ Please paste ticker codes")
 
 st.markdown("---")
-
-# ── Navigation bridge (st.switch_page can't run inside a fragment) ─────────────
-if st.session_state.get("_goto_analysis"):
-    ticker = st.session_state.pop("_goto_analysis")
-    st.session_state.active_ticker = ticker
-    st.switch_page("pages/2_Single_Stock_Analysis_个股分析.py")
 
 
 # ── Watchlist Grid (fragment-scoped) ───────────────────────────────────────────
@@ -257,9 +252,16 @@ def _watchlist_grid():
     else:
         ca, cg, cr, _ = st.columns([1.2, 1.6, 1.2, 3.5])
 
-    if ca.button("🔍 Analyze", type="primary", use_container_width=True):
-        st.session_state["_goto_analysis"] = sel_ticker
-        st.rerun(scope="app")
+    with ca:
+        page_link_button(
+            "single-stock-analysis",
+            "🔍 Analyze",
+            params={"ticker": sel_ticker},
+            style="primary",
+            use_container_width=True,
+            help="Open in Single Stock Analysis. "
+                 "Middle/right-click → Open in new tab.",
+        )
 
     if has_graph:
         if cv.button("📊 View Graph", use_container_width=True):

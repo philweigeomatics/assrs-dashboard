@@ -13,6 +13,7 @@ import time
 st.title("📊 Sector Stock Selector 板块个股选择器")
 
 import auth_manager
+from nav_helpers import page_link_button, join_tickers
 auth_manager.require_login()
 
 # Load sector map from DB (falls back to hardcoded if DB unavailable)
@@ -506,19 +507,19 @@ with _btn_col:
         if _n_sel == 0
         else f"🔗 Send {_n_sel} stock{'s' if _n_sel != 1 else ''} → Pair Trader"
     )
-    if st.button(
+    page_link_button(
+        "pair-trader",
         _btn_label,
+        params={
+            "tickers": join_tickers(_selected_tickers),
+            "from":    st.session_state.get("loaded_sector", "Sector Selector"),
+        },
         disabled=(_n_sel == 0),
-        type="primary",
+        style="primary",
         use_container_width=True,
-        key="send_to_pair_trader_btn",
-        help="Tick at least 2 stocks in the ✅ column to enable",
-    ):
-        st.session_state["pt_preload_tickers"]   = "\n".join(_selected_tickers)
-        st.session_state["pt_from_sector"]       = True
-        st.session_state["pt_from_sector_name"]  = st.session_state.get("loaded_sector", "Sector Selector")
-        # ⚠️  Adjust this path to match your actual Pair Trader page filename
-        st.switch_page("pages/pair_trader.py")
+        help="Tick at least 2 stocks in the ✅ column to enable. "
+             "Middle/right-click → Open in new tab.",
+    )
 
 with _info_col:
     if _n_sel == 0:
@@ -790,10 +791,15 @@ cols = st.columns(num_cols)
 for idx, row in risk_df.iterrows():
     col_idx = idx % num_cols
     with cols[col_idx]:
-        button_label = f"{row['Name'][:12]}...\n{row['Ticker']}"
-        if st.button(button_label, key=f"btn_{row['Ticker']}", use_container_width=True):
-            st.session_state.active_ticker = row['Ticker']
-            st.switch_page("pages/2_Single_Stock_Analysis_个股分析.py")
+        button_label = f"{row['Name'][:12]}… · {row['Ticker']}"
+        page_link_button(
+            "single-stock-analysis",
+            button_label,
+            params={"ticker": row['Ticker']},
+            use_container_width=True,
+            help=f"Open {row['Name']} in Single Stock Analysis. "
+                 "Middle/right-click → Open in new tab.",
+        )
 
 # ============================================================================
 # SECTION 3: RISK-RETURN SCATTER PLOT

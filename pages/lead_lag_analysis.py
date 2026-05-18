@@ -33,6 +33,15 @@ import supply_chain_ui
 
 auth_manager.require_login()
 
+# ── Cross-page deep link: ?ticker=600036 ──────────────────────────────────────
+from nav_helpers import consume_query_params as _consume_qp
+_qp = _consume_qp("ticker")
+if _qp.get("ticker"):
+    _t = _qp["ticker"]
+    if _t.isdigit() and len(_t) == 6:
+        st.session_state["ll_active_ticker"] = _t
+        st.session_state["ll_ticker"] = _t
+
 # ── Page Header ────────────────────────────────────────────────────────────────
 st.title("📊 Lead-Lag Analysis | 领先滞后分析")
 st.caption("Phase 1 · Dominant Edge Detection 主导环节识别")

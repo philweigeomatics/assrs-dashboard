@@ -43,8 +43,8 @@ pages = {
         st.Page("pages/sector_performance_rotation.py", title="Rotation 轮动"),
     ],
     "📈 Stock 股票": [
-        st.Page("pages/Equity_Brief.py", title="Equity Report 个股研报"),
-        st.Page("pages/2_Single_Stock_Analysis_个股分析.py", title="Technical Analysis 技术分析"),
+        st.Page("pages/Equity_Brief.py", title="Equity Report 个股研报", url_path="equity-brief"),
+        st.Page("pages/2_Single_Stock_Analysis_个股分析.py", title="Technical Analysis 技术分析", url_path="single-stock-analysis"),
         st.Page("pages/sector_stock_selector.py", title="Stock Selector 选股器"),
         st.Page("pages/watchlist.py", title="Watchlist 观察名单"),
         st.Page("pages/watchlist_earnings_calendar.py", title="Earnings Calendar 财报日历"),
@@ -57,8 +57,8 @@ pages = {
     ],
     "🌊 Strategy 策略": [
         st.Page("pages/wave_trader.py", title="Wave Trader 波段交易"),
-        st.Page("pages/pair_trader.py", title="Pair Trader 配对交易"),
-        st.Page("pages/lead_lag_analysis.py", title="Lead-Lag 领先滞后"),
+        st.Page("pages/pair_trader.py", title="Pair Trader 配对交易", url_path="pair-trader"),
+        st.Page("pages/lead_lag_analysis.py", title="Lead-Lag 领先滞后", url_path="lead-lag"),
     ],
     "🔔 Alerts 提示": [
         st.Page("pages/4_Todays_Alerts_今日提醒.py", title="Today's Alerts 今日提醒"),
@@ -72,7 +72,7 @@ pages = {
 if auth_manager.is_admin():
     pages["⚙️ Admin"] = [
         st.Page("pages/Admin_Invite_Users.py", title="Invite Users 邀请用户", icon="👥"),
-        st.Page("pages/Admin_Sector_Management.py", title="Sector Management 板块管理", icon="⚙️"),
+        st.Page("pages/Admin_Sector_Management.py", title="Sector Management 板块管理", icon="⚙️", url_path="admin-sector-management"),
     ]
 
 

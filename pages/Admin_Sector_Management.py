@@ -29,6 +29,15 @@ st.set_page_config(
 
 auth_manager.require_admin()
 
+# ── Cross-page deep link: ?tickers=600036,000001&sector_name=NewSector ────────
+from nav_helpers import consume_query_params as _consume_qp, split_tickers as _split_t
+_qp = _consume_qp("tickers", "sector_name")
+if _qp.get("tickers"):
+    _ts = _split_t(_qp["tickers"])
+    if _ts:
+        st.session_state["_new_sector_stocks"]   = _ts
+        st.session_state["_preseed_sector_name"] = _qp.get("sector_name", "")
+
 st.title("⚙️ Sector Management")
 st.caption("Admin only — changes here affect PPI calculations and all downstream analysis.")
 

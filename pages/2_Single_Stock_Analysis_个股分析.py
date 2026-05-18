@@ -1640,6 +1640,14 @@ def create_single_stock_chart_analysis(
 if 'active_ticker' not in st.session_state:
     st.session_state.active_ticker = None
 
+# ── Cross-page deep link: ?ticker=600036 ──────────────────────────────────────
+from nav_helpers import consume_query_params as _consume_qp
+_qp = _consume_qp("ticker")
+if _qp.get("ticker"):
+    _t = _qp["ticker"]
+    if _t.isdigit() and len(_t) == 6:
+        st.session_state.active_ticker = _t
+
 def set_active_ticker(ticker: str):
     """Set active ticker (called from history or external links)."""
     st.session_state.active_ticker = ticker

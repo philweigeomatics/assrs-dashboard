@@ -25,6 +25,7 @@ import sector_themes as sector_themes_mod
 import supply_chain_ui
 import trading_strategy
 from analysis_engine import run_single_stock_analysis
+from nav_helpers import page_link_button
 
 auth_manager.require_login()
 equity_brief.ensure_equity_brief_cache_table()
@@ -1341,24 +1342,23 @@ else:
 # ── Links to related pages ───────────────────────────────────────────────────
 _tc1, _tc2, _tc3 = st.columns([4, 1, 1])
 with _tc2:
-    if st.button(
+    page_link_button(
+        "single-stock-analysis",
         "Full Analysis →",
-        key="eb_goto_ssa",
+        params={"ticker": ticker},
         use_container_width=True,
-        help="Open Stock Analysis page pre-loaded with this stock",
-    ):
-        st.session_state["active_ticker"]  = ticker
-        st.session_state["ssa_stock_pick"] = ticker
-        st.switch_page("pages/2_Single_Stock_Analysis_个股分析.py")
+        help="Open Technical Analysis pre-loaded with this stock. "
+             "Middle/right-click → Open in new tab.",
+    )
 with _tc3:
-    if st.button(
+    page_link_button(
+        "lead-lag",
         "Lead-Lag →",
-        key="eb_goto_ll",
+        params={"ticker": ticker},
         use_container_width=True,
-        help="Open Lead-Lag Analysis pre-loaded with this stock",
-    ):
-        st.session_state["ll_active_ticker"] = ticker
-        st.switch_page("pages/lead_lag_analysis.py")
+        help="Open Lead-Lag Analysis pre-loaded with this stock. "
+             "Middle/right-click → Open in new tab.",
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

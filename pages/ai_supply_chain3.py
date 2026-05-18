@@ -7,6 +7,7 @@ import streamlit as st
 import pandas as pd
 import data_manager
 import auth_manager
+from nav_helpers import page_link_button
 
 # ==================== PAGE CONFIG & AUTH ====================
 auth_manager.require_login()
@@ -253,10 +254,16 @@ for layer in SUPPLY_CHAIN:
                     # Header: Clickable Stock Code + Market Label
                     head1, head2 = st.columns([1.5, 1])
                     with head1:
-                        # Sets session state and routes to analysis page
-                        if st.button(f"🔍 {ticker}", key=f"nav_{ticker}_{layer['id']}", use_container_width=True):
-                            st.session_state.active_ticker = ticker
-                            st.switch_page("pages/2_Single_Stock_Analysis_个股分析.py")
+                        # Anchor link → Single Stock Analysis (supports
+                        # middle-click / right-click → Open in new tab).
+                        page_link_button(
+                            "single-stock-analysis",
+                            f"🔍 {ticker}",
+                            params={"ticker": ticker},
+                            use_container_width=True,
+                            help="Open in Single Stock Analysis. "
+                                 "Middle/right-click → Open in new tab.",
+                        )
                     with head2:
                         st.markdown(f"<div style='text-align:right; color:gray; font-size:0.8rem; margin-top:8px;'>{comp['market']}</div>", unsafe_allow_html=True)
                     
