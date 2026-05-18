@@ -139,7 +139,7 @@ def match_sector_theme(sector_name: str, all_themes: list) -> dict | None:
                     for t in pool
                 ],
             }),
-            max_tokens=800,
+            max_tokens=4000,
             temperature=0.0,
         )
         matched_id = result.get("matched_id")
@@ -236,7 +236,7 @@ def match_sectors_to_themes_batch(sectors: list, all_themes: list) -> dict:
                     for t in pool_union
                 ],
             }),
-            max_tokens=1500,
+            max_tokens=4000,
             temperature=0.0,
         )
         matches = result.get("matches", {})
@@ -401,7 +401,7 @@ def classify_ticker_in_theme(
 
     result = ai_client.call_json(
         _CLASSIFY_PROMPT, user_msg,
-        max_tokens=1500,
+        max_tokens=4000,
         temperature=0.1,
     )
 

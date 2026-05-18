@@ -229,7 +229,7 @@ def get_company_overview(ticker, name, industry, force_refresh=False):
         if cached:
             return cached
     user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
-    payload  = ai_client.call_json(_OVERVIEW_PROMPT, user_msg, max_tokens=1500)
+    payload  = ai_client.call_json(_OVERVIEW_PROMPT, user_msg, max_tokens=4000)
     _write_cache(ticker, "overview", payload)
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
@@ -252,7 +252,7 @@ def get_porters(ticker: str, name: str, industry: str, force_refresh: bool = Fal
         if cached:
             return cached
     user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
-    payload  = ai_client.call_json(_PORTERS_PROMPT, user_msg, max_tokens=2000)
+    payload  = ai_client.call_json(_PORTERS_PROMPT, user_msg, max_tokens=4000)
     _write_cache(ticker, "porters", payload)
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 

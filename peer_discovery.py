@@ -235,7 +235,7 @@ def discover_layer_stocks(
 
     data = ai_client.call_json(
         _LAYER_STOCK_PROMPT, user_msg,
-        max_tokens=2000,
+        max_tokens=4000,
         temperature=0.2,
     )
 
@@ -431,7 +431,7 @@ def discover_product_stocks(
 
     data = ai_client.call_json(
         _PRODUCT_STOCK_PROMPT, user_msg,
-        max_tokens=2000,
+        max_tokens=4000,
         temperature=0.2,
     )
 
