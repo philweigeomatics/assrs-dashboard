@@ -1,9 +1,13 @@
 name: Run Daily ASSRS Data Pipeline
 
 on:
-  # Run at 4:10 PM UTC = 12:10 AM Beijing Time (after market close)
+  # Run at 12:00 PM UTC = 20:00 Beijing Time (≥ 2h after 15:00 close,
+  # ≥ 1h after Tushare publishes daily_basic & margin data at ~18:30).
+  # main.py uses a self-correcting date so manual workflow_dispatch reruns
+  # at any time of day (e.g. 22:30 same evening, or next morning) still
+  # target the most-recent trading session.
   schedule:
-    - cron: '10 16 * * *'
+    - cron: '0 12 * * *'
   workflow_dispatch:  # Manual trigger
 
 jobs:

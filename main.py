@@ -20,10 +20,21 @@ print(f"[CONFIG] Project path: {PROJECT_PATH}")
 DATA_START_DATE = '20240101'
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 TODAY_DATE = datetime.now(CHINA_TZ)
-YESTERDAY_DATE = TODAY_DATE - timedelta(days=1)
-DATA_END_DATE = YESTERDAY_DATE.strftime('%Y%m%d')
+
+# Pick the most recent close to target. A-share market closes at 15:00;
+# Tushare publishes daily_basic / margin / daily price data by ~18:30. After
+# 18:00 Beijing today's close is available — target TODAY. Before 18:00
+# (typical for manual morning reruns to backfill a missed run), target the
+# previous day. Mirrors the same heuristic used in
+# data_manager.execute_daily_portfolio_rollup so both stay in lockstep.
+if TODAY_DATE.hour >= 18:
+    DATA_REFERENCE_DATE = TODAY_DATE
+else:
+    DATA_REFERENCE_DATE = TODAY_DATE - timedelta(days=1)
+
+DATA_END_DATE       = DATA_REFERENCE_DATE.strftime('%Y%m%d')
 BACKTEST_START_DATE = '2025-07-01'
-BACKTEST_END_DATE = YESTERDAY_DATE.strftime('%Y-%m-%d')
+BACKTEST_END_DATE   = DATA_REFERENCE_DATE.strftime('%Y-%m-%d')
 
 
 def calculate_ppi_breadth_proxy(ppi_df, current_date, lookback=20):
@@ -176,7 +187,7 @@ def run_daily_ppi_and_market_breadth():
         if ppi_latest_date is None:
             sector_start_dates[sector] = None
             print(f"{sector}: PPI table empty, will do FULL aggregation")
-        elif ppi_latest_date.date() >= YESTERDAY_DATE.date():
+        elif ppi_latest_date.date() >= DATA_REFERENCE_DATE.date():
             print(f"{sector}: PPI is up-to-date, skipping")
         else:
             next_date = ppi_latest_date + pd.Timedelta(days=1)
@@ -313,7 +324,8 @@ if __name__ == "__main__":
 
     print(f"\n{'#'*60}")
     print(f"# ASSRS Daily Task - V2 Enhanced (Live QFQ Data)")
-    print(f"# Started: {datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M:%S')} (China Time)")
+    print(f"# Started:   {datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M:%S')} (China Time)")
+    print(f"# Targeting: {DATA_REFERENCE_DATE.strftime('%Y-%m-%d')} close data")
     print(f"{'#'*60}\n")
 
     try:
