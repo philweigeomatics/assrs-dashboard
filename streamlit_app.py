@@ -28,50 +28,13 @@ _pending_token = st.session_state.pop("_pending_cookie_write", None)
 if _pending_token:
     auth_manager.write_session_cookie(_pending_token)
 
-# ── Always define login page ─────────────────────────────────────────
+# ── Page registry ────────────────────────────────────────────────────
+# Build all pages up front (before the auth check) so st.navigation can
+# match the current URL against a registered page even during the
+# cookie-restore loading state. This preserves the URL through the rerun
+# so a new tab opened to /Interaction_Lab actually lands there instead of
+# defaulting to the first page.
 login_page = st.Page("pages/Login.py", title="Login 登录", icon="🔐")
-
-
-if not auth_manager.is_logged_in():
-    # On the very first render of a new tab, the CookieManager iframe is
-    # still loading and cm.get() returns None. Calling st.navigation here
-    # would force the URL to the login page, losing the user's originally
-    # requested page (e.g. /Interaction_Lab → ends up on default dashboard
-    # after the cookie restore rerun).
-    #
-    # Instead, render only a loading message and stop. The URL stays
-    # untouched. When the CookieManager iframe responds with the cookie
-    # value, Streamlit auto-reruns; on that rerun is_logged_in() is True
-    # and st.navigation routes to whatever the URL says.
-    if not st.session_state.get("_cookie_check_attempted"):
-        st.session_state["_cookie_check_attempted"] = True
-        st.info("🔄 Restoring session…")
-        st.stop()
-
-    # CookieManager has responded with no valid cookie — really need login
-    pg = st.navigation([login_page])
-    pg.run()
-    st.stop()
-
-# Logged in — clear the check flag so logout → re-login still gets a clean
-# restore attempt on any new tabs (those tabs get fresh session_state anyway,
-# but this keeps the same-tab state tidy).
-st.session_state.pop("_cookie_check_attempted", None)
-
-
-user = auth_manager.get_current_user();
-
-# ── Sidebar: user info + logout ──────────────────────────────────
-with st.sidebar:
-    st.markdown("---")
-    role_badge = "👑 Admin" if auth_manager.is_admin() else "👤 User"
-    st.caption(f"{role_badge} | **{user['username']}**")
-    if st.button("🚪 Logout", use_container_width=True):
-        auth_manager.logout()
-        st.rerun()
-
-    # ── Authenticated pages ──────────────────────────────────────────
-
 
 pages = {
     "📊 Sector 板块": [
@@ -112,11 +75,44 @@ if auth_manager.is_admin():
         st.Page("pages/Admin_Sector_Management.py", title="Sector Management 板块管理", icon="⚙️"),
     ]
 
-# Create navigation
+
+if not auth_manager.is_logged_in():
+    # On the very first render of a new tab, the CookieManager iframe is
+    # still loading. To preserve the requested URL through the rerun, we
+    # register the full pages dict so st.navigation can match the URL —
+    # but we hide the menu and skip pg.run() so nothing actually renders
+    # except a loading message.
+    #
+    # When the iframe responds, Streamlit reruns; on that rerun
+    # is_logged_in() is True, st.navigation runs normally, and the page
+    # corresponding to the preserved URL is rendered.
+    if not st.session_state.get("_cookie_check_attempted"):
+        st.session_state["_cookie_check_attempted"] = True
+        st.navigation(pages, position="hidden")  # URL → page mapping only
+        st.info("🔄 Restoring session…")
+        st.stop()
+
+    # CookieManager has responded with no valid cookie — really need login
+    pg = st.navigation([login_page])
+    pg.run()
+    st.stop()
+
+# Logged in — clear the check flag so logout → re-login still gets a clean
+# restore attempt on any new tabs.
+st.session_state.pop("_cookie_check_attempted", None)
+
+
+user = auth_manager.get_current_user()
+
+# ── Sidebar: user info + logout ──────────────────────────────────
+with st.sidebar:
+    st.markdown("---")
+    role_badge = "👑 Admin" if auth_manager.is_admin() else "👤 User"
+    st.caption(f"{role_badge} | **{user['username']}**")
+    if st.button("🚪 Logout", use_container_width=True):
+        auth_manager.logout()
+        st.rerun()
+
+# Create navigation and run the selected page
 pg = st.navigation(pages)
-
-# Run the selected page
 pg.run()
-
-
-
