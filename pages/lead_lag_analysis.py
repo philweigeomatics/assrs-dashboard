@@ -453,8 +453,10 @@ st.markdown("---")
 # ══════════════════════════════════════════════════════════════════════════════
 st.subheader("🏭 Phase 3 · Key Stocks per Layer 各层核心标的")
 st.caption(
-    "AI identifies the top 3 A-share companies per supply-chain layer, "
-    "validated against the stock_basic database. 🔗 = supply chain graph already saved."
+    "AI identifies up to 10 A-share companies per supply-chain layer, "
+    "validated against the stock_basic database. 🔗 = supply chain graph already saved. "
+    "Vertically-integrated companies may appear in multiple layers; duplicates are "
+    "automatically removed before Phase 4 runs."
 )
 
 p3_key = f"ll_p3_stocks_{ticker}_{matched['id']}"
@@ -551,17 +553,33 @@ for layer_name, stocks in layer_results.items():
 st.markdown("---")
 
 # ── Collect checked stocks for Phase 4 ────────────────────────────────────────
+# Dedupe by ticker — vertically integrated companies often appear in multiple
+# layers (e.g. a battery maker that also supplies materials). We keep the
+# first (upstream-most) occurrence and merge any later layer names into the
+# label so the user can see which layers the stock spans.
 p4_peers = []
+_seen_tickers: dict[str, int] = {}      # ticker → index in p4_peers
 for layer_name, stocks in layer_results.items():
     for s in stocks:
+        if s["ticker"] == ticker:
+            continue
         chk_key = f"ll_p3_chk_{ticker}_{s['layer_idx']}_{s['ticker']}"
-        if st.session_state.get(chk_key, s["valid"]) and s["ticker"] != ticker:
-            p4_peers.append({
-                "ticker":     s["ticker"],
-                "name":       s["name"],
-                "layer_name": s["layer_name"],
-                "layer_idx":  s["layer_idx"],
-            })
+        if not st.session_state.get(chk_key, s["valid"]):
+            continue
+        if s["ticker"] in _seen_tickers:
+            # Already collected via an earlier layer — merge layer label only.
+            idx = _seen_tickers[s["ticker"]]
+            existing = p4_peers[idx]
+            if s["layer_name"] not in existing["layer_name"]:
+                existing["layer_name"] = f"{existing['layer_name']} + {s['layer_name']}"
+            continue
+        _seen_tickers[s["ticker"]] = len(p4_peers)
+        p4_peers.append({
+            "ticker":     s["ticker"],
+            "name":       s["name"],
+            "layer_name": s["layer_name"],
+            "layer_idx":  s["layer_idx"],
+        })
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Phase 4 · Lead-Lag Statistical Analysis

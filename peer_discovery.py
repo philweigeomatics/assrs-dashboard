@@ -169,7 +169,7 @@ def fetch_latest_pct_chg(tickers):
 _LAYER_STOCK_PROMPT = """\
 You are an elite Chinese A-share equity analyst.
 
-Given a specific layer in a supply chain, find the TOP 3 A-share listed companies
+Given a specific layer in a supply chain, find the A-share listed companies
 whose PRIMARY or MAJORITY revenue comes from SUPPLYING the products or services
 listed for that layer.
 
@@ -189,7 +189,11 @@ CRITICAL OUTPUT RULES:
 - Return ONLY raw JSON. No markdown, no fences. Start with { end with }.
 - Each ticker MUST be exactly 6 digits (A-share only; no ETFs, no HK/US stocks).
 - primary_product must name one specific item from the layer's key items list.
-- Return exactly 3 stocks (or fewer only if fewer than 3 qualified companies exist).
+- Return AT MOST 10 stocks, ordered best → worst by the ranking criteria above.
+  Layers typically have 4–6 key items, so aim for broad coverage across items
+  rather than 10 names all tied to the same single item.
+- If fewer than 10 high-quality candidates exist, return only those that truly
+  qualify — quality matters more than hitting the cap.
 
 Schema:
 {
@@ -209,10 +213,15 @@ def discover_layer_stocks(
     force_refresh: bool = False,
 ) -> list:
     """
-    Return top 3 A-share stocks for a specific supply-chain layer.
+    Return up to 10 A-share stocks for a specific supply-chain layer.
+
+    The model is asked to return broad coverage across the layer's key
+    items rather than 10 names tied to the same single item.
 
     Results are cached in product_peers under a namespaced key so the same
-    (sector, layer) pair is not re-queried on every page load.
+    (sector, layer) pair is not re-queried on every page load. To refresh
+    a layer's list after changing the cap, use the "Re-query AI" button in
+    the Lead-Lag page (it invalidates the cache for every layer).
 
     Returns list of {ticker, name, primary_product}.
     """
@@ -238,10 +247,11 @@ def discover_layer_stocks(
 
     data = ai_client.call_json(
         _LAYER_STOCK_PROMPT, user_msg,
-        # Layer-stock discovery: top 3 stocks per layer with primary_product
-        # justification. Model reasons through which A-share names actually
-        # derive primary/majority revenue from this layer.
-        max_tokens=6000,
+        # Layer-stock discovery: up to 10 stocks per layer with
+        # primary_product justification. The output content is ~3x heavier
+        # than the previous "exactly 3" version, so the budget is raised
+        # accordingly to leave room for the reasoning trace too.
+        max_tokens=8000,
         temperature=0.2,
     )
 
