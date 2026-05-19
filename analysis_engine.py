@@ -235,15 +235,19 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
         (df_analysis['DI_Minus'].shift(1) <= df_analysis['DI_Plus'].shift(1))
     )
 
-    # DI Screaming Buy — mirrors the simulator definition:
-    # a fresh bullish crossover AND spread widened by > DI_SCREAMING_BUY_MOMENTUM in one day.
-    # FIX: was only computed inside simulate_next_day_indicators(), so the Today's Alerts
-    # scan always received False for this column. Now emitted by the main engine.
+    # DI Screaming Buy / Sell — fresh DI crossover AND spread widened by
+    # > DI_SCREAMING_BUY_MOMENTUM in one day. The "screaming" pair are the
+    # strongest direction-flip signals because both the cross AND the
+    # momentum of the cross are unusually large.
     _di_spread    = df_analysis['DI_Plus'] - df_analysis['DI_Minus']
     _di_spread_mo = _di_spread - _di_spread.shift(1)
     df_analysis['DI_Screaming_Buy'] = (
         df_analysis['DI_Bullish_Cross'] &
-        (_di_spread_mo > DI_SCREAMING_BUY_MOMENTUM)
+        (_di_spread_mo >  DI_SCREAMING_BUY_MOMENTUM)
+    )
+    df_analysis['DI_Screaming_Sell'] = (
+        df_analysis['DI_Bearish_Cross'] &
+        (_di_spread_mo < -DI_SCREAMING_BUY_MOMENTUM)
     )
 
     # ── ADX Smoothing ─────────────────────────────────────────
@@ -287,6 +291,43 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
     # ── ADX Pattern Detection ─────────────────────────────────
     df_analysis = apply_adx_patterns(df_analysis)
+
+    # ── Direction-Gated Entry / Exit Candidates ──────────────
+    # ADX patterns describe trend STRENGTH; they say nothing about
+    # direction. Fusing them with +DI vs -DI turns them into actionable
+    # buy/sell signals:
+    #   • Bullish patterns (Bottoming, Reversing Up, Accelerating Up)
+    #     are only constructive when +DI ≥ -DI (uptrend in place /
+    #     re-emerging). Otherwise they mean the existing DOWNtrend is
+    #     gaining strength — exact opposite of a buy signal.
+    #   • Bearish patterns (Peaking, Reversing Down, Accelerating Down)
+    #     are only sell signals when +DI > -DI (current uptrend losing
+    #     strength). Otherwise they describe a downtrend topping out.
+    _di_bullish = df_analysis['DI_Plus'] >= df_analysis['DI_Minus']
+
+    df_analysis['Entry_Candidate'] = ''
+    df_analysis.loc[
+        _di_bullish & df_analysis['ADX_Pattern'].isin(['Bottoming', 'Reversing Up']),
+        'Entry_Candidate'
+    ] = 'Strength Returning'
+    df_analysis.loc[
+        _di_bullish & (df_analysis['ADX_Pattern'] == 'Accelerating Up'),
+        'Entry_Candidate'
+    ] = 'Trend Accelerating'
+    # Screaming Buy is the strongest signal — it already encodes its own
+    # direction (Bullish Cross), so overwrite anything else on the same bar.
+    df_analysis.loc[df_analysis['DI_Screaming_Buy'], 'Entry_Candidate'] = 'Screaming Buy'
+
+    df_analysis['Exit_Candidate'] = ''
+    df_analysis.loc[
+        _di_bullish & df_analysis['ADX_Pattern'].isin(['Peaking', 'Reversing Down']),
+        'Exit_Candidate'
+    ] = 'Trend Topping'
+    df_analysis.loc[
+        _di_bullish & (df_analysis['ADX_Pattern'] == 'Accelerating Down'),
+        'Exit_Candidate'
+    ] = 'Trend Collapsing'
+    df_analysis.loc[df_analysis['DI_Screaming_Sell'], 'Exit_Candidate'] = 'Screaming Sell'
 
     # ── OBV ──────────────────────────────────────────────────
     df_analysis['OBV'] = ta.volume.on_balance_volume(df_analysis['Close'], df_analysis['Volume'])

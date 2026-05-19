@@ -945,7 +945,68 @@ def create_single_stock_chart_analysis(
             marker=dict(color='#22c55e', size=10, symbol='x'),
             showlegend=True
         ), row=1, col=1)
-    
+
+    # ════════════════════════════════════════════════════════════════════════
+    # ENTRY / EXIT CANDIDATES — direction-gated ADX + DI signals on price
+    # ════════════════════════════════════════════════════════════════════════
+    # Three buy tiers (red ▲ = A-share bullish) and three sell tiers
+    # (green ▼ = A-share bearish), all anchored to the candle bar with
+    # constant-offset placement (ATR-based) so spacing stays consistent
+    # regardless of the stock's price level.
+    if 'Entry_Candidate' in df.columns and 'Exit_Candidate' in df.columns:
+        # Average true range proxy (no Wilder smoothing, just rolling mean of
+        # daily range) — used to position markers a stable distance away
+        # from the candle wicks regardless of absolute price level.
+        _atr_proxy = (df['High'] - df['Low']).rolling(14).mean().fillna(
+            (df['High'] - df['Low']).mean() or 1.0
+        )
+
+        # ── BUYS (red, A-share bullish) ─────────────────────────────────
+        buy_tiers = [
+            ('Strength Returning', 'triangle-up', 12, 1.0,  '#f87171', '🔺 Buy Watch · Strength Returning'),
+            ('Trend Accelerating', 'diamond',     13, 1.6,  '#ef4444', '💎 Buy · Trend Accelerating'),
+            ('Screaming Buy',      'star',        18, 2.4,  '#dc2626', '🚀 Strong Buy · Screaming'),
+        ]
+        for tag, symbol, size, mult, color, label in buy_tiers:
+            hits = df[df['Entry_Candidate'] == tag]
+            if hits.empty:
+                continue
+            _y = hits['Low'] - (_atr_proxy.reindex(hits.index) * mult).fillna(0)
+            fig.add_trace(go.Scatter(
+                x=hits.index.strftime('%Y-%m-%d'),
+                y=_y,
+                mode='markers',
+                name=label,
+                marker=dict(color=color, size=size, symbol=symbol,
+                            line=dict(color='black', width=1)),
+                hovertemplate='%{x}<br><b>' + label + '</b><br>Price: ¥%{customdata:.2f}<extra></extra>',
+                customdata=hits['Close'],
+                showlegend=True,
+            ), row=1, col=1)
+
+        # ── SELLS (green, A-share bearish) ──────────────────────────────
+        sell_tiers = [
+            ('Trend Topping',     'triangle-down', 12, 1.0,  '#86efac', '🔻 Sell Watch · Trend Topping'),
+            ('Trend Collapsing',  'diamond',       13, 1.6,  '#22c55e', '📉 Sell · Trend Collapsing'),
+            ('Screaming Sell',    'star',          18, 2.4,  '#16a34a', '🛑 Strong Sell · Screaming'),
+        ]
+        for tag, symbol, size, mult, color, label in sell_tiers:
+            hits = df[df['Exit_Candidate'] == tag]
+            if hits.empty:
+                continue
+            _y = hits['High'] + (_atr_proxy.reindex(hits.index) * mult).fillna(0)
+            fig.add_trace(go.Scatter(
+                x=hits.index.strftime('%Y-%m-%d'),
+                y=_y,
+                mode='markers',
+                name=label,
+                marker=dict(color=color, size=size, symbol=symbol,
+                            line=dict(color='black', width=1)),
+                hovertemplate='%{x}<br><b>' + label + '</b><br>Price: ¥%{customdata:.2f}<extra></extra>',
+                customdata=hits['Close'],
+                showlegend=True,
+            ), row=1, col=1)
+
     # ==================== ROW 2: VOLUME WITH NORMALIZED OBV ====================
     # Volume bars
     colors_volume = ['#ef4444' if df.loc[idx, 'Close'] > df.loc[idx, 'Open'] 
@@ -1336,30 +1397,37 @@ def create_single_stock_chart_analysis(
             ), row=5, col=1)
 
 
-        # Mark Bottoming
-        bottoming = df[df['ADX_Pattern'] == 'Bottoming']
+        # Direction gate: bullish ADX patterns only fire as buy signals when
+        # +DI is dominant (otherwise the rising strength belongs to the
+        # downtrend, not the up move). Constant ±2 ADX-unit offsets so
+        # markers don't drift with ADX level.
+        _di_up = df['DI_Plus'] >= df['DI_Minus']
+
+        # Mark Bottoming (gated)
+        bottoming = df[(df['ADX_Pattern'] == 'Bottoming') & _di_up]
         if not bottoming.empty:
             fig.add_trace(go.Scatter(
                 x=bottoming.index.strftime('%Y-%m-%d'),
-                y=bottoming['ADX'] * 0.95,
+                y=bottoming['ADX'] - 2,
                 mode='markers+text',
-                name='🔄 Bottoming',
+                name='🔄 Bottoming (DI+ dom.)',
                 marker=dict(color='#f59e0b', size=12, symbol='triangle-up'),
                 text='🔄',
                 textposition='bottom center',
                 showlegend=True
             ), row=5, col=1)
 
-        reversing_up = df[df['ADX_Pattern'] == 'Reversing Up']
+        reversing_up = df[(df['ADX_Pattern'] == 'Reversing Up') & _di_up]
         if not reversing_up.empty:
             fig.add_trace(go.Scatter(
                 x=reversing_up.index.strftime('%Y-%m-%d'),
-                y=reversing_up['ADX'] * 1.05,
+                y=reversing_up['ADX'] + 2,
                 mode='markers+text',
-                name='Reversing Up',
-                marker=dict(color='#22c55e', size=12, symbol='triangle-up'),
+                name='🔺 Reversing Up (DI+ dom.)',
+                # A-share convention: red = up / bullish
+                marker=dict(color='#ef4444', size=12, symbol='triangle-up'),
                 text='🔺',
-                textposition='bottom center',
+                textposition='top center',
                 showlegend=True
             ), row=5, col=1)
         
@@ -1401,33 +1469,63 @@ def create_single_stock_chart_analysis(
         #         showlegend=True
         #     ), row=5, col=1)
         
-        # Mark Peaking (NEW - Warning!)
-        peaking = df[df['ADX_Pattern'] == 'Peaking']
+        # Bearish ADX patterns are only sell signals when +DI is currently
+        # dominant — they mean "uptrend strength is fading/topping". If -DI
+        # is already dominant the pattern just describes a downtrend that
+        # is itself running out of steam, which isn't actionable on its own.
+        _di_up_for_sell = df['DI_Plus'] > df['DI_Minus']
+
+        # Mark Peaking (gated; A-share green = bearish/sell warning)
+        peaking = df[(df['ADX_Pattern'] == 'Peaking') & _di_up_for_sell]
         if not peaking.empty:
             fig.add_trace(go.Scatter(
                 x=peaking.index.strftime('%Y-%m-%d'),
-                y=peaking['ADX'] * 1.08,
+                y=peaking['ADX'] + 2,
                 mode='markers+text',
-                name='🔴 Peaking',
-                marker=dict(color="#ff1f01", size=14, symbol='triangle-down'),
+                name='🔴 Peaking (uptrend top)',
+                marker=dict(color="#16a34a", size=14, symbol='triangle-down'),
                 text='🔴',
                 textposition='top center',
                 showlegend=True
             ), row=5, col=1)
-        
-        # Mark Reversing Down (NEW - Danger!)
-        reversing_down = df[df['ADX_Pattern'] == 'Reversing Down']
+
+        # Mark Reversing Down (gated; uptrend strength fading)
+        reversing_down = df[(df['ADX_Pattern'] == 'Reversing Down') & _di_up_for_sell]
         if not reversing_down.empty:
             fig.add_trace(go.Scatter(
                 x=reversing_down.index.strftime('%Y-%m-%d'),
-                y=reversing_down['ADX'] * 1.05,
+                y=reversing_down['ADX'] + 2,
                 mode='markers+text',
-                name='🔻 Reversing',
-                marker=dict(color="#00f85b", size=14, symbol='triangle-down'),
+                name='🔻 Reversing Down (uptrend fading)',
+                marker=dict(color="#16a34a", size=14, symbol='triangle-down'),
                 text='🔻',
                 textposition='top center',
                 showlegend=True
             ), row=5, col=1)
+
+        # 🛑 DI Screaming Sell — mirror of the existing 🚀 Screaming Buy.
+        # Plotted on the -DI line so you can see seller dominance flipping in.
+        if 'DI_Screaming_Sell' in df.columns:
+            screaming_sells = df[df['DI_Screaming_Sell'] == True]
+            if not screaming_sells.empty:
+                sell_dates    = screaming_sells.index.strftime('%Y-%m-%d').tolist()
+                sell_di_minus = screaming_sells['DI_Minus']
+                fig.add_trace(go.Scatter(
+                    x=sell_dates,
+                    y=sell_di_minus,
+                    mode='markers+text',
+                    marker=dict(
+                        symbol='star',
+                        size=14,
+                        color='#16a34a',  # A-share green = sell
+                        line=dict(color='black', width=1),
+                    ),
+                    name='🛑 DI Screaming Sell',
+                    text='🛑',
+                    textposition='top center',
+                    hovertext='🛑 DI Screaming Sell (Violent Seller Expansion)',
+                    hoverinfo='text',
+                ), row=5, col=1)
 
         # accelerating_down = df[df['ADX_Pattern'] == 'Accelerating Down']
         # if not accelerating_down.empty:
