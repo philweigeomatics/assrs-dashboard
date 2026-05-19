@@ -59,6 +59,7 @@ pages = {
         st.Page("pages/wave_trader.py", title="Wave Trader 波段交易"),
         st.Page("pages/pair_trader.py", title="Pair Trader 配对交易", url_path="pair-trader"),
         st.Page("pages/lead_lag_analysis.py", title="Lead-Lag 领先滞后", url_path="lead-lag"),
+        st.Page("pages/sentiment_mean_reversion.py", title="Mean Reversion 反转候选", url_path="mean-reversion"),
     ],
     "🔔 Alerts 提示": [
         st.Page("pages/4_Todays_Alerts_今日提醒.py", title="Today's Alerts 今日提醒"),
