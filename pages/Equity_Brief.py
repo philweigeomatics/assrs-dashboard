@@ -25,7 +25,7 @@ import sector_themes as sector_themes_mod
 import supply_chain_ui
 import trading_strategy
 from analysis_engine import run_single_stock_analysis
-from nav_helpers import page_link_button
+from nav_helpers import page_link_button, join_tickers
 
 auth_manager.require_login()
 equity_brief.ensure_equity_brief_cache_table()
@@ -2007,6 +2007,29 @@ def _competitors_section():
       </table>
     </div>
     """, unsafe_allow_html=True)
+
+    # ── Send target + peers to Pair Trader ──────────────────────────────────
+    _pt_tickers = [r["ticker"] for r in table_rows if r.get("ticker")]
+    if len(_pt_tickers) >= 2:
+        _pt_col, _pt_cap = st.columns([2, 5])
+        with _pt_col:
+            page_link_button(
+                "pair-trader",
+                f"🔗 Run pair analysis · {len(_pt_tickers)} stocks",
+                params={
+                    "tickers": join_tickers(_pt_tickers),
+                    "from":    f"Equity Brief · {company} ({ticker})",
+                },
+                style="primary",
+                use_container_width=True,
+                help="Send the target plus its peers to Pair Trader for a "
+                     "walk-forward OOS backtest. Middle/right-click → Open in new tab.",
+            )
+        with _pt_cap:
+            st.caption(
+                f"Preloads **{ticker}** + {len(_pt_tickers) - 1} peer"
+                f"{'s' if len(_pt_tickers) > 2 else ''} into the Pair Trader engine."
+            )
 
     # ── Admin curation panel ─────────────────────────────────────────────────
     # WHY st.form here:
