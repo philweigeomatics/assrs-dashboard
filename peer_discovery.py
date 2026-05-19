@@ -90,7 +90,10 @@ def discover_peers(product, sector=None, force_refresh=False):
 
     data = ai_client.call_json(
         _SYSTEM_PROMPT, user_msg,
-        max_tokens=4000,
+        # Peer discovery: list of A-share competitors with reasoning about
+        # who actually competes in the named downstream sector. Reasoning
+        # trace is the dominant cost here.
+        max_tokens=6000,
         temperature=0.2,
     )
 
@@ -235,7 +238,10 @@ def discover_layer_stocks(
 
     data = ai_client.call_json(
         _LAYER_STOCK_PROMPT, user_msg,
-        max_tokens=4000,
+        # Layer-stock discovery: top 3 stocks per layer with primary_product
+        # justification. Model reasons through which A-share names actually
+        # derive primary/majority revenue from this layer.
+        max_tokens=6000,
         temperature=0.2,
     )
 

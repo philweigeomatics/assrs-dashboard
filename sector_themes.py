@@ -74,7 +74,11 @@ def generate_sector_theme(raw_input: str) -> dict:
     data = ai_client.call_json(
         _SYSTEM_PROMPT,
         f"Industry theme: {raw_input.strip()}",
-        max_tokens=4000,
+        # Sector-theme prompt produces 3–5 layers × multiple items each,
+        # ordered upstream→downstream with bilingual labels. JSON output is
+        # often 1.5–2k tokens AND the model spends a long reasoning trace
+        # picking which items belong in which layer.
+        max_tokens=8000,
         temperature=0.2,
     )
 
