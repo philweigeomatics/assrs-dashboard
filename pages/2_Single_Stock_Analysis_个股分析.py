@@ -947,63 +947,48 @@ def create_single_stock_chart_analysis(
         ), row=1, col=1)
 
     # ════════════════════════════════════════════════════════════════════════
-    # ENTRY / EXIT CANDIDATES — direction-gated ADX + DI signals on price
+    # ENTRY / EXIT POINTS on the price chart
     # ════════════════════════════════════════════════════════════════════════
-    # Three buy tiers (red ▲ = A-share bullish) and three sell tiers
-    # (green ▼ = A-share bearish), all anchored to the candle bar with
-    # constant-offset placement (ATR-based) so spacing stays consistent
-    # regardless of the stock's price level.
+    # Only the strongest direction-confirmed signals are shown here — these
+    # are the actual fire-points (fresh DI cross + violent spread expansion).
+    # Intermediate lifecycle states (Bottoming / Reversing Up / Peaking /
+    # Reversing Down / Accelerating) stay on the ADX panel as momentum
+    # context, not on the price chart.
     if 'Entry_Candidate' in df.columns and 'Exit_Candidate' in df.columns:
-        # Average true range proxy (no Wilder smoothing, just rolling mean of
-        # daily range) — used to position markers a stable distance away
-        # from the candle wicks regardless of absolute price level.
+        # ATR proxy for stable marker offsets (no multiplicative drift).
         _atr_proxy = (df['High'] - df['Low']).rolling(14).mean().fillna(
             (df['High'] - df['Low']).mean() or 1.0
         )
 
-        # ── BUYS (red, A-share bullish) ─────────────────────────────────
-        buy_tiers = [
-            ('Strength Returning', 'triangle-up', 12, 1.0,  '#f87171', '🔺 Buy Watch · Strength Returning'),
-            ('Trend Accelerating', 'diamond',     13, 1.6,  '#ef4444', '💎 Buy · Trend Accelerating'),
-            ('Screaming Buy',      'star',        18, 2.4,  '#dc2626', '🚀 Strong Buy · Screaming'),
-        ]
-        for tag, symbol, size, mult, color, label in buy_tiers:
-            hits = df[df['Entry_Candidate'] == tag]
-            if hits.empty:
-                continue
-            _y = hits['Low'] - (_atr_proxy.reindex(hits.index) * mult).fillna(0)
+        # 🚀 BUY (red, A-share bullish)
+        buys = df[df['Entry_Candidate'] == 'Screaming Buy']
+        if not buys.empty:
+            _y = buys['Low'] - (_atr_proxy.reindex(buys.index) * 1.8).fillna(0)
             fig.add_trace(go.Scatter(
-                x=hits.index.strftime('%Y-%m-%d'),
+                x=buys.index.strftime('%Y-%m-%d'),
                 y=_y,
                 mode='markers',
-                name=label,
-                marker=dict(color=color, size=size, symbol=symbol,
+                name='🚀 Entry · Screaming Buy',
+                marker=dict(color='#dc2626', size=18, symbol='star',
                             line=dict(color='black', width=1)),
-                hovertemplate='%{x}<br><b>' + label + '</b><br>Price: ¥%{customdata:.2f}<extra></extra>',
-                customdata=hits['Close'],
+                hovertemplate='%{x}<br><b>🚀 Entry · Screaming Buy</b><br>Price: ¥%{customdata:.2f}<extra></extra>',
+                customdata=buys['Close'],
                 showlegend=True,
             ), row=1, col=1)
 
-        # ── SELLS (green, A-share bearish) ──────────────────────────────
-        sell_tiers = [
-            ('Trend Topping',     'triangle-down', 12, 1.0,  '#86efac', '🔻 Sell Watch · Trend Topping'),
-            ('Trend Collapsing',  'diamond',       13, 1.6,  '#22c55e', '📉 Sell · Trend Collapsing'),
-            ('Screaming Sell',    'star',          18, 2.4,  '#16a34a', '🛑 Strong Sell · Screaming'),
-        ]
-        for tag, symbol, size, mult, color, label in sell_tiers:
-            hits = df[df['Exit_Candidate'] == tag]
-            if hits.empty:
-                continue
-            _y = hits['High'] + (_atr_proxy.reindex(hits.index) * mult).fillna(0)
+        # 🛑 SELL (green, A-share bearish)
+        sells = df[df['Exit_Candidate'] == 'Screaming Sell']
+        if not sells.empty:
+            _y = sells['High'] + (_atr_proxy.reindex(sells.index) * 1.8).fillna(0)
             fig.add_trace(go.Scatter(
-                x=hits.index.strftime('%Y-%m-%d'),
+                x=sells.index.strftime('%Y-%m-%d'),
                 y=_y,
                 mode='markers',
-                name=label,
-                marker=dict(color=color, size=size, symbol=symbol,
+                name='🛑 Exit · Screaming Sell',
+                marker=dict(color='#16a34a', size=18, symbol='star',
                             line=dict(color='black', width=1)),
-                hovertemplate='%{x}<br><b>' + label + '</b><br>Price: ¥%{customdata:.2f}<extra></extra>',
-                customdata=hits['Close'],
+                hovertemplate='%{x}<br><b>🛑 Exit · Screaming Sell</b><br>Price: ¥%{customdata:.2f}<extra></extra>',
+                customdata=sells['Close'],
                 showlegend=True,
             ), row=1, col=1)
 
