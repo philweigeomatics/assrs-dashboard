@@ -643,8 +643,11 @@ def create_single_stock_chart_analysis(
     p_slow = int(df['MACD_Slow_Param'].iloc[-1]) if 'MACD_Slow_Param' in df.columns else 26
     p_sign = int(df['MACD_Sign_Param'].iloc[-1]) if 'MACD_Sign_Param' in df.columns else 9
 
-    n_rows   = 7 if has_comp else 6
-    comp_row = 7  # relative-performance panel lives here when active
+    # Row layout (Z-score sits between P/E and the optional comparison pane):
+    #   1 Price · 2 Volume · 3 MACD · 4 RSI · 5 ADX · 6 P/E · 7 Z-score · 8 Comp(opt)
+    z_row    = 7
+    n_rows   = 8 if has_comp else 7
+    comp_row = 8  # relative-performance panel lives here when active
 
     _titles_base = (
         'Price & Trading Blocks + Signals',
@@ -653,11 +656,14 @@ def create_single_stock_chart_analysis(
         'RSI',
         'ADX Trend Analysis',
         'P/E Ratio',
+        'Z-Score Oscillator · Price (line) + Volume (histogram)',
     )
     _subplot_titles = _titles_base + (f'Relative Performance vs {comp_name}',) if has_comp else _titles_base
 
-    _heights_base  = [0.40, 0.10, 0.18, 0.10, 0.18, 0.08]
-    _row_heights   = _heights_base + [0.14] if has_comp else _heights_base[:-1] + [0.10]
+    # Slightly larger P/E pane when there's no comparison (matches old layout
+    # of giving the last "real" row a bit more breathing room).
+    _heights_base  = [0.40, 0.10, 0.18, 0.10, 0.18, 0.08 if has_comp else 0.10, 0.14]
+    _row_heights   = _heights_base + [0.14] if has_comp else _heights_base
 
     _specs = [[{"secondary_y": True}]] + [[{"secondary_y": False}]] * (n_rows - 1)
 
@@ -1565,8 +1571,90 @@ def create_single_stock_chart_analysis(
                 )
     
     fig.update_yaxes(title_text='P/E', row=6, col=1)
-    
-    
+
+    # ════════════════════════════════════════════════════════════════════════
+    # ROW 7 — Z-SCORE DUAL OSCILLATOR (Price line + Volume histogram)
+    # ════════════════════════════════════════════════════════════════════════
+    # Standardise the latest 1-day return / volume against a rolling 20-day
+    # window. Watch for visual divergence: when the Price Z line dives toward
+    # -2.5 but the Volume histogram collapses toward 0, sellers are
+    # exhausting and a snapback is mechanically likely (mean-reversion setup).
+    _zwin = 20
+    _rets   = df['Close'].pct_change()
+    _vol    = df['Volume']
+    price_z = (_rets - _rets.rolling(_zwin).mean()) / _rets.rolling(_zwin).std(ddof=0)
+    vol_z   = (_vol  - _vol.rolling(_zwin).mean())  / _vol.rolling(_zwin).std(ddof=0)
+
+    # Per-bar volume histogram colour: green when volume is unusually high
+    # (above +1 z = potential climax/capitulation print), red when unusually
+    # low (below -1 z = sellers withdrawn), neutral gray otherwise.
+    _vol_colors = [
+        'rgba(34, 197, 94, 0.55)'  if (v is not None and not pd.isna(v) and v >  1.0) else
+        'rgba(239, 68, 68, 0.55)'  if (v is not None and not pd.isna(v) and v < -1.0) else
+        'rgba(148, 163, 184, 0.45)'
+        for v in vol_z.tolist()
+    ]
+
+    # Volume Z bars — drawn first so the price Z line renders on top.
+    fig.add_trace(go.Bar(
+        x=dates,
+        y=vol_z.tolist(),
+        name='Volume Z',
+        marker_color=_vol_colors,
+        marker_line_width=0,
+        opacity=0.85,
+        hovertemplate='%{x}<br>Volume Z: %{y:.2f}<extra></extra>',
+    ), row=z_row, col=1)
+
+    # Price Z solid line on top
+    fig.add_trace(go.Scatter(
+        x=dates,
+        y=price_z.tolist(),
+        mode='lines',
+        name='Price Z',
+        line=dict(color='#7c3aed', width=2.2),  # purple
+        hovertemplate='%{x}<br>Price Z: %{y:.2f}<extra></extra>',
+    ), row=z_row, col=1)
+
+    # Highlight oversold (≤ -2.5) and overbought (≥ +2.0) price-Z events as markers
+    _os_mask = price_z <= -2.5
+    _ob_mask = price_z >=  2.0
+    if _os_mask.any():
+        fig.add_trace(go.Scatter(
+            x=[d for d, m in zip(dates, _os_mask.tolist()) if m],
+            y=[v for v, m in zip(price_z.tolist(), _os_mask.tolist()) if m],
+            mode='markers',
+            name='Oversold (Z ≤ -2.5)',
+            marker=dict(color='#dc2626', size=9, symbol='triangle-up',
+                        line=dict(color='#7f1d1d', width=1)),
+            hovertemplate='%{x}<br>Price Z: %{y:.2f}<br><b>OVERSOLD</b><extra></extra>',
+        ), row=z_row, col=1)
+    if _ob_mask.any():
+        fig.add_trace(go.Scatter(
+            x=[d for d, m in zip(dates, _ob_mask.tolist()) if m],
+            y=[v for v, m in zip(price_z.tolist(), _ob_mask.tolist()) if m],
+            mode='markers',
+            name='Overbought (Z ≥ +2.0)',
+            marker=dict(color='#16a34a', size=9, symbol='triangle-down',
+                        line=dict(color='#14532d', width=1)),
+            hovertemplate='%{x}<br>Price Z: %{y:.2f}<br><b>OVERBOUGHT</b><extra></extra>',
+        ), row=z_row, col=1)
+
+    # Threshold bands at -2.5 / 0 / +2.0
+    fig.add_hline(y=-2.5, line_dash='dash', line_color='#dc2626', line_width=1,
+                  row=z_row, col=1,
+                  annotation_text='Oversold (-2.5)', annotation_position='bottom right',
+                  annotation_font=dict(color='#dc2626', size=10))
+    fig.add_hline(y=0, line_dash='solid', line_color='#9ca3af', line_width=1,
+                  row=z_row, col=1)
+    fig.add_hline(y=2.0, line_dash='dash', line_color='#16a34a', line_width=1,
+                  row=z_row, col=1,
+                  annotation_text='Overbought (+2.0)', annotation_position='top right',
+                  annotation_font=dict(color='#16a34a', size=10))
+
+    fig.update_yaxes(title_text='Z-score', row=z_row, col=1, zeroline=False)
+
+
     # ==================== UPDATE LAYOUT ====================
     # Y-axis index note: secondary_y=True on row 1 allocates yaxis2 for the
     # comparison stock's right-hand axis, pushing every subsequent panel up by 1:
@@ -1576,11 +1664,12 @@ def create_single_stock_chart_analysis(
     #   yaxis4  = Row 3 (MACD)
     #   yaxis5  = Row 4 (RSI)
     #   yaxis6  = Row 5 (ADX)
-    #   yaxis7  = Row 6 (P/E  — managed by update_yaxes above)
-    #   yaxis8  = Row 7 (Rel Perf, if has_comp — managed by update_yaxes above)
+    #   yaxis7  = Row 6 (P/E       — managed by update_yaxes above)
+    #   yaxis8  = Row 7 (Z-score   — managed by update_yaxes above)
+    #   yaxis9  = Row 8 (Rel Perf, if has_comp — managed by update_yaxes above)
     _bottom_xaxis = f'xaxis{n_rows}_title'
     fig.update_layout(
-        height=1500 + (150 if has_comp else 0),
+        height=1650 + (150 if has_comp else 0),
         template='plotly_white',
         xaxis_rangeslider_visible=False,
         hovermode='x unified',
