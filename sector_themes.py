@@ -74,7 +74,7 @@ def generate_sector_theme(raw_input: str) -> dict:
     data = ai_client.call_json(
         _SYSTEM_PROMPT,
         f"Industry theme: {raw_input.strip()}",
-        max_tokens=3000,
+        max_tokens=4000,
         temperature=0.2,
     )
 

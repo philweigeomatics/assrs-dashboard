@@ -90,7 +90,7 @@ def discover_peers(product, sector=None, force_refresh=False):
 
     data = ai_client.call_json(
         _SYSTEM_PROMPT, user_msg,
-        max_tokens=2500,
+        max_tokens=4000,
         temperature=0.2,
     )
 

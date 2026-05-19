@@ -13,10 +13,10 @@ Usage:
     import ai_client
 
     # Returns a parsed dict — raises RuntimeError on any failure
-    data = ai_client.call_json(system_prompt, user_msg, max_tokens=2000)
+    data = ai_client.call_json(system_prompt, user_msg, max_tokens=4000)
 
     # Returns raw text string (for non-JSON responses)
-    text = ai_client.call_text(system_prompt, user_msg, max_tokens=2000)
+    text = ai_client.call_text(system_prompt, user_msg, max_tokens=4000)
 
 Changing the model or endpoint in this one file affects the entire app.
 """

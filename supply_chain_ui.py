@@ -76,7 +76,7 @@ def generate_supply_chain_graph(ticker: str, company_name: str) -> dict:
     )
     return ai_client.call_json(
         _SYSTEM_PROMPT, user_msg,
-        max_tokens=3000,
+        max_tokens=4000,
         temperature=0.3,
     )
 
