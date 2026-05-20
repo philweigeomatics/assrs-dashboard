@@ -641,12 +641,20 @@ st.caption(
 
 # ── 5) Backtest ─────────────────────────────────────────────────────────────
 st.markdown("#### 5 · Backtest the plan on historical days")
-st.markdown(
-    "**The strategy in one sentence:** *if the stock dips by X % of its average intraday "
-    "range below today's open, buy; if it rallies by Y % of the same range above open, sell.* "
-    "X and Y scale automatically with the stock's own range, so the same X/Y settings give "
-    "tight zones on a quiet stock and wide zones on a volatile one."
-)
+if mode == '正T':
+    st.markdown(
+        "**The strategy in one sentence:** *if the stock dips by X % of its average intraday "
+        "range below today's open, buy; then sell as soon as price reaches Y % profit above "
+        "your buy fill.* X scales the entry zone to the stock's own range; Y is the gross "
+        "profit you're aiming to bank on each successful round-trip."
+    )
+else:  # 倒T
+    st.markdown(
+        "**The strategy in one sentence:** *if the stock rallies by X % of its average intraday "
+        "range above today's open, sell some of your base position; then buy back as soon as "
+        "price drops Y % below your sell fill.* X scales the entry zone to the stock's own "
+        "range; Y is the gross profit per successful round-trip."
+    )
 st.caption(
     "Limit orders fill at their TARGET price (not the day's extreme). On days where only "
     "one leg fills, the position is force-flattened at the Close to model the realistic "
@@ -693,29 +701,50 @@ avg_range = plan_intraday or 0.0  # 20-day mean of (H-L)/Open in %
 
 if bt_zone_mode.startswith("Range-scaled"):
     pct_l, pct_r = st.columns(2)
-    buy_frac_pct = pct_l.number_input(
-        "Buy when down ___ % of avg range",
+    leg1_frac_pct = pct_l.number_input(
+        "Buy when down ___ % of avg range" if mode == '正T'
+            else "Sell when up ___ % of avg range",
         value=40, step=5, min_value=5, max_value=100,
-        key="tt_bt_buy_frac",
-        help=f"Buy fires when intraday price drops by this % of the stock's "
-             f"20-day average intraday range ({avg_range:.2f} %). "
-             f"Smaller value → fills more often, smaller win.",
+        key="tt_bt_leg1_frac",
+        help=(
+            f"First leg fires when intraday price moves this % of the stock's "
+            f"20-day average intraday range ({avg_range:.2f} %). "
+            f"Smaller value → leg fires more often, smaller average move "
+            f"available for the take-profit leg."
+        ),
     )
-    sell_frac_pct = pct_r.number_input(
-        "Sell when up ___ % of avg range",
-        value=40, step=5, min_value=5, max_value=100,
-        key="tt_bt_sell_frac",
-        help=f"Sell fires when intraday price rises by this % of the stock's "
-             f"20-day average intraday range ({avg_range:.2f} %). "
-             f"Smaller value → fills more often, smaller win.",
+    take_profit_pct = pct_r.number_input(
+        "Take profit ___ % above buy" if mode == '正T'
+            else "Buy back ___ % below sell",
+        value=1.5, step=0.1, min_value=0.2, max_value=10.0,
+        format="%.2f",
+        key="tt_bt_take_profit",
+        help=(
+            "Gross profit per round-trip. The exit limit is placed at "
+            "first_leg_price × (1 ± take_profit/100). Net P&L = this minus "
+            "round-trip cost."
+        ),
     )
-    bt_buy_pct  = -(buy_frac_pct  / 100.0) * avg_range
-    bt_sell_pct = +(sell_frac_pct / 100.0) * avg_range
-    _zone_explainer = (
-        f"**Stock's 20-day avg intraday range: `{avg_range:.2f} %`**  ·  "
-        f"buy zone = `{buy_frac_pct} %` of that = `{bt_buy_pct:.3f} %` below open  ·  "
-        f"sell zone = `{sell_frac_pct} %` of that = `{bt_sell_pct:+.3f} %` above open"
-    )
+
+    leg1_offset = (leg1_frac_pct / 100.0) * avg_range  # absolute % from open
+    if mode == '正T':
+        # Buy at -leg1_offset % from open; sell at buy × (1 + take_profit/100)
+        bt_buy_pct  = -leg1_offset
+        bt_sell_pct = ((1 + bt_buy_pct / 100) * (1 + take_profit_pct / 100) - 1) * 100
+        _zone_explainer = (
+            f"**20d avg intraday range `{avg_range:.2f} %`** · "
+            f"Buy at `{leg1_frac_pct} %` of range = `{bt_buy_pct:.3f} %` below open · "
+            f"Take profit `{take_profit_pct:.2f} %` above buy → sell at `{bt_sell_pct:+.3f} %` from open"
+        )
+    else:  # 倒T
+        # Sell at +leg1_offset % from open; buy back at sell × (1 - take_profit/100)
+        bt_sell_pct = +leg1_offset
+        bt_buy_pct  = ((1 + bt_sell_pct / 100) * (1 - take_profit_pct / 100) - 1) * 100
+        _zone_explainer = (
+            f"**20d avg intraday range `{avg_range:.2f} %`** · "
+            f"Sell at `{leg1_frac_pct} %` of range = `{bt_sell_pct:+.3f} %` above open · "
+            f"Buy back `{take_profit_pct:.2f} %` below sell → buy at `{bt_buy_pct:.3f} %` from open"
+        )
 else:  # Fixed target
     bt_target_profit = st.number_input(
         "Target net profit per trade (%)",
