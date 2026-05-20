@@ -776,6 +776,107 @@ else:
     k5.metric("Cumulative P&L",  f"{total_pnl:+.2f} %",
               delta=f"max DD {max_dd:+.2f} %", delta_color="inverse")
 
+    # ── Candle chart with per-trade fills overlaid ─────────────────────────
+    # A-share convention: red = up day, green = down day. Triangle markers
+    # show where each leg actually filled (solid = limit fill, hollow =
+    # forced flatten at Close on stuck days).
+    fig_candles = go.Figure()
+    fig_candles.add_trace(go.Candlestick(
+        x=bt_df.index.strftime('%Y-%m-%d'),
+        open=bt_df['Open'], high=bt_df['High'],
+        low=bt_df['Low'],   close=bt_df['Close'],
+        name='Price',
+        increasing=dict(line=dict(color='#dc2626'), fillcolor='#dc2626'),
+        decreasing=dict(line=dict(color='#16a34a'), fillcolor='#16a34a'),
+    ))
+
+    # Helper to classify each buy/sell fill as 'limit' or 'forced' based on mode
+    def _classify_fills(side):
+        """side ∈ {'buy', 'sell'}. Returns (limit_rows, forced_rows)."""
+        col = f'{side}_fill'
+        all_filled = bt_df[bt_df[col].notna()]
+        if all_filled.empty:
+            return all_filled.iloc[0:0], all_filled.iloc[0:0]
+        if mode == '正T':
+            # 正T stuck → sell is forced (at Close); buy is always at limit
+            if side == 'buy':
+                return all_filled, all_filled.iloc[0:0]
+            else:
+                forced = all_filled[all_filled['outcome'] == 'stuck']
+                limit  = all_filled[all_filled['outcome'] == 'success']
+                return limit, forced
+        else:  # 倒T
+            # 倒T stuck → buy is forced (at Close); sell is always at limit
+            if side == 'sell':
+                return all_filled, all_filled.iloc[0:0]
+            else:
+                forced = all_filled[all_filled['outcome'] == 'stuck']
+                limit  = all_filled[all_filled['outcome'] == 'success']
+                return limit, forced
+
+    buy_limit, buy_forced = _classify_fills('buy')
+    sell_limit, sell_forced = _classify_fills('sell')
+
+    # BUY markers — red ▲ in A-share convention
+    if not buy_limit.empty:
+        fig_candles.add_trace(go.Scatter(
+            x=buy_limit.index.strftime('%Y-%m-%d'),
+            y=buy_limit['buy_fill'],
+            mode='markers', name='▲ Buy (limit fill)',
+            marker=dict(color='#dc2626', size=12, symbol='triangle-up',
+                        line=dict(color='black', width=1.2)),
+            customdata=(buy_limit['pnl_pct'].values * 100),
+            hovertemplate=('%{x}<br><b>▲ Buy filled at limit</b><br>'
+                           'Price ¥%{y:.2f}<br>Day P&L %{customdata:+.3f}%<extra></extra>'),
+        ))
+    if not buy_forced.empty:
+        fig_candles.add_trace(go.Scatter(
+            x=buy_forced.index.strftime('%Y-%m-%d'),
+            y=buy_forced['buy_fill'],
+            mode='markers', name='🛑 Buy (force-buyback at Close)',
+            marker=dict(color='#dc2626', size=14, symbol='triangle-up-open',
+                        line=dict(color='#7f1d1d', width=2.5)),
+            customdata=(buy_forced['pnl_pct'].values * 100),
+            hovertemplate=('%{x}<br><b>🛑 Buy was force-flatten at Close</b><br>'
+                           'Price ¥%{y:.2f}<br>Day P&L %{customdata:+.3f}%<extra></extra>'),
+        ))
+
+    # SELL markers — green ▼ in A-share convention
+    if not sell_limit.empty:
+        fig_candles.add_trace(go.Scatter(
+            x=sell_limit.index.strftime('%Y-%m-%d'),
+            y=sell_limit['sell_fill'],
+            mode='markers', name='▼ Sell (limit fill)',
+            marker=dict(color='#16a34a', size=12, symbol='triangle-down',
+                        line=dict(color='black', width=1.2)),
+            customdata=(sell_limit['pnl_pct'].values * 100),
+            hovertemplate=('%{x}<br><b>▼ Sell filled at limit</b><br>'
+                           'Price ¥%{y:.2f}<br>Day P&L %{customdata:+.3f}%<extra></extra>'),
+        ))
+    if not sell_forced.empty:
+        fig_candles.add_trace(go.Scatter(
+            x=sell_forced.index.strftime('%Y-%m-%d'),
+            y=sell_forced['sell_fill'],
+            mode='markers', name='🛑 Sell (force-close at Close)',
+            marker=dict(color='#16a34a', size=14, symbol='triangle-down-open',
+                        line=dict(color='#14532d', width=2.5)),
+            customdata=(sell_forced['pnl_pct'].values * 100),
+            hovertemplate=('%{x}<br><b>🛑 Sell was force-flatten at Close</b><br>'
+                           'Price ¥%{y:.2f}<br>Day P&L %{customdata:+.3f}%<extra></extra>'),
+        ))
+
+    fig_candles.update_layout(
+        title=f"Price action with trade fills · last {n_total_days} days",
+        height=420, template='plotly_white',
+        xaxis=dict(tickangle=-45, type='category',
+                   rangeslider=dict(visible=False)),
+        yaxis_title='Price (¥)',
+        margin=dict(t=50, l=50, r=30, b=50),
+        hovermode='closest',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig_candles, use_container_width=True)
+
     # Cumulative P&L chart with per-trade markers.
     # A-share colours: red = wins / positive, green = losses / negative.
     line_color = "#dc2626" if total_pnl >= 0 else "#16a34a"
