@@ -60,6 +60,7 @@ pages = {
         st.Page("pages/pair_trader.py", title="Pair Trader 配对交易", url_path="pair-trader"),
         st.Page("pages/lead_lag_analysis.py", title="Lead-Lag 领先滞后", url_path="lead-lag"),
         st.Page("pages/sentiment_mean_reversion.py", title="Mean Reversion 反转候选", url_path="mean-reversion"),
+        st.Page("pages/t_trading_scanner.py", title="T-Trading Scanner 做T候选", url_path="t-trading"),
     ],
     "🔔 Alerts 提示": [
         st.Page("pages/4_Todays_Alerts_今日提醒.py", title="Today's Alerts 今日提醒"),
