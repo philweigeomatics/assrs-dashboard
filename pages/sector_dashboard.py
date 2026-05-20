@@ -308,18 +308,21 @@ else:
           <td style="padding:6px 10px;font-size:12px;color:#64748b">{reason}</td>
         </tr>"""
 
+    # Fixed height ≈ header + 8 rows; rest scrolls. Header stays sticky on
+    # top while scrolling so users always know which column is which.
     table_html = f"""
-    <div style="overflow-x:auto;border:1px solid #e5e7eb;border-radius:8px;margin-top:8px">
+    <div style="max-height:360px;overflow-y:auto;overflow-x:auto;
+                border:1px solid #e5e7eb;border-radius:8px;margin-top:8px">
       <table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead>
+        <thead style="position:sticky;top:0;z-index:1">
           <tr style="background:#f8fafc;border-bottom:1px solid #e5e7eb">
-            <th style="padding:8px 10px;text-align:left">Ticker</th>
-            <th style="padding:8px 10px;text-align:left">Name</th>
-            <th style="padding:8px 10px;text-align:right">Close</th>
-            <th style="padding:8px 10px;text-align:right">% Chg</th>
-            <th style="padding:8px 10px;text-align:right">Net 龙虎榜</th>
-            <th style="padding:8px 10px;text-align:right">Net Rate</th>
-            <th style="padding:8px 10px;text-align:left">上榜理由 · Reason</th>
+            <th style="padding:8px 10px;text-align:left;background:#f8fafc">Ticker</th>
+            <th style="padding:8px 10px;text-align:left;background:#f8fafc">Name</th>
+            <th style="padding:8px 10px;text-align:right;background:#f8fafc">Close</th>
+            <th style="padding:8px 10px;text-align:right;background:#f8fafc">% Chg</th>
+            <th style="padding:8px 10px;text-align:right;background:#f8fafc">Net 龙虎榜</th>
+            <th style="padding:8px 10px;text-align:right;background:#f8fafc">Net Rate</th>
+            <th style="padding:8px 10px;text-align:left;background:#f8fafc">上榜理由 · Reason</th>
           </tr>
         </thead>
         <tbody>{rows_html}</tbody>
