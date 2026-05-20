@@ -7,7 +7,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from zoneinfo import ZoneInfo
-from datetime import datetime
+from datetime import datetime, timedelta
 import data_manager as dm
 
 from sector_utils import (
@@ -198,6 +198,139 @@ if chart_df is not None and not chart_df.empty:
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.error("无法加载 CSI 300 数据")
+
+# ════════════════════════════════════════════════════════════════════════════
+# 龙虎榜  ·  TOP LIST  (Tushare pro.top_list — daily abnormal-trading list)
+# ════════════════════════════════════════════════════════════════════════════
+# Each ticker is a clickable anchor → Lead-Lag Analysis page with that
+# stock preloaded as the topic. Middle-click / right-click → "Open in new
+# tab" works natively because it's a real <a href>, not a Streamlit button.
+
+st.markdown("---")
+st.subheader("🐉 龙虎榜 · Top Trading List")
+st.caption(
+    "Stocks that triggered Shanghai/Shenzhen exchange's abnormal-trading "
+    "rules (large pct move / turnover spike / amplitude). Click any ticker "
+    "to deep-dive into Lead-Lag Analysis with that stock as the topic."
+)
+
+
+@st.cache_data(ttl=4 * 3600, show_spinner=False)
+def _load_top_list_latest(max_lookback_days: int = 10):
+    """
+    Pull the most recent day's 龙虎榜. Walks back day-by-day for up to
+    max_lookback_days because weekends/holidays return an empty frame.
+    Cached 4h — the data only updates once per evening after close.
+    Returns (df, trade_date_yyyymmdd) or (None, None) on failure.
+    """
+    try:
+        dm.init_tushare()
+        if dm.TUSHARE_API is None:
+            return None, None
+        bj = datetime.now(ZoneInfo("Asia/Shanghai"))
+        for delta in range(max_lookback_days):
+            d = (bj - timedelta(days=delta)).strftime("%Y%m%d")
+            try:
+                df = dm.TUSHARE_API.top_list(trade_date=d)
+            except Exception:
+                continue
+            if df is not None and not df.empty:
+                return df, d
+        return None, None
+    except Exception:
+        return None, None
+
+
+with st.spinner("Loading 龙虎榜 data…"):
+    tl_df, tl_date = _load_top_list_latest()
+
+if tl_df is None or tl_df.empty:
+    st.info("📭 No 龙虎榜 data available for the past 10 days.")
+else:
+    tl_date_fmt = f"{tl_date[:4]}-{tl_date[4:6]}-{tl_date[6:8]}"
+
+    # Sort by net buying amount descending; show top 30
+    sort_col = "net_amount" if "net_amount" in tl_df.columns else "amount"
+    tl_df = tl_df.sort_values(sort_col, ascending=False).head(30)
+
+    n_buys  = int((tl_df.get("net_amount", pd.Series(dtype=float)) > 0).sum())
+    n_sells = int((tl_df.get("net_amount", pd.Series(dtype=float)) < 0).sum())
+
+    hdr_l, hdr_r = st.columns([3, 2])
+    hdr_l.markdown(
+        f"**Trade date:** {tl_date_fmt}  ·  **Listings shown:** {len(tl_df)}  "
+        f"(net buy: **{n_buys}**, net sell: **{n_sells}**)"
+    )
+
+    # Build the HTML table — tickers as anchor links to /lead-lag?ticker=…
+    rows_html = ""
+    for _, row in tl_df.iterrows():
+        ts_code = str(row.get("ts_code", ""))
+        ticker6 = ts_code[:6] if ts_code else ""
+        name    = row.get("name", "") or ""
+        close   = row.get("close", None)
+        pct     = row.get("pct_change", None)
+        net_amt = row.get("net_amount", None)
+        net_rt  = row.get("net_rate", None)
+        reason  = row.get("reason", "") or ""
+
+        # A-share colour: red = up, green = down
+        if pd.notna(pct) and pct > 0:
+            pct_style = "color:#dc2626;font-weight:600"
+        elif pd.notna(pct) and pct < 0:
+            pct_style = "color:#16a34a;font-weight:600"
+        else:
+            pct_style = "color:#6b7280"
+
+        if pd.notna(net_amt):
+            net_style = "color:#dc2626" if net_amt > 0 else "color:#16a34a" if net_amt < 0 else "color:#6b7280"
+            net_str   = f"{net_amt / 1e4:+,.0f} 万"
+        else:
+            net_style, net_str = "color:#6b7280", "—"
+
+        close_str = f"¥{close:.2f}" if pd.notna(close) else "—"
+        pct_str   = f"{pct:+.2f}%"  if pd.notna(pct)   else "—"
+        rate_str  = f"{net_rt:+.2f}%" if pd.notna(net_rt) else "—"
+
+        rows_html += f"""
+        <tr>
+          <td style="padding:6px 10px">
+            <a href="/lead-lag?ticker={ticker6}" target="_self"
+               style="color:#7c3aed;text-decoration:underline;
+                      text-underline-offset:3px;font-weight:600;
+                      font-family:ui-monospace,monospace">{ticker6}</a>
+          </td>
+          <td style="padding:6px 10px">{name}</td>
+          <td style="padding:6px 10px;text-align:right">{close_str}</td>
+          <td style="padding:6px 10px;text-align:right;{pct_style}">{pct_str}</td>
+          <td style="padding:6px 10px;text-align:right;{net_style};font-variant-numeric:tabular-nums">{net_str}</td>
+          <td style="padding:6px 10px;text-align:right;{net_style}">{rate_str}</td>
+          <td style="padding:6px 10px;font-size:12px;color:#64748b">{reason}</td>
+        </tr>"""
+
+    table_html = f"""
+    <div style="overflow-x:auto;border:1px solid #e5e7eb;border-radius:8px;margin-top:8px">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead>
+          <tr style="background:#f8fafc;border-bottom:1px solid #e5e7eb">
+            <th style="padding:8px 10px;text-align:left">Ticker</th>
+            <th style="padding:8px 10px;text-align:left">Name</th>
+            <th style="padding:8px 10px;text-align:right">Close</th>
+            <th style="padding:8px 10px;text-align:right">% Chg</th>
+            <th style="padding:8px 10px;text-align:right">Net 龙虎榜</th>
+            <th style="padding:8px 10px;text-align:right">Net Rate</th>
+            <th style="padding:8px 10px;text-align:left">上榜理由 · Reason</th>
+          </tr>
+        </thead>
+        <tbody>{rows_html}</tbody>
+      </table>
+    </div>"""
+
+    st.markdown(table_html, unsafe_allow_html=True)
+    st.caption(
+        "Sorted by **net 龙虎榜 amount** (institutional / large-order net flow on the day) descending. "
+        "Click a ticker to open Lead-Lag Analysis with that stock as topic — middle/right-click to open in a new tab."
+    )
 
 # Market Breadth History
 st.markdown("---")
