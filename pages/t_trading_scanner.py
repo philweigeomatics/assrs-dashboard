@@ -176,6 +176,67 @@ def _to_ts_code(ticker6):
         return f"{ticker6}.SH" if ticker6.startswith(("6", "9")) else f"{ticker6}.SZ"
 
 
+def _backtest_t_trading(df, mode, buy_pct, sell_pct, cost_round_trip_pct, lookback_days):
+    """
+    Simulate the T-trading plan on historical OHLC.
+
+    Limitation: we only have daily bars, so we INFER the intraday path:
+      - Close >= Open  → path: Open → Low  → High → Close  (down-first day)
+      - Close <  Open  → path: Open → High → Low  → Close  (up-first day)
+    Limit orders fill at their TARGET price (not the day's extreme), which is
+    the realistic outcome — buy at `buy_target` if `Low <= buy_target`,
+    sell at `sell_target` if `High >= sell_target`.
+
+    Three per-day outcomes:
+      - SUCCESS  — both legs filled in the right order; realised P&L locked in.
+      - STUCK    — first leg filled but second didn't; position force-closed at
+                   Close (this is the realistic loss scenario — you wouldn't
+                   carry the extra inventory overnight given T+1 lock).
+      - NO FILL  — neither leg's limit was touched; no trade, no impact.
+    """
+    if df is None or df.empty:
+        return None
+    bt = df.tail(int(lookback_days))[['Open', 'High', 'Low', 'Close']].dropna().copy()
+    if bt.empty:
+        return None
+
+    bt['buy_target']   = bt['Open'] * (1 + buy_pct / 100)
+    bt['sell_target']  = bt['Open'] * (1 + sell_pct / 100)
+    bt['down_first']   = bt['Close'] >= bt['Open']
+    bt['buy_touched']  = bt['Low']  <= bt['buy_target']
+    bt['sell_touched'] = bt['High'] >= bt['sell_target']
+
+    bt['outcome'] = 'no fill'
+    bt['pnl_pct'] = 0.0
+    cost_frac = cost_round_trip_pct / 100  # express as fraction
+
+    if mode == '正T':
+        # Success: rally day where Low touched buy zone AND High touched sell zone
+        ok = bt['down_first'] & bt['buy_touched'] & bt['sell_touched']
+        bt.loc[ok, 'outcome'] = 'success'
+        bt.loc[ok, 'pnl_pct'] = (sell_pct - buy_pct) / 100 - cost_frac
+
+        # Stuck: bought but never sold — force-close at Close
+        stuck = (~ok) & bt['buy_touched']
+        bt.loc[stuck, 'outcome'] = 'stuck'
+        # PnL = (Close - buy_target) / Open  —  expressed as % of opening price
+        stuck_pnl = (bt['Close'] - bt['buy_target']) / bt['Open'] - cost_frac
+        bt.loc[stuck, 'pnl_pct'] = stuck_pnl[stuck]
+    else:  # 倒T
+        ok = (~bt['down_first']) & bt['sell_touched'] & bt['buy_touched']
+        bt.loc[ok, 'outcome'] = 'success'
+        bt.loc[ok, 'pnl_pct'] = (sell_pct - buy_pct) / 100 - cost_frac
+
+        # Stuck: sold from base but never bought back — force-close at Close
+        stuck = (~ok) & bt['sell_touched']
+        bt.loc[stuck, 'outcome'] = 'stuck'
+        stuck_pnl = (bt['sell_target'] - bt['Close']) / bt['Open'] - cost_frac
+        bt.loc[stuck, 'pnl_pct'] = stuck_pnl[stuck]
+
+    bt['cum_pnl_pct'] = bt['pnl_pct'].cumsum() * 100
+    return bt
+
+
 def _scan_one(ticker, name):
     """Compute all metrics + final score for one ticker. Returns the row dict."""
     df = _fetch_prices(ticker)
@@ -565,3 +626,139 @@ st.caption(
     "excursions. This is a heuristic envelope — *not* a guarantee. The day's actual high/low "
     "can land anywhere; the percentiles just tell you the historically typical zone."
 )
+
+# ── 5) Backtest ─────────────────────────────────────────────────────────────
+st.markdown("#### 5 · Backtest the plan on historical days")
+st.caption(
+    "Tests the trade plan against the last N days using OHLC-inferred intraday paths. "
+    "**Limit orders fill at their TARGET price** (not the day's extreme — that would be unrealistic). "
+    "On days where only one leg fills, the position is force-flattened at the Close to model "
+    "the realistic 'don't carry overnight' rule."
+)
+
+bt_l, bt_m, bt_r = st.columns(3)
+bt_target_profit = bt_l.number_input(
+    "Target net profit per trade (%)",
+    value=1.0, step=0.1, min_value=0.2, max_value=5.0,
+    key="tt_bt_target",
+    help="Net profit per successful round-trip. Smaller = more fills, smaller wins. "
+         "Larger = fewer fills, bigger wins per trade.",
+)
+bt_lookback = bt_m.number_input(
+    "Lookback days",
+    value=60, step=10, min_value=20, max_value=250,
+    key="tt_bt_lookback",
+)
+bt_cost = bt_r.number_input(
+    "Round-trip cost (%)",
+    value=0.15, step=0.01, min_value=0.0, max_value=1.0, format="%.2f",
+    key="tt_bt_cost",
+    help="Total cost for both legs: A-share commission ≈ 0.05% round-trip + stamp duty "
+         "0.05% (sell only) + slippage ≈ 0.05%. Default 0.15% is typical.",
+)
+
+# Symmetric zones derived from target profit: zones widen by cost so the
+# NET profit at success equals the target.
+_half_span = (bt_target_profit + bt_cost) / 2
+bt_buy_pct  = -_half_span
+bt_sell_pct = +_half_span
+
+st.markdown(
+    f"_Derived zones (symmetric around open):_ "
+    f"buy at `{bt_buy_pct:.3f} %` · sell at `{bt_sell_pct:+.3f} %` · "
+    f"implied gross spread `{bt_target_profit + bt_cost:.2f} %`  →  "
+    f"after `{bt_cost:.2f} %` cost → **net {bt_target_profit:.2f} % per success**"
+)
+
+bt_df = _backtest_t_trading(plan_df, mode, bt_buy_pct, bt_sell_pct, bt_cost, bt_lookback)
+
+if bt_df is None or bt_df.empty:
+    st.warning("Insufficient history for backtest.")
+else:
+    n_total_days = len(bt_df)
+    n_traded     = int((bt_df['outcome'] != 'no fill').sum())
+    n_success    = int((bt_df['outcome'] == 'success').sum())
+    n_stuck      = int((bt_df['outcome'] == 'stuck').sum())
+    n_noFill     = int((bt_df['outcome'] == 'no fill').sum())
+    total_pnl    = float(bt_df['pnl_pct'].sum() * 100)
+    success_only_pnl = float(bt_df.loc[bt_df['outcome'] == 'success', 'pnl_pct'].sum() * 100)
+    stuck_only_pnl   = float(bt_df.loc[bt_df['outcome'] == 'stuck',   'pnl_pct'].sum() * 100)
+    avg_pnl_per_trade = float(bt_df.loc[bt_df['outcome'] != 'no fill', 'pnl_pct'].mean() * 100) if n_traded else 0.0
+    win_rate     = (n_success / n_traded * 100) if n_traded else 0.0
+    cum          = bt_df['cum_pnl_pct']
+    max_dd       = float((cum - cum.cummax()).min()) if not cum.empty else 0.0
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Trade days",      f"{n_traded} / {n_total_days}",
+              help="Days where at least one leg's limit was touched (vs. days with no fills)")
+    k2.metric("Round-trip wins", f"{n_success}  ({win_rate:.0f}%)",
+              help="Days where both buy AND sell legs filled in the correct order")
+    k3.metric("Stuck days",      f"{n_stuck}",
+              help="Days where one leg filled but the other didn't — force-closed at Close")
+    k4.metric("Avg P&L / trade", f"{avg_pnl_per_trade:+.3f} %")
+    k5.metric("Cumulative P&L",  f"{total_pnl:+.2f} %",
+              delta=f"max DD {max_dd:+.2f} %", delta_color="inverse")
+
+    # Cumulative P&L chart (A-share colours: red = positive)
+    line_color = "#dc2626" if total_pnl >= 0 else "#16a34a"
+    fill_color = "rgba(220, 38, 38, 0.12)" if total_pnl >= 0 else "rgba(22, 163, 74, 0.12)"
+    fig_bt = go.Figure()
+    fig_bt.add_trace(go.Scatter(
+        x=bt_df.index.strftime('%Y-%m-%d'),
+        y=bt_df['cum_pnl_pct'],
+        mode='lines',
+        line=dict(color=line_color, width=2),
+        name='Cumulative P&L %',
+        fill='tozeroy', fillcolor=fill_color,
+        hovertemplate='%{x}<br>Cumulative: %{y:.2f}%<extra></extra>',
+    ))
+    fig_bt.add_hline(y=0, line_color='#94a3b8', line_width=1, line_dash='dot')
+    fig_bt.update_layout(
+        title=f"Cumulative P&L over last {n_total_days} trading days",
+        height=320, template='plotly_white',
+        xaxis=dict(tickangle=-45),
+        yaxis_title='Cumulative %',
+        margin=dict(t=50, l=50, r=30, b=50),
+    )
+    st.plotly_chart(fig_bt, use_container_width=True)
+
+    # Breakdown caption
+    st.caption(
+        f"**Breakdown:** {n_success} winning round-trips contributed `{success_only_pnl:+.2f} %`. "
+        f"{n_stuck} stuck-day flattens contributed `{stuck_only_pnl:+.2f} %`. "
+        f"{n_noFill} days had no fill (no impact). "
+        f"Average per traded day: `{avg_pnl_per_trade:+.3f} %`."
+    )
+
+    # Trade-by-trade log
+    with st.expander("📋 Trade log (last 30 trade days)", expanded=False):
+        log = bt_df[bt_df['outcome'] != 'no fill'].copy()
+        log['Date']    = log.index.strftime('%Y-%m-%d')
+        log['P&L %']   = (log['pnl_pct'] * 100).round(3)
+        log = log[['Date', 'outcome', 'Open', 'buy_target', 'sell_target', 'Close', 'P&L %']]
+        log = log.rename(columns={
+            'outcome':     'Outcome',
+            'buy_target':  'Buy@',
+            'sell_target': 'Sell@',
+        })
+        log = log.tail(30).iloc[::-1]  # most recent first
+        st.dataframe(
+            log,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Open":  st.column_config.NumberColumn(format="¥%.2f"),
+                "Buy@":  st.column_config.NumberColumn(format="¥%.2f"),
+                "Sell@": st.column_config.NumberColumn(format="¥%.2f"),
+                "Close": st.column_config.NumberColumn(format="¥%.2f"),
+                "P&L %": st.column_config.NumberColumn(format="%+.3f"),
+            },
+        )
+
+    st.caption(
+        "ⓘ The backtest uses an OHLC-inferred intraday path (Close ≥ Open → "
+        "Low-then-High; Close < Open → High-then-Low). Real intraday paths zigzag — "
+        "this approximation tends to be *optimistic* for the 'success' count and *honest* "
+        "for the 'stuck' count, because if neither leg can fill under the simplification, "
+        "neither would in reality."
+    )
