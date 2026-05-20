@@ -210,28 +210,40 @@ def _backtest_t_trading(df, mode, buy_pct, sell_pct, cost_round_trip_pct, lookba
     bt['pnl_pct'] = 0.0
     cost_frac = cost_round_trip_pct / 100  # express as fraction
 
+    # Actual fill prices — for success they equal the targets; for stuck the
+    # second leg is the force-flatten at Close, not the unfilled target.
+    bt['buy_fill']  = np.nan
+    bt['sell_fill'] = np.nan
+
     if mode == '正T':
         # Success: rally day where Low touched buy zone AND High touched sell zone
         ok = bt['down_first'] & bt['buy_touched'] & bt['sell_touched']
-        bt.loc[ok, 'outcome'] = 'success'
-        bt.loc[ok, 'pnl_pct'] = (sell_pct - buy_pct) / 100 - cost_frac
+        bt.loc[ok, 'outcome']   = 'success'
+        bt.loc[ok, 'pnl_pct']   = (sell_pct - buy_pct) / 100 - cost_frac
+        bt.loc[ok, 'buy_fill']  = bt.loc[ok, 'buy_target']
+        bt.loc[ok, 'sell_fill'] = bt.loc[ok, 'sell_target']
 
-        # Stuck: bought but never sold — force-close at Close
+        # Stuck: bought at buy_target but never reached sell_target → flatten at Close
         stuck = (~ok) & bt['buy_touched']
-        bt.loc[stuck, 'outcome'] = 'stuck'
-        # PnL = (Close - buy_target) / Open  —  expressed as % of opening price
+        bt.loc[stuck, 'outcome']   = 'stuck'
         stuck_pnl = (bt['Close'] - bt['buy_target']) / bt['Open'] - cost_frac
-        bt.loc[stuck, 'pnl_pct'] = stuck_pnl[stuck]
+        bt.loc[stuck, 'pnl_pct']   = stuck_pnl[stuck]
+        bt.loc[stuck, 'buy_fill']  = bt.loc[stuck, 'buy_target']
+        bt.loc[stuck, 'sell_fill'] = bt.loc[stuck, 'Close']
     else:  # 倒T
         ok = (~bt['down_first']) & bt['sell_touched'] & bt['buy_touched']
-        bt.loc[ok, 'outcome'] = 'success'
-        bt.loc[ok, 'pnl_pct'] = (sell_pct - buy_pct) / 100 - cost_frac
+        bt.loc[ok, 'outcome']   = 'success'
+        bt.loc[ok, 'pnl_pct']   = (sell_pct - buy_pct) / 100 - cost_frac
+        bt.loc[ok, 'buy_fill']  = bt.loc[ok, 'buy_target']
+        bt.loc[ok, 'sell_fill'] = bt.loc[ok, 'sell_target']
 
-        # Stuck: sold from base but never bought back — force-close at Close
+        # Stuck: sold at sell_target but never reached buy_target → buy back at Close
         stuck = (~ok) & bt['sell_touched']
-        bt.loc[stuck, 'outcome'] = 'stuck'
+        bt.loc[stuck, 'outcome']   = 'stuck'
         stuck_pnl = (bt['sell_target'] - bt['Close']) / bt['Open'] - cost_frac
-        bt.loc[stuck, 'pnl_pct'] = stuck_pnl[stuck]
+        bt.loc[stuck, 'pnl_pct']   = stuck_pnl[stuck]
+        bt.loc[stuck, 'sell_fill'] = bt.loc[stuck, 'sell_target']
+        bt.loc[stuck, 'buy_fill']  = bt.loc[stuck, 'Close']
 
     bt['cum_pnl_pct'] = bt['pnl_pct'].cumsum() * 100
     return bt
@@ -785,29 +797,56 @@ else:
         f"Average per traded day: `{avg_pnl_per_trade:+.3f} %`."
     )
 
-    # Trade-by-trade log
+    # Trade-by-trade log — actual realised fill prices, not the unfilled targets.
     with st.expander("📋 Trade log (last 30 trade days)", expanded=False):
         log = bt_df[bt_df['outcome'] != 'no fill'].copy()
         log['Date']    = log.index.strftime('%Y-%m-%d')
         log['P&L %']   = (log['pnl_pct'] * 100).round(3)
-        log = log[['Date', 'outcome', 'Open', 'buy_target', 'sell_target', 'Close', 'P&L %']]
+        # Annotate stuck rows so it's visually clear which fill was the
+        # planned limit and which was the force-flatten at Close.
+        if mode == '正T':
+            log['Buy note']  = ""
+            log['Sell note'] = log['outcome'].map(
+                lambda o: "🛑 force-close at Close" if o == 'stuck' else ""
+            )
+        else:
+            log['Sell note'] = ""
+            log['Buy note']  = log['outcome'].map(
+                lambda o: "🛑 force-buyback at Close" if o == 'stuck' else ""
+            )
+
+        log = log[['Date', 'outcome', 'Open', 'buy_fill', 'Buy note',
+                   'sell_fill', 'Sell note', 'Close', 'P&L %']]
         log = log.rename(columns={
-            'outcome':     'Outcome',
-            'buy_target':  'Buy@',
-            'sell_target': 'Sell@',
+            'outcome':   'Outcome',
+            'buy_fill':  'Buy fill ¥',
+            'sell_fill': 'Sell fill ¥',
         })
         log = log.tail(30).iloc[::-1]  # most recent first
+
         st.dataframe(
             log,
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Open":  st.column_config.NumberColumn(format="¥%.2f"),
-                "Buy@":  st.column_config.NumberColumn(format="¥%.2f"),
-                "Sell@": st.column_config.NumberColumn(format="¥%.2f"),
-                "Close": st.column_config.NumberColumn(format="¥%.2f"),
-                "P&L %": st.column_config.NumberColumn(format="%+.3f"),
+                "Open":         st.column_config.NumberColumn(format="¥%.2f"),
+                "Buy fill ¥":   st.column_config.NumberColumn(format="¥%.2f",
+                                  help="Actual price the buy leg filled at."),
+                "Buy note":     st.column_config.TextColumn(width="small",
+                                  help="Annotation if the buy was a force-flatten."),
+                "Sell fill ¥":  st.column_config.NumberColumn(format="¥%.2f",
+                                  help="Actual price the sell leg filled at."),
+                "Sell note":    st.column_config.TextColumn(width="small",
+                                  help="Annotation if the sell was a force-flatten."),
+                "Close":        st.column_config.NumberColumn(format="¥%.2f"),
+                "P&L %":        st.column_config.NumberColumn(format="%+.3f"),
             },
+        )
+        st.caption(
+            "**Buy fill ¥** and **Sell fill ¥** are the *actual* prices each leg "
+            "executed at. On 🛑 stuck rows, one leg filled at the limit target and "
+            "the other was force-flattened at Close — the column annotation marks "
+            "which one. P&L % is derived from the actual fills (not the targets)."
         )
 
     st.caption(
