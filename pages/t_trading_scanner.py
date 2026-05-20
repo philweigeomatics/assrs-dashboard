@@ -641,11 +641,16 @@ st.caption(
 
 # ── 5) Backtest ─────────────────────────────────────────────────────────────
 st.markdown("#### 5 · Backtest the plan on historical days")
+st.markdown(
+    "**The strategy in one sentence:** *if the stock dips by X % of its average intraday "
+    "range below today's open, buy; if it rallies by Y % of the same range above open, sell.* "
+    "X and Y scale automatically with the stock's own range, so the same X/Y settings give "
+    "tight zones on a quiet stock and wide zones on a volatile one."
+)
 st.caption(
-    "Tests the trade plan against the last N days using OHLC-inferred intraday paths. "
-    "**Limit orders fill at their TARGET price** (not the day's extreme — that would be unrealistic). "
-    "On days where only one leg fills, the position is force-flattened at the Close to model "
-    "the realistic 'don't carry overnight' rule."
+    "Limit orders fill at their TARGET price (not the day's extreme). On days where only "
+    "one leg fills, the position is force-flattened at the Close to model the realistic "
+    "'don't carry net new shares overnight' rule."
 )
 
 # Common parameters (lookback + cost)
@@ -665,53 +670,58 @@ bt_cost = bt_cost_col.number_input(
 
 # Zone-strategy selector
 st.markdown("**Zone strategy**")
-bt_mode_col, bt_param_col = st.columns([1, 2])
-bt_zone_mode = bt_mode_col.radio(
+bt_zone_mode = st.radio(
     "Zone strategy",
-    options=["Range-scaled (recommended)", "Fixed target"],
+    options=["Range-scaled (% of avg intraday range)", "Fixed target (% net profit)"],
     index=0,
+    horizontal=True,
     key="tt_bt_zone_mode",
     label_visibility="collapsed",
     help=(
-        "**Range-scaled**: zones are derived from THIS stock's actual historical "
-        "intraday excursions. A high-vol stock gets wider zones; a quiet stock "
-        "gets tighter zones — automatically.\n\n"
-        "**Fixed target**: symmetric zones around open at a user-set net profit "
-        "(e.g. 1 %). One-size-fits-all — usually too shallow for high-range "
-        "stocks and too aggressive for quiet ones."
+        "**Range-scaled (recommended)**: buy fires when price drops by X % of "
+        "the stock's 20-day average intraday range; sell fires when it rises "
+        "by Y % of the same. A high-vol stock gets wider zones; a quiet stock "
+        "gets tighter zones — automatically, in the units the strategy itself "
+        "is defined in.\n\n"
+        "**Fixed target**: symmetric ±(target+cost)/2 zones around open at a "
+        "user-set net profit. One-size-fits-all — usually too shallow for "
+        "high-range stocks and too aggressive for quiet ones."
     ),
 )
 
+avg_range = plan_intraday or 0.0  # 20-day mean of (H-L)/Open in %
+
 if bt_zone_mode.startswith("Range-scaled"):
-    bt_pctile = bt_param_col.select_slider(
-        "Aggressiveness",
-        options=[
-            "P25 — fills often, smaller wins",
-            "P50 — balanced (median)",
-            "P75 — rarer fills, bigger wins",
-        ],
-        value="P50 — balanced (median)",
-        key="tt_bt_pctile",
-        help="Percentile of the last 20 days' upside/downside excursions used "
-             "as the zone width. P25 = 25th percentile (close to open); "
-             "P75 = 75th percentile (further out).",
+    pct_l, pct_r = st.columns(2)
+    buy_frac_pct = pct_l.number_input(
+        "Buy when down ___ % of avg range",
+        value=40, step=5, min_value=5, max_value=100,
+        key="tt_bt_buy_frac",
+        help=f"Buy fires when intraday price drops by this % of the stock's "
+             f"20-day average intraday range ({avg_range:.2f} %). "
+             f"Smaller value → fills more often, smaller win.",
     )
-    if "P25" in bt_pctile:
-        bt_buy_pct, bt_sell_pct, _label = -float(dn_p25), +float(up_p25), "P25"
-    elif "P75" in bt_pctile:
-        bt_buy_pct, bt_sell_pct, _label = -float(dn_p75), +float(up_p75), "P75"
-    else:
-        bt_buy_pct, bt_sell_pct, _label = -float(dn_p50), +float(up_p50), "P50"
+    sell_frac_pct = pct_r.number_input(
+        "Sell when up ___ % of avg range",
+        value=40, step=5, min_value=5, max_value=100,
+        key="tt_bt_sell_frac",
+        help=f"Sell fires when intraday price rises by this % of the stock's "
+             f"20-day average intraday range ({avg_range:.2f} %). "
+             f"Smaller value → fills more often, smaller win.",
+    )
+    bt_buy_pct  = -(buy_frac_pct  / 100.0) * avg_range
+    bt_sell_pct = +(sell_frac_pct / 100.0) * avg_range
     _zone_explainer = (
-        f"**Zones at {_label} of this stock's historical excursions** · "
-        f"buy `{bt_buy_pct:.3f} %` · sell `{bt_sell_pct:+.3f} %`"
+        f"**Stock's 20-day avg intraday range: `{avg_range:.2f} %`**  ·  "
+        f"buy zone = `{buy_frac_pct} %` of that = `{bt_buy_pct:.3f} %` below open  ·  "
+        f"sell zone = `{sell_frac_pct} %` of that = `{bt_sell_pct:+.3f} %` above open"
     )
 else:  # Fixed target
-    bt_target_profit = bt_param_col.number_input(
+    bt_target_profit = st.number_input(
         "Target net profit per trade (%)",
         value=1.0, step=0.1, min_value=0.2, max_value=5.0,
         key="tt_bt_target",
-        help="Symmetric zones around open. Same target on every stock.",
+        help="Symmetric zones around open. Same target on every stock regardless of its range.",
     )
     _half_span = (bt_target_profit + bt_cost) / 2
     bt_buy_pct, bt_sell_pct = -_half_span, +_half_span
