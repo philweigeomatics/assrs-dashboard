@@ -636,39 +636,94 @@ st.caption(
     "the realistic 'don't carry overnight' rule."
 )
 
-bt_l, bt_m, bt_r = st.columns(3)
-bt_target_profit = bt_l.number_input(
-    "Target net profit per trade (%)",
-    value=1.0, step=0.1, min_value=0.2, max_value=5.0,
-    key="tt_bt_target",
-    help="Net profit per successful round-trip. Smaller = more fills, smaller wins. "
-         "Larger = fewer fills, bigger wins per trade.",
-)
-bt_lookback = bt_m.number_input(
+# Common parameters (lookback + cost)
+bt_lb_col, bt_cost_col = st.columns(2)
+bt_lookback = bt_lb_col.number_input(
     "Lookback days",
     value=60, step=10, min_value=20, max_value=250,
     key="tt_bt_lookback",
 )
-bt_cost = bt_r.number_input(
+bt_cost = bt_cost_col.number_input(
     "Round-trip cost (%)",
     value=0.15, step=0.01, min_value=0.0, max_value=1.0, format="%.2f",
     key="tt_bt_cost",
-    help="Total cost for both legs: A-share commission ≈ 0.05% round-trip + stamp duty "
-         "0.05% (sell only) + slippage ≈ 0.05%. Default 0.15% is typical.",
+    help="Commission (~0.05%) + stamp duty on sell (~0.05%) + slippage (~0.05%). "
+         "Default 0.15% is typical for A-share retail.",
 )
 
-# Symmetric zones derived from target profit: zones widen by cost so the
-# NET profit at success equals the target.
-_half_span = (bt_target_profit + bt_cost) / 2
-bt_buy_pct  = -_half_span
-bt_sell_pct = +_half_span
+# Zone-strategy selector
+st.markdown("**Zone strategy**")
+bt_mode_col, bt_param_col = st.columns([1, 2])
+bt_zone_mode = bt_mode_col.radio(
+    "Zone strategy",
+    options=["Range-scaled (recommended)", "Fixed target"],
+    index=0,
+    key="tt_bt_zone_mode",
+    label_visibility="collapsed",
+    help=(
+        "**Range-scaled**: zones are derived from THIS stock's actual historical "
+        "intraday excursions. A high-vol stock gets wider zones; a quiet stock "
+        "gets tighter zones — automatically.\n\n"
+        "**Fixed target**: symmetric zones around open at a user-set net profit "
+        "(e.g. 1 %). One-size-fits-all — usually too shallow for high-range "
+        "stocks and too aggressive for quiet ones."
+    ),
+)
 
+if bt_zone_mode.startswith("Range-scaled"):
+    bt_pctile = bt_param_col.select_slider(
+        "Aggressiveness",
+        options=[
+            "P25 — fills often, smaller wins",
+            "P50 — balanced (median)",
+            "P75 — rarer fills, bigger wins",
+        ],
+        value="P50 — balanced (median)",
+        key="tt_bt_pctile",
+        help="Percentile of the last 20 days' upside/downside excursions used "
+             "as the zone width. P25 = 25th percentile (close to open); "
+             "P75 = 75th percentile (further out).",
+    )
+    if "P25" in bt_pctile:
+        bt_buy_pct, bt_sell_pct, _label = -float(dn_p25), +float(up_p25), "P25"
+    elif "P75" in bt_pctile:
+        bt_buy_pct, bt_sell_pct, _label = -float(dn_p75), +float(up_p75), "P75"
+    else:
+        bt_buy_pct, bt_sell_pct, _label = -float(dn_p50), +float(up_p50), "P50"
+    _zone_explainer = (
+        f"**Zones at {_label} of this stock's historical excursions** · "
+        f"buy `{bt_buy_pct:.3f} %` · sell `{bt_sell_pct:+.3f} %`"
+    )
+else:  # Fixed target
+    bt_target_profit = bt_param_col.number_input(
+        "Target net profit per trade (%)",
+        value=1.0, step=0.1, min_value=0.2, max_value=5.0,
+        key="tt_bt_target",
+        help="Symmetric zones around open. Same target on every stock.",
+    )
+    _half_span = (bt_target_profit + bt_cost) / 2
+    bt_buy_pct, bt_sell_pct = -_half_span, +_half_span
+    _zone_explainer = (
+        f"**Fixed symmetric zones for {bt_target_profit:.2f} % net target** · "
+        f"buy `{bt_buy_pct:.3f} %` · sell `{bt_sell_pct:+.3f} %`"
+    )
+
+_implied_gross = bt_sell_pct - bt_buy_pct
+_implied_net   = _implied_gross - bt_cost
 st.markdown(
-    f"_Derived zones (symmetric around open):_ "
-    f"buy at `{bt_buy_pct:.3f} %` · sell at `{bt_sell_pct:+.3f} %` · "
-    f"implied gross spread `{bt_target_profit + bt_cost:.2f} %`  →  "
-    f"after `{bt_cost:.2f} %` cost → **net {bt_target_profit:.2f} % per success**"
+    f"{_zone_explainer}  ·  gross `{_implied_gross:.2f} %`  →  after `{bt_cost:.2f} %` cost  →  "
+    f"**net `{_implied_net:+.2f} %` per success**"
 )
+if _implied_net <= 0:
+    st.error(
+        f"❌ Implied net profit is `{_implied_net:.2f} %` — zones are too tight to "
+        "clear costs. Pick a higher percentile (P50 / P75) or use a fixed target."
+    )
+elif _implied_net < 0.20:
+    st.warning(
+        f"⚠️ Net profit per trade is only `{_implied_net:.2f} %` — close to noise. "
+        "Consider P50 / P75 for wider zones."
+    )
 
 bt_df = _backtest_t_trading(plan_df, mode, bt_buy_pct, bt_sell_pct, bt_cost, bt_lookback)
 
