@@ -766,10 +766,12 @@ else:
     k5.metric("Cumulative P&L",  f"{total_pnl:+.2f} %",
               delta=f"max DD {max_dd:+.2f} %", delta_color="inverse")
 
-    # Cumulative P&L chart (A-share colours: red = positive)
+    # Cumulative P&L chart with per-trade markers.
+    # A-share colours: red = wins / positive, green = losses / negative.
     line_color = "#dc2626" if total_pnl >= 0 else "#16a34a"
     fill_color = "rgba(220, 38, 38, 0.12)" if total_pnl >= 0 else "rgba(22, 163, 74, 0.12)"
     fig_bt = go.Figure()
+    # Base cumulative-P&L area
     fig_bt.add_trace(go.Scatter(
         x=bt_df.index.strftime('%Y-%m-%d'),
         y=bt_df['cum_pnl_pct'],
@@ -780,12 +782,69 @@ else:
         hovertemplate='%{x}<br>Cumulative: %{y:.2f}%<extra></extra>',
     ))
     fig_bt.add_hline(y=0, line_color='#94a3b8', line_width=1, line_dash='dot')
+
+    # Success markers — small red circles on the line (A-share red = win)
+    success_only = bt_df[bt_df['outcome'] == 'success']
+    if not success_only.empty:
+        fig_bt.add_trace(go.Scatter(
+            x=success_only.index.strftime('%Y-%m-%d'),
+            y=success_only['cum_pnl_pct'],
+            mode='markers',
+            name='✓ Round-trip win',
+            marker=dict(color='#dc2626', size=7, symbol='circle',
+                        line=dict(color='#7f1d1d', width=1)),
+            customdata=np.stack([
+                success_only['buy_fill'].values,
+                success_only['sell_fill'].values,
+                (success_only['pnl_pct'].values * 100),
+            ], axis=-1),
+            hovertemplate=(
+                '%{x}<br>'
+                '<b>✓ Success</b><br>'
+                'Bought  ¥%{customdata[0]:.2f}<br>'
+                'Sold    ¥%{customdata[1]:.2f}<br>'
+                'P&L     %{customdata[2]:+.3f}%<extra></extra>'
+            ),
+        ))
+
+    # Stuck markers — bigger green triangles (A-share green = loss / warning)
+    stuck_only = bt_df[bt_df['outcome'] == 'stuck']
+    if not stuck_only.empty:
+        # Hover annotates which leg was the force-flatten
+        if mode == '正T':
+            stuck_annot = ['sell force-closed at Close'] * len(stuck_only)
+        else:
+            stuck_annot = ['buy force-replaced at Close'] * len(stuck_only)
+        fig_bt.add_trace(go.Scatter(
+            x=stuck_only.index.strftime('%Y-%m-%d'),
+            y=stuck_only['cum_pnl_pct'],
+            mode='markers',
+            name='🛑 Stuck (force-flatten)',
+            marker=dict(color='#16a34a', size=11, symbol='triangle-down',
+                        line=dict(color='black', width=1)),
+            customdata=np.stack([
+                stuck_only['buy_fill'].values,
+                stuck_only['sell_fill'].values,
+                (stuck_only['pnl_pct'].values * 100),
+                stuck_annot,
+            ], axis=-1),
+            hovertemplate=(
+                '%{x}<br>'
+                '<b>🛑 Stuck — %{customdata[3]}</b><br>'
+                'Bought  ¥%{customdata[0]:.2f}<br>'
+                'Sold    ¥%{customdata[1]:.2f}<br>'
+                'P&L     %{customdata[2]:+.3f}%<extra></extra>'
+            ),
+        ))
+
     fig_bt.update_layout(
         title=f"Cumulative P&L over last {n_total_days} trading days",
-        height=320, template='plotly_white',
+        height=360, template='plotly_white',
         xaxis=dict(tickangle=-45),
         yaxis_title='Cumulative %',
         margin=dict(t=50, l=50, r=30, b=50),
+        hovermode='closest',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     st.plotly_chart(fig_bt, use_container_width=True)
 
@@ -797,56 +856,34 @@ else:
         f"Average per traded day: `{avg_pnl_per_trade:+.3f} %`."
     )
 
-    # Trade-by-trade log — actual realised fill prices, not the unfilled targets.
+    # Trade-by-trade log — actual realised fill prices.
     with st.expander("📋 Trade log (last 30 trade days)", expanded=False):
         log = bt_df[bt_df['outcome'] != 'no fill'].copy()
-        log['Date']    = log.index.strftime('%Y-%m-%d')
-        log['P&L %']   = (log['pnl_pct'] * 100).round(3)
-        # Annotate stuck rows so it's visually clear which fill was the
-        # planned limit and which was the force-flatten at Close.
-        if mode == '正T':
-            log['Buy note']  = ""
-            log['Sell note'] = log['outcome'].map(
-                lambda o: "🛑 force-close at Close" if o == 'stuck' else ""
-            )
-        else:
-            log['Sell note'] = ""
-            log['Buy note']  = log['outcome'].map(
-                lambda o: "🛑 force-buyback at Close" if o == 'stuck' else ""
-            )
-
-        log = log[['Date', 'outcome', 'Open', 'buy_fill', 'Buy note',
-                   'sell_fill', 'Sell note', 'Close', 'P&L %']]
+        log['Date']  = log.index.strftime('%Y-%m-%d')
+        log['P&L %'] = (log['pnl_pct'] * 100).round(3)
+        log = log[['Date', 'outcome', 'Open', 'buy_fill', 'sell_fill', 'Close', 'P&L %']]
         log = log.rename(columns={
             'outcome':   'Outcome',
             'buy_fill':  'Buy fill ¥',
             'sell_fill': 'Sell fill ¥',
         })
         log = log.tail(30).iloc[::-1]  # most recent first
-
         st.dataframe(
             log,
             use_container_width=True,
             hide_index=True,
             column_config={
                 "Open":         st.column_config.NumberColumn(format="¥%.2f"),
-                "Buy fill ¥":   st.column_config.NumberColumn(format="¥%.2f",
-                                  help="Actual price the buy leg filled at."),
-                "Buy note":     st.column_config.TextColumn(width="small",
-                                  help="Annotation if the buy was a force-flatten."),
-                "Sell fill ¥":  st.column_config.NumberColumn(format="¥%.2f",
-                                  help="Actual price the sell leg filled at."),
-                "Sell note":    st.column_config.TextColumn(width="small",
-                                  help="Annotation if the sell was a force-flatten."),
+                "Buy fill ¥":   st.column_config.NumberColumn(format="¥%.2f"),
+                "Sell fill ¥":  st.column_config.NumberColumn(format="¥%.2f"),
                 "Close":        st.column_config.NumberColumn(format="¥%.2f"),
                 "P&L %":        st.column_config.NumberColumn(format="%+.3f"),
             },
         )
         st.caption(
-            "**Buy fill ¥** and **Sell fill ¥** are the *actual* prices each leg "
-            "executed at. On 🛑 stuck rows, one leg filled at the limit target and "
-            "the other was force-flattened at Close — the column annotation marks "
-            "which one. P&L % is derived from the actual fills (not the targets)."
+            "**Buy fill ¥** and **Sell fill ¥** are the *actual* execution prices. "
+            "Hover the markers on the cumulative-P&L chart above to see which leg "
+            "was force-flattened on stuck rows."
         )
 
     st.caption(
