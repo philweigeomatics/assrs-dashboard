@@ -1501,6 +1501,12 @@ ex_df, ex_status = _filter_status(ex_df)
 if fc_df is not None or ex_df is not None:
     cards_html = ""
 
+    # NaN-safe string getter — pandas Series fields are float('nan') when
+    # missing, not None, and `nan or ""` evaluates to nan (because bool(nan)
+    # is True), breaking subsequent .strip() calls. This helper handles both.
+    def _s(v):
+        return str(v).strip() if pd.notna(v) else ""
+
     # Forecast card — preliminary earnings warning with narrative
     if fc_df is not None and not fc_df.empty:
         f0 = fc_df.iloc[0]
@@ -1508,11 +1514,11 @@ if fc_df is not None or ex_df is not None:
         ann_fmt = f"{ann[:4]}-{ann[4:6]}-{ann[6:8]}" if len(ann) == 8 else "—"
         period = str(f0.get("end_date") or "")
         period_fmt = f"{period[:4]}-{period[4:6]}" if len(period) == 8 else "—"
-        ftype = (f0.get("type") or "").strip() or "—"
+        ftype = _s(f0.get("type")) or "—"
         pmin, pmax = f0.get("p_change_min"), f0.get("p_change_max")
         npmin, npmax = f0.get("net_profit_min"), f0.get("net_profit_max")
-        summary_txt = (f0.get("summary") or "").strip()
-        reason_txt  = (f0.get("change_reason") or "").strip()
+        summary_txt = _s(f0.get("summary"))
+        reason_txt  = _s(f0.get("change_reason"))
 
         range_str = ""
         if pd.notna(pmin) and pd.notna(pmax):
