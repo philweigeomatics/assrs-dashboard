@@ -1981,6 +1981,145 @@ def remove_from_watchlist(ticker):
         return False, f"❌ Error: {str(e)}"
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# T-Trading Scan Persistence  (page: pages/t_trading_scanner.py)
+# ──────────────────────────────────────────────────────────────────────────────
+# A user's scan results are persisted so the page loads instantly from DB on
+# next visit instead of forcing a slow Tushare re-fetch. Re-scan replaces all
+# rows for that user; the page also surfaces the age of the saved scan so
+# users know when the values are stale.
+
+def ensure_t_trading_scan_table() -> None:
+    """
+    Idempotent migration: creates t_trading_scans in SQLite if missing.
+    Supabase users must run the equivalent SQL once via the editor:
+
+        CREATE TABLE IF NOT EXISTS t_trading_scans (
+            user_id      BIGINT      NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+            ticker       TEXT        NOT NULL,
+            name         TEXT,
+            t_score      DOUBLE PRECISION,
+            verdict      TEXT,
+            range_pct    DOUBLE PRECISION,
+            turnover_pct DOUBLE PRECISION,
+            meanrev_bias DOUBLE PRECISION,
+            adx          DOUBLE PRECISION,
+            range_pos    DOUBLE PRECISION,
+            limit_event  INTEGER     DEFAULT 0,
+            fail_reason  TEXT        DEFAULT '',
+            scanned_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (user_id, ticker)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tts_user ON t_trading_scans(user_id);
+    """
+    from db_config import USE_SQLITE
+    if not USE_SQLITE:
+        return
+    from db_config import DBNAME
+    import sqlite3
+    with sqlite3.connect(DBNAME) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS t_trading_scans (
+                user_id      INTEGER NOT NULL,
+                ticker       TEXT    NOT NULL,
+                name         TEXT,
+                t_score      REAL,
+                verdict      TEXT,
+                range_pct    REAL,
+                turnover_pct REAL,
+                meanrev_bias REAL,
+                adx          REAL,
+                range_pos    REAL,
+                limit_event  INTEGER DEFAULT 0,
+                fail_reason  TEXT    DEFAULT '',
+                scanned_at   TEXT    NOT NULL,
+                PRIMARY KEY (user_id, ticker)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tts_user ON t_trading_scans(user_id)")
+        conn.commit()
+
+
+def save_t_trading_scan(user_id: int, rows: list[dict]) -> None:
+    """
+    Replace all saved scan rows for `user_id` with `rows`. Each row dict is
+    expected to use the same keys as the page's results DataFrame
+    (Ticker / Name / T-Score / Verdict / Range % / Turnover % / MeanRev bias
+    / ADX / Range pos / Limit event? / Why).
+    """
+    if not user_id:
+        return
+    clear_t_trading_scan(user_id)
+    if not rows:
+        return
+    from datetime import datetime, timezone
+    now_iso = datetime.now(timezone.utc).isoformat()
+    payload = []
+    for r in rows:
+        payload.append({
+            "user_id":      int(user_id),
+            "ticker":       r.get("Ticker"),
+            "name":         r.get("Name"),
+            "t_score":      r.get("T-Score"),
+            "verdict":      r.get("Verdict"),
+            "range_pct":    r.get("Range %"),
+            "turnover_pct": r.get("Turnover %"),
+            "meanrev_bias": r.get("MeanRev bias"),
+            "adx":          r.get("ADX"),
+            "range_pos":    r.get("Range pos"),
+            "limit_event":  1 if "Yes" in str(r.get("Limit event?", "")) else 0,
+            "fail_reason":  r.get("Why", "") or "",
+            "scanned_at":   now_iso,
+        })
+    try:
+        db.insert_records("t_trading_scans", payload)
+    except Exception as e:
+        print(f"[t_trading] save failed: {e}")
+
+
+def load_t_trading_scan(user_id: int):
+    """
+    Returns (df, scanned_at_iso) or (None, None) if no saved scan exists.
+    df uses the original page column names so it can render without remapping.
+    """
+    if not user_id:
+        return None, None
+    try:
+        df = db.read_table("t_trading_scans", filters={"user_id": int(user_id)})
+        if df is None or df.empty:
+            return None, None
+        latest = str(df["scanned_at"].max())
+        # Rebuild the display column names so the page can render this directly.
+        out = df.rename(columns={
+            "ticker":       "Ticker",
+            "name":         "Name",
+            "t_score":      "T-Score",
+            "verdict":      "Verdict",
+            "range_pct":    "Range %",
+            "turnover_pct": "Turnover %",
+            "meanrev_bias": "MeanRev bias",
+            "adx":          "ADX",
+            "range_pos":    "Range pos",
+            "fail_reason":  "Why",
+        })
+        out["Limit event?"] = out["limit_event"].map(lambda v: "⚠️ Yes" if v else "—")
+        out = out.drop(columns=[c for c in ("user_id", "limit_event", "scanned_at") if c in out.columns])
+        return out, latest
+    except Exception as e:
+        print(f"[t_trading] load failed: {e}")
+        return None, None
+
+
+def clear_t_trading_scan(user_id: int) -> None:
+    """Wipe every saved scan row for `user_id`."""
+    if not user_id:
+        return
+    try:
+        db.delete_records("t_trading_scans", {"user_id": int(user_id)})
+    except Exception as e:
+        print(f"[t_trading] clear failed: {e}")
+
+
 def get_watchlist():
     """Get all stocks in the current user's watchlist."""
     import auth_manager
