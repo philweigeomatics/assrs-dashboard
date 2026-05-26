@@ -30,7 +30,11 @@ user = auth_manager.get_current_user()
 _uid = auth_manager.get_current_user_id()
 
 # ── Cached loaders (1 entry per user, capped) ──────────────────────────────────
-@st.cache_data(ttl=60, max_entries=20, show_spinner=False)
+# TTL is 10 min: daily_basic is refreshed once a night by the cron, so a short
+# TTL just forces unnecessary DB reads on every fragment rerun (every row click
+# triggers a rerun). 10 min still picks up cache-bust events from
+# add/remove/import (those call _clear_data_cache() explicitly).
+@st.cache_data(ttl=600, max_entries=20, show_spinner=False)
 def _load_enriched_watchlist(user_id):
     """Return watchlist DF with daily-basic columns merged in. One DB hit per cache."""
     items = data_manager.get_watchlist()
@@ -42,7 +46,7 @@ def _load_enriched_watchlist(user_id):
         df = df.merge(daily, on="ticker", how="left")
     return df.sort_values("added_date", ascending=False).reset_index(drop=True)
 
-@st.cache_data(ttl=60, max_entries=20, show_spinner=False)
+@st.cache_data(ttl=600, max_entries=20, show_spinner=False)
 def _load_graphed_tickers(user_id):
     return data_manager.get_all_supply_chain_tickers()
 

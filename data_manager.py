@@ -2867,29 +2867,59 @@ def get_daily_basic_latest(tickers: list) -> pd.DataFrame:
     """
     Fetch the latest daily_basic row for a list of tickers from the DB.
     Returns a DataFrame indexed by ticker with trading metrics.
+
+    PERF NOTE: db.read_table only supports single-value '=' filters, not
+    multi-value IN. The previous implementation loaded the ENTIRE
+    daily_basic table (millions of rows for a market this size) and
+    filtered in pandas — that's a 50–200 MB transient allocation per call
+    just to extract ~50 rows for a typical watchlist, and is the root
+    cause of the watchlist page periodically OOMing the server on
+    repeated reruns.
+
+    This version bypasses db.read_table for this one query and issues a
+    proper WHERE ts_code IN (...) (SQLite) / .in_('ts_code', ...) (Supabase)
+    so only the rows we care about are pulled from disk. The change is
+    fully contained inside this function — db.read_table itself is not
+    modified, so all other callers behave identically.
     """
     if not tickers:
         return pd.DataFrame()
     try:
-        # Read all rows for these tickers, then keep only the latest per ticker
         ts_codes = [get_tushare_ticker(t) for t in tickers]
-        placeholders = ','.join(['?' for _ in ts_codes])  # SQLite
-        df = db.read_table(
-            'daily_basic',
-            columns='ts_code, trade_date, close, pe_ttm, pb, turnover_rate, circ_mv',
-            order_by='-trade_date'
-        )
+        cols = 'ts_code,trade_date,close,pe_ttm,pb,turnover_rate,circ_mv'
+
+        if db.use_supabase:
+            from db_manager import supabase_client
+            resp = (
+                supabase_client.table('daily_basic')
+                .select(cols)
+                .in_('ts_code', ts_codes)
+                .order('trade_date', desc=True)
+                .execute()
+            )
+            df = pd.DataFrame(resp.data) if resp.data else pd.DataFrame()
+        else:
+            import sqlite3
+            placeholders = ','.join(['?'] * len(ts_codes))
+            query = (
+                f'SELECT {cols} FROM "daily_basic" '
+                f'WHERE ts_code IN ({placeholders}) '
+                f'ORDER BY trade_date DESC'
+            )
+            with sqlite3.connect(db.dbname) as conn:
+                df = pd.read_sql_query(query, conn, params=ts_codes)
+
         if df.empty:
             return pd.DataFrame()
-        df = df[df['ts_code'].isin(ts_codes)]
+
         # Keep latest row per ticker
         df = df.sort_values('trade_date', ascending=False).drop_duplicates('ts_code')
         # Normalize ticker back to 6-digit for merging
         df['ticker'] = df['ts_code'].str[:6]
-        df['circ_mv_yi'] = (pd.to_numeric(df['circ_mv'], errors='coerce') / 10000).round(2)
-        df['pe_ttm'] = pd.to_numeric(df['pe_ttm'], errors='coerce').round(1)
-        df['pb'] = pd.to_numeric(df['pb'], errors='coerce').round(2)
-        df['turnover_rate'] = pd.to_numeric(df['turnover_rate'], errors='coerce').round(2)
+        df['circ_mv_yi']    = (pd.to_numeric(df['circ_mv'],       errors='coerce') / 10000).round(2)
+        df['pe_ttm']        =  pd.to_numeric(df['pe_ttm'],        errors='coerce').round(1)
+        df['pb']            =  pd.to_numeric(df['pb'],            errors='coerce').round(2)
+        df['turnover_rate'] =  pd.to_numeric(df['turnover_rate'], errors='coerce').round(2)
         return df[['ticker', 'close', 'pe_ttm', 'pb', 'turnover_rate', 'circ_mv_yi', 'trade_date']]
     except Exception as e:
         print(f"[data_manager] ❌ get_daily_basic_latest failed: {e}")
