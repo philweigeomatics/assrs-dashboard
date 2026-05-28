@@ -676,8 +676,244 @@ def create_performance_comparison_chart(hist_df, lookback_days=60, selected_sect
     return fig
 
 
+def compute_rrg_series(close_panel, csi300_df, sectors=None,
+                       rs_window=20, mom_window=5):
+    """
+    Compute JdK-style Relative Rotation Graph series for each sector vs CSI300.
+
+    For each sector:
+        rs_raw[t]   = sector_close[t] / csi300_close[t]
+        rs_ratio[t] = 100 + (rs_raw[t] - mean_W(rs_raw)) / std_W(rs_raw)
+        rs_mom[t]   = 100 + (rs_ratio[t] - rs_ratio[t-mom_window])
+
+    Both axes are centred at 100 so the cross (100,100) is the benchmark.
+
+    Args:
+        close_panel: Date x Sector close-price panel (trading days, sorted).
+        csi300_df:   DataFrame with 'Close' column indexed by trading date.
+        sectors:     subset of sectors to compute (defaults to all non-proxy).
+        rs_window:   window for the RS z-score normalisation (trading days).
+        mom_window:  lag for the momentum (rate-of-change) of RS-Ratio.
+
+    Returns:
+        rs_ratio_panel, rs_momentum_panel  (both Date x Sector, centred at 100)
+        Returns (None, None) if CSI300 is missing.
+    """
+    if csi300_df is None or 'Close' not in csi300_df.columns:
+        return None, None
+
+    bench = csi300_df['Close'].copy()
+    common = close_panel.index.intersection(bench.index)
+    if len(common) < rs_window + mom_window + 5:
+        return None, None
+    close = close_panel.loc[common].sort_index()
+    bench = bench.loc[common].sort_index()
+
+    if sectors is None:
+        sectors = [c for c in close.columns if c != 'MARKET_PROXY']
+
+    min_periods = max(5, rs_window // 2)
+    rs_ratio_dict = {}
+    rs_mom_dict = {}
+
+    for sector in sectors:
+        if sector not in close.columns:
+            continue
+        sec = close[sector].astype(float)
+        b = bench.reindex(sec.index).ffill()
+        rs_raw = sec / b
+        rs_raw = rs_raw.replace([np.inf, -np.inf], np.nan)
+
+        roll_mean = rs_raw.rolling(rs_window, min_periods=min_periods).mean()
+        roll_std = rs_raw.rolling(rs_window, min_periods=min_periods).std()
+        rs_ratio = 100.0 + (rs_raw - roll_mean) / roll_std.replace(0, np.nan)
+
+        rs_mom = 100.0 + (rs_ratio - rs_ratio.shift(mom_window))
+
+        rs_ratio_dict[sector] = rs_ratio
+        rs_mom_dict[sector] = rs_mom
+
+    if not rs_ratio_dict:
+        return None, None
+
+    return pd.DataFrame(rs_ratio_dict), pd.DataFrame(rs_mom_dict)
+
+
+def _quadrant_for(x, y):
+    if pd.isna(x) or pd.isna(y):
+        return None
+    if x >= 100 and y >= 100:
+        return 'Leading'
+    if x < 100 and y >= 100:
+        return 'Improving'
+    if x < 100 and y < 100:
+        return 'Lagging'
+    return 'Weakening'
+
+
+def create_rrg_chart(rs_ratio_panel, rs_mom_panel, sectors=None, tail_length=10):
+    """
+    Build an RRG scatter with a trajectory tail per sector.
+
+    Returns (fig, rotation_df) where rotation_df has one row per sector with
+    latest RS-Ratio / RS-Momentum, quadrant, and tail deltas (direction of travel).
+    """
+    if rs_ratio_panel is None or rs_mom_panel is None:
+        return None, None
+
+    if sectors is None:
+        sectors = [c for c in rs_ratio_panel.columns if c in rs_mom_panel.columns]
+
+    palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+               '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+               '#393b79', '#637939', '#8c6d31', '#843c39', '#7b4173']
+
+    fig = go.Figure()
+    rows = []
+
+    for i, sector in enumerate(sectors):
+        if sector not in rs_ratio_panel.columns or sector not in rs_mom_panel.columns:
+            continue
+        x_full = rs_ratio_panel[sector]
+        y_full = rs_mom_panel[sector]
+        df_xy = pd.concat([x_full, y_full], axis=1, keys=['x', 'y']).dropna()
+        if len(df_xy) < 2:
+            continue
+        tail = df_xy.tail(tail_length)
+        if len(tail) < 2:
+            continue
+
+        color = palette[i % len(palette)]
+        n = len(tail)
+        # marker sizes ramp up so the latest point is the largest
+        sizes = [4 + 10 * (j / (n - 1)) for j in range(n)]
+        opacities = [0.25 + 0.75 * (j / (n - 1)) for j in range(n)]
+
+        # Trajectory line + fading markers
+        fig.add_trace(go.Scatter(
+            x=tail['x'].values,
+            y=tail['y'].values,
+            mode='lines+markers',
+            name=sector,
+            legendgroup=sector,
+            line=dict(color=color, width=1.5),
+            marker=dict(size=sizes, color=color, opacity=opacities,
+                        line=dict(width=0)),
+            hovertemplate=(f'<b>{sector}</b><br>'
+                           'Date: %{customdata}<br>'
+                           'RS-Ratio: %{x:.2f}<br>'
+                           'RS-Momentum: %{y:.2f}<extra></extra>'),
+            customdata=[d.strftime('%Y-%m-%d') for d in tail.index],
+            showlegend=True,
+        ))
+
+        # Labelled latest point
+        x_last, y_last = tail['x'].iloc[-1], tail['y'].iloc[-1]
+        fig.add_trace(go.Scatter(
+            x=[x_last], y=[y_last],
+            mode='markers+text',
+            name=sector,
+            legendgroup=sector,
+            text=[sector],
+            textposition='top center',
+            textfont=dict(size=11, color=color),
+            marker=dict(size=14, color=color,
+                        line=dict(width=2, color='white')),
+            showlegend=False,
+            hoverinfo='skip',
+        ))
+
+        rows.append({
+            'Sector': sector,
+            'RS_Ratio': x_last,
+            'RS_Momentum': y_last,
+            'Quadrant': _quadrant_for(x_last, y_last),
+            'ΔRS_Ratio_tail': x_last - tail['x'].iloc[0],
+            'ΔRS_Momentum_tail': y_last - tail['y'].iloc[0],
+            'Tail_Days': n,
+        })
+
+    fig.add_vline(x=100, line_dash='dash', line_color='gray', opacity=0.5)
+    fig.add_hline(y=100, line_dash='dash', line_color='gray', opacity=0.5)
+
+    fig.update_layout(
+        title=f'Relative Rotation Graph vs CSI300 — tail = last {tail_length} trading days',
+        xaxis_title='RS-Ratio (level, 100 = in line with CSI300)',
+        yaxis_title='RS-Momentum (100 = flat, >100 rising)',
+        height=720,
+        template='plotly_white',
+        hovermode='closest',
+        legend=dict(orientation='v', yanchor='top', y=1, xanchor='left', x=1.02),
+        annotations=[
+            dict(x=0.99, y=0.99, xref='paper', yref='paper',
+                 text='🟢 LEADING<br>(buy / hold)', showarrow=False,
+                 font=dict(size=12, color='#15803d'), opacity=0.45,
+                 xanchor='right', yanchor='top'),
+            dict(x=0.01, y=0.99, xref='paper', yref='paper',
+                 text='🔵 IMPROVING<br>(early buy)', showarrow=False,
+                 font=dict(size=12, color='#3b82f6'), opacity=0.45,
+                 xanchor='left', yanchor='top'),
+            dict(x=0.99, y=0.01, xref='paper', yref='paper',
+                 text='🟡 WEAKENING<br>(take profits)', showarrow=False,
+                 font=dict(size=12, color='#f59e0b'), opacity=0.45,
+                 xanchor='right', yanchor='bottom'),
+            dict(x=0.01, y=0.01, xref='paper', yref='paper',
+                 text='🔴 LAGGING<br>(avoid)', showarrow=False,
+                 font=dict(size=12, color='#dc2626'), opacity=0.45,
+                 xanchor='left', yanchor='bottom'),
+        ],
+    )
+
+    rotation_df = pd.DataFrame(rows)
+    return fig, rotation_df
+
+
+def compute_lead_lag_matrix(exret_panel, sectors, max_lag=5, lookback=120):
+    """
+    For each ordered pair (A, B), find the lag in [-max_lag, +max_lag]
+    that maximises |corr(A_t, B_{t-lag})| on the last `lookback` trading days.
+
+    Convention:
+        lag > 0  => B leads A by `lag` trading days
+        lag < 0  => A leads B
+        lag == 0 => contemporaneous
+
+    Returns (best_lag, best_corr) as DataFrames indexed [A] x columns [B].
+    """
+    sectors = [s for s in sectors if s in exret_panel.columns]
+    if len(sectors) < 2:
+        return None, None
+
+    df = exret_panel[sectors].tail(lookback).dropna(how='all')
+    if len(df) < max_lag * 4:
+        return None, None
+
+    best_lag = pd.DataFrame(0, index=sectors, columns=sectors, dtype=int)
+    best_corr = pd.DataFrame(np.nan, index=sectors, columns=sectors, dtype=float)
+
+    for a in sectors:
+        for b in sectors:
+            if a == b:
+                best_corr.loc[a, b] = 1.0
+                continue
+            best_c = 0.0
+            best_l = 0
+            for lag in range(-max_lag, max_lag + 1):
+                if lag >= 0:
+                    c = df[a].corr(df[b].shift(lag))
+                else:
+                    c = df[a].shift(-lag).corr(df[b])
+                if pd.notna(c) and abs(c) > abs(best_c):
+                    best_c = c
+                    best_l = lag
+            best_lag.loc[a, b] = best_l
+            best_corr.loc[a, b] = best_c
+
+    return best_lag, best_corr
+
+
 def create_sector_rotation_map(hist_df, lookback_short=5, lookback_long=20):
-    """Create sector rotation quadrant map."""
+    """[DEPRECATED] Legacy quadrant chart. Use compute_rrg_series + create_rrg_chart."""
     # Get latest data
     latest_date = hist_df['Date'].max()
     recent = hist_df[hist_df['Date'] >= latest_date - pd.Timedelta(days=lookback_long*2)]
