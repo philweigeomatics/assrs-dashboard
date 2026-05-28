@@ -603,6 +603,190 @@ def analyze_stock_personality(df: pd.DataFrame) -> dict:
     return results
 
 
+def _add_ghost_traces(fig, df, dates, sim_result, price_change_pct, has_comp, n_rows):
+    """
+    Append a 'ghost' next-business-day point/bar to each indicator panel using
+    sim_result from simulate_next_day_indicators.
+
+    Style: dashed line + hollow marker for line panels; outline-only bar for
+    bar panels. Hovers participate in 'x unified' so users get a tooltip for
+    the simulated day exactly like for any real day.
+
+    Compare panel (row n_rows when has_comp) is intentionally not ghosted —
+    we don't have a what-if for the comparison stock. A faint annotation
+    explains this when has_comp is True.
+    """
+    if sim_result is None:
+        return
+
+    last_date = pd.to_datetime(dates[-1])
+    next_bday = (last_date + pd.tseries.offsets.BDay(1)).strftime('%Y-%m-%d')
+    pair_x = [dates[-1], next_bday]
+
+    # ----- Row 1: Price -----
+    close_today = float(df['Close'].iloc[-1])
+    price_tmr = close_today * (1.0 + price_change_pct / 100.0)
+    up = price_tmr >= close_today
+    price_color = '#ef4444' if up else '#22c55e'   # red=up (A-share)
+
+    fig.add_trace(go.Scatter(
+        x=pair_x, y=[close_today, price_tmr],
+        mode='lines+markers',
+        name='👻 Ghost · Price',
+        legendgroup='ghost', legendgrouptitle_text='What-If (tomorrow)',
+        line=dict(color=price_color, width=2.5, dash='dot'),
+        marker=dict(
+            size=[0, 14], symbol='circle-open',
+            color=price_color, line=dict(color=price_color, width=2.5),
+        ),
+        hovertemplate=(f'<b>Tomorrow (sim)</b><br>Close: ¥%{{y:.2f}}<br>'
+                       f'Δ: {price_change_pct:+.2f}%<extra></extra>'),
+        showlegend=True,
+    ), row=1, col=1)
+
+    # ----- Row 2: Volume bar + scaled OBV line -----
+    vol_tmr = float(sim_result.get('volume_tomorrow', df['Volume'].iloc[-1]))
+    fig.add_trace(go.Bar(
+        x=[next_bday], y=[vol_tmr],
+        name='👻 Ghost · Volume',
+        legendgroup='ghost',
+        marker=dict(color='rgba(0,0,0,0)',
+                    line=dict(color=price_color, width=2)),
+        hovertemplate='<b>Tomorrow (sim)</b><br>Volume: %{y:,.0f}<extra></extra>',
+        showlegend=False,
+    ), row=2, col=1)
+
+    if 'Volume_Scaled_OBV' in df.columns:
+        obv_today_raw = float(df['Volume_Scaled_OBV'].iloc[-1])
+        obv_tmr_raw = float(sim_result.get('obv_scaled_tomorrow', obv_today_raw))
+        obv_min = float(df['Volume_Scaled_OBV'].min())
+        obv_max = float(df['Volume_Scaled_OBV'].max())
+        vol_min = float(df['Volume'].min())
+        vol_max = float(df['Volume'].max())
+        if obv_max > obv_min and vol_max > vol_min:
+            def _rescale(x):
+                return (x - obv_min) / (obv_max - obv_min) * (vol_max - vol_min) + vol_min
+            y0, y1 = _rescale(obv_today_raw), _rescale(obv_tmr_raw)
+            fig.add_trace(go.Scatter(
+                x=pair_x, y=[y0, y1],
+                mode='lines+markers',
+                name='👻 Ghost · OBV',
+                legendgroup='ghost',
+                line=dict(color='#f59e0b', width=2.5, dash='dot'),
+                marker=dict(size=[0, 11], symbol='circle-open',
+                            color='#f59e0b',
+                            line=dict(color='#f59e0b', width=2.5)),
+                customdata=[obv_today_raw, obv_tmr_raw],
+                hovertemplate='<b>Tomorrow (sim)</b><br>OBV: %{customdata:.2f}<extra></extra>',
+                showlegend=False,
+            ), row=2, col=1)
+
+    # ----- Row 3: MACD line + signal + histogram (×2.5 like the real trace) -----
+    macd_today = float(sim_result['macd_today'])
+    macd_tmr = float(sim_result['macd_tomorrow'])
+    sig_today = float(sim_result['macd_signal_today'])
+    sig_tmr = float(sim_result['macd_signal_tomorrow'])
+    hist_tmr = float(sim_result.get('macd_hist_tomorrow', macd_tmr - sig_tmr))
+
+    fig.add_trace(go.Scatter(
+        x=pair_x, y=[macd_today, macd_tmr],
+        mode='lines+markers', name='👻 Ghost · MACD',
+        legendgroup='ghost',
+        line=dict(color='#2563eb', width=2.5, dash='dot'),
+        marker=dict(size=[0, 11], symbol='circle-open',
+                    color='#2563eb',
+                    line=dict(color='#2563eb', width=2.5)),
+        hovertemplate='<b>Tomorrow (sim)</b><br>MACD: %{y:.4f}<extra></extra>',
+        showlegend=False,
+    ), row=3, col=1)
+    fig.add_trace(go.Scatter(
+        x=pair_x, y=[sig_today, sig_tmr],
+        mode='lines+markers', name='👻 Ghost · Signal',
+        legendgroup='ghost',
+        line=dict(color='#f97316', width=2.5, dash='dot'),
+        marker=dict(size=[0, 11], symbol='circle-open',
+                    color='#f97316',
+                    line=dict(color='#f97316', width=2.5)),
+        hovertemplate='<b>Tomorrow (sim)</b><br>Signal: %{y:.4f}<extra></extra>',
+        showlegend=False,
+    ), row=3, col=1)
+    hist_color = '#ef4444' if hist_tmr > 0 else '#22c55e'
+    fig.add_trace(go.Bar(
+        x=[next_bday], y=[hist_tmr * 2.5],
+        name='👻 Ghost · MACD Hist',
+        legendgroup='ghost',
+        marker=dict(color='rgba(0,0,0,0)',
+                    line=dict(color=hist_color, width=2)),
+        customdata=[hist_tmr],
+        hovertemplate='<b>Tomorrow (sim)</b><br>MACD Hist: %{customdata:.4f}<extra></extra>',
+        showlegend=False,
+    ), row=3, col=1)
+
+    # ----- Row 4: RSI -----
+    rsi_today = float(sim_result['rsi_today'])
+    rsi_tmr = float(sim_result['rsi_tomorrow'])
+    fig.add_trace(go.Scatter(
+        x=pair_x, y=[rsi_today, rsi_tmr],
+        mode='lines+markers', name='👻 Ghost · RSI',
+        legendgroup='ghost',
+        line=dict(color='#1f2937', width=2.5, dash='dot'),
+        marker=dict(size=[0, 11], symbol='circle-open',
+                    color='#1f2937',
+                    line=dict(color='#1f2937', width=2.5)),
+        hovertemplate='<b>Tomorrow (sim)</b><br>RSI(14): %{y:.1f}<extra></extra>',
+        showlegend=False,
+    ), row=4, col=1)
+
+    # ----- Row 5: ADX -----
+    adx_today = float(sim_result['adx_today'])
+    adx_tmr = float(sim_result['adx_tomorrow'])
+    fig.add_trace(go.Scatter(
+        x=pair_x, y=[adx_today, adx_tmr],
+        mode='lines+markers', name='👻 Ghost · ADX',
+        legendgroup='ghost',
+        line=dict(color='#64748b', width=2.5, dash='dot'),
+        marker=dict(size=[0, 11], symbol='circle-open',
+                    color='#64748b',
+                    line=dict(color='#64748b', width=2.5)),
+        hovertemplate=('<b>Tomorrow (sim)</b><br>ADX: %{y:.1f}'
+                       '<br><i>approx.</i><extra></extra>'),
+        showlegend=False,
+    ), row=5, col=1)
+
+    # ----- Row 6: P/E — hold EPS constant, scale with simulated price -----
+    if 'PE_TTM' in df.columns:
+        pe_series = df['PE_TTM'].dropna()
+        if not pe_series.empty and close_today > 0:
+            pe_t = float(pe_series.iloc[-1])
+            pe_tmr = pe_t * (price_tmr / close_today)
+            fig.add_trace(go.Scatter(
+                x=pair_x, y=[pe_t, pe_tmr],
+                mode='lines+markers', name='👻 Ghost · P/E',
+                legendgroup='ghost',
+                line=dict(color='#0ea5e9', width=2.5, dash='dot'),
+                marker=dict(size=[0, 11], symbol='circle-open',
+                            color='#0ea5e9',
+                            line=dict(color='#0ea5e9', width=2.5)),
+                hovertemplate=('<b>Tomorrow (sim)</b><br>P/E (EPS held): %{y:.2f}'
+                               '<extra></extra>'),
+                showlegend=False,
+            ), row=6, col=1)
+
+    # ----- Row 7 (Z-score) skipped — no tomorrow value available -----
+
+    # ----- Compare panel: annotation only -----
+    if has_comp:
+        fig.add_annotation(
+            text='👻 Ghost N/A here (no what-if for the comparison stock)',
+            xref='paper', yref='paper',
+            x=0.99, y=0.02,
+            showarrow=False,
+            font=dict(size=10, color='gray'),
+            opacity=0.7,
+            xanchor='right', yanchor='bottom',
+        )
+
+
 def create_single_stock_chart_analysis(
     df: pd.DataFrame,
     fundamentals_df: pd.DataFrame = None,
@@ -610,6 +794,9 @@ def create_single_stock_chart_analysis(
     comp_df: pd.DataFrame = None,
     comp_name: str = "Comparison",
     scale_mode: str = "pct",  # "pct" = Same % Scale  |  "new" = New Price Scale
+    sim_result: dict = None,
+    price_change_pct: float = 0.0,
+    show_ghost: bool = False,
 ) -> go.Figure:
 
     """
@@ -1801,6 +1988,15 @@ def create_single_stock_chart_analysis(
     )
     for row in range(1, n_rows):
         fig.update_xaxes(type='category', showticklabels=False, row=row, col=1)
+
+    # ===== Ghost (what-if) overlay =====
+    if show_ghost and sim_result is not None:
+        _add_ghost_traces(
+            fig, df, dates, sim_result,
+            price_change_pct=price_change_pct,
+            has_comp=has_comp,
+            n_rows=n_rows,
+        )
 
     return fig
 
@@ -3082,27 +3278,39 @@ if st.session_state.active_ticker:
             # ==================== END MARKET STATUS ====================
 
             
-            # ── Chart section wrapped in a fragment so the comparison picker
-            #    only rerenders the chart — NOT the analysis above it.
+            # ── Chart + What-If Simulator are in ONE fragment so a single
+            #    slider drag updates both the ghost overlay and the metric
+            #    cards below. The controls row (Compare / Scale / Ghost
+            #    toggle / Δ% / Volume) lives at the top to reclaim the
+            #    real-estate the simulator inputs used to occupy below.
             @st.fragment
-            def chart_with_comparison(analysis_df, fundamentals_df, blocks):
-                # ── Controls row ─────────────────────────────────────────────
-                ctrl_l, ctrl_r = st.columns([3, 2])
-                with ctrl_l:
+            def chart_and_simulator(analysis_df, fundamentals_df, blocks):
+                # ── Sim defaults & bounds ────────────────────────────────────
+                latest = analysis_df.iloc[-1]
+                vol_10d_avg = analysis_df['Volume'].rolling(10).mean().iloc[-1]
+                vol_yesterday = latest['Volume']
+                close_yesterday = latest['Close']
+
+                vol_10d_avg_millions = vol_10d_avg / 1e6
+                vol_min_M = max(0.01, vol_10d_avg_millions * 0.1)
+                vol_max_M = vol_10d_avg_millions * 10
+                vol_step_M = max(0.001, vol_10d_avg_millions * 0.05)
+
+                # ── Top control row: Compare | Scale | Ghost toggle ─────────
+                ctrl_cmp, ctrl_scale, ctrl_ghost = st.columns([3, 2, 1])
+                with ctrl_cmp:
                     comp_pick = st.selectbox(
                         "📊 Compare with another stock (optional)",
                         options=_all_stock_options(),
                         key="comp_ticker_pick",
                         format_func=lambda x: "Type to search… (code or name)" if x == "" else x,
-                        help="Overlay a second stock on the price chart. "
-                             "Changing the ticker or scale mode only rerenders the chart.",
+                        help="Overlay a second stock on the price chart.",
                     )
-                with ctrl_r:
+                with ctrl_scale:
                     scale_choice = st.radio(
                         "Price scale",
                         options=["Same % Scale", "New Price Scale"],
-                        index=0,
-                        horizontal=True,
+                        index=0, horizontal=True,
                         key="comp_scale_mode",
                         help=(
                             "**Same % Scale**: comparison stock rebased to the main stock's "
@@ -3112,9 +3320,55 @@ if st.session_state.active_ticker:
                             "axis at actual price."
                         ),
                     )
+                with ctrl_ghost:
+                    show_ghost = st.toggle(
+                        "👻 Ghost",
+                        value=False,
+                        key="show_ghost",
+                        help=(
+                            "Overlay tomorrow's what-if values (dashed lines + hollow "
+                            "markers) on every indicator panel. Ghost stops at the P/E panel — "
+                            "no what-if exists for the comparison stock."
+                        ),
+                    )
                 scale_mode = "pct" if scale_choice == "Same % Scale" else "new"
 
-                # ── Load comparison data ──────────────────────────────────────
+                # ── Simulator input sub-row (always visible) ────────────────
+                sim_p, sim_v, sim_caption = st.columns([2, 2, 4])
+                with sim_p:
+                    price_change = st.slider(
+                        "📈 明日Δ% Price change",
+                        min_value=-10.0, max_value=10.0, value=0.0, step=0.1,
+                        format="%.1f%%",
+                        key="sim_price",
+                        help="正数=上涨，负数=下跌",
+                    )
+                with sim_v:
+                    vol_input_millions = st.number_input(
+                        "📦 明日成交量 (M)",
+                        min_value=vol_min_M, max_value=vol_max_M,
+                        value=vol_10d_avg / 1e6, step=vol_step_M, format="%.3f",
+                        key="sim_volume",
+                        help="以百万为单位",
+                    )
+                volume_tomorrow = vol_input_millions * 1e6
+                target_price = close_yesterday * (1 + price_change / 100)
+                with sim_caption:
+                    st.markdown(
+                        f"<div style='padding-top:32px; color:#6b7280; font-size:13px;'>"
+                        f"昨收 ¥{close_yesterday:.2f} → 明日 ¥{target_price:.2f} "
+                        f"({price_change:+.2f}%)  ·  vol {vol_input_millions:.1f}M "
+                        f"(昨 {vol_yesterday/1e6:.1f}M · 10日均 {vol_10d_avg/1e6:.1f}M)"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                # ── Compute simulation (cheap, runs every rerun) ────────────
+                sim_result = simulate_next_day_indicators(
+                    analysis_df, price_change, volume_tomorrow
+                )
+
+                # ── Load comparison data ────────────────────────────────────
                 comp_df_overlay   = None
                 comp_name_overlay = "Comparison"
                 _comp = (comp_pick or "").split(" · ")[0].strip()
@@ -3133,7 +3387,7 @@ if st.session_state.active_ticker:
                     except Exception as _e:
                         st.warning(f"Could not load {_comp}: {_e}")
 
-                # ── Render ────────────────────────────────────────────────────
+                # ── Render chart (with optional ghost) ──────────────────────
                 with st.spinner("Generating chart..."):
                     fig_stock = create_single_stock_chart_analysis(
                         analysis_df,
@@ -3142,74 +3396,22 @@ if st.session_state.active_ticker:
                         comp_df=comp_df_overlay,
                         comp_name=comp_name_overlay,
                         scale_mode=scale_mode,
+                        sim_result=sim_result,
+                        price_change_pct=price_change,
+                        show_ghost=show_ghost,
                     )
                 st.plotly_chart(fig_stock, use_container_width=True)
 
-            chart_with_comparison(analysis_df, fundamentals_df, blocks)
-
-            st.markdown("---")
-
-            @st.fragment
-            def simulator_section():
-                """Isolated simulator - only this reruns on slider changes"""
-
+                # ── Simulator detail cards (always visible, no inputs here) ─
+                st.markdown("---")
                 st.subheader("🎮 What-If Simulator (明日指标模拟器)")
-                st.caption("输入明日价格变化和成交量，实时计算MACD、RSI、ADX指标值 | Input tomorrow's price change and volume to see indicator values")
-
-                # Get reference values from parent scope - CORRECT VARIABLE NAME: analysis_df
-                latest = analysis_df.iloc[-1]
-                vol_10d_avg = analysis_df['Volume'].rolling(10).mean().iloc[-1]
-                vol_yesterday = latest['Volume']
-                close_yesterday = latest['Close']
-
-
-                # Calculate dynamic bounds
-                vol_10d_avg_millions = vol_10d_avg / 1e6  # Convert to millions
-                vol_min = max(0.01, vol_10d_avg_millions * 0.1)  # Min: 10% of avg, or 0.01M
-                vol_max = vol_10d_avg_millions * 10  # Max: 10x average
-                vol_step = max(0.001, vol_10d_avg_millions * 0.05)  # Step: 5% of avg, floor at 0.001M
-
-                # Input section
-                col_input1, col_input2 = st.columns(2)
-
-                with col_input1:
-                    st.markdown("**📈 明日价格变化 (%)**")
-                    price_change = st.slider(
-                        "Price Change",
-                        min_value=-10.0,
-                        max_value=10.0,
-                        value=0.0,
-                        step=0.1,
-                        format="%.1f%%",
-                        help="正数=上涨，负数=下跌",
-                        key="frag_sim_price",
-                        label_visibility="collapsed"
-                    )
-                    target_price = close_yesterday * (1 + price_change / 100)
-                    st.caption(f"昨收: ¥{close_yesterday:.2f} → 明日: ¥{target_price:.2f}")
-
-                with col_input2:
-                    st.markdown("**📦 明日成交量 (M)**")
-                    vol_input_millions = st.number_input(
-                        "Volume",
-                        min_value=vol_min,
-                        max_value=vol_max,
-                        value=vol_10d_avg / 1e6,
-                        step=vol_step,
-                        format="%.3f",
-                        help="以百万为单位",
-                        key="frag_sim_volume",
-                        label_visibility="collapsed"
-                    )
-                    volume_tomorrow = vol_input_millions * 1e6
-                    st.caption(f"昨日: {vol_yesterday/1e6:.1f}M | 10日均: {vol_10d_avg/1e6:.1f}M")
-
-                # Calculate simulation - uses analysis_df (not analysisdf)
-                sim_result = simulate_next_day_indicators(analysis_df, price_change, volume_tomorrow)
+                st.caption(
+                    "数值随上方的价格变化和成交量实时计算 | "
+                    "Values recompute from the inputs above. "
+                    "Toggle **👻 Ghost** to also see them on the chart panels."
+                )
 
                 if sim_result:
-                    st.markdown("---")
-
                     # Display results
                     col_macd, col_rsi, col_adx, col_obv = st.columns(4)
 
@@ -3372,7 +3574,7 @@ if st.session_state.active_ticker:
                 else:
                     st.error("无法计算模拟结果")
 
-            simulator_section()
+            chart_and_simulator(analysis_df, fundamentals_df, blocks)
             st.markdown("---")
 
             st.subheader("🎯 Setup-Conditioned Expectancy")
