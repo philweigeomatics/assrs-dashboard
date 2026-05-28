@@ -753,7 +753,74 @@ def _add_ghost_traces(fig, df, dates, sim_result, price_change_pct, has_comp, n_
         showlegend=False,
     ), row=5, col=1)
 
-    # ----- Row 6: P/E — hold EPS constant, scale with simulated price -----
+    # ----- Row 6: Z-Score Oscillator (price-Z line + volume-Z bar) -----
+    # Mirror the panel's rolling-20 z-score logic, but include tomorrow's
+    # simulated return / volume in the window (matches how `rolling(20)`
+    # evaluates at a new data point: window = last 19 real obs + new obs).
+    _ZWIN = 20
+    rets_full = df['Close'].pct_change()
+    rets_recent = rets_full.dropna().tail(_ZWIN - 1).tolist()
+    ret_tmr = price_change_pct / 100.0
+    win_r = rets_recent + [ret_tmr]
+    if len(win_r) >= 2:
+        mu_r = float(np.mean(win_r))
+        sd_r = float(np.std(win_r, ddof=0))
+        price_z_tmr = (ret_tmr - mu_r) / sd_r if sd_r > 0 else 0.0
+    else:
+        price_z_tmr = 0.0
+
+    vols_recent = df['Volume'].dropna().tail(_ZWIN - 1).tolist()
+    vol_tmr_val = float(sim_result.get('volume_tomorrow', df['Volume'].iloc[-1]))
+    win_v = vols_recent + [vol_tmr_val]
+    if len(win_v) >= 2:
+        mu_v = float(np.mean(win_v))
+        sd_v = float(np.std(win_v, ddof=0))
+        vol_z_tmr = (vol_tmr_val - mu_v) / sd_v if sd_v > 0 else 0.0
+    else:
+        vol_z_tmr = 0.0
+
+    # Today's price-Z, recomputed the same way as the panel does at the last
+    # real bar, so the dashed segment starts exactly on the existing line.
+    last_real_rets = rets_full.dropna().tail(_ZWIN).tolist()
+    if len(last_real_rets) >= 2:
+        ret_today = last_real_rets[-1]
+        mu_r0 = float(np.mean(last_real_rets))
+        sd_r0 = float(np.std(last_real_rets, ddof=0))
+        price_z_today = (ret_today - mu_r0) / sd_r0 if sd_r0 > 0 else 0.0
+    else:
+        price_z_today = 0.0
+
+    # Volume-Z ghost bar (color-coded the same as the real bars)
+    if vol_z_tmr > 1.0:
+        zbar_color = '#22c55e'
+    elif vol_z_tmr < -1.0:
+        zbar_color = '#ef4444'
+    else:
+        zbar_color = '#94a3b8'
+    fig.add_trace(go.Bar(
+        x=[next_bday], y=[vol_z_tmr],
+        name='👻 Ghost · Volume Z',
+        legendgroup='ghost',
+        marker=dict(color='rgba(0,0,0,0)',
+                    line=dict(color=zbar_color, width=2)),
+        hovertemplate='<b>Tomorrow (sim)</b><br>Volume Z: %{y:.2f}<extra></extra>',
+        showlegend=False,
+    ), row=6, col=1)
+
+    # Price-Z ghost segment (purple, matches panel)
+    fig.add_trace(go.Scatter(
+        x=pair_x, y=[price_z_today, price_z_tmr],
+        mode='lines+markers', name='👻 Ghost · Price Z',
+        legendgroup='ghost',
+        line=dict(color='#7c3aed', width=2.5, dash='dot'),
+        marker=dict(size=[0, 11], symbol='circle-open',
+                    color='#7c3aed',
+                    line=dict(color='#7c3aed', width=2.5)),
+        hovertemplate='<b>Tomorrow (sim)</b><br>Price Z: %{y:.2f}<extra></extra>',
+        showlegend=False,
+    ), row=6, col=1)
+
+    # ----- Row 7: P/E — hold EPS constant, scale with simulated price -----
     if 'PE_TTM' in df.columns:
         pe_series = df['PE_TTM'].dropna()
         if not pe_series.empty and close_today > 0:
@@ -770,9 +837,7 @@ def _add_ghost_traces(fig, df, dates, sim_result, price_change_pct, has_comp, n_
                 hovertemplate=('<b>Tomorrow (sim)</b><br>P/E (EPS held): %{y:.2f}'
                                '<extra></extra>'),
                 showlegend=False,
-            ), row=6, col=1)
-
-    # ----- Row 7 (Z-score) skipped — no tomorrow value available -----
+            ), row=7, col=1)
 
     # ----- Compare panel: annotation only -----
     if has_comp:
@@ -830,9 +895,10 @@ def create_single_stock_chart_analysis(
     p_slow = int(df['MACD_Slow_Param'].iloc[-1]) if 'MACD_Slow_Param' in df.columns else 26
     p_sign = int(df['MACD_Sign_Param'].iloc[-1]) if 'MACD_Sign_Param' in df.columns else 9
 
-    # Row layout (Z-score sits between P/E and the optional comparison pane):
-    #   1 Price · 2 Volume · 3 MACD · 4 RSI · 5 ADX · 6 P/E · 7 Z-score · 8 Comp(opt)
-    z_row    = 7
+    # Row layout (Z-score now sits above P/E; P/E is the last "real" row):
+    #   1 Price · 2 Volume · 3 MACD · 4 RSI · 5 ADX · 6 Z-score · 7 P/E · 8 Comp(opt)
+    z_row    = 6
+    pe_row   = 7
     n_rows   = 8 if has_comp else 7
     comp_row = 8  # relative-performance panel lives here when active
 
@@ -842,14 +908,14 @@ def create_single_stock_chart_analysis(
         f'MACD ({p_fast}, {p_slow}, {p_sign})',
         'RSI',
         'ADX Trend Analysis',
-        'P/E Ratio',
         'Z-Score Oscillator · Price (line) + Volume (histogram)',
+        'P/E Ratio',
     )
     _subplot_titles = _titles_base + (f'Relative Performance vs {comp_name}',) if has_comp else _titles_base
 
-    # Slightly larger P/E pane when there's no comparison (matches old layout
-    # of giving the last "real" row a bit more breathing room).
-    _heights_base  = [0.40, 0.10, 0.18, 0.10, 0.18, 0.08 if has_comp else 0.10, 0.14]
+    # Z-score gets the larger of the two trailing slots (it's the busier
+    # panel with two series); P/E gets the slim slot.
+    _heights_base  = [0.40, 0.10, 0.18, 0.10, 0.18, 0.14, 0.08 if has_comp else 0.10]
     _row_heights   = _heights_base + [0.14] if has_comp else _heights_base
 
     _specs = [[{"secondary_y": True}]] + [[{"secondary_y": False}]] * (n_rows - 1)
@@ -1813,23 +1879,23 @@ def create_single_stock_chart_analysis(
     )
 
 
-        # === ROW 6: P/E RATIO ===
+        # === P/E RATIO (now the last "real" panel, below Z-score) ===
     if fundamentals_df is not None and not fundamentals_df.empty:
         # Merge fundamentals with analysis dates
         fund_aligned = fundamentals_df.reindex(df.index, method='ffill')
-        
+
         if 'PE_TTM' in fund_aligned.columns:
             pe_data = fund_aligned['PE_TTM'].dropna()
             if not pe_data.empty:
                 pe_dates = pe_data.index.strftime('%Y-%m-%d').tolist()
-                
+
                 fig.add_trace(go.Scatter(
                     x=pe_dates, y=pe_data,
                     name='P/E (TTM)',
                     line=dict(color='#8b5cf6', width=2.5),
                     showlegend=True
-                ), row=6, col=1)
-                
+                ), row=pe_row, col=1)
+
                 # Add reference lines
                 pe_median = pe_data.median()
                 fig.add_hline(
@@ -1837,10 +1903,10 @@ def create_single_stock_chart_analysis(
                     line_dash='dash',
                     line_color='gray',
                     annotation_text=f'Median: {pe_median:.1f}',
-                    row=6, col=1
+                    row=pe_row, col=1
                 )
-    
-    fig.update_yaxes(title_text='P/E', row=6, col=1)
+
+    fig.update_yaxes(title_text='P/E', row=pe_row, col=1)
 
     # ════════════════════════════════════════════════════════════════════════
     # ROW 7 — Z-SCORE DUAL OSCILLATOR (Price line + Volume histogram)
@@ -1934,8 +2000,8 @@ def create_single_stock_chart_analysis(
     #   yaxis4  = Row 3 (MACD)
     #   yaxis5  = Row 4 (RSI)
     #   yaxis6  = Row 5 (ADX)
-    #   yaxis7  = Row 6 (P/E       — managed by update_yaxes above)
-    #   yaxis8  = Row 7 (Z-score   — managed by update_yaxes above)
+    #   yaxis7  = Row 6 (Z-score   — managed by update_yaxes above)
+    #   yaxis8  = Row 7 (P/E       — managed by update_yaxes above)
     #   yaxis9  = Row 8 (Rel Perf, if has_comp — managed by update_yaxes above)
     _bottom_xaxis = f'xaxis{n_rows}_title'
     fig.update_layout(
