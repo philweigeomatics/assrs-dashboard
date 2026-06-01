@@ -65,6 +65,9 @@ pages = {
     "🔔 Alerts 提示": [
         st.Page("pages/4_Todays_Alerts_今日提醒.py", title="Today's Alerts 今日提醒"),
     ],
+    "🌍 Macro 宏观": [
+        st.Page("pages/macro_commodities.py", title="Macro & Commodities 宏观与大宗", url_path="macro-commodities"),
+    ],
     "📖 About 关于": [
         st.Page("pages/about.py", title="声明"),
     ],
