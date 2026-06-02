@@ -177,6 +177,99 @@ _Q_START = f"{_NOW.year - 3}Q1"
 _Q_END   = f"{_NOW.year}Q4"
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# Futures term-structure helpers
+# ════════════════════════════════════════════════════════════════════════════
+# A futures price is meaningless without its delivery month. To read whether a
+# market is in contango (far > near → storage/carry priced in) or backwardation
+# (near > far → tight spot / supply stress), we need every active contract's
+# settlement price on the same trade date, sorted by maturity = the forward
+# curve. From the front two points we derive market state + annualised roll
+# yield; the full set gives the calendar-spread matrix.
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _latest_fut_date() -> str | None:
+    """Most recent futures trade date with data (probed via a liquid contract)."""
+    df = _fetch("fut_daily", ts_code="CU.SHF", start_date=_D_START, end_date=_D_END)
+    if df is None or df.empty or "_error" in df.columns or "trade_date" not in df.columns:
+        return None
+    return str(df["trade_date"].max())
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fut_basic(exchange: str) -> pd.DataFrame:
+    """Contract directory for an exchange — maturity (delist_date) + product code."""
+    return _fetch("fut_basic", exchange=exchange, fut_type="1",
+                  fields="ts_code,symbol,fut_code,name,list_date,delist_date")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fut_day(trade_date: str) -> pd.DataFrame:
+    """All futures daily bars for one trade date (one call, filtered locally)."""
+    return _fetch("fut_daily", trade_date=trade_date)
+
+
+def _forward_curve(code: str, exchange: str, trade_date: str) -> pd.DataFrame | None:
+    """
+    Build the forward curve for product `code` on `trade_date`:
+    every active contract's settlement price, sorted near→far by maturity.
+    Returns a DataFrame [symbol, maturity (YYYYMMDD), price, oi, vol] or None.
+    """
+    basic = _fut_basic(exchange)
+    day   = _fut_day(trade_date)
+    if (basic is None or basic.empty or "_error" in basic.columns
+            or day is None or day.empty or "_error" in day.columns):
+        return None
+    b = basic[basic["fut_code"].astype(str).str.upper() == code.upper()].copy()
+    if b.empty:
+        return None
+    # Active = not yet delisted as of the trade date
+    b = b[b["delist_date"].astype(str) >= str(trade_date)]
+    if b.empty:
+        return None
+    keep = [c for c in ("ts_code", "settle", "close", "pre_settle", "oi", "vol") if c in day.columns]
+    m = b.merge(day[keep], on="ts_code", how="inner")
+    if m.empty:
+        return None
+    m["price"] = pd.to_numeric(m.get("settle"), errors="coerce")
+    if "close" in m.columns:
+        m["price"] = m["price"].fillna(pd.to_numeric(m["close"], errors="coerce"))
+    m = m.dropna(subset=["price"])
+    m = m[m["price"] > 0]
+    if m.empty:
+        return None
+    m = m.sort_values("delist_date").reset_index(drop=True)
+    m["maturity"] = m["delist_date"].astype(str)
+    cols = ["symbol", "maturity", "price"]
+    for extra in ("oi", "vol"):
+        if extra in m.columns:
+            cols.append(extra)
+    return m[cols]
+
+
+def _term_structure(curve: pd.DataFrame) -> dict | None:
+    """From the front two contracts derive market state + annualised roll yield."""
+    if curve is None or len(curve) < 2:
+        return None
+    front, nxt = curve.iloc[0], curve.iloc[1]
+    spread = float(front["price"]) - float(nxt["price"])
+    try:
+        d0 = datetime.strptime(str(front["maturity"]), "%Y%m%d")
+        d1 = datetime.strptime(str(nxt["maturity"]), "%Y%m%d")
+        days = max((d1 - d0).days, 1)
+    except Exception:
+        days = 30
+    # Roll yield: rolling from front to next. Positive = backwardation (you
+    # gain rolling down the curve), negative = contango (you bleed carry).
+    roll_ann = (float(front["price"]) / float(nxt["price"]) - 1.0) * (365.0 / days)
+    state = "Backwardation" if spread > 0 else ("Contango" if spread < 0 else "Flat")
+    return {
+        "front_symbol": front["symbol"], "front_price": float(front["price"]),
+        "next_symbol":  nxt["symbol"],   "next_price":  float(nxt["price"]),
+        "spread": spread, "roll_ann_pct": roll_ann * 100, "state": state,
+    }
+
+
 tab_macro, tab_comm = st.tabs(["📊 Macro 宏观", "🛢 Commodities 大宗商品"])
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -233,42 +326,153 @@ with tab_macro:
 # TAB 2 — COMMODITIES
 # ════════════════════════════════════════════════════════════════════════════
 with tab_comm:
+    # fut_code (product) + exchange param. ts_code suffix differs from the
+    # exchange param: SHFE→.SHF, DCE→.DCE, CZCE→.ZCE, INE→.INE.
+    FUTURES = [
+        {"label": "Copper 沪铜",       "code": "CU", "exchange": "SHFE", "unit": "¥/t"},
+        {"label": "Aluminum 沪铝",     "code": "AL", "exchange": "SHFE", "unit": "¥/t"},
+        {"label": "Zinc 沪锌",         "code": "ZN", "exchange": "SHFE", "unit": "¥/t"},
+        {"label": "Gold 沪金",         "code": "AU", "exchange": "SHFE", "unit": "¥/g"},
+        {"label": "Silver 沪银",       "code": "AG", "exchange": "SHFE", "unit": "¥/kg"},
+        {"label": "Rebar 螺纹钢",      "code": "RB", "exchange": "SHFE", "unit": "¥/t"},
+        {"label": "Iron Ore 铁矿石",   "code": "I",  "exchange": "DCE",  "unit": "¥/t"},
+        {"label": "Coking Coal 焦煤",  "code": "JM", "exchange": "DCE",  "unit": "¥/t"},
+        {"label": "Crude Oil 原油",    "code": "SC", "exchange": "INE",  "unit": "¥/bbl"},
+        {"label": "Soybean Meal 豆粕", "code": "M",  "exchange": "DCE",  "unit": "¥/t"},
+        {"label": "Palm Oil 棕榈油",   "code": "P",  "exchange": "DCE",  "unit": "¥/t"},
+        {"label": "PTA",               "code": "TA", "exchange": "CZCE", "unit": "¥/t"},
+    ]
+    _LABEL_BY_CODE = {f["code"]: f for f in FUTURES}
+
+    trade_date = _latest_fut_date()
+    if not trade_date:
+        st.error("Could not determine the latest futures trade date from Tushare.")
+        st.stop()
     st.caption(
-        "Domestic commodity-futures continuous-main contracts (settlement / close), "
-        "from Tushare `fut_daily`. Delta is day-over-day close change."
+        f"Settlement prices for trade date **{_fmt_period(trade_date)}**, from "
+        "Tushare `fut_daily` / `fut_basic`. Each price is a dated delivery "
+        "contract — red = up, green = down."
     )
 
-    # Continuous-main contract codes (<SYMBOL>.<EXCHANGE>):
-    #   SHFE→.SHF · DCE→.DCE · CZCE→.ZCE · INE→.INE
-    COMMODITIES = [
-        {"label": "Copper 沪铜",      "ts_code": "CU.SHF", "group": "Base Metals"},
-        {"label": "Aluminum 沪铝",    "ts_code": "AL.SHF", "group": "Base Metals"},
-        {"label": "Zinc 沪锌",        "ts_code": "ZN.SHF", "group": "Base Metals"},
-        {"label": "Gold 沪金",        "ts_code": "AU.SHF", "group": "Precious Metals"},
-        {"label": "Silver 沪银",      "ts_code": "AG.SHF", "group": "Precious Metals"},
-        {"label": "Rebar 螺纹钢",     "ts_code": "RB.SHF", "group": "Ferrous"},
-        {"label": "Iron Ore 铁矿石",  "ts_code": "I.DCE",  "group": "Ferrous"},
-        {"label": "Coking Coal 焦煤", "ts_code": "JM.DCE", "group": "Energy"},
-        {"label": "Crude Oil 原油",   "ts_code": "SC.INE", "group": "Energy"},
-        {"label": "Soybean Meal 豆粕","ts_code": "M.DCE",  "group": "Agriculture"},
-        {"label": "Palm Oil 棕榈油",  "ts_code": "P.DCE",  "group": "Agriculture"},
-        {"label": "PTA",              "ts_code": "TA.ZCE", "group": "Chemicals"},
-    ]
+    # ── Headline cards: front-month settlement for the 4 key metals ──────────
+    st.markdown("**Key metals · front-month settlement**")
+    head_cols = st.columns(4)
+    for col, code in zip(head_cols, ["CU", "AL", "AU", "AG"]):
+        spec = _LABEL_BY_CODE[code]
+        curve = _forward_curve(code, spec["exchange"], trade_date)
+        if curve is None or curve.empty:
+            col.metric(spec["label"], "—", help="No active contracts returned.")
+            continue
+        front = curve.iloc[0]
+        ts = _term_structure(curve)
+        delta = f"{ts['spread']:+.2f} vs {ts['next_symbol']}" if ts else None
+        col.metric(
+            f"{spec['label']} · {front['symbol']}",
+            f"{front['price']:,.2f} {spec['unit']}",
+            delta=delta, delta_color="inverse",
+            help=f"Front contract {front['symbol']} settlement on {_fmt_period(trade_date)}."
+                 + (f" Term structure: {ts['state']}." if ts else ""),
+        )
 
-    # Build specs by fetching each contract's recent daily bars.
-    comm_specs = []
-    for c in COMMODITIES:
-        df = _fetch("fut_daily", ts_code=c["ts_code"], start_date=_D_START, end_date=_D_END)
-        comm_specs.append({
-            "label": c["label"], "group": c["group"], "unit": "",
-            "_df": df, "period_col": "trade_date", "value_col": "close",
-        })
+    st.markdown("---")
 
-    comm_trends = _render_cards(comm_specs, cols_per_row=4)
-    _trend_chart(comm_trends, key="comm_trend_pick", default_unit="Price")
+    # ── Per-commodity term-structure drill-down ──────────────────────────────
+    st.markdown("### 🔬 Term-structure analysis")
+    sel_label = st.selectbox(
+        "Commodity",
+        options=[f["label"] for f in FUTURES],
+        key="comm_select",
+    )
+    sel = next(f for f in FUTURES if f["label"] == sel_label)
+    curve = _forward_curve(sel["code"], sel["exchange"], trade_date)
+
+    if curve is None or curve.empty:
+        st.warning(
+            f"No active contracts returned for {sel_label} ({sel['code']}.{sel['exchange']}). "
+            "The product code or exchange may need adjusting for your data tier."
+        )
+    else:
+        ts = _term_structure(curve)
+
+        # ── Term-structure status panel ──────────────────────────────────────
+        if ts:
+            state = ts["state"]
+            # A-share convention: backwardation (near richer) = red, contango = green
+            if state == "Backwardation":
+                badge_color, blurb = "#dc2626", "near > far — tight spot / supply stress; positive roll for longs"
+            elif state == "Contango":
+                badge_color, blurb = "#16a34a", "far > near — carry/storage priced in; negative roll for longs"
+            else:
+                badge_color, blurb = "#64748b", "front and next roughly equal"
+
+            st.markdown(
+                f"<div style='padding:10px 14px;border-radius:8px;"
+                f"background:{badge_color}1a;border:1px solid {badge_color};"
+                f"display:inline-block;margin-bottom:6px'>"
+                f"<b style='color:{badge_color}'>Market state: {state}</b> "
+                f"<span style='color:var(--text-color,#475569)'>· {blurb}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric(f"Front · {ts['front_symbol']}", f"{ts['front_price']:,.2f}")
+            k2.metric(f"Next · {ts['next_symbol']}",   f"{ts['next_price']:,.2f}",
+                      delta=f"{ts['spread']:+.2f}", delta_color="inverse",
+                      help="Front − Next settlement spread.")
+            k3.metric("Calendar spread", f"{ts['spread']:+.2f} {sel['unit']}")
+            k4.metric("Annualised roll yield", f"{ts['roll_ann_pct']:+.2f}%",
+                      delta_color="inverse",
+                      help="Annualised gain/loss from rolling the front contract to "
+                           "the next. Positive = backwardation, negative = contango.")
+
+        # ── Forward curve chart ──────────────────────────────────────────────
+        rising = curve["price"].iloc[-1] >= curve["price"].iloc[0]
+        # Upward-sloping curve = contango = green; downward = backwardation = red
+        line_color = "#16a34a" if rising else "#dc2626"
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=curve["symbol"], y=curve["price"],
+            mode="lines+markers",
+            line=dict(color=line_color, width=2.5),
+            marker=dict(size=7, color=line_color),
+            hovertemplate="%{x}<br>Settle %{y:,.2f}<extra></extra>",
+        ))
+        fig.update_layout(
+            title=f"{sel_label} forward curve · {_fmt_period(trade_date)}",
+            height=380, template="plotly_white",
+            margin=dict(t=50, l=50, r=30, b=50),
+            xaxis_title="Contract (near → far)",
+            yaxis_title=f"Settlement ({sel['unit']})",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # ── Calendar-spread matrix (first up-to-6 contracts) ─────────────────
+        st.markdown("**Calendar-spread matrix** · row − column settlement (near→far)")
+        topn = curve.head(6).reset_index(drop=True)
+        syms = topn["symbol"].tolist()
+        prices = topn["price"].tolist()
+        mat = pd.DataFrame(
+            [[round(prices[i] - prices[j], 2) for j in range(len(syms))] for i in range(len(syms))],
+            index=syms, columns=syms,
+        )
+        st.dataframe(
+            mat.style.format("{:+.2f}").background_gradient(cmap="RdYlGn_r", axis=None),
+            use_container_width=True,
+        )
+
+        # ── Underlying contract table ────────────────────────────────────────
+        with st.expander("📋 Contract detail", expanded=False):
+            disp = curve.copy()
+            disp["maturity"] = disp["maturity"].map(_fmt_period)
+            disp = disp.rename(columns={
+                "symbol": "Contract", "maturity": "Delist date",
+                "price": "Settle", "oi": "Open interest", "vol": "Volume",
+            })
+            st.dataframe(disp, use_container_width=True, hide_index=True)
 
     st.caption(
-        "ⓘ Contract codes use Tushare's continuous-main format "
-        "(`<SYMBOL>.<EXCHANGE>`). If any card shows “—”, that specific code may "
-        "need adjusting for your data tier — note which ones and they can be fixed."
+        "ⓘ Forward curve = each active contract's settlement, sorted near→far. "
+        "Upward slope = contango; downward = backwardation. Roll yield is the "
+        "annualised front→next carry. If a commodity returns no contracts, its "
+        "product code may need adjusting for your tier."
     )
