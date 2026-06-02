@@ -263,8 +263,16 @@ def _age_display(iso):
     except Exception:
         return iso, "ok", None
 
-# Load any saved scan
+# Load any saved scan from the DB. If that comes back empty but we have an
+# in-session result (e.g. the Supabase t_trading_scans table doesn't exist yet,
+# so the save silently failed), fall back to the session copy so the user still
+# sees the results they just waited for.
 saved_df, saved_at = data_manager.load_t_trading_scan(USER_ID)
+_persist_failed = False
+if (saved_df is None or saved_df.empty) and "tt_results_df" in st.session_state:
+    saved_df = st.session_state["tt_results_df"]
+    saved_at = st.session_state.get("tt_results_at")
+    _persist_failed = True
 
 # Scan control row
 scan_l, scan_r = st.columns([1, 4])
@@ -276,9 +284,15 @@ do_scan = scan_l.button(
 )
 
 # Age / status badge
-if saved_df is not None and saved_at:
+if saved_df is not None and not saved_df.empty and saved_at:
     age_str, severity, scanned_dt = _age_display(saved_at)
-    if severity == "stale":
+    if _persist_failed:
+        scan_r.warning(
+            "⚠️ Results are showing for this session but could **not be saved** to "
+            "the database — they'll be lost on reload. Create the `t_trading_scans` "
+            "table in Supabase (SQL in the page's docstring) to enable persistence."
+        )
+    elif severity == "stale":
         scan_r.error(f"🔴 Last scan **{age_str}** — values are likely stale, re-scan recommended.")
     elif severity == "warn":
         scan_r.warning(f"🟡 Last scan **{age_str}** — over 1 day old, consider re-scanning.")
@@ -301,14 +315,18 @@ if do_scan:
         prog.progress(idx / len(watchlist), text=f"{idx}/{len(watchlist)} · {ticker} {name}")
         fresh.append(_scan_one(ticker, name))
     prog.empty()
+    # Keep an in-session copy so the results render even if the DB save fails
+    # (e.g. Supabase table not yet created). This is the source of truth for
+    # the current session; the DB is for cross-session persistence + age.
+    st.session_state["tt_results_df"] = pd.DataFrame(fresh)
+    st.session_state["tt_results_at"] = datetime.now(timezone.utc).isoformat()
     data_manager.save_t_trading_scan(USER_ID, fresh)
-    st.success(f"✅ Scanned {len(fresh)} stocks, saved to database.")
+    st.success(f"✅ Scanned {len(fresh)} stocks.")
     st.rerun()
 
 # If still nothing, prompt
-if saved_df is None and not do_scan:
-    st.info("No saved scan yet. Click **Scan watchlist now** to run your first scan. "
-            "Results will be saved and reload instantly next time.")
+if saved_df is None or saved_df.empty:
+    st.info("No scan results yet. Click **Scan watchlist now** to run your first scan.")
     st.stop()
 
 # ── Render saved (or just-completed) table with row-selection ────────────────
