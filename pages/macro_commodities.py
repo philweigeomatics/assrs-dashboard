@@ -270,6 +270,25 @@ def _term_structure(curve: pd.DataFrame) -> dict | None:
     }
 
 
+def _liquid_only(curve: pd.DataFrame, frac: float = 0.10) -> pd.DataFrame:
+    """
+    Keep only liquid contracts — those whose open interest is ≥ `frac` of the
+    most-liquid contract's OI. In Chinese commodity futures, liquidity clusters
+    in the 1/5/9 delivery months; the off-months barely trade and their
+    settlements are administrative, producing fake kinks in a full curve.
+    Filtering by OI surfaces the real liquidity nodes (which ARE 1/5/9 for most
+    metals) without hard-coding a month rule that breaks for crude / some ags.
+    Falls back to the full curve if OI is missing or all-zero.
+    """
+    if curve is None or curve.empty or "oi" not in curve.columns:
+        return curve
+    oi = pd.to_numeric(curve["oi"], errors="coerce").fillna(0)
+    if oi.max() <= 0:
+        return curve
+    keep = curve[oi >= oi.max() * frac]
+    return keep if len(keep) >= 2 else curve
+
+
 tab_macro, tab_comm = st.tabs(["📊 Macro 宏观", "🛢 Commodities 大宗商品"])
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -384,14 +403,30 @@ with tab_comm:
         key="comm_select",
     )
     sel = next(f for f in FUTURES if f["label"] == sel_label)
-    curve = _forward_curve(sel["code"], sel["exchange"], trade_date)
+    full_curve = _forward_curve(sel["code"], sel["exchange"], trade_date)
 
-    if curve is None or curve.empty:
+    if full_curve is None or full_curve.empty:
         st.warning(
             f"No active contracts returned for {sel_label} ({sel['code']}.{sel['exchange']}). "
             "The product code or exchange may need adjusting for your data tier."
         )
     else:
+        # Liquidity toggle. Default ON so the curve, roll yield and spread
+        # table all reflect the real liquidity nodes (1/5/9 for most metals),
+        # not the dead off-months whose settlements are administrative.
+        liquid_only = st.toggle(
+            "Liquid months only (filter by open interest)",
+            value=True,
+            key="comm_liquid_toggle",
+            help="Chinese commodity liquidity clusters in the 1/5/9 contracts. "
+                 "ON keeps contracts with OI ≥ 10% of the most-liquid month, "
+                 "removing dead-month noise so the curve slope is accurate. "
+                 "OFF shows every listed month.",
+        )
+        curve = _liquid_only(full_curve) if liquid_only else full_curve
+        if liquid_only and len(curve) < len(full_curve):
+            st.caption(f"Showing {len(curve)} liquid of {len(full_curve)} listed contracts.")
+
         ts = _term_structure(curve)
 
         # ── Term-structure status panel ──────────────────────────────────────
@@ -425,44 +460,83 @@ with tab_comm:
                       help="Annualised gain/loss from rolling the front contract to "
                            "the next. Positive = backwardation, negative = contango.")
 
-        # ── Forward curve chart ──────────────────────────────────────────────
+        # ── Forward curve chart with OI-sized bubbles ────────────────────────
+        # Bubble size ∝ open interest: big solid node = dominant/liquid month
+        # to trust; tiny dot = dead contract whose price is suspect. This stops
+        # a thin contract near expiry from faking a steep curve segment.
         rising = curve["price"].iloc[-1] >= curve["price"].iloc[0]
-        # Upward-sloping curve = contango = green; downward = backwardation = red
-        line_color = "#16a34a" if rising else "#dc2626"
+        line_color = "#16a34a" if rising else "#dc2626"   # up=contango green, down=backwardation red
+
+        oi_vals = pd.to_numeric(curve.get("oi", pd.Series([0] * len(curve))), errors="coerce").fillna(0)
+        if oi_vals.max() > 0:
+            sizes = (10 + 40 * (oi_vals / oi_vals.max())).tolist()   # 10–50 px
+        else:
+            sizes = [14] * len(curve)
+
         fig = go.Figure()
+        # Connecting line
         fig.add_trace(go.Scatter(
             x=curve["symbol"], y=curve["price"],
-            mode="lines+markers",
-            line=dict(color=line_color, width=2.5),
-            marker=dict(size=7, color=line_color),
-            hovertemplate="%{x}<br>Settle %{y:,.2f}<extra></extra>",
+            mode="lines", line=dict(color=line_color, width=2),
+            hoverinfo="skip", showlegend=False,
+        ))
+        # OI bubbles
+        fig.add_trace(go.Scatter(
+            x=curve["symbol"], y=curve["price"],
+            mode="markers",
+            marker=dict(size=sizes, color=line_color, opacity=0.55,
+                        line=dict(color=line_color, width=1.5)),
+            customdata=oi_vals,
+            hovertemplate="%{x}<br>Settle %{y:,.2f}<br>OI %{customdata:,.0f}<extra></extra>",
+            showlegend=False,
         ))
         fig.update_layout(
-            title=f"{sel_label} forward curve · {_fmt_period(trade_date)}",
-            height=380, template="plotly_white",
+            title=f"{sel_label} forward curve · {_fmt_period(trade_date)}  (bubble = open interest)",
+            height=400, template="plotly_white",
             margin=dict(t=50, l=50, r=30, b=50),
             xaxis_title="Contract (near → far)",
             yaxis_title=f"Settlement ({sel['unit']})",
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # ── Calendar-spread matrix (first up-to-6 contracts) ─────────────────
-        st.markdown("**Calendar-spread matrix** · row − column settlement (near→far)")
-        topn = curve.head(6).reset_index(drop=True)
-        syms = topn["symbol"].tolist()
-        prices = topn["price"].tolist()
-        mat = pd.DataFrame(
-            [[round(prices[i] - prices[j], 2) for j in range(len(syms))] for i in range(len(syms))],
-            index=syms, columns=syms,
-        )
+        # ── Spread table: Contract · Price · Spread vs front · State ─────────
+        st.markdown("**Calendar spreads** · each contract vs the front, with state")
+        front_price = float(curve["price"].iloc[0])
+        spread_rows = []
+        for _, r in curve.iterrows():
+            spr = float(r["price"]) - front_price
+            if abs(spr) < 1e-9:
+                state_lbl = "— front"
+            elif spr > 0:
+                state_lbl = "Contango (far richer)"      # far > near
+            else:
+                state_lbl = "Backwardation (far cheaper)"  # far < near
+            spread_rows.append({
+                "Contract":  r["symbol"],
+                "Price":     round(float(r["price"]), 2),
+                "Spread vs front": round(spr, 2),
+                "State":     state_lbl,
+            })
+        spread_df = pd.DataFrame(spread_rows)
+
+        def _state_color(val):
+            # A-share: contango (far richer) green, backwardation (far cheaper) red
+            if "Contango" in str(val):
+                return "color:#16a34a;font-weight:600"
+            if "Backwardation" in str(val):
+                return "color:#dc2626;font-weight:600"
+            return "color:#64748b"
+
         st.dataframe(
-            mat.style.format("{:+.2f}").background_gradient(cmap="RdYlGn_r", axis=None),
-            use_container_width=True,
+            spread_df.style
+                .format({"Price": "{:,.2f}", "Spread vs front": "{:+,.2f}"})
+                .map(_state_color, subset=["State"]),
+            use_container_width=True, hide_index=True,
         )
 
-        # ── Underlying contract table ────────────────────────────────────────
-        with st.expander("📋 Contract detail", expanded=False):
-            disp = curve.copy()
+        # ── Underlying contract table (raw OI / volume) ──────────────────────
+        with st.expander("📋 Contract detail (settle · OI · volume)", expanded=False):
+            disp = full_curve.copy()
             disp["maturity"] = disp["maturity"].map(_fmt_period)
             disp = disp.rename(columns={
                 "symbol": "Contract", "maturity": "Delist date",
@@ -471,8 +545,10 @@ with tab_comm:
             st.dataframe(disp, use_container_width=True, hide_index=True)
 
     st.caption(
-        "ⓘ Forward curve = each active contract's settlement, sorted near→far. "
-        "Upward slope = contango; downward = backwardation. Roll yield is the "
-        "annualised front→next carry. If a commodity returns no contracts, its "
-        "product code may need adjusting for your tier."
+        "ⓘ Forward curve = each contract's settlement, sorted near→far; bubble "
+        "size = open interest (trust the slope between big bubbles, ignore tiny "
+        "ones). Upward slope = contango, downward = backwardation. In Chinese "
+        "commodities, liquidity clusters in the 1/5/9 months — the liquidity "
+        "toggle keeps only those real nodes. Roll yield = annualised front→next "
+        "carry on the displayed (liquid) curve."
     )
