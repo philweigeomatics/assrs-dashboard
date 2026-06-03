@@ -1825,10 +1825,13 @@ def save_signals_to_cache(df, scan_date, scan_duration):
         records = df_to_save.to_dict('records')
         db.insert_records('daily_signals', records, upsert=True)
         
-        # Save metadata
-        opportunities = len(df[df['Type'] == '🚀 Opportunity'])
-        alerts = len(df[df['Type'] == '⚠️ Alert'])
-        total_stocks = len(ALL_STOCK_TICKERS)
+        # Save metadata. 'Type' now carries a per-stock Bias label
+        # (🚀 Bullish / ⚠️ Bearish / ⚖️ Mixed) in the one-row-per-stock layout;
+        # count tolerantly so both old and new label sets work.
+        _type = df['Type'].astype(str)
+        opportunities = int(_type.str.contains('Bullish|Opportunity').sum())
+        alerts        = int(_type.str.contains('Bearish|Alert').sum())
+        total_stocks  = len(df)
         
         metadata = {
             'scan_date': scan_date,
