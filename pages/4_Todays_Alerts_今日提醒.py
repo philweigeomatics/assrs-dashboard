@@ -336,6 +336,10 @@ else:
     display_df['MACD']   = display_df['MACD'].apply(lambda x: f"{x:.4f}")
     display_df['Volume'] = display_df['Volume'].apply(lambda x: f"{x:,.0f}")
 
+    # Code → deep link into Technical Analysis (?ticker= seeds active_ticker).
+    display_df['Ticker'] = display_df['Ticker'].apply(
+        lambda t: f"/single-stock-analysis?ticker={t}")
+
     # One row per stock: Bias · Code · Name · ▲ · ▼ · Signals · indicators
     display_df = display_df[['Type', 'Ticker', 'Name', 'Bull', 'Bear',
                              'Signals', 'Price', 'RSI', 'ADX', 'MACD', 'Volume']]
@@ -351,7 +355,10 @@ else:
             "Bias": st.column_config.TextColumn(
                 "Bias", width="small",
                 help="Net bias: 🚀 Bullish (only bull signals) · ⚠️ Bearish (only bear) · ⚖️ Mixed (both)"),
-            "Code": st.column_config.TextColumn("Code", width="small"),
+            "Code": st.column_config.LinkColumn(
+                "Code", width="small",
+                display_text=r"ticker=(.+)$",
+                help="Click to open this stock in Technical Analysis 技术分析"),
             "Stock Name": st.column_config.TextColumn("Stock Name", width="medium"),
             "▲": st.column_config.NumberColumn("▲", width="small", help="Bullish signal count"),
             "▼": st.column_config.NumberColumn("▼", width="small", help="Bearish signal count"),
