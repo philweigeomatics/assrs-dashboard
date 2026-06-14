@@ -92,36 +92,67 @@ with st.spinner("加载热力图…"):
 if _hm_df is None or _hm_df.empty:
     st.info("热力图数据暂不可用（需要 daily_basic 市值数据）。")
 else:
-    import plotly.express as px
     _fmt_d = (f"{_hm_date[:4]}-{_hm_date[4:6]}-{_hm_date[6:8]}"
               if len(str(_hm_date)) == 8 and str(_hm_date).isdigit() else str(_hm_date))
     _maxabs = max(float(_hm_df['pct_chg'].abs().max()), 1.0)
-    fig_hm = px.treemap(
-        _hm_df,
-        path=[px.Constant("全市场"), 'sector', 'stock'],
-        values='mcap',
-        color='pct_chg',
-        color_continuous_scale=["#15803d", "#86efac", "#f1f5f9", "#fca5a5", "#dc2626"],
-        color_continuous_midpoint=0,
-        range_color=[-_maxabs, _maxabs],
-        custom_data=['ticker'],
-    )
-    fig_hm.update_traces(
-        texttemplate="%{label}<br>%{color:+.2f}%",
-        hovertemplate="%{label} (%{customdata[0]})<br>"
-                      "涨跌 %{color:+.2f}%<br>流通市值 %{value:.0f} 亿<extra></extra>",
+
+    # Build the treemap node lists manually so every node (root / sector /
+    # stock) carries its OWN numeric pct in customdata. We can't use
+    # %{color} in the texttemplate — in a treemap that resolves to the box's
+    # colour STRING (e.g. "rgb(233,245,243)"), not the value. Sector & root
+    # percentages are CAP-WEIGHTED averages of their constituents (same
+    # weighting idea as the nightly PPI, but computed live from the same
+    # per-stock pct_chg as the leaves so box and children stay consistent).
+    _df = _hm_df.copy()
+    _df["_w"] = _df["pct_chg"] * _df["mcap"]
+    _sec = _df.groupby("sector").agg(mcap=("mcap", "sum"), _w=("_w", "sum"))
+    _sec["pct"] = _sec["_w"] / _sec["mcap"].replace(0, pd.NA)
+    _total_cap = float(_df["mcap"].sum())
+    _root_pct = float(_df["_w"].sum() / _total_cap) if _total_cap > 0 else 0.0
+
+    ids, labels, parents, values, pcts, tickers = [], [], [], [], [], []
+    # root
+    ids.append("全市场"); labels.append("全市场"); parents.append("")
+    values.append(_total_cap); pcts.append(_root_pct); tickers.append("")
+    # sectors
+    for sector, row in _sec.iterrows():
+        sid = f"sec::{sector}"
+        ids.append(sid); labels.append(str(sector)); parents.append("全市场")
+        values.append(float(row["mcap"]))
+        pcts.append(float(row["pct"]) if pd.notna(row["pct"]) else 0.0)
+        tickers.append("")
+    # stocks
+    for _, r in _df.iterrows():
+        sid = f"sec::{r['sector']}"
+        ids.append(f"{sid}::{r['ticker']}")
+        labels.append(str(r["stock"])); parents.append(sid)
+        values.append(float(r["mcap"])); pcts.append(float(r["pct_chg"]))
+        tickers.append(str(r["ticker"]))
+
+    customdata = list(zip(pcts, tickers))
+    fig_hm = go.Figure(go.Treemap(
+        ids=ids, labels=labels, parents=parents, values=values,
+        branchvalues="total",
+        customdata=customdata,
+        marker=dict(
+            colors=pcts,
+            colorscale=[[0.0, "#15803d"], [0.5, "#f1f5f9"], [1.0, "#dc2626"]],
+            cmid=0, cmin=-_maxabs, cmax=_maxabs,
+            line=dict(width=1, color="white"),
+            colorbar=dict(title="涨跌%", ticksuffix="%"),
+        ),
+        texttemplate="%{label}<br>%{customdata[0]:+.2f}%",
+        hovertemplate="%{label} %{customdata[1]}<br>"
+                      "涨跌 %{customdata[0]:+.2f}%<br>市值 %{value:.0f} 亿<extra></extra>",
         textposition="middle center",
         textfont=dict(size=12),
-        marker=dict(line=dict(width=1, color="white")),
-    )
-    fig_hm.update_layout(
-        height=560, margin=dict(t=10, l=10, r=10, b=10),
-        coloraxis_colorbar=dict(title="涨跌%", ticksuffix="%"),
-    )
+        tiling=dict(pad=2),
+    ))
+    fig_hm.update_layout(height=560, margin=dict(t=10, l=10, r=10, b=10))
     st.plotly_chart(fig_hm, use_container_width=True)
     st.caption(
         f"box 大小 = 流通市值 · 颜色 = {_fmt_d} 当日涨跌（红涨绿跌）· "
-        "板块分组与市场广度一致。"
+        "板块 % 为成分股市值加权平均 · 板块分组与市场广度一致。"
     )
 
 # ===================================================================
