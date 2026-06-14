@@ -139,7 +139,7 @@ else:
             colorscale=[[0.0, "#15803d"], [0.5, "#f1f5f9"], [1.0, "#dc2626"]],
             cmid=0, cmin=-_maxabs, cmax=_maxabs,
             line=dict(width=1, color="white"),
-            colorbar=dict(title="涨跌%", ticksuffix="%"),
+            colorbar=dict(title="涨跌%", ticksuffix="%", tickformat=".2f"),
         ),
         texttemplate="%{label}<br>%{customdata[0]:+.2f}%",
         hovertemplate="%{label} %{customdata[1]}<br>"
