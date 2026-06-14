@@ -79,6 +79,40 @@ def load_single_stock(ticker, cache_date):
     return data_manager.get_single_stock_data_live(ticker, lookback_years=3)
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def load_moneyflow(ticker, cache_date, lookback_days=250):
+    """
+    Tushare `moneyflow` (2000-credit tier): per-day order-size flow breakdown.
+    Returns a DataFrame indexed by date with a single 主力净流入 column
+    (large + extra-large net, in 万元) — the standard "主力资金" definition —
+    or None on any failure. Cached 15 min.
+    """
+    try:
+        from datetime import timedelta as _td
+        data_manager.init_tushare()
+        api = data_manager.TUSHARE_API
+        if api is None:
+            return None
+        ts_code = data_manager.get_tushare_ticker(ticker)
+        end = date.today().strftime("%Y%m%d")
+        start = (date.today() - _td(days=int(lookback_days * 1.6) + 20)).strftime("%Y%m%d")
+        mf = api.moneyflow(ts_code=ts_code, start_date=start, end_date=end)
+        if mf is None or mf.empty:
+            return None
+        mf = mf.copy()
+        for c in ("buy_lg_amount", "sell_lg_amount", "buy_elg_amount", "sell_elg_amount"):
+            mf[c] = pd.to_numeric(mf.get(c), errors="coerce").fillna(0)
+        # 主力净流入 = (大单买 + 特大单买) − (大单卖 + 特大单卖)
+        mf["main_net"] = (mf["buy_lg_amount"] + mf["buy_elg_amount"]
+                          - mf["sell_lg_amount"] - mf["sell_elg_amount"])
+        mf["date"] = pd.to_datetime(mf["trade_date"], format="%Y%m%d", errors="coerce")
+        mf = mf.dropna(subset=["date"]).set_index("date").sort_index()
+        return mf[["main_net"]]
+    except Exception as exc:
+        print(f"[moneyflow] {ticker} failed: {exc}")
+        return None
+
+
 
 def backtest_signal_expectancy(analysis_df, buy_signal_type, sell_signal_type):
     """
@@ -858,6 +892,7 @@ def create_single_stock_chart_analysis(
     blocks: list = None,
     comp_df: pd.DataFrame = None,
     comp_name: str = "Comparison",
+    moneyflow_df: pd.DataFrame = None,  # 主力净流入 (large+xlarge net, 万元), DatetimeIndex
     scale_mode: str = "pct",  # "pct" = Same % Scale  |  "new" = New Price Scale
     sim_result: dict = None,
     price_change_pct: float = 0.0,
@@ -895,12 +930,15 @@ def create_single_stock_chart_analysis(
     p_slow = int(df['MACD_Slow_Param'].iloc[-1]) if 'MACD_Slow_Param' in df.columns else 26
     p_sign = int(df['MACD_Sign_Param'].iloc[-1]) if 'MACD_Sign_Param' in df.columns else 9
 
-    # Row layout (Z-score now sits above P/E; P/E is the last "real" row):
-    #   1 Price · 2 Volume · 3 MACD · 4 RSI · 5 ADX · 6 Z-score · 7 P/E · 8 Comp(opt)
+    # Row layout — MERGED: main moved Z-score above P/E; this branch appends
+    # 主力净流入 at the bottom. Final order:
+    #   1 Price · 2 Volume · 3 MACD · 4 RSI · 5 ADX · 6 Z-score · 7 P/E ·
+    #   8 主力净流入 (main-force money flow) · 9 Comp(opt)
     z_row    = 6
     pe_row   = 7
-    n_rows   = 8 if has_comp else 7
-    comp_row = 8  # relative-performance panel lives here when active
+    mf_row   = 8  # 主力净流入 panel (large+xlarge net money flow)
+    n_rows   = 9 if has_comp else 8
+    comp_row = 9  # relative-performance panel lives here when active
 
     _titles_base = (
         'Price & Trading Blocks + Signals',
@@ -910,13 +948,13 @@ def create_single_stock_chart_analysis(
         'ADX Trend Analysis',
         'Z-Score Oscillator · Price (line) + Volume (histogram)',
         'P/E Ratio',
+        '主力净流入 Main-Force Net Money Flow (大单+特大单, 万元)',
     )
     _subplot_titles = _titles_base + (f'Relative Performance vs {comp_name}',) if has_comp else _titles_base
 
-    # Z-score gets the larger of the two trailing slots (it's the busier
-    # panel with two series); P/E gets the slim slot.
-    _heights_base  = [0.40, 0.10, 0.18, 0.10, 0.18, 0.14, 0.08 if has_comp else 0.10]
-    _row_heights   = _heights_base + [0.14] if has_comp else _heights_base
+    # Heights: price, vol, macd, rsi, adx, z-score, pe, moneyflow [, comp]
+    _heights_base  = [0.34, 0.09, 0.15, 0.09, 0.15, 0.12, 0.06, 0.10]
+    _row_heights   = _heights_base + [0.12] if has_comp else _heights_base
 
     _specs = [[{"secondary_y": True}]] + [[{"secondary_y": False}]] * (n_rows - 1)
 
@@ -1990,6 +2028,50 @@ def create_single_stock_chart_analysis(
 
     fig.update_yaxes(title_text='Z-score', row=z_row, col=1, zeroline=False)
 
+    # ════════════════════════════════════════════════════════════════════════
+    # ROW 8 — 主力净流入 MAIN-FORCE NET MONEY FLOW
+    # ════════════════════════════════════════════════════════════════════════
+    # Daily net money flow from large + extra-large orders (主力资金), in 万元.
+    # Bars = per-day net (A-share colours: red inflow / green outflow); a
+    # secondary cumulative line shows the accumulation/distribution trend.
+    # Watch for divergence: price flat/down while the cumulative line climbs =
+    # stealth institutional accumulation.
+    if moneyflow_df is not None and not moneyflow_df.empty and 'main_net' in moneyflow_df.columns:
+        mf_aligned = moneyflow_df['main_net'].reindex(df.index)
+        mf_vals = mf_aligned.fillna(0)
+        mf_cum = mf_vals.cumsum()
+
+        _mf_colors = [
+            'rgba(220,38,38,0.75)' if v > 0 else 'rgba(22,163,74,0.75)'
+            for v in mf_vals.tolist()
+        ]
+        # Per-day net bars (left axis)
+        fig.add_trace(go.Bar(
+            x=dates, y=mf_vals.tolist(),
+            name='主力净流入/日',
+            marker_color=_mf_colors, marker_line_width=0,
+            hovertemplate='%{x}<br>主力净流入: %{y:,.0f} 万元<extra></extra>',
+        ), row=mf_row, col=1)
+        # Cumulative line (same axis — 万元 units comparable)
+        fig.add_trace(go.Scatter(
+            x=dates, y=mf_cum.tolist(),
+            name='累计主力净流入',
+            mode='lines',
+            line=dict(color='#f59e0b', width=2),
+            hovertemplate='%{x}<br>累计: %{y:,.0f} 万元<extra></extra>',
+        ), row=mf_row, col=1)
+        fig.add_hline(y=0, line_dash='solid', line_color='#9ca3af',
+                      line_width=1, row=mf_row, col=1)
+        fig.update_yaxes(title_text='主力净流入 (万元)', row=mf_row, col=1)
+    else:
+        # No data — annotate the empty pane so it's clear why it's blank.
+        fig.add_annotation(
+            text='主力净流入 data unavailable',
+            xref=f'x{mf_row} domain', yref=f'y{mf_row} domain',
+            x=0.5, y=0.5, showarrow=False,
+            font=dict(color='#9ca3af', size=12),
+        )
+
 
     # ==================== UPDATE LAYOUT ====================
     # Y-axis index note: secondary_y=True on row 1 allocates yaxis2 for the
@@ -2002,10 +2084,11 @@ def create_single_stock_chart_analysis(
     #   yaxis6  = Row 5 (ADX)
     #   yaxis7  = Row 6 (Z-score   — managed by update_yaxes above)
     #   yaxis8  = Row 7 (P/E       — managed by update_yaxes above)
-    #   yaxis9  = Row 8 (Rel Perf, if has_comp — managed by update_yaxes above)
+    #   yaxis9  = Row 8 (主力净流入 — managed by update_yaxes above)
+    #   yaxis10 = Row 9 (Rel Perf, if has_comp — managed by update_yaxes above)
     _bottom_xaxis = f'xaxis{n_rows}_title'
     fig.update_layout(
-        height=1650 + (150 if has_comp else 0),
+        height=1820 + (150 if has_comp else 0),
         template='plotly_white',
         xaxis_rangeslider_visible=False,
         hovermode='x unified',
@@ -3350,7 +3433,7 @@ if st.session_state.active_ticker:
             #    toggle / Δ% / Volume) lives at the top to reclaim the
             #    real-estate the simulator inputs used to occupy below.
             @st.fragment
-            def chart_and_simulator(analysis_df, fundamentals_df, blocks):
+            def chart_and_simulator(analysis_df, fundamentals_df, blocks, ticker):
                 # ── Sim defaults & bounds ────────────────────────────────────
                 latest = analysis_df.iloc[-1]
                 vol_10d_avg = analysis_df['Volume'].rolling(10).mean().iloc[-1]
@@ -3453,6 +3536,13 @@ if st.session_state.active_ticker:
                     except Exception as _e:
                         st.warning(f"Could not load {_comp}: {_e}")
 
+                # ── Main-force money flow (主力净流入, Tushare moneyflow) ──────
+                _mf_df = None
+                try:
+                    _mf_df = load_moneyflow(ticker, date.today())
+                except Exception:
+                    _mf_df = None
+
                 # ── Render chart (with optional ghost) ──────────────────────
                 with st.spinner("Generating chart..."):
                     fig_stock = create_single_stock_chart_analysis(
@@ -3461,6 +3551,7 @@ if st.session_state.active_ticker:
                         blocks=blocks,
                         comp_df=comp_df_overlay,
                         comp_name=comp_name_overlay,
+                        moneyflow_df=_mf_df,
                         scale_mode=scale_mode,
                         sim_result=sim_result,
                         price_change_pct=price_change,
@@ -3640,7 +3731,7 @@ if st.session_state.active_ticker:
                 else:
                     st.error("无法计算模拟结果")
 
-            chart_and_simulator(analysis_df, fundamentals_df, blocks)
+            chart_and_simulator(analysis_df, fundamentals_df, blocks, ticker)
             st.markdown("---")
 
             st.subheader("🎯 Setup-Conditioned Expectancy")
