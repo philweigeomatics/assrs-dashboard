@@ -25,6 +25,105 @@ v2latest, v2hist, v2date, v2error = load_v2_data()
 if v2latest is None:
     st.error(f"Error loading data: {v2error}")
     st.stop()
+
+# ===================================================================
+# SECTION 0: MARKET HEATMAP (sector-segmented, market-cap weighted)
+# ===================================================================
+# Box size = 流通市值 (circulating market cap, from daily_basic in the DB).
+# Box colour = last trading day's % change. A-share convention: red = up,
+# green = down. Grouped by the same sector map used for market breadth.
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_heatmap_data():
+    """Return (DataFrame[sector, stock, ticker, mcap, pct_chg], trade_date) or (None, None)."""
+    import re
+    sector_map = dm.get_sector_stock_map()
+    all_tickers = sorted({t for lst in sector_map.values() for t in lst})
+    if not all_tickers:
+        return None, None
+
+    # Market cap (circulating, 亿) from the DB — one read of the latest date.
+    mcap = dm.get_daily_basic_for_tickers(all_tickers)
+    if mcap is None or mcap.empty:
+        return None, None
+    latest_date = str(mcap['trade_date'].iloc[0])
+    compact = re.sub(r'\D', '', latest_date)  # YYYYMMDD for Tushare
+
+    mc_by_ticker = dict(zip(mcap['ticker'], pd.to_numeric(mcap['circ_mv_yi'], errors='coerce')))
+
+    # Last-day % change — not stored per stock in the DB, so one Tushare
+    # daily(trade_date=…) call returns pct_chg for every A-share in one shot.
+    pct_by_ticker = {}
+    try:
+        dm.init_tushare()
+        if dm.TUSHARE_API is not None:
+            d = dm.TUSHARE_API.daily(trade_date=compact, fields='ts_code,pct_chg')
+            if d is not None and not d.empty:
+                d['ticker'] = d['ts_code'].str[:6]
+                pct_by_ticker = dict(zip(d['ticker'],
+                                         pd.to_numeric(d['pct_chg'], errors='coerce')))
+    except Exception as exc:
+        print(f"[heatmap] pct_chg fetch failed: {exc}")
+
+    names = {s['ticker']: s['name'] for s in dm.get_all_stock_basic()}
+
+    rows = []
+    for sector, tickers in sector_map.items():
+        for t in tickers:
+            mc = mc_by_ticker.get(t)
+            if mc is None or pd.isna(mc) or mc <= 0:
+                continue
+            rows.append({
+                'sector':  sector,
+                'stock':   names.get(t, t),     # Chinese name = readable leaf label
+                'ticker':  t,
+                'mcap':    float(mc),
+                'pct_chg': float(pct_by_ticker.get(t, 0.0) or 0.0),
+            })
+    if not rows:
+        return None, None
+    return pd.DataFrame(rows), latest_date
+
+
+st.subheader("🗺️ 市场热力图 · Market Heatmap")
+with st.spinner("加载热力图…"):
+    _hm_df, _hm_date = _load_heatmap_data()
+
+if _hm_df is None or _hm_df.empty:
+    st.info("热力图数据暂不可用（需要 daily_basic 市值数据）。")
+else:
+    import plotly.express as px
+    _fmt_d = (f"{_hm_date[:4]}-{_hm_date[4:6]}-{_hm_date[6:8]}"
+              if len(str(_hm_date)) == 8 and str(_hm_date).isdigit() else str(_hm_date))
+    _maxabs = max(float(_hm_df['pct_chg'].abs().max()), 1.0)
+    fig_hm = px.treemap(
+        _hm_df,
+        path=[px.Constant("全市场"), 'sector', 'stock'],
+        values='mcap',
+        color='pct_chg',
+        color_continuous_scale=["#15803d", "#86efac", "#f1f5f9", "#fca5a5", "#dc2626"],
+        color_continuous_midpoint=0,
+        range_color=[-_maxabs, _maxabs],
+        custom_data=['ticker'],
+    )
+    fig_hm.update_traces(
+        texttemplate="%{label}<br>%{color:+.2f}%",
+        hovertemplate="%{label} (%{customdata[0]})<br>"
+                      "涨跌 %{color:+.2f}%<br>流通市值 %{value:.0f} 亿<extra></extra>",
+        textposition="middle center",
+        textfont=dict(size=12),
+        marker=dict(line=dict(width=1, color="white")),
+    )
+    fig_hm.update_layout(
+        height=560, margin=dict(t=10, l=10, r=10, b=10),
+        coloraxis_colorbar=dict(title="涨跌%", ticksuffix="%"),
+    )
+    st.plotly_chart(fig_hm, use_container_width=True)
+    st.caption(
+        f"box 大小 = 流通市值 · 颜色 = {_fmt_d} 当日涨跌（红涨绿跌）· "
+        "板块分组与市场广度一致。"
+    )
+
 # ===================================================================
 # SECTION 1: CSI 300 INDEX WITH VOLATILITY INDICATORS
 # ===================================================================
