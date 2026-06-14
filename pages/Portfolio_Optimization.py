@@ -637,6 +637,29 @@ def load_fund_callback():
         # If it fails, show exactly why in the UI
         st.toast(f"❌ Error loading fund: {str(e)}")
 
+# 2b. Searchable stock universe (same code·name search as the Single Stock /
+#     Equity Brief pages). Options are bare codes; the format_func renders
+#     "code · name" so the dropdown filters on either part.
+@st.cache_data(ttl=3600, show_spinner=False)
+def _po_stock_universe():
+    stocks = data_manager.get_all_stock_basic()
+    codes = [s['ticker'] for s in stocks]
+    names = {s['ticker']: s['name'] for s in stocks}
+    return codes, names
+
+# 2c. Callback: merge the search picks INTO the canonical text-area store so
+#     the mandate-load and bulk-paste flows keep working untouched.
+def add_searched_callback():
+    picked = st.session_state.get("po_search_picker", []) or []
+    if not picked:
+        return
+    raw = st.session_state.get("ticker_input_val", "") or ""
+    current = [t.strip() for t in raw.replace('\n', ',').split(',') if t.strip()]
+    merged = list(dict.fromkeys(current + [str(c).strip() for c in picked]))
+    st.session_state.ticker_input_val = ", ".join(merged)
+    st.session_state.po_search_picker = []  # clear the picker after adding
+    st.toast(f"➕ Added {len(picked)} stock(s)")
+
 # 3. Fetch funds for the dropdown options
 user_id = auth_manager.get_current_user_id()
 user_funds_df = db.read_table('funds', filters={'user_id': user_id})
@@ -647,15 +670,38 @@ if not user_funds_df.empty:
 
 # 4. The Vertical Dropdown (Triggering the callback)
 st.selectbox(
-    "Load from Mandate:", 
-    options=fund_names, 
+    "Load from Mandate:",
+    options=fund_names,
     key="fund_dropdown",
     on_change=load_fund_callback
 )
 
-# 5. The Vertical Text Area
+# 4b. Searchable picker — type a code or name, select one or many, then Add.
+#     This is the same search UX as the Single Stock / Equity Brief pages,
+#     adapted to multi-select. Picks are appended to the text area below.
+po_codes, po_names = _po_stock_universe()
+sc1, sc2 = st.columns([4, 1])
+with sc1:
+    st.multiselect(
+        "🔍 Search & add stocks (code or name 代码或名称):",
+        options=po_codes,
+        format_func=lambda c: f"{c} · {po_names.get(c, c)}",
+        key="po_search_picker",
+        placeholder="Type a code or name, pick one or many…",
+    )
+with sc2:
+    st.write("")
+    st.write("")
+    st.button(
+        "➕ Add to list",
+        on_click=add_searched_callback,
+        use_container_width=True,
+    )
+
+# 5. The Vertical Text Area — canonical store. Mandate-load, bulk paste, and
+#    the search picker above all funnel into this single text box.
 ticker_input = st.text_area(
-    "Enter / Edit Tickers (comma-separated or one per line):", 
+    "Selected Tickers (comma-separated or one per line — edit / paste freely):",
     key="ticker_input_val",
     height=100,
     placeholder="e.g., 600519, 000858, 000001\nOr paste a list here..."
