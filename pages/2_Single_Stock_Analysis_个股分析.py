@@ -886,6 +886,92 @@ def _add_ghost_traces(fig, df, dates, sim_result, price_change_pct, has_comp, n_
         )
 
 
+def detect_support_resistance(df, swing_window=4, cluster_pct=0.015,
+                              top_n=6, vp_bins=50):
+    """
+    Detect support/resistance ZONES from daily OHLC only.
+
+    Method (swing-cluster + volume-profile scored):
+      1. Swing pivots — a bar whose High is the max (or Low the min) within
+         ±swing_window bars = a level where price actually turned.
+      2. Cluster pivots within cluster_pct of each other into a price zone.
+      3. Score each zone = touches × recency × pivot-volume × HVN-overlap,
+         where HVN-overlap boosts zones sitting on a high-volume node of the
+         volume-by-price profile (volume spread across each day's H–L range).
+      4. Tag each zone support/resistance vs the latest close.
+
+    Returns a list of dicts {low, high, mid, touches, score, kind} (score desc).
+    """
+    if df is None or len(df) < swing_window * 2 + 5:
+        return []
+    highs = df['High'].to_numpy(dtype=float)
+    lows  = df['Low'].to_numpy(dtype=float)
+    vols  = (df['Volume'].to_numpy(dtype=float) if 'Volume' in df.columns
+             else np.ones(len(df)))
+    n = len(df)
+    vmean = float(np.nanmean(vols)) + 1e-9
+
+    # 1. Swing pivots → (price, idx, vol)
+    w = swing_window
+    pivots = []
+    for i in range(w, n - w):
+        if highs[i] == highs[i - w:i + w + 1].max():
+            pivots.append((highs[i], i, vols[i]))
+        if lows[i] == lows[i - w:i + w + 1].min():
+            pivots.append((lows[i], i, vols[i]))
+    if not pivots:
+        return []
+
+    # 2. Volume-by-price profile (spread each day's volume across its H–L range)
+    pmin, pmax = float(lows.min()), float(highs.max())
+    span = (pmax - pmin) or 1.0
+    vp = np.zeros(vp_bins)
+    for i in range(n):
+        b0 = int((lows[i]  - pmin) / span * (vp_bins - 1))
+        b1 = int((highs[i] - pmin) / span * (vp_bins - 1))
+        b0 = min(max(b0, 0), vp_bins - 1)
+        b1 = min(max(b1, 0), vp_bins - 1)
+        if b1 < b0:
+            b0, b1 = b1, b0
+        vp[b0:b1 + 1] += vols[i] / (b1 - b0 + 1)
+    vp_mean = float(vp.mean()) + 1e-9
+
+    # 3. Cluster pivots by price proximity, then score
+    pivots.sort(key=lambda x: x[0])
+    clusters, cur = [], [pivots[0]]
+    for p in pivots[1:]:
+        if abs(p[0] - cur[-1][0]) / cur[-1][0] <= cluster_pct:
+            cur.append(p)
+        else:
+            clusters.append(cur); cur = [p]
+    clusters.append(cur)
+
+    last_close = float(df['Close'].iloc[-1])
+    zones = []
+    for c in clusters:
+        prices = [x[0] for x in c]
+        idxs   = [x[1] for x in c]
+        vs     = [x[2] for x in c]
+        mid = sum(prices) / len(prices)
+        touches = len(c)
+        recency = (sum(idxs) / len(idxs)) / n          # 0 old … 1 recent
+        vol_w   = (sum(vs) / len(vs)) / vmean
+        bz = min(max(int((mid - pmin) / span * (vp_bins - 1)), 0), vp_bins - 1)
+        hvn = vp[bz] / vp_mean
+        score = (touches
+                 * (0.5 + recency)
+                 * (0.6 + 0.4 * min(vol_w, 3.0))
+                 * (0.7 + 0.3 * min(hvn, 3.0)))
+        zones.append({
+            "low": min(prices), "high": max(prices), "mid": mid,
+            "touches": touches, "score": score,
+            "kind": "resistance" if mid >= last_close else "support",
+        })
+
+    zones.sort(key=lambda z: z["score"], reverse=True)
+    return zones[:top_n]
+
+
 def create_single_stock_chart_analysis(
     df: pd.DataFrame,
     fundamentals_df: pd.DataFrame = None,
@@ -2071,6 +2157,48 @@ def create_single_stock_chart_analysis(
             x=0.5, y=0.5, showarrow=False,
             font=dict(color='#9ca3af', size=12),
         )
+
+    # ════════════════════════════════════════════════════════════════════════
+    # SUPPORT / RESISTANCE ZONES on the price panel (row 1)
+    # ════════════════════════════════════════════════════════════════════════
+    # Swing-cluster + volume-profile scored zones (see detect_support_resistance).
+    # A-share colour logic: support (a floor that, if it holds, implies upside) =
+    # red tint; resistance (a ceiling that caps upside) = green tint. The two
+    # zones nearest the current price are drawn bolder and labelled — those are
+    # the actionable ones.
+    try:
+        _sr_zones = detect_support_resistance(df)
+    except Exception:
+        _sr_zones = []
+
+    if _sr_zones:
+        _last_close = float(df['Close'].iloc[-1])
+        _sups = sorted([z for z in _sr_zones if z['kind'] == 'support'],
+                       key=lambda z: z['mid'], reverse=True)
+        _ress = sorted([z for z in _sr_zones if z['kind'] == 'resistance'],
+                       key=lambda z: z['mid'])
+        _near_sup = _sups[0] if _sups else None
+        _near_res = _ress[0] if _ress else None
+
+        for z in _sr_zones:
+            is_sup   = z['kind'] == 'support'
+            nearest  = (z is _near_sup) or (z is _near_res)
+            base_rgb = '220,38,38' if is_sup else '22,163,74'   # red sup / green res
+            alpha    = 0.15 if nearest else 0.06
+            fig.add_hrect(
+                y0=z['low'], y1=z['high'], row=1, col=1,
+                fillcolor=f'rgba({base_rgb},{alpha})',
+                line_width=0, layer='below',
+            )
+            if nearest:
+                tag = '支撑 Support' if is_sup else '压力 Resist'
+                fig.add_hline(
+                    y=z['mid'], row=1, col=1,
+                    line=dict(color=f'rgba({base_rgb},0.7)', width=1, dash='dot'),
+                    annotation_text=f"{tag} ¥{z['mid']:.2f} · {z['touches']}x",
+                    annotation_position='top left' if is_sup else 'bottom left',
+                    annotation_font=dict(size=10, color=f'rgb({base_rgb})'),
+                )
 
 
     # ==================== UPDATE LAYOUT ====================
