@@ -1377,13 +1377,27 @@ st.markdown("""
 if inc is not None and not inc.empty:
     df_show = inc.copy()
     df_show["end_date"] = df_show["end_date"].astype(str)
-    df_show["gross_profit"] = (df_show.get("total_revenue", 0).fillna(0)
-                              - df_show.get("oper_cost", 0).fillna(0))
+
+    # Coerce financial columns to numeric. Financial/securities companies
+    # (banks, brokers, insurers) report a different income-statement schema —
+    # oper_cost is often absent and values can arrive as object dtype (strings
+    # / None mixed), which would make gross_profit object dtype and crash the
+    # downstream .abs() in _yoy_series. _num() returns a clean numeric Series
+    # (all-zero when the column is missing entirely).
+    def _num(col: str) -> pd.Series:
+        if col not in df_show.columns:
+            return pd.Series(0.0, index=df_show.index)
+        return pd.to_numeric(df_show[col], errors="coerce")
+
+    df_show["total_revenue"]   = _num("total_revenue")
+    df_show["n_income_attr_p"] = _num("n_income_attr_p")
+    df_show["gross_profit"]    = _num("total_revenue").fillna(0) - _num("oper_cost").fillna(0)
 
     # YoY: compare each row to the row 4 quarters older
     def _yoy_series(s: pd.Series) -> pd.Series:
-        s2 = s.reset_index(drop=True)
-        return ((s2 - s2.shift(-4)) / s2.shift(-4).abs() * 100)
+        s2   = pd.to_numeric(s, errors="coerce").reset_index(drop=True)
+        prev = s2.shift(-4)
+        return (s2 - prev) / prev.abs() * 100
 
     df_show["rev_yoy"]    = _yoy_series(df_show["total_revenue"])
     df_show["np_yoy"]     = _yoy_series(df_show["n_income_attr_p"])
