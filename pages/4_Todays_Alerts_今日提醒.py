@@ -121,7 +121,14 @@ def scan_my_watchlist():
         status_text.text(f"🔍 调取并分析 {idx}/{total_stocks}: {ticker} - {progress*100:.1f}%")
 
         try:
-            stock_df = data_manager.get_single_stock_data_live(ticker, lookback_years=1)
+            # MUST match the Technical Analysis page's window (lookback_years=3).
+            # The squeeze uses a rolling BB-width percentile whose window is
+            # ADAPTIVE to the data length (analysis_engine._adaptive_lookback):
+            # 1yr of data (~243 bars) → 120-day window, but ≥250 bars → 250-day
+            # window. Feeding different history made the same bar's squeeze fire
+            # here but not on the chart. 3 years guarantees the 250-day window
+            # on both pages, so signals are computed identically.
+            stock_df = data_manager.get_single_stock_data_live(ticker, lookback_years=3)
             if stock_df is None or len(stock_df) < 100:
                 st.warning(f"⚠️ {ticker}: 数据不足 (需要至少100天)")
                 continue
