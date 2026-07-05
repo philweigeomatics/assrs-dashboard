@@ -58,8 +58,16 @@ ADX_ACCEL_FAST    =  0.10
 ADX_ACCEL_SLOW    = -0.10
 ADX_ACCEL_PEAK    = -0.15
 
-# DI Screaming Buy: crossover AND one-day spread widening > this value
+# DI Screaming Buy: crossover AND one-day spread widening > this value.
+# (Still used by the what-if simulator's rough next-day forecast.)
 DI_SCREAMING_BUY_MOMENTUM = 15
+
+# Hardened Screaming Buy/Sell (historical signal): the fixed 15-point rule is
+# replaced by a volatility-normalized threshold + a volume-confirmation gate.
+DI_SCREAM_SIGMA        = 2.0   # spread jump must exceed this many σ of its own recent distribution
+DI_SCREAM_SIGMA_WINDOW = 60    # window for the spread-momentum volatility scale
+DI_SCREAM_MO_FLOOR     = 8.0   # absolute floor so a near-dead stock can't fire on noise
+DI_SCREAM_VOL_MULT     = 1.5   # signal-bar volume must be ≥ this × its 20-day average
 
 # ── MACD (three-speed dynamic set) ───────────────────────────
 MACD_FAST_F, MACD_FAST_S, MACD_FAST_SIGN =  8, 21,  5
@@ -310,19 +318,38 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
         (df_analysis['DI_Minus'].shift(1) <= df_analysis['DI_Plus'].shift(1))
     )
 
-    # DI Screaming Buy / Sell — fresh DI crossover AND spread widened by
-    # > DI_SCREAMING_BUY_MOMENTUM in one day. The "screaming" pair are the
-    # strongest direction-flip signals because both the cross AND the
-    # momentum of the cross are unusually large.
+    # DI Screaming Buy / Sell — a fresh +DI/−DI crossover whose spread also
+    # expands violently in one day. Two hardening filters over the raw cross:
+    #
+    #   1. Volatility-normalized threshold — the 1-day spread jump must exceed
+    #      DI_SCREAM_SIGMA × the stock's OWN recent spread-momentum σ (floored
+    #      at DI_SCREAM_MO_FLOOR so a near-dead stock can't fire on noise).
+    #      This is fair across calm large-caps and jumpy small-caps, replacing
+    #      the old fixed 15-point rule that over-fired on volatile names.
+    #   2. Volume confirmation — the thrust must come with real participation:
+    #      signal-bar volume ≥ DI_SCREAM_VOL_MULT × its 20-day average. A big
+    #      directional bar on thin volume is a trap, not an ignition.
+    #
+    # (Location / trend context is intentionally NOT gated here — that's a
+    #  read-the-chart judgement, not a mechanical filter.)
     _di_spread    = df_analysis['DI_Plus'] - df_analysis['DI_Minus']
     _di_spread_mo = _di_spread - _di_spread.shift(1)
+
+    _spread_mo_sigma = _di_spread_mo.rolling(DI_SCREAM_SIGMA_WINDOW, min_periods=20).std()
+    _dyn_thresh = np.maximum(DI_SCREAM_MO_FLOOR, DI_SCREAM_SIGMA * _spread_mo_sigma)
+
+    _vol_avg20 = df_analysis['Volume'].rolling(20, min_periods=5).mean()
+    _vol_ok    = df_analysis['Volume'] >= DI_SCREAM_VOL_MULT * _vol_avg20
+
     df_analysis['DI_Screaming_Buy'] = (
         df_analysis['DI_Bullish_Cross'] &
-        (_di_spread_mo >  DI_SCREAMING_BUY_MOMENTUM)
+        (_di_spread_mo >  _dyn_thresh) &
+        _vol_ok
     )
     df_analysis['DI_Screaming_Sell'] = (
         df_analysis['DI_Bearish_Cross'] &
-        (_di_spread_mo < -DI_SCREAMING_BUY_MOMENTUM)
+        (_di_spread_mo < -_dyn_thresh) &
+        _vol_ok
     )
 
     # ── ADX Smoothing ─────────────────────────────────────────
