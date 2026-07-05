@@ -73,6 +73,81 @@ VOL_OBV_WINDOW  = 20
 # ── Market Regime (HMM) ──────────────────────────────────────
 REGIME_METHOD = 'HMM'   # 'HMM', 'JUMP', or 'ATR'
 
+# ── Structural regime anchor ─────────────────────────────────
+# China's "924" policy pivot (2024-09-24) triggered a structural regime
+# change in A-shares. Statistical baselines (BB-width squeeze percentile,
+# RSI dynamic percentile bands) must NOT span this break — a "bottom 10%"
+# reading against the prior bear regime is not comparable to the same
+# reading in the current regime. We anchor on 2024-10-10 (after the Oct 1–7
+# National Day holiday and its chaotic first re-open week) so percentile
+# windows never reach before it. Update this if a future break occurs.
+REGIME_ANCHOR = pd.Timestamp("2024-10-10")
+
+
+# ============================================================
+#  REGIME-AWARE ROLLING STATISTICS
+# ============================================================
+
+def _regime_window_starts(n: int, base_window: int, anchor_pos: int) -> np.ndarray:
+    """
+    For each bar i, the window start index. Post-anchor bars never reach
+    before `anchor_pos`; pre-anchor bars use the plain trailing window.
+    """
+    starts = np.empty(n, dtype=int)
+    for i in range(n):
+        lo = i - base_window + 1
+        if i >= anchor_pos:
+            lo = max(lo, anchor_pos)
+        starts[i] = max(0, lo)
+    return starts
+
+
+def _regime_pct_rank(series: pd.Series, base_window: int, anchor_pos: int,
+                     min_periods: int = 20) -> pd.Series:
+    """Percentile rank (0–1) of the CURRENT value within a regime-clamped
+    trailing window — regime-aware replacement for
+    rolling(w).apply(lambda x: x.rank(pct=True).iloc[-1])."""
+    vals = series.to_numpy(dtype=float)
+    n = len(vals)
+    out = np.full(n, np.nan)
+    starts = _regime_window_starts(n, base_window, anchor_pos)
+    for i in range(n):
+        cur = vals[i]
+        if np.isnan(cur):
+            continue
+        w = vals[starts[i]:i + 1]
+        w = w[~np.isnan(w)]
+        if len(w) < min_periods:
+            continue
+        out[i] = (w <= cur).mean()
+    return pd.Series(out, index=series.index)
+
+
+def _regime_quantile(series: pd.Series, base_window: int, anchor_pos: int,
+                     q: float, min_periods: int = 60) -> pd.Series:
+    """Rolling q-quantile VALUE over a regime-clamped trailing window —
+    regime-aware replacement for rolling(w).quantile(q)."""
+    vals = series.to_numpy(dtype=float)
+    n = len(vals)
+    out = np.full(n, np.nan)
+    starts = _regime_window_starts(n, base_window, anchor_pos)
+    for i in range(n):
+        w = vals[starts[i]:i + 1]
+        w = w[~np.isnan(w)]
+        if len(w) < min_periods:
+            continue
+        out[i] = float(np.quantile(w, q))
+    return pd.Series(out, index=series.index)
+
+
+def _regime_anchor_pos(index) -> int:
+    """First index position on/after REGIME_ANCHOR (n if all pre-anchor,
+    0 if all post-anchor)."""
+    try:
+        return int((pd.DatetimeIndex(index) < REGIME_ANCHOR).sum())
+    except Exception:
+        return 0
+
 
 # ============================================================
 #  ADX PATTERN DETECTION  (9 phases)
@@ -352,6 +427,10 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     params   = calculate_adaptive_parameters_percentile(df, lookback_days=30)
     lookback = params['obv_lookback']
 
+    # First bar on/after the 924 structural regime anchor — statistical
+    # percentile baselines below must not reach before it.
+    anchor_pos = _regime_anchor_pos(df_analysis.index)
+
     # ── Signal Column Initialisation ─────────────────────────
     df_analysis['Signal_Accumulation']  = False
     df_analysis['Signal_Squeeze']       = False
@@ -388,10 +467,12 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     df_analysis.loc[consecutive_days_filter(accumulation_raw, min_days=3), 'Signal_Accumulation'] = True
     
     # ==================== PHASE 2: SQUEEZE ====================
-    df_analysis['BB_Width_Percentile'] = df_analysis['BB_Width'].rolling(
-        window=lookback_period, min_periods=20
-    ).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan)
-    
+    # Regime-aware BB-width percentile: the trailing window never spans the
+    # 924 anchor, so "bottom 10% of BB width" is measured within one regime.
+    df_analysis['BB_Width_Percentile'] = _regime_pct_rank(
+        df_analysis['BB_Width'], lookback_period, anchor_pos, min_periods=20
+    )
+
     df_analysis['Squeeze_Raw'] = df_analysis['BB_Width_Percentile'] <= 0.10
 
     df_analysis['Signal_Squeeze'] = consecutive_days_filter(df_analysis['Squeeze_Raw'], min_days=3)
@@ -517,13 +598,16 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     df_analysis['Large_Downtrend']   = df_analysis['MACD_Signal_Slope'] < 0
 
     # ── RSI Dynamic Percentile Thresholds ────────────────────
+    # Regime-aware: the P10/P90 bands are measured only within the current
+    # regime (window never spans the 924 anchor), so "overbought/oversold
+    # relative to recent history" doesn't blend the pre-924 bear regime in.
     lookback_window = min(RSI_LOOKBACK, len(df_analysis))
-    df_analysis['RSI_P10'] = df_analysis['RSI_14'].rolling(
-        window=lookback_window, min_periods=60
-    ).quantile(0.10)
-    df_analysis['RSI_P90'] = df_analysis['RSI_14'].rolling(
-        window=lookback_window, min_periods=60
-    ).quantile(0.90)
+    df_analysis['RSI_P10'] = _regime_quantile(
+        df_analysis['RSI_14'], lookback_window, anchor_pos, q=0.10, min_periods=60
+    )
+    df_analysis['RSI_P90'] = _regime_quantile(
+        df_analysis['RSI_14'], lookback_window, anchor_pos, q=0.90, min_periods=60
+    )
 
     df_analysis['RSI_Bottoming'] = (
         (df_analysis['RSI_14'] <= df_analysis['RSI_P10']) &
