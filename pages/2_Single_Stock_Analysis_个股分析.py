@@ -21,30 +21,24 @@ import auth_manager
 auth_manager.require_login()
 
 
-# ==================== SIGNAL DEFINITIONS ( should be the same as Todays Alerts ) ====================
-
+# ==================== SIGNAL DEFINITIONS ====================
+# Every entry is a BOOLEAN column produced by run_single_stock_analysis — the
+# SAME engine output the chart markers and Today's Alerts use — so the
+# backtest evaluates exactly what the rest of the app surfaces (identical
+# computation, no re-derivation here). Each sell signal is the direct opposite
+# of a buy signal.
 BULLISH_SIGNALS = {
-    'MACD_Bottoming': 'MACD Bottoming',
-    'MACD_ClassicCrossover': 'MACD Positive Crossover',
-    'RSI_Bottoming': 'RSI Bottoming',
-    'Squeeze_Fired_Bullish': 'Bullish Squeeze Breakout'  # <--- ADD THIS
+    'RSI_Bottoming':         'RSI Bottoming',
+    'MACD_Bottoming':        'MACD Bottoming',
+    'MACD_ClassicCrossover': 'MACD Bullish Crossover',
+    'DI_Screaming_Buy':      'DI Screaming Buy 🚀',
 }
 
 BEARISH_SIGNALS = {
-    'MACD_Peaking': 'MACD Peaking',
+    'RSI_Peaking':           'RSI Peaking',
+    'MACD_Peaking':          'MACD Peaking',
     'MACD_BearishCrossover': 'MACD Bearish Crossover',
-    'RSI_Peaking': 'RSI Peaking',
-    'Squeeze_Fired_Bearish': 'Bearish Squeeze Drop'     # <--- ADD THIS
-}
-
-ADX_BULLISH_PATTERNS = {
-    'Bottoming + Downtrend': 'ADX Bottoming (after decline)',
-    'Reversing Up + Downtrend': 'ADX Reversing Up (after decline)',
-}
-
-ADX_BEARISH_PATTERNS = {
-    'Peaking + Uptrend': 'ADX Peaking (after rally)',
-    'Reversing Down + Uptrend': 'ADX Reversing Down (after rally)',
+    'DI_Screaming_Sell':     'DI Screaming Sell 🛑',
 }
 
 
@@ -129,58 +123,20 @@ def backtest_signal_expectancy(analysis_df, buy_signal_type, sell_signal_type):
     - summary: Dictionary with performance metrics
     """
     df = analysis_df.copy()
-    
+
     # Add next day's open for execution
     df['Next_Open'] = df['Open'].shift(-1)
-    
-    # Calculate price trend for ADX patterns
-    ema_5d = df['Close'].ewm(span=5, adjust=False).mean()
-    df['EMA_5d'] = ema_5d
-    df['EMA_5d_prev'] = df['EMA_5d'].shift(1)
-    
-    # Determine price trend
-    df['Price_Trend'] = 'neutral'
-    df.loc[(df['Close'] > df['EMA_5d']) & (df['EMA_5d'] > df['EMA_5d_prev']), 'Price_Trend'] = 'uptrend'
-    df.loc[(df['Close'] < df['EMA_5d']) & (df['EMA_5d'] < df['EMA_5d_prev']), 'Price_Trend'] = 'downtrend'
-    
+
     # Initialize
     trades = []
     position = 0  # shares held
     total_cost = 0.0  # total cost basis
-    
+
     for idx, row in df.iterrows():
-        # Check buy signal
-        buy_signal = False
-        
-        if buy_signal_type in BULLISH_SIGNALS:
-            # Boolean signal (MACD, RSI)
-            buy_signal = row.get(buy_signal_type, False)
-        elif buy_signal_type in ADX_BULLISH_PATTERNS:
-            # ADX pattern with price context
-            adx_pattern = str(row.get('ADX_Pattern', ''))
-            price_trend = row.get('Price_Trend', 'neutral')
-            
-            if buy_signal_type == 'Bottoming + Downtrend':
-                buy_signal = (adx_pattern == 'Bottoming' and price_trend == 'downtrend')
-            elif buy_signal_type == 'Reversing Up + Downtrend':
-                buy_signal = (adx_pattern == 'Reversing Up' and price_trend == 'downtrend')
-        
-        # Check sell signal
-        sell_signal = False
-        
-        if sell_signal_type in BEARISH_SIGNALS:
-            # Boolean signal (MACD, RSI)
-            sell_signal = row.get(sell_signal_type, False)
-        elif sell_signal_type in ADX_BEARISH_PATTERNS:
-            # ADX pattern with price context
-            adx_pattern = str(row.get('ADX_Pattern', ''))
-            price_trend = row.get('Price_Trend', 'neutral')
-            
-            if sell_signal_type == 'Peaking + Uptrend':
-                sell_signal = (adx_pattern == 'Peaking' and price_trend == 'uptrend')
-            elif sell_signal_type == 'Reversing Down + Uptrend':
-                sell_signal = (adx_pattern == 'Reversing Down' and price_trend == 'uptrend')
-        
+        # Both entry and exit are boolean engine columns (same as chart/alerts).
+        buy_signal  = bool(row.get(buy_signal_type,  False))
+        sell_signal = bool(row.get(sell_signal_type, False))
+
         next_open = row['Next_Open']
         
         if pd.isna(next_open):
@@ -234,56 +190,80 @@ def backtest_signal_expectancy(analysis_df, buy_signal_type, sell_signal_type):
         return None, None
     
     trades_df = pd.DataFrame(trades)
-    
-    # Calculate complete transactions (from first BUY to SELL ALL)
+
+    # Pair BUYs into their SELL ALL to form complete (closed) transactions.
     complete_transactions = []
     buy_group = []
-    
     for _, trade in trades_df.iterrows():
         if trade['Action'] == 'BUY':
             buy_group.append(trade)
         elif trade['Action'] == 'SELL ALL':
             if buy_group:
-                # This is a complete transaction
-                first_buy_date = buy_group[0]['Date']
-                sell_date = trade['Date']
                 total_invested = sum(b['Amount'] for b in buy_group)
-                total_shares = sum(b['Shares'] for b in buy_group)
-                avg_buy_price = total_invested / total_shares
-                sell_price = trade['Price']
-                profit = trade['Profit']
-                profit_pct = trade['Profit_Pct']
-                
+                total_shares   = sum(b['Shares'] for b in buy_group)
                 complete_transactions.append({
-                    'Entry_Date': first_buy_date,
-                    'Exit_Date': sell_date,
-                    'Shares': total_shares,
-                    'Avg_Buy_Price': avg_buy_price,
-                    'Sell_Price': sell_price,
-                    'Profit': profit,
-                    'Profit_Pct': profit_pct
+                    'Entry_Date':    buy_group[0]['Date'],
+                    'Exit_Date':     trade['Date'],
+                    'Shares':        total_shares,
+                    'Invested':      total_invested,      # for position weighting
+                    'Avg_Buy_Price': total_invested / total_shares,
+                    'Sell_Price':    trade['Price'],
+                    'Profit':        trade['Profit'],
+                    'Profit_Pct':    trade['Profit_Pct'],
                 })
-                
-                buy_group = []  # Reset for next transaction
-    
+                buy_group = []  # reset for next transaction
+
+    # Any BUYs still open at the end = an OPEN position. Mark it to market at
+    # the last close and surface it separately (NOT counted as a closed trade,
+    # so it can't bias the win-rate / expectancy stats).
+    open_position = None
+    if buy_group:
+        inv        = sum(b['Amount'] for b in buy_group)
+        sh         = sum(b['Shares'] for b in buy_group)
+        avg_cost   = inv / sh
+        last_close = float(df['Close'].iloc[-1])
+        open_position = {
+            'Shares':         int(sh),
+            'Avg_Cost':       avg_cost,
+            'Last_Price':     last_close,
+            'Invested':       inv,
+            'Unrealized_PL':  sh * last_close - inv,
+            'Unrealized_Pct': (last_close - avg_cost) / avg_cost * 100,
+            'Entry_Date':     buy_group[0]['Date'],
+        }
+
     if not complete_transactions:
-        return trades_df, None
-    
+        if open_position is None:
+            return trades_df, None
+        # Only an open position exists (bought, never hit a sell signal yet).
+        return trades_df, {
+            'Total_Transactions': 0, 'Winning_Trades': 0, 'Losing_Trades': 0,
+            'Win_Rate': 0.0, 'Avg_Profit_Pct': 0.0, 'Total_Profit': 0.0,
+            'Best_Trade_Pct': 0.0, 'Worst_Trade_Pct': 0.0, 'Median_Profit_Pct': 0.0,
+            'Open_Position': open_position,
+        }
+
     trans_df = pd.DataFrame(complete_transactions)
-    
-    # Summary metrics
+
+    # Position-weighted average return: weight each closed trade's % by the
+    # capital it deployed, so a big pyramided trade counts more than a small one.
+    total_inv    = float(trans_df['Invested'].sum())
+    weighted_avg = (float((trans_df['Profit_Pct'] * trans_df['Invested']).sum()) / total_inv
+                    if total_inv > 0 else 0.0)
+
     summary = {
         'Total_Transactions': len(trans_df),
-        'Winning_Trades': (trans_df['Profit'] > 0).sum(),
-        'Losing_Trades': (trans_df['Profit'] < 0).sum(),
-        'Win_Rate': (trans_df['Profit'] > 0).mean() * 100,
-        'Avg_Profit_Pct': trans_df['Profit_Pct'].mean(),
-        'Total_Profit': trans_df['Profit'].sum(),
-        'Best_Trade_Pct': trans_df['Profit_Pct'].max(),
-        'Worst_Trade_Pct': trans_df['Profit_Pct'].min(),
-        'Median_Profit_Pct': trans_df['Profit_Pct'].median()
+        'Winning_Trades':     int((trans_df['Profit'] > 0).sum()),
+        'Losing_Trades':      int((trans_df['Profit'] < 0).sum()),
+        'Win_Rate':           float((trans_df['Profit'] > 0).mean() * 100),
+        'Avg_Profit_Pct':     weighted_avg,        # position-weighted
+        'Total_Profit':       float(trans_df['Profit'].sum()),
+        'Best_Trade_Pct':     float(trans_df['Profit_Pct'].max()),
+        'Worst_Trade_Pct':    float(trans_df['Profit_Pct'].min()),
+        'Median_Profit_Pct':  float(trans_df['Profit_Pct'].median()),
+        'Open_Position':      open_position,
     }
-    
+
     return trades_df, summary
 
 
@@ -3884,23 +3864,20 @@ if st.session_state.active_ticker:
                 st.caption(f"Available: {min_date} to {max_date}")
 
             with col_buy:
-                # Your existing buy signal selector
-                buy_options = list(BULLISH_SIGNALS.keys()) + list(ADX_BULLISH_PATTERNS.keys())
-                buy_display = {**BULLISH_SIGNALS, **ADX_BULLISH_PATTERNS}
+                # Boolean engine signals — identical to chart markers / alerts.
+                buy_options = list(BULLISH_SIGNALS.keys())
                 buy_signal = st.selectbox(
-                    "Buy Signal (Entry)", 
-                    buy_options, 
-                    format_func=lambda x: buy_display[x]
+                    "Buy Signal (Entry)",
+                    buy_options,
+                    format_func=lambda x: BULLISH_SIGNALS[x]
                 )
 
             with col_sell:
-                # Your existing sell signal selector
-                sell_options = list(BEARISH_SIGNALS.keys()) + list(ADX_BEARISH_PATTERNS.keys())
-                sell_display = {**BEARISH_SIGNALS, **ADX_BEARISH_PATTERNS}
+                sell_options = list(BEARISH_SIGNALS.keys())
                 sell_signal = st.selectbox(
-                    "Sell Signal (Exit)", 
-                    sell_options, 
-                    format_func=lambda x: sell_display[x]
+                    "Sell Signal (Exit)",
+                    sell_options,
+                    format_func=lambda x: BEARISH_SIGNALS[x]
                 )
 
             # Filter analysis data based on selected start date
@@ -3948,17 +3925,38 @@ if st.session_state.active_ticker:
 
                             with col3:
                                 avg_profit = summary['Avg_Profit_Pct']
-                                st.metric("Avg Profit/Trade", f"{avg_profit:.2f}%")
+                                st.metric("Avg Profit/Trade", f"{avg_profit:.2f}%",
+                                          help="Position-weighted: each closed trade's % is "
+                                               "weighted by the capital it deployed.")
                                 total_profit_dollars = summary['Total_Profit']
                                 if avg_profit > 0:
-                                    st.success(f"¥{total_profit_dollars:.2f} total")  # Display as currency, not %
+                                    st.success(f"¥{total_profit_dollars:.2f} total (closed)")
                                 else:
-                                    st.error(f"¥{total_profit_dollars:.2f} total")
+                                    st.error(f"¥{total_profit_dollars:.2f} total (closed)")
 
 
                             with col4:
                                 st.metric("Best Trade", f"{summary['Best_Trade_Pct']:.2f}%")
                                 st.caption(f"Worst: {summary['Worst_Trade_Pct']:.2f}%")
+
+                            # ── Open position (marked to market at last close) ──
+                            _op = summary.get('Open_Position')
+                            if _op:
+                                st.markdown("---")
+                                st.markdown("**📌 Open position at end of period** "
+                                            "(still holding — a buy with no sell signal yet; "
+                                            "not counted in the closed-trade stats above)")
+                                o1, o2, o3, o4 = st.columns(4)
+                                o1.metric("Shares held", f"{_op['Shares']:,}")
+                                o2.metric("Avg cost", f"¥{_op['Avg_Cost']:.2f}")
+                                o3.metric("Last close", f"¥{_op['Last_Price']:.2f}")
+                                # A-share convention: red = gain (up), green = loss (down)
+                                _upl_pct = _op['Unrealized_Pct']
+                                o4.metric("Unrealized P/L", f"{_upl_pct:+.2f}%",
+                                          delta=f"¥{_op['Unrealized_PL']:+,.2f}",
+                                          delta_color="inverse")
+                                st.caption(f"Entry: {pd.Timestamp(_op['Entry_Date']).date()} · "
+                                           f"Invested ¥{_op['Invested']:,.2f}")
 
 
 
