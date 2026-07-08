@@ -352,6 +352,31 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
         _vol_ok
     )
 
+    # ── Downtrend / Uptrend Reversal (early DMI reversal) ─────
+    # A DI cross is only a REVERSAL when it flips the prevailing trend with
+    # early momentum behind it — not a mid-trend cross or a dead bounce.
+    #   Downtrend Reversal (bullish):
+    #     • was a downtrend  — Close was below MA20 on the prior bar
+    #     • trigger          — +DI crosses above −DI (DI_Bullish_Cross)
+    #     • early confirm     — MACD histogram turning up (momentum, even if
+    #                           MACD is still negative — a leading signal)
+    #   Uptrend Reversal (bearish) is the exact mirror.
+    _macd_hist_rising  = df_analysis['MACD_Hist'] > df_analysis['MACD_Hist'].shift(1)
+    _macd_hist_falling = df_analysis['MACD_Hist'] < df_analysis['MACD_Hist'].shift(1)
+    _was_below_ma20    = df_analysis['Close'].shift(1) < df_analysis['MA20'].shift(1)
+    _was_above_ma20    = df_analysis['Close'].shift(1) > df_analysis['MA20'].shift(1)
+
+    df_analysis['Downtrend_Reversal'] = (
+        _was_below_ma20 &
+        df_analysis['DI_Bullish_Cross'] &
+        _macd_hist_rising
+    )
+    df_analysis['Uptrend_Reversal'] = (
+        _was_above_ma20 &
+        df_analysis['DI_Bearish_Cross'] &
+        _macd_hist_falling
+    )
+
     # ── ADX Smoothing ─────────────────────────────────────────
     # FIX: fillna(method='ffill') is deprecated — use .ffill() directly.
     adx_filled = df_analysis['ADX'].ffill()

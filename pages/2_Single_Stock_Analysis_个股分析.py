@@ -32,6 +32,7 @@ BULLISH_SIGNALS = {
     'MACD_Bottoming':        'MACD Bottoming',
     'MACD_ClassicCrossover': 'MACD Bullish Crossover',
     'DI_Screaming_Buy':      'DI Screaming Buy 🚀',
+    'Downtrend_Reversal':    'Downtrend Reversal 🔄',
 }
 
 BEARISH_SIGNALS = {
@@ -39,6 +40,7 @@ BEARISH_SIGNALS = {
     'MACD_Peaking':          'MACD Peaking',
     'MACD_BearishCrossover': 'MACD Bearish Crossover',
     'DI_Screaming_Sell':     'DI Screaming Sell 🛑',
+    'Uptrend_Reversal':      'Uptrend Reversal 🔄',
 }
 
 
@@ -1244,14 +1246,38 @@ def create_single_stock_chart_analysis(
     bear_sqz = df[df.get('Squeeze_Fired_Bearish', False)]
     if not bear_sqz.empty:
         fig.add_trace(go.Scatter(
-            x=bear_sqz.index.strftime('%Y-%m-%d'), 
+            x=bear_sqz.index.strftime('%Y-%m-%d'),
             y=bear_sqz['High'] * 1.05,  # Placed slightly above the candle
-            mode='markers', 
+            mode='markers',
             name='🩸 Bearish Squeeze Drop',
             marker=dict(color='#ef4444', size=14, symbol='triangle-down', line=dict(width=1, color='black')),
             showlegend=True
         ), row=1, col=1)
-    
+
+    # Downtrend Reversal (early DMI reversal up) — A-share red = up.
+    dt_rev = df[df.get('Downtrend_Reversal', False)]
+    if not dt_rev.empty:
+        fig.add_trace(go.Scatter(
+            x=dt_rev.index.strftime('%Y-%m-%d'),
+            y=dt_rev['Low'] * 0.96,
+            mode='markers', name='🔄 Downtrend Reversal',
+            marker=dict(color='#dc2626', size=13, symbol='triangle-up',
+                        line=dict(width=1, color='black')),
+            showlegend=True
+        ), row=1, col=1)
+
+    # Uptrend Reversal (early DMI reversal down) — A-share green = down.
+    ut_rev = df[df.get('Uptrend_Reversal', False)]
+    if not ut_rev.empty:
+        fig.add_trace(go.Scatter(
+            x=ut_rev.index.strftime('%Y-%m-%d'),
+            y=ut_rev['High'] * 1.04,
+            mode='markers', name='🔄 Uptrend Reversal',
+            marker=dict(color='#16a34a', size=13, symbol='triangle-down',
+                        line=dict(width=1, color='black')),
+            showlegend=True
+        ), row=1, col=1)
+
     # launch = df[df['Signal_Golden_Launch']]
     # if not launch.empty:
     #     fig.add_trace(go.Scatter(

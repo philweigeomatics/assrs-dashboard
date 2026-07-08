@@ -39,6 +39,7 @@ _BULL_BOOL = {
     'MACD_Bottoming':         'MACD Bottoming',
     'MACD_ClassicCrossover':  'MACD Bullish Crossover',
     'RSI_Bottoming':          'RSI Bottoming',
+    'Downtrend_Reversal':     'Downtrend Reversal 🔄',
 }
 _BULL_ENTRY = {  # Entry_Candidate value → label
     'Strength Returning':     'Strength Returning (ADX)',
@@ -53,6 +54,7 @@ _BEAR_BOOL = {
     'MACD_Peaking':           'MACD Peaking',
     'MACD_BearishCrossover':  'MACD Bearish Crossover',
     'RSI_Peaking':            'RSI Peaking',
+    'Uptrend_Reversal':       'Uptrend Reversal 🔄',
 }
 _BEAR_EXIT = {  # Exit_Candidate value → label
     'Trend Topping':          'Trend Topping (ADX)',
