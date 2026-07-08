@@ -373,15 +373,58 @@ st.markdown("---")
 # Cache the match result in session state so node-click reruns don't re-call DeepSeek
 all_themes = data_manager.get_all_sector_themes()
 match_cache_key = f"ll_p2_match_{ticker}_{chosen_sector}_{len(all_themes)}"
+override_key    = f"ll_p2_override_{ticker}_{chosen_sector}"
 if match_cache_key not in st.session_state:
     with st.spinner(f"Matching '{chosen_sector}' to stored sector themes…"):
         st.session_state[match_cache_key] = sector_themes_mod.match_sector_theme(
             chosen_sector, all_themes
         )
-matched = st.session_state[match_cache_key]
+
+# A manual override (from the "Wrong sector?" panel) wins over the auto-match.
+# It may be a theme dict (user picked one) or None (user forced "generate fresh").
+if override_key in st.session_state:
+    matched = st.session_state[override_key]
+else:
+    matched = st.session_state[match_cache_key]
 
 if matched:
     st.success(f"✅ Matched to saved theme: **{matched['formal_name']}**")
+
+    # ── Recourse when the auto-match is wrong ────────────────────────────────
+    with st.expander("❌ Wrong sector? Re-match / pick correct / generate fresh",
+                     expanded=False):
+        st.caption(
+            f"Auto-matched **'{chosen_sector}'** → **'{matched['formal_name']}'**. "
+            "If that's the wrong sector, re-run the AI matcher, pick the correct "
+            "saved sector directly, or generate a fresh theme."
+        )
+        fix_c1, fix_c2 = st.columns([1, 2])
+        with fix_c1:
+            if st.button("🤖 Re-match with AI", key=f"ll_p2_rematch_{chosen_sector}",
+                         use_container_width=True):
+                st.session_state.pop(match_cache_key, None)
+                st.session_state.pop(override_key, None)
+                st.rerun()
+        with fix_c2:
+            _theme_opts = {
+                f"{t['formal_name']}  ·  {t['raw_input']}  (#{t['id']})": t
+                for t in all_themes
+            }
+            _FRESH = "🧬 None of these — generate a fresh theme for this sector"
+            _pick = st.selectbox(
+                "…or pick the correct saved sector",
+                ["— keep current —"] + list(_theme_opts.keys()) + [_FRESH],
+                key=f"ll_p2_fixpick_{chosen_sector}",
+            )
+            if st.button("Apply", key=f"ll_p2_fixapply_{chosen_sector}",
+                         type="primary", use_container_width=True):
+                if _pick == "— keep current —":
+                    st.session_state.pop(override_key, None)
+                elif _pick == _FRESH:
+                    st.session_state[override_key] = None   # force generate-fresh path
+                else:
+                    st.session_state[override_key] = _theme_opts[_pick]
+                st.rerun()
 
     # Cache the full theme (layers) too
     theme_cache_key = f"ll_p2_theme_{matched['id']}"
@@ -398,7 +441,18 @@ if matched:
         st.error("Could not load theme details from the database.")
 
 else:
-    st.warning(f"No stored theme matches **'{chosen_sector}'** yet.")
+    # Reached either because the matcher found nothing, or the user forced
+    # "generate fresh" from the Wrong-sector panel.
+    _forced_fresh = override_key in st.session_state  # value is None here
+    if _forced_fresh:
+        st.info(f"Generating a **fresh** theme for '{chosen_sector}' "
+                "(you rejected the auto-match).")
+        if st.button("↩︎ Undo — go back to the auto-match",
+                     key=f"ll_p2_undo_fresh_{chosen_sector}"):
+            st.session_state.pop(override_key, None)
+            st.rerun()
+    else:
+        st.warning(f"No stored theme matches **'{chosen_sector}'** yet.")
 
     if auth_manager.is_admin():
         st.caption(
@@ -421,8 +475,10 @@ else:
                         created_by=user_info["username"],
                     )
                     if ok:
-                        # Bust the match cache so the next rerun picks up the new theme
+                        # Bust the match cache + any override so the next rerun
+                        # picks up the newly saved theme.
                         st.session_state.pop(match_cache_key, None)
+                        st.session_state.pop(override_key, None)
                         st.success(f"✅ Saved: **{data['name']}**. Reloading…")
                         st.rerun()
                     else:

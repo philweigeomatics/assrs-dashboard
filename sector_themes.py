@@ -55,9 +55,14 @@ Input JSON: {"sector": "...", "themes": [{"id": 1, "formal_name": "...", "raw_in
 Rules:
 - Return ONLY raw JSON: {"matched_id": <integer> or null}
 - matched_id is the id of the best-matching theme, or null if none fits well.
-- A match is good if the theme clearly covers the same industry, even with
-  different wording (e.g. "Industrial Robot" matches "Robotics / 机器人").
-- Do NOT force a match when nothing is close enough.
+- A match is good ONLY IF the theme covers the SAME industry / supply chain,
+  even with different wording (e.g. "Industrial Robot" matches "Robotics / 机器人").
+- Reject superficial keyword overlaps — a shared word is NOT a match:
+    • "Industrial Internet of Things" does NOT match "Internet"
+    • "Solar Inverter" does NOT match "Solar Water Heater"
+    • "New Energy Vehicle" does NOT match "Energy"
+  If the industries/supply chains differ, return null.
+- Do NOT force a match when nothing is close enough. When in doubt, return null.
 """
 
 
@@ -108,9 +113,14 @@ def match_sector_theme(sector_name: str, all_themes: list) -> dict | None:
     Find the best-matching stored theme for `sector_name`.
 
     Strategy:
-      1. Simple case-insensitive substring match against formal_name / raw_input.
-         If exactly one candidate, return it immediately (no API call).
-      2. Otherwise ask DeepSeek to pick the best match (or return null).
+      1. EXACT (case-insensitive) match on formal_name / raw_input → accept
+         immediately (no API call).
+      2. Otherwise let the AI decide. Substring overlap is used ONLY to narrow
+         the candidate pool sent to the AI — it is NEVER auto-accepted, so a
+         short generic theme ("Internet") can't hijack a longer distinct query
+         ("Industrial Internet of Things") on a keyword overlap.
+      3. If the AI finds no genuine same-industry match, return None (which
+         lets the caller offer "generate a fresh theme"). No forced fallback.
 
     Returns a theme dict {id, formal_name, raw_input} or None.
     """
@@ -119,6 +129,12 @@ def match_sector_theme(sector_name: str, all_themes: list) -> dict | None:
 
     low = sector_name.strip().lower()
 
+    # 1. Exact match only — safe to auto-accept.
+    for t in all_themes:
+        if low == t["formal_name"].strip().lower() or low == t["raw_input"].strip().lower():
+            return t
+
+    # 2. Substring narrows the pool for the AI; if none overlap, ask over all.
     candidates = [
         t for t in all_themes
         if low in t["formal_name"].lower()
@@ -126,12 +142,8 @@ def match_sector_theme(sector_name: str, all_themes: list) -> dict | None:
         or t["formal_name"].lower() in low
         or t["raw_input"].lower() in low
     ]
-
-    if len(candidates) == 1:
-        return candidates[0]
-
-    # Multiple or zero candidates — ask DeepSeek
     pool = candidates if candidates else all_themes
+
     try:
         result = ai_client.call_json(
             _MATCH_PROMPT,
@@ -154,7 +166,8 @@ def match_sector_theme(sector_name: str, all_themes: list) -> dict | None:
     except Exception:
         pass
 
-    return candidates[0] if candidates else None
+    # 3. No genuine match — do NOT force a wrong one.
+    return None
 
 
 # ── Batch sector → theme matcher ──────────────────────────────────────────────
