@@ -2051,6 +2051,75 @@ def _competitors_section():
                 f"{'s' if len(_pt_tickers) > 2 else ''} into the Pair Trader engine."
             )
 
+    # ── Save comparison group to a Sector (admin) ────────────────────────────
+    # Persists the comparison stocks (target + peers) into the sector_stock_map
+    # used by Sector Management. Two modes:
+    #   • Append to an existing sector — adds only the stocks NOT already in it
+    #     (dedupes against current members; reactivates any soft-deleted ones).
+    #   • Create a new sector — seeds a brand-new sector with these stocks.
+    # A single st.form batches the widgets so the @st.fragment doesn't rerun
+    # (and re-fetch peer fundamentals) on every keystroke/selection.
+    if is_admin and _pt_tickers:
+        with st.expander("🗂 Save comparison to a Sector (admin)", expanded=False):
+            _existing_map = data_manager.get_sector_stock_map()
+            _existing_sectors = sorted(_existing_map.keys())
+
+            st.caption(
+                f"Will save these **{len(_pt_tickers)}** stocks: "
+                + " · ".join(f"`{t}`" for t in _pt_tickers)
+            )
+            with st.form(key=f"eb_sector_save_{ticker}"):
+                _mode = st.radio(
+                    "Mode",
+                    ["Append to existing sector", "Create new sector"],
+                    horizontal=True,
+                    key=f"eb_sec_mode_{ticker}",
+                )
+                _sel_sector = st.selectbox(
+                    "Existing sector (for Append)",
+                    options=(_existing_sectors or ["— none yet —"]),
+                    key=f"eb_sec_existing_{ticker}",
+                )
+                _new_sector = st.text_input(
+                    "New sector name (for Create new)",
+                    placeholder="e.g. 银行 / Banks",
+                    key=f"eb_sec_new_{ticker}",
+                )
+                _sec_submit = st.form_submit_button(
+                    "💾 Save to sector", type="primary", use_container_width=True
+                )
+
+            if _sec_submit:
+                if _mode.startswith("Append"):
+                    if not _existing_sectors:
+                        st.warning("No existing sectors yet — use **Create new sector**.")
+                    else:
+                        _members = set(_existing_map.get(_sel_sector, []))
+                        _to_add = [t for t in _pt_tickers if t not in _members]
+                        _skipped = [t for t in _pt_tickers if t in _members]
+                        for t in _to_add:
+                            data_manager.add_stock_to_sector(_sel_sector, t)
+                        if _to_add:
+                            st.success(
+                                f"✅ Added {len(_to_add)} stock(s) to **{_sel_sector}**: "
+                                + ", ".join(_to_add)
+                                + (f" · skipped {len(_skipped)} already present" if _skipped else "")
+                            )
+                        else:
+                            st.info(f"All {len(_pt_tickers)} stocks were already in "
+                                    f"**{_sel_sector}** — nothing to add.")
+                else:  # Create new sector
+                    _name = (_new_sector or "").strip()
+                    if not _name:
+                        st.warning("Enter a name for the new sector.")
+                    elif _name in _existing_map:
+                        st.error(f"Sector **{_name}** already exists — pick "
+                                 "**Append to existing sector** instead.")
+                    else:
+                        data_manager.add_new_sector(_name, _pt_tickers)
+                        st.success(f"✅ Created sector **{_name}** with "
+                                   f"{len(_pt_tickers)} stocks.")
+
     # ── Admin curation panel ─────────────────────────────────────────────────
     # WHY st.form here:
     #   Any st.widget outside a form inside a @st.fragment triggers an
