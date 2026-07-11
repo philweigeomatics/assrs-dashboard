@@ -584,3 +584,260 @@ st.caption(
     "can land anywhere; the percentiles just tell you the historically typical zone."
 )
 
+# ════════════════════════════════════════════════════════════════════════════
+# 5) 做T SCENARIO LAB — dual-limit exact backtest + OHLC-constrained scenarios
+# ════════════════════════════════════════════════════════════════════════════
+# Why this backtest is legitimate on daily bars (unlike the sequential one we
+# removed): the strategy places BOTH limit orders at the open, simultaneously —
+# buy N at (open − x%) and sell N base shares at (open + y%). With both orders
+# standing, the ORDER of fills doesn't change P&L; the only questions are
+# "did the day touch each level?", and High/Low answer that EXACTLY. Every
+# number in the core backtest is provable from OHLC — no path inference.
+# What OHLC can't see is multi-oscillation (band crossed several times), so
+# the core result is a CONSERVATIVE floor; the Monte Carlo layer estimates the
+# multi-trip upside using synthetic paths CONSTRAINED to each day's real OHLC
+# (start at Open, end at Close, touch the actual High and Low).
+
+st.markdown("#### 5 · 做T Scenario Lab — dual-limit backtest")
+st.markdown(
+    "**Strategy tested:** at each open, place BOTH orders — buy `N` shares at "
+    "`open − x%` AND sell `N` base shares at `open + y%`. Both fill → round-trip "
+    "profit locked (order of fills irrelevant). One fills → the imbalance is "
+    "marked at that day's close. P&L is **excess over pure buy-and-hold** of "
+    "the base. T+1-legal by construction: the sell leg always comes from "
+    "base shares held overnight."
+)
+
+_PEN = 0.0005  # fill requires 0.05% penetration past the level (queue realism)
+
+lab_c1, lab_c2, lab_c3, lab_c4 = st.columns(4)
+lab_shares = lab_c1.number_input("T shares per leg (N)", value=300, step=100,
+                                 min_value=100, max_value=100000, key="tt_lab_shares",
+                                 help="Shares per leg. Your base position must be ≥ N "
+                                      "so the sell leg always comes from held shares.")
+lab_buy_frac = lab_c2.number_input("Buy at ___ % of avg range below open",
+                                   value=40, step=5, min_value=10, max_value=100,
+                                   key="tt_lab_buy")
+lab_sell_frac = lab_c3.number_input("Sell at ___ % of avg range above open",
+                                    value=40, step=5, min_value=10, max_value=100,
+                                    key="tt_lab_sell")
+lab_lookback = lab_c4.number_input("Lookback days", value=120, step=20,
+                                   min_value=30, max_value=250, key="tt_lab_lb")
+
+_avg_rng = (plan_intraday or 0.0) / 100.0   # fraction of open
+_b_off = (lab_buy_frac  / 100.0) * _avg_rng
+_s_off = (lab_sell_frac / 100.0) * _avg_rng
+st.caption(
+    f"20d avg intraday range `{(plan_intraday or 0):.2f}%` → buy level = "
+    f"`open − {_b_off*100:.2f}%`, sell level = `open + {_s_off*100:.2f}%`. "
+    f"Fills require {_PEN*100:.2f}% penetration past the level."
+)
+
+
+def _dual_limit_backtest(df: pd.DataFrame, b_off: float, s_off: float,
+                         n_shares: int, lookback: int) -> pd.DataFrame | None:
+    """Exact dual-limit 做T backtest from OHLC. Returns per-day frame."""
+    if df is None or df.empty or b_off <= 0 or s_off <= 0:
+        return None
+    d = df.tail(int(lookback))[['Open', 'High', 'Low', 'Close']].dropna().copy()
+    if d.empty:
+        return None
+    d['buy_lv']  = d['Open'] * (1 - b_off)
+    d['sell_lv'] = d['Open'] * (1 + s_off)
+    d['buy_fill']  = d['Low']  <= d['buy_lv']  * (1 - _PEN)
+    d['sell_fill'] = d['High'] >= d['sell_lv'] * (1 + _PEN)
+
+    both      = d['buy_fill'] & d['sell_fill']
+    buy_only  = d['buy_fill'] & ~d['sell_fill']
+    sell_only = ~d['buy_fill'] & d['sell_fill']
+
+    d['locked'] = 0.0
+    d.loc[both, 'locked'] = (d['sell_lv'] - d['buy_lv']) * n_shares
+    d['mtm'] = 0.0
+    d.loc[buy_only,  'mtm'] = (d['Close'] - d['buy_lv'])  * n_shares
+    d.loc[sell_only, 'mtm'] = (d['sell_lv'] - d['Close']) * n_shares
+    d['pnl'] = d['locked'] + d['mtm']
+    d['outcome'] = np.select([both, buy_only, sell_only],
+                             ['both', 'buy_only', 'sell_only'], default='none')
+    d['cum_pnl'] = d['pnl'].cumsum()
+    return d
+
+
+lab = _dual_limit_backtest(plan_df, _b_off, _s_off, int(lab_shares), int(lab_lookback))
+
+if lab is None or lab.empty:
+    st.warning("Not enough data (or zero avg range) to run the dual-limit backtest.")
+else:
+    n_days   = len(lab)
+    n_both   = int((lab['outcome'] == 'both').sum())
+    n_bonly  = int((lab['outcome'] == 'buy_only').sum())
+    n_sonly  = int((lab['outcome'] == 'sell_only').sum())
+    notional = float((lab['Open'] * lab_shares).mean())
+    tot_pnl  = float(lab['pnl'].sum())
+    tot_lock = float(lab['locked'].sum())
+    tot_mtm  = float(lab['mtm'].sum())
+    avg_bp   = (lab['pnl'] / (lab['Open'] * lab_shares)).mean() * 1e4  # bp/day
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Round-trip days", f"{n_both} / {n_days}",
+              help="Days where BOTH levels were touched — profit locked, provable from High/Low.")
+    k2.metric("One-sided days", f"{n_bonly}▼ / {n_sonly}▲",
+              help="buy-only ▼ (holding extra into close) / sell-only ▲ (sold base, price ran).")
+    k3.metric("Locked P&L", f"¥{tot_lock:+,.0f}")
+    k4.metric("MTM drift P&L", f"¥{tot_mtm:+,.0f}",
+              help="Mark-to-close of one-sided days. Negative = the unfilled leg cost you.")
+    k5.metric("Total · per-day", f"¥{tot_pnl:+,.0f}",
+              delta=f"{avg_bp:+.1f} bp/day on ¥{notional:,.0f}", delta_color="inverse")
+
+    # Equity curve — A-share colours (red = profit)
+    _lc = "#dc2626" if tot_pnl >= 0 else "#16a34a"
+    fig_lab = go.Figure()
+    fig_lab.add_trace(go.Scatter(
+        x=lab.index.strftime('%Y-%m-%d'), y=lab['locked'].cumsum(),
+        mode='lines', name='Locked only (floor)',
+        line=dict(color='#94a3b8', width=1.5, dash='dot'),
+        hovertemplate='%{x}<br>Locked cum: ¥%{y:,.0f}<extra></extra>'))
+    fig_lab.add_trace(go.Scatter(
+        x=lab.index.strftime('%Y-%m-%d'), y=lab['cum_pnl'],
+        mode='lines', name='Total (locked + MTM)',
+        line=dict(color=_lc, width=2.2),
+        fill='tozeroy',
+        fillcolor='rgba(220,38,38,0.08)' if tot_pnl >= 0 else 'rgba(22,163,74,0.08)',
+        hovertemplate='%{x}<br>Total cum: ¥%{y:,.0f}<extra></extra>'))
+    fig_lab.add_hline(y=0, line_color='#94a3b8', line_width=1, line_dash='dot')
+    fig_lab.update_layout(
+        title=f"Cumulative 做T excess P&L · {n_days} days · N={lab_shares}",
+        height=330, template='plotly_white', yaxis_title='¥',
+        margin=dict(t=45, l=50, r=30, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    st.plotly_chart(fig_lab, use_container_width=True)
+    st.caption(
+        "ⓘ Every number above is exact from daily OHLC — zero path assumptions. "
+        "It is a **conservative floor**: days the band was crossed multiple times "
+        "are credited only one round-trip (see Monte Carlo below for that upside)."
+    )
+
+    # ── Parameter heatmap ────────────────────────────────────────────────────
+    with st.expander("🔥 Parameter heatmap — buy × sell offsets", expanded=False):
+        fracs = list(range(20, 90, 10))  # % of avg range
+        z, txt = [], []
+        for bf in fracs:
+            zrow, trow = [], []
+            for sf in fracs:
+                r = _dual_limit_backtest(plan_df, (bf/100)*_avg_rng,
+                                         (sf/100)*_avg_rng, 100, int(lab_lookback))
+                if r is None or r.empty:
+                    zrow.append(np.nan); trow.append("")
+                    continue
+                bp = (r['pnl'] / (r['Open'] * 100)).mean() * 1e4
+                fill = (r['outcome'] == 'both').mean() * 100
+                zrow.append(bp); trow.append(f"{bp:+.0f}bp<br>{fill:.0f}%RT")
+            z.append(zrow); txt.append(trow)
+        _zmax = np.nanmax(np.abs(z)) or 1.0
+        fig_hm = go.Figure(go.Heatmap(
+            z=z, x=[f"sell {f}%" for f in fracs], y=[f"buy {f}%" for f in fracs],
+            text=txt, texttemplate="%{text}", textfont=dict(size=10),
+            colorscale=[[0, "#16a34a"], [0.5, "#f1f5f9"], [1, "#dc2626"]],
+            zmid=0, zmin=-_zmax, zmax=_zmax,
+            colorbar=dict(title="bp/day"),
+            hovertemplate="buy %{y} · sell %{x}<br>%{z:+.1f} bp/day<extra></extra>"))
+        fig_hm.update_layout(
+            title="Avg daily excess P&L (bp of notional) · %RT = round-trip fill rate",
+            height=430, template='plotly_white',
+            xaxis_title="Sell offset (% of avg range)",
+            yaxis_title="Buy offset (% of avg range)",
+            margin=dict(t=50, l=60, r=30, b=50))
+        st.plotly_chart(fig_hm, use_container_width=True)
+        st.caption("Offsets in % of the 20-day avg intraday range. Tight offsets fill "
+                   "often but earn little per trip and suffer more one-sided drift; "
+                   "wide offsets rarely fill. Red = positive (A-share convention).")
+
+    # ── Monte Carlo multi-trip scenarios (OHLC-constrained paths) ───────────
+    with st.expander("🎲 Monte Carlo — multi-trip upside (OHLC-constrained paths)",
+                     expanded=False):
+        st.markdown(
+            "Paths are **not random prices** — each synthetic path is pinned to "
+            "that day's real bar: starts at **Open**, ends at **Close**, touches "
+            "the actual **High** and **Low**, never exceeds them. Only the "
+            "*sequencing/oscillation between those anchors* is simulated, which is "
+            "exactly the one thing daily data doesn't record. This estimates how "
+            "many EXTRA round-trips (beyond the floor's one) the band typically "
+            "allowed."
+        )
+
+        @st.cache_data(ttl=900, show_spinner=False)
+        def _mc_multitrip(ticker, b_off, s_off, lookback, n_paths=200, n_steps=120):
+            dfp = _fetch_prices(ticker)
+            base = _dual_limit_backtest(dfp, b_off, s_off, 100, lookback)
+            if base is None or base.empty:
+                return None
+            rng = np.random.default_rng(42)
+            extra_by_day = []
+            both_days = base[base['outcome'] == 'both']
+            for dt, row in both_days.iterrows():
+                O, H, L, C = row['Open'], row['High'], row['Low'], row['Close']
+                blv, slv = row['buy_lv'], row['sell_lv']
+                if H <= L:
+                    extra_by_day.append(0.0); continue
+                # Which extreme first: weight by close position (rally days more
+                # likely dipped first). Waypoints: O → E1 → E2 → C.
+                p_low_first = 0.6 if C >= O else 0.4
+                lows_first = rng.random(n_paths) < p_low_first
+                t1 = rng.integers(int(n_steps*0.15), int(n_steps*0.5),  n_paths)
+                t2 = rng.integers(int(n_steps*0.5),  int(n_steps*0.85), n_paths)
+                sigma = (H - L) / np.sqrt(n_steps) * 0.7
+                trips = np.zeros(n_paths)
+                for p in range(n_paths):
+                    e1, e2 = (L, H) if lows_first[p] else (H, L)
+                    ts = [0, t1[p], t2[p], n_steps - 1]
+                    ws = [O, e1, e2, C]
+                    path = np.empty(n_steps)
+                    for s0 in range(3):  # 3 Brownian-bridge segments
+                        a, b_ = ts[s0], ts[s0 + 1]
+                        m = b_ - a
+                        if m <= 0:
+                            path[a] = ws[s0]; continue
+                        steps_ = rng.normal(0, sigma, m)
+                        steps_[0] = 0.0                             # pin start
+                        noise = steps_.cumsum()
+                        noise -= np.linspace(0, noise[-1], m)       # pin end
+                        path[a:b_] = np.linspace(ws[s0], ws[s0+1], m) + noise
+                    path[-1] = C
+                    np.clip(path, L, H, out=path)
+                    # count alternating touches of the two levels
+                    state = np.zeros(n_steps, dtype=int)
+                    state[path <= blv] = 1
+                    state[path >= slv] = -1
+                    seq = state[state != 0]
+                    if seq.size:
+                        alt = 1 + int((np.diff(seq) != 0).sum())
+                        trips[p] = alt // 2
+                extra_by_day.append(max(float(np.mean(trips)) - 1.0, 0.0))
+            return {
+                'n_both': len(both_days),
+                'avg_extra': float(np.mean(extra_by_day)) if extra_by_day else 0.0,
+                'spread_per_trip': float(((both_days['sell_lv'] - both_days['buy_lv'])).mean())
+                                   if len(both_days) else 0.0,
+            }
+
+        if st.button("Run Monte Carlo (200 paths/day)", key="tt_lab_mc"):
+            with st.spinner("Simulating OHLC-constrained paths…"):
+                mc = _mc_multitrip(selected_ticker, _b_off, _s_off, int(lab_lookback))
+            if not mc or mc['n_both'] == 0:
+                st.info("No round-trip days in the window — nothing to simulate.")
+            else:
+                extra_pnl = mc['avg_extra'] * mc['spread_per_trip'] * lab_shares * mc['n_both']
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Avg EXTRA trips on round-trip days", f"{mc['avg_extra']:.2f}",
+                          help="Simulated mean of additional band crossings beyond the "
+                               "one trip the exact floor already counts.")
+                m2.metric("Est. extra P&L over window", f"¥{extra_pnl:+,.0f}")
+                m3.metric("Optimistic total", f"¥{tot_pnl + extra_pnl:+,.0f}",
+                          help="Floor (exact) + simulated multi-trip upside. Treat as "
+                               "a ceiling estimate, not a promise.")
+                st.caption(
+                    "ⓘ Assumes both orders are re-armed immediately after each "
+                    "round-trip (needs base ≥ N and cash for one extra leg). Dip-first "
+                    "probability set to 60% on up-close days / 40% on down-close days."
+                )
+
