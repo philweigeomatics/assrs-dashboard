@@ -601,13 +601,23 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     macd_trigger = classic_crossover | approaching_from_below | bottoming | momentum_building
 
     # Scenario 5: Peaking (bearish)
+    # FIX: the old condition fired on a SINGLE one-bar down-tick in MACD with no
+    # requirement that momentum was actually rolling over. Right after a bullish
+    # crossover (MACD climbing off zero), one noisy down-bar — while the
+    # histogram was still EXPANDING — falsely flagged "Peaking" at the start of
+    # an uptrend (the yellow triangle sitting on the crossover). A real peak is a
+    # momentum rollover: the histogram (MACD_Gap) must CONTRACT for two
+    # consecutive bars. That cannot happen right after a crossover (the histogram
+    # is expanding there) and it filters single-bar MACD noise, while still
+    # catching genuine tops (verified against synthetic crossover-vs-peak cases).
     peaking = (
         (df_analysis['MACD_Gap']              > 0) &
         (df_analysis['MACD']                  > 0) &
         (df_analysis['MACD_Signal']           > 0) &
-        (df_analysis['MACD'].shift(1)         > df_analysis['MACD'].shift(2)) &
-        (df_analysis['MACD']                  < df_analysis['MACD'].shift(1)) &
-        (df_analysis['MACD_Momentum_Pct']     < df_analysis['MACD_Momentum_Pct'].shift(1))
+        (df_analysis['MACD']                  < df_analysis['MACD'].shift(1)) &   # MACD turned down
+        (df_analysis['MACD'].shift(1)         > df_analysis['MACD'].shift(2)) &   # was rising into the turn
+        (df_analysis['MACD_Gap']              < df_analysis['MACD_Gap'].shift(1)) &        # histogram contracting…
+        (df_analysis['MACD_Gap'].shift(1)     < df_analysis['MACD_Gap'].shift(2))          # …for a 2nd bar = confirmed rollover
     )
 
     # Scenario 6: Bearish crossover
