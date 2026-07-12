@@ -162,6 +162,65 @@ def _measure_selected_range(event, analysis_df):
     return plot_idx[i0], plot_idx[i1]
 
 
+@st.fragment
+def _render_chart_with_measure(fig_stock, analysis_df, ticker, measure_mode):
+    """
+    Displays the pre-built chart, optionally with 📏 Measure box-select.
+
+    Nested @st.fragment: box-select fires on_select="rerun", and Streamlit
+    scopes that rerun to the INNERMOST fragment that triggered it. Without
+    this nesting, the selection reruns the whole outer chart_and_simulator
+    fragment — re-fetching the comparison stock and moneyflow, recomputing
+    the what-if simulator, REBUILDING the entire 8-panel chart from scratch,
+    and re-rendering the simulator cards below it, all just to read two x
+    values off a drag. Nesting means a drag only re-executes this small
+    function body; fig_stock (already built) is reused as-is, and nothing
+    outside this fragment re-renders.
+    """
+    if not measure_mode:
+        st.plotly_chart(fig_stock, use_container_width=True)
+        return
+
+    # Box-select is the default drag tool in measure mode.
+    fig_stock.update_layout(dragmode="select")
+    _ev = st.plotly_chart(
+        fig_stock, use_container_width=True,
+        on_select="rerun", selection_mode=("box",),
+        key=f"ta_chart_measure_{ticker}",
+    )
+    _rng = _measure_selected_range(_ev, analysis_df)
+    if _rng is None:
+        st.info("📏 Drag a box across a date range on any panel to "
+                "measure the buy→sell return for that range.")
+        return
+
+    _t0, _t1 = _rng
+    _seg  = analysis_df.loc[_t0:_t1]
+    _buy  = float(_seg['Close'].iloc[0])
+    _sell = float(_seg['Close'].iloc[-1])
+    _pct  = (_sell / _buy - 1) * 100
+    _hi   = float(_seg['High'].max())
+    _lo   = float(_seg['Low'].min())
+    _runmax = _seg['Close'].cummax()
+    _mdd  = float(((_seg['Close'] - _runmax) / _runmax).min() * 100)
+    _n    = len(_seg)
+    mm1, mm2, mm3, mm4, mm5 = st.columns(5)
+    mm1.metric("Buy @ start", f"¥{_buy:.2f}", help=f"Close of {_t0.date()}")
+    mm2.metric("Sell @ end", f"¥{_sell:.2f}", help=f"Close of {_t1.date()}")
+    # A-share colours: red = gain, green = loss
+    mm3.metric(f"Return · {_n} days", f"{_pct:+.2f}%",
+               delta=f"¥{_sell - _buy:+.2f}/share", delta_color="inverse")
+    mm4.metric("Range Hi / Lo", f"¥{_hi:.2f} / ¥{_lo:.2f}",
+               help=f"Perfect low→high capture would be {(_hi/_lo - 1)*100:+.2f}%")
+    mm5.metric("Max drawdown (close)", f"{_mdd:.2f}%",
+               help="Worst peak-to-trough of closes inside the range — "
+                    "the pain you'd have sat through holding it.")
+    st.caption(
+        f"📏 {_t0.date()} → {_t1.date()} · buy/sell at each day's close · "
+        "re-drag to re-measure, toggle 📏 off to restore zoom/pan."
+    )
+
+
 def backtest_signal_expectancy(analysis_df, buy_signal_type, sell_signal_type):
     """
     Backtest a buy/sell signal strategy:
@@ -3754,52 +3813,10 @@ if st.session_state.active_ticker:
                         price_change_pct=price_change,
                         show_ghost=show_ghost,
                     )
-                if measure_mode:
-                    # Box-select is the default drag tool in measure mode; the
-                    # selection reruns only this fragment.
-                    fig_stock.update_layout(dragmode="select")
-                    _ev = st.plotly_chart(
-                        fig_stock, use_container_width=True,
-                        on_select="rerun", selection_mode=("box",),
-                        key=f"ta_chart_measure_{ticker}",
-                    )
-                    _rng = _measure_selected_range(_ev, analysis_df)
-                    if _rng is None:
-                        st.info("📏 Drag a box across a date range on any panel to "
-                                "measure the buy→sell return for that range.")
-                    else:
-                        _t0, _t1 = _rng
-                        _seg  = analysis_df.loc[_t0:_t1]
-                        _buy  = float(_seg['Close'].iloc[0])
-                        _sell = float(_seg['Close'].iloc[-1])
-                        _pct  = (_sell / _buy - 1) * 100
-                        _hi   = float(_seg['High'].max())
-                        _lo   = float(_seg['Low'].min())
-                        _runmax = _seg['Close'].cummax()
-                        _mdd  = float(((_seg['Close'] - _runmax) / _runmax).min() * 100)
-                        _n    = len(_seg)
-                        mm1, mm2, mm3, mm4, mm5 = st.columns(5)
-                        mm1.metric("Buy @ start", f"¥{_buy:.2f}",
-                                   help=f"Close of {_t0.date()}")
-                        mm2.metric("Sell @ end", f"¥{_sell:.2f}",
-                                   help=f"Close of {_t1.date()}")
-                        # A-share colours: red = gain, green = loss
-                        mm3.metric(f"Return · {_n} days", f"{_pct:+.2f}%",
-                                   delta=f"¥{_sell - _buy:+.2f}/share",
-                                   delta_color="inverse")
-                        mm4.metric("Range Hi / Lo", f"¥{_hi:.2f} / ¥{_lo:.2f}",
-                                   help=f"Perfect low→high capture would be "
-                                        f"{(_hi/_lo - 1)*100:+.2f}%")
-                        mm5.metric("Max drawdown (close)", f"{_mdd:.2f}%",
-                                   help="Worst peak-to-trough of closes inside the range — "
-                                        "the pain you'd have sat through holding it.")
-                        st.caption(
-                            f"📏 {_t0.date()} → {_t1.date()} · buy/sell at each day's "
-                            "close · re-drag to re-measure, toggle 📏 off to restore "
-                            "zoom/pan."
-                        )
-                else:
-                    st.plotly_chart(fig_stock, use_container_width=True)
+                # Nested fragment: a 📏 Measure box-select reruns only this
+                # small piece, not the simulator/data-fetch code around it —
+                # see _render_chart_with_measure docstring for why.
+                _render_chart_with_measure(fig_stock, analysis_df, ticker, measure_mode)
 
                 # ── Simulator detail cards (always visible, no inputs here) ─
                 st.markdown("---")
