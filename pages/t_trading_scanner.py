@@ -58,7 +58,7 @@ captures the intraday swing.
 |---|---|---|---|
 | 1 | **Intraday Range** | 30 % | 20-day avg `(High − Low) / Open` — has to be big enough to clear costs. Target ≥ 4 %. |
 | 2 | **Liquidity** | 25 % | 20-day avg `turnover_rate` — tight spreads + ability to fill at size. Target ≥ 8 %. |
-| 3 | **Mean-Reversion Bias** | 25 % | 20-day avg `\|Close − Open\| / (High − Low)` — lower is better. Below 0.4 = Close lands in middle of day's range (oscillator). |
+| 3 | **Mean-Reversion Bias** | 25 % | 20-day avg `\\|Close − Open\\| / (High − Low)` — lower is better. Below 0.4 = Close lands in middle of day's range (oscillator). |
 | 4 | **ADX Regime** | 10 % | ADX(14) in [15, 35] = 1.0. Below 15 → no movement; above 35 → strong trend (limit-day risk). |
 | 5 | **Range Position** | 10 % | Distance from 60-day high/low. Middle of range = 1.0; within ±5 % of an extreme = 0. |
 
