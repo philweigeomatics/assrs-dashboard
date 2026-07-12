@@ -110,6 +110,58 @@ def load_moneyflow(ticker, cache_date, lookback_days=250):
 
 
 
+def _measure_selected_range(event, analysis_df):
+    """
+    Parse a box-select event from the TA chart into (start_ts, end_ts).
+
+    The chart's x-axis is a CATEGORY axis of date strings, so a box selection
+    can come back either as selected point x-values (date strings, from the
+    scatter/MA traces inside the box) or as box corner coordinates (fractional
+    category indices). Handle both defensively. Returns None if fewer than two
+    distinct bars are covered.
+    """
+    sel = getattr(event, "selection", None)
+    if sel is None:
+        return None
+
+    def _get(container, key):
+        try:
+            v = container[key]
+        except Exception:
+            v = getattr(container, key, None)
+        return v or []
+
+    points = _get(sel, "points")
+    boxes  = _get(sel, "box")
+
+    plot_idx = analysis_df.tail(250).index   # same window the chart draws
+    labels = [d.strftime('%Y-%m-%d') for d in plot_idx]
+
+    xs = [p.get("x") for p in points if isinstance(p, dict) and p.get("x") is not None]
+    if not xs and boxes:
+        b = boxes[0]
+        bx = b.get("x") if isinstance(b, dict) else None
+        if bx is not None and len(bx) == 2:
+            xs = list(bx)
+    if not xs:
+        return None
+
+    pos = []
+    for x in xs:
+        if isinstance(x, (int, float)):            # fractional category index
+            i = int(round(float(x)))
+        else:                                       # date string
+            s = str(x)[:10]
+            i = labels.index(s) if s in labels else int(
+                np.searchsorted(np.array(labels), s))
+        pos.append(min(max(i, 0), len(labels) - 1))
+
+    i0, i1 = min(pos), max(pos)
+    if i1 <= i0:
+        return None
+    return plot_idx[i0], plot_idx[i1]
+
+
 def backtest_signal_expectancy(analysis_df, buy_signal_type, sell_signal_type):
     """
     Backtest a buy/sell signal strategy:
@@ -3580,7 +3632,7 @@ if st.session_state.active_ticker:
                 vol_step_M = max(0.001, vol_10d_avg_millions * 0.05)
 
                 # ── Top control row: Compare | Scale | Ghost toggle ─────────
-                ctrl_cmp, ctrl_scale, ctrl_ghost = st.columns([3, 2, 1])
+                ctrl_cmp, ctrl_scale, ctrl_ghost, ctrl_meas = st.columns([3, 2, 1, 1])
                 with ctrl_cmp:
                     comp_pick = st.selectbox(
                         "📊 Compare with another stock (optional)",
@@ -3612,6 +3664,17 @@ if st.session_state.active_ticker:
                             "Overlay tomorrow's what-if values (dashed lines + hollow "
                             "markers) on every indicator panel. Ghost stops at the P/E panel — "
                             "no what-if exists for the comparison stock."
+                        ),
+                    )
+                with ctrl_meas:
+                    measure_mode = st.toggle(
+                        "📏 Measure",
+                        value=False,
+                        key="ta_measure_mode",
+                        help=(
+                            "Drag a box across a date range on the chart to compute the "
+                            "buy-at-start → sell-at-end return for that range (close to "
+                            "close), plus the range high/low and max drawdown."
                         ),
                     )
                 scale_mode = "pct" if scale_choice == "Same % Scale" else "new"
@@ -3691,7 +3754,52 @@ if st.session_state.active_ticker:
                         price_change_pct=price_change,
                         show_ghost=show_ghost,
                     )
-                st.plotly_chart(fig_stock, use_container_width=True)
+                if measure_mode:
+                    # Box-select is the default drag tool in measure mode; the
+                    # selection reruns only this fragment.
+                    fig_stock.update_layout(dragmode="select")
+                    _ev = st.plotly_chart(
+                        fig_stock, use_container_width=True,
+                        on_select="rerun", selection_mode=("box",),
+                        key=f"ta_chart_measure_{ticker}",
+                    )
+                    _rng = _measure_selected_range(_ev, analysis_df)
+                    if _rng is None:
+                        st.info("📏 Drag a box across a date range on any panel to "
+                                "measure the buy→sell return for that range.")
+                    else:
+                        _t0, _t1 = _rng
+                        _seg  = analysis_df.loc[_t0:_t1]
+                        _buy  = float(_seg['Close'].iloc[0])
+                        _sell = float(_seg['Close'].iloc[-1])
+                        _pct  = (_sell / _buy - 1) * 100
+                        _hi   = float(_seg['High'].max())
+                        _lo   = float(_seg['Low'].min())
+                        _runmax = _seg['Close'].cummax()
+                        _mdd  = float(((_seg['Close'] - _runmax) / _runmax).min() * 100)
+                        _n    = len(_seg)
+                        mm1, mm2, mm3, mm4, mm5 = st.columns(5)
+                        mm1.metric("Buy @ start", f"¥{_buy:.2f}",
+                                   help=f"Close of {_t0.date()}")
+                        mm2.metric("Sell @ end", f"¥{_sell:.2f}",
+                                   help=f"Close of {_t1.date()}")
+                        # A-share colours: red = gain, green = loss
+                        mm3.metric(f"Return · {_n} days", f"{_pct:+.2f}%",
+                                   delta=f"¥{_sell - _buy:+.2f}/share",
+                                   delta_color="inverse")
+                        mm4.metric("Range Hi / Lo", f"¥{_hi:.2f} / ¥{_lo:.2f}",
+                                   help=f"Perfect low→high capture would be "
+                                        f"{(_hi/_lo - 1)*100:+.2f}%")
+                        mm5.metric("Max drawdown (close)", f"{_mdd:.2f}%",
+                                   help="Worst peak-to-trough of closes inside the range — "
+                                        "the pain you'd have sat through holding it.")
+                        st.caption(
+                            f"📏 {_t0.date()} → {_t1.date()} · buy/sell at each day's "
+                            "close · re-drag to re-measure, toggle 📏 off to restore "
+                            "zoom/pan."
+                        )
+                else:
+                    st.plotly_chart(fig_stock, use_container_width=True)
 
                 # ── Simulator detail cards (always visible, no inputs here) ─
                 st.markdown("---")
