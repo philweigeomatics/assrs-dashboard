@@ -1072,6 +1072,7 @@ def create_single_stock_chart_analysis(
     comp_df: pd.DataFrame = None,
     comp_name: str = "Comparison",
     moneyflow_df: pd.DataFrame = None,  # 主力净流入 (large+xlarge net, 万元), DatetimeIndex
+    mf_cum_days: int = 20,              # accumulation-line window: rolling N-day sum; 0 = full cumsum
     scale_mode: str = "pct",  # "pct" = Same % Scale  |  "new" = New Price Scale
     sim_result: dict = None,
     price_change_pct: float = 0.0,
@@ -2235,33 +2236,44 @@ def create_single_stock_chart_analysis(
     # ROW 8 — 主力净流入 MAIN-FORCE NET MONEY FLOW
     # ════════════════════════════════════════════════════════════════════════
     # Daily net money flow from large + extra-large orders (主力资金), in 万元.
-    # Bars = per-day net (A-share colours: red inflow / green outflow); a
-    # secondary cumulative line shows the accumulation/distribution trend.
-    # Watch for divergence: price flat/down while the cumulative line climbs =
-    # stealth institutional accumulation.
+    # Bars = per-day net (A-share colours: red inflow / green outflow).
+    # The line is a ROLLING N-day sum (net main-force flow over the trailing N
+    # days), NOT an unbounded cumsum: an unbounded cumsum is anchored to the
+    # left edge of the chart window, so its level is arbitrary and old
+    # accumulation masks recent outflow. The rolling window has a meaningful
+    # zero (net-zero over the window) and reflects RECENT force. mf_cum_days=0
+    # falls back to the full-window cumsum (long-run accumulation/divergence).
     if moneyflow_df is not None and not moneyflow_df.empty and 'main_net' in moneyflow_df.columns:
         mf_aligned = moneyflow_df['main_net'].reindex(df.index)
         mf_vals = mf_aligned.fillna(0)
-        mf_cum = mf_vals.cumsum()
+        if mf_cum_days and int(mf_cum_days) > 0:
+            _w = int(mf_cum_days)
+            mf_line   = mf_vals.rolling(_w, min_periods=1).sum()
+            _line_nm  = f'近{_w}日主力净流入'
+            _line_hov = f'%{{x}}<br>近{_w}日累计: %{{y:,.0f}} 万元<extra></extra>'
+        else:
+            mf_line   = mf_vals.cumsum()
+            _line_nm  = '全区间累计主力净流入'
+            _line_hov = '%{x}<br>全区间累计: %{y:,.0f} 万元<extra></extra>'
 
         _mf_colors = [
             'rgba(220,38,38,0.75)' if v > 0 else 'rgba(22,163,74,0.75)'
             for v in mf_vals.tolist()
         ]
-        # Per-day net bars (left axis)
+        # Per-day net bars
         fig.add_trace(go.Bar(
             x=dates, y=mf_vals.tolist(),
             name='主力净流入/日',
             marker_color=_mf_colors, marker_line_width=0,
             hovertemplate='%{x}<br>主力净流入: %{y:,.0f} 万元<extra></extra>',
         ), row=mf_row, col=1)
-        # Cumulative line (same axis — 万元 units comparable)
+        # Rolling-window (or full) accumulation line
         fig.add_trace(go.Scatter(
-            x=dates, y=mf_cum.tolist(),
-            name='累计主力净流入',
+            x=dates, y=mf_line.tolist(),
+            name=_line_nm,
             mode='lines',
             line=dict(color='#f59e0b', width=2),
-            hovertemplate='%{x}<br>累计: %{y:,.0f} 万元<extra></extra>',
+            hovertemplate=_line_hov,
         ), row=mf_row, col=1)
         fig.add_hline(y=0, line_dash='solid', line_color='#9ca3af',
                       line_width=1, row=mf_row, col=1)
@@ -3690,8 +3702,8 @@ if st.session_state.active_ticker:
                 vol_max_M = vol_10d_avg_millions * 10
                 vol_step_M = max(0.001, vol_10d_avg_millions * 0.05)
 
-                # ── Top control row: Compare | Scale | Ghost toggle ─────────
-                ctrl_cmp, ctrl_scale, ctrl_ghost, ctrl_meas = st.columns([3, 2, 1, 1])
+                # ── Top control row: Compare | Scale | Ghost | Measure | MF ─
+                ctrl_cmp, ctrl_scale, ctrl_ghost, ctrl_meas, ctrl_mfwin = st.columns([3, 2, 1, 1, 1.6])
                 with ctrl_cmp:
                     comp_pick = st.selectbox(
                         "📊 Compare with another stock (optional)",
@@ -3736,6 +3748,21 @@ if st.session_state.active_ticker:
                             "close), plus the range high/low and max drawdown."
                         ),
                     )
+                with ctrl_mfwin:
+                    _mf_win_label = st.selectbox(
+                        "主力资金累计",
+                        options=["近20日", "近5日", "近60日", "全区间"],
+                        index=0,
+                        key="mf_cum_window",
+                        help=(
+                            "Accumulation window for the 主力净流入 line in the bottom "
+                            "panel. A ROLLING N-day sum shows net main-force flow over "
+                            "the trailing N days — a meaningful zero and recent-force "
+                            "reading. '全区间' is the old cumulative-from-chart-start "
+                            "(level is arbitrary; use it only for long-run divergence)."
+                        ),
+                    )
+                    mf_cum_days = {"近5日": 5, "近20日": 20, "近60日": 60, "全区间": 0}[_mf_win_label]
                 scale_mode = "pct" if scale_choice == "Same % Scale" else "new"
 
                 # ── Simulator input sub-row (always visible) ────────────────
@@ -3808,6 +3835,7 @@ if st.session_state.active_ticker:
                         comp_df=comp_df_overlay,
                         comp_name=comp_name_overlay,
                         moneyflow_df=_mf_df,
+                        mf_cum_days=mf_cum_days,
                         scale_mode=scale_mode,
                         sim_result=sim_result,
                         price_change_pct=price_change,
