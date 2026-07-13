@@ -1513,7 +1513,7 @@ def create_single_stock_chart_analysis(
         )
         
         fig.add_trace(go.Scatter(
-            x=dates, y=df['OBV_Scaled_Display'], 
+            x=dates, y=df['OBV_Scaled_Display'],
             name='Vol-Scaled OBV',
             line=dict(color='#f59e0b', width=3),
             mode='lines',
@@ -1522,6 +1522,41 @@ def create_single_stock_chart_analysis(
             customdata=df['Volume_Scaled_OBV']  # Original values for hover
         ), row=2, col=1)
 
+    # ── OBV Momentum (the SLOPE of OBV) ──────────────────────────────────────
+    # The cumulative OBV line above is for DIVERGENCE (its shape vs price); its
+    # LEVEL is arbitrary. This line is OBV's N-day rate of change =
+    # OBV.diff(N) = net signed volume over the trailing N days, normalised by
+    # average volume → units of "× average daily volume". Zero-centred, so it
+    # reads directly as CURRENT accumulation force: > 0 net buying-volume over
+    # the window, < 0 net selling. Same N-day window as the 主力资金 selector
+    # (falls back to 20 when 全区间). Toggle it via the legend if the panel
+    # feels busy.
+    if 'OBV' in df.columns:
+        _obvN = int(mf_cum_days) if (mf_cum_days and int(mf_cum_days) > 0) else 20
+        _vmin, _vmax = float(df['Volume'].min()), float(df['Volume'].max())
+        _avgvol = df['Volume'].rolling(20, min_periods=1).mean().replace(0, np.nan)
+        obv_mom = (df['OBV'] - df['OBV'].shift(_obvN)) / _avgvol
+        _mm = obv_mom.replace([np.inf, -np.inf], np.nan).dropna()
+        if not _mm.empty and _mm.max() != _mm.min() and _vmax > _vmin:
+            _mmin, _mmax = float(_mm.min()), float(_mm.max())
+            def _obv_map(v):
+                return (v - _mmin) / (_mmax - _mmin) * (_vmax - _vmin) + _vmin
+            obv_mom_disp = obv_mom.apply(lambda v: _obv_map(v) if pd.notna(v) else np.nan)
+            fig.add_trace(go.Scatter(
+                x=dates, y=obv_mom_disp.tolist(),
+                name=f'OBV动能({_obvN}日)',
+                line=dict(color='#3b82f6', width=1.6),
+                mode='lines',
+                hovertemplate='OBV动能: %{customdata:+.2f}× 日均量<extra></extra>',
+                customdata=obv_mom,
+            ), row=2, col=1)
+            if _mmin <= 0 <= _mmax:   # draw the accumulation/distribution zero line
+                fig.add_hline(
+                    y=_obv_map(0.0), line_dash='dot',
+                    line_color='rgba(59,130,246,0.55)', line_width=1, row=2, col=1,
+                    annotation_text='OBV动能=0', annotation_position='bottom right',
+                    annotation_font=dict(size=8, color='#3b82f6'),
+                )
 
 
     # ==================== ROW 3: MACD WITH SCENARIO MARKERS ====================
