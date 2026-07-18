@@ -9,6 +9,7 @@ from plotly.subplots import make_subplots
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta
 import data_manager as dm
+import market_leverage as mlev
 
 from sector_utils import (
     load_v2_data, 
@@ -328,6 +329,83 @@ if chart_df is not None and not chart_df.empty:
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.error("无法加载 CSI 300 数据")
+
+# ════════════════════════════════════════════════════════════════════════════
+# 市场杠杆  ·  MARKET LEVERAGE  (customer margin borrowings across CN·US·JP·KR)
+# ════════════════════════════════════════════════════════════════════════════
+# Margin debt = money customers borrow to buy stock. Rising = risk appetite /
+# potential froth; falling = de-leveraging. China 两融余额 (Tushare) and US
+# margin debt (FINRA) are live; Japan/Korea await a clean aggregate source and
+# degrade to "—" rather than showing fabricated numbers. Fetchers live in
+# market_leverage.py; each is cached at the source's natural refresh cadence.
+
+@st.cache_data(ttl=1800, show_spinner=False)      # A-share margin updates daily
+def _lev_china():
+    dm.init_tushare()
+    return mlev.fetch_china_margin(dm.TUSHARE_API)
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)  # FINRA is monthly
+def _lev_us():
+    return mlev.fetch_us_margin()
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _lev_jp():
+    return mlev.fetch_japan_margin()
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _lev_kr():
+    return mlev.fetch_korea_margin()
+
+st.markdown("---")
+st.subheader("💳 市场杠杆 · Market Leverage")
+st.caption(
+    "Customer margin borrowings — money borrowed to buy stock — a direct "
+    "risk-appetite gauge. China 两融余额 (Tushare) and US margin debt (FINRA) "
+    "are live; Japan & Korea are pending a clean aggregate source. "
+    "Red = rising leverage, green = falling (A-share convention)."
+)
+
+_levs = [_lev_china(), _lev_us(), _lev_jp(), _lev_kr()]
+_lev_cols = st.columns(4)
+for _col, _r in zip(_lev_cols, _levs):
+    with _col:
+        if not _r["ok"] or _r["latest"] is None:
+            st.metric(_r["label"], "—",
+                      help=f"⚠️ {_r.get('error') or 'Unavailable.'}  {_r['note']}")
+            continue
+        _val = f"{_r['latest']:,.1f}{_r['unit']}"
+        _delta = None
+        if _r["prev"] is not None:
+            _delta = f"{_r['latest'] - _r['prev']:+,.1f}{_r['unit']}"
+        st.metric(
+            _r["label"], _val, delta=_delta,
+            delta_color="inverse",   # A-share: red = up (rising leverage)
+            help=f"As of {_r['asof']} · {_r['freq']}. {_r['note']}"
+                 + (f"  Prev {_r['prev']:,.1f}{_r['unit']}." if _r["prev"] is not None else ""),
+        )
+
+# Trend for whichever markets returned a usable series.
+_lev_ok = {r["label"]: r for r in _levs
+           if r["ok"] and r["series"] is not None and len(r["series"]) >= 2}
+if _lev_ok:
+    _pick = st.selectbox("📈 杠杆走势 · View leverage trend for:",
+                         options=list(_lev_ok.keys()), key="lev_trend_pick")
+    _lr = _lev_ok[_pick]
+    _ld = _lr["series"]
+    _rising = _ld["value"].iloc[-1] >= _ld["value"].iloc[0]
+    _lcolor = "#dc2626" if _rising else "#16a34a"   # red up / green down
+    _fig_lev = go.Figure()
+    _fig_lev.add_trace(go.Scatter(
+        x=_ld["period"], y=_ld["value"], mode="lines",
+        line=dict(color=_lcolor, width=2),
+        hovertemplate="%{x}<br>%{y:,.1f}" + _lr["unit"] + "<extra></extra>",
+    ))
+    _fig_lev.update_layout(
+        title=f"{_pick} · {_lr['freq']}", height=340, template="plotly_white",
+        margin=dict(t=50, l=60, r=30, b=50),
+        xaxis=dict(tickangle=-45), yaxis_title=_lr["unit"].strip(),
+    )
+    st.plotly_chart(_fig_lev, use_container_width=True)
 
 # ════════════════════════════════════════════════════════════════════════════
 # 龙虎榜  ·  TOP LIST  (Tushare pro.top_list — daily abnormal-trading list)
