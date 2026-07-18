@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta
 import data_manager as dm
 import market_leverage as mlev
+import ai_client
 
 from sector_utils import (
     load_v2_data, 
@@ -406,6 +407,73 @@ if _lev_ok:
         xaxis=dict(tickangle=-45), yaxis_title=_lr["unit"].strip(),
     )
     st.plotly_chart(_fig_lev, use_container_width=True)
+
+# ── AI 中文解读 · plain-Chinese read of the leverage picture ──────────────────
+# Digest the (already-fetched) leverage dicts into a compact factual block and
+# hand it to the AI for a human-readable Chinese summary. The summary is cached
+# on the digest text (+ a manual nonce), so it only calls the API when the data
+# actually changes or the user hits regenerate — reruns from other widgets hit
+# the cache for free.
+
+def _lev_digest(levs: list[dict]) -> str:
+    """Compact, model-friendly factual digest of the leverage series."""
+    lines = []
+    for r in levs:
+        u = r["unit"]
+        if not r.get("ok") or r.get("latest") is None or r.get("series") is None:
+            lines.append(f"- {r['label']}：暂无数据（{r.get('note', '')}）")
+            continue
+        s = r["series"]
+        latest, prev = r["latest"], r.get("prev")
+        first = float(s["value"].iloc[0])
+        span = f"{s['period'].iloc[0]}→{s['period'].iloc[-1]}"
+        seg = [f"最新 {latest:,.1f}{u}（截至 {r['asof']}，{r['freq']}）"]
+        if prev is not None:
+            dp = latest - prev
+            pp = (dp / prev * 100) if prev else 0.0
+            seg.append(f"环比 {dp:+,.1f}{u}（{pp:+.2f}%）")
+        if first:
+            dw = latest - first
+            pw = dw / first * 100
+            seg.append(f"区间({span}, {len(s)}期) {dw:+,.1f}{u}（{pw:+.2f}%）")
+        lines.append(f"- {r['label']}：" + "；".join(seg))
+    return "\n".join(lines)
+
+
+_LEV_SYS_PROMPT = (
+    "你是一位专业的市场分析师。根据提供的各市场“杠杆/保证金余额”（融资余额、"
+    "margin debt 等）数据，用简洁、专业、通俗易懂的中文写一段总结（150–250字）。"
+    "要点：说明各市场当前杠杆水平及其环比/区间变化；解读这些变化所反映的风险偏好"
+    "与市场情绪；对比不同市场之间的差异。A股惯例：融资余额上升通常代表风险偏好上升。"
+    "若某市场数据暂缺，用一句话说明即可。只做客观描述与解读，不要给出任何具体的"
+    "买入/卖出或投资建议。直接输出总结正文，不要加标题或免责声明。"
+)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _lev_ai_summary(digest: str, _nonce: int) -> str:
+    """Cached AI summary. `_nonce` lets the regenerate button bust the cache."""
+    return ai_client.call_text(_LEV_SYS_PROMPT, digest, max_tokens=2000, temperature=0.3)
+
+
+_lev_has_data = any(r.get("ok") for r in _levs)
+if _lev_has_data:
+    _lc1, _lc2 = st.columns([6, 1])
+    _lc1.markdown("**🧠 AI 杠杆解读**")
+    if _lc2.button("🔄 重新生成", key="lev_ai_regen", use_container_width=True):
+        st.session_state["lev_ai_nonce"] = st.session_state.get("lev_ai_nonce", 0) + 1
+
+    _digest = _lev_digest(_levs)
+    try:
+        with st.spinner("AI 正在解读市场杠杆数据…"):
+            _summary = _lev_ai_summary(_digest, st.session_state.get("lev_ai_nonce", 0))
+        with st.container(border=True):
+            st.markdown(_summary)
+        st.caption("由 AI 根据上方杠杆数据自动生成，仅供参考，不构成投资建议。")
+    except Exception as _exc:
+        st.warning(f"AI 解读暂不可用：{_exc}")
+        with st.expander("查看原始杠杆数据摘要"):
+            st.text(_digest)
 
 # ════════════════════════════════════════════════════════════════════════════
 # 龙虎榜  ·  TOP LIST  (Tushare pro.top_list — daily abnormal-trading list)
