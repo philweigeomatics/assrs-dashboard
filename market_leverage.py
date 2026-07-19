@@ -69,16 +69,36 @@ def _finalise(res: dict, series: pd.DataFrame) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # CHINA — Tushare `margin` (融资融券交易汇总)
 # ─────────────────────────────────────────────────────────────────────────────
+# Balances vs flows — the identity that makes the flows worth showing:
+#     rzye(today) = rzye(yesterday) + rzmre − rzche
+# i.e. today's 融资余额 (a balance) = yesterday's balance + 融资买入额 (new
+# leveraged buying) − 融资偿还额 (repayments). A flat balance can hide huge gross
+# churn; a falling balance driven by a spike in rzche = active de-leveraging /
+# forced selling. So we surface rzye, rqye and the daily buy/repay/net flows,
+# not just the headline total.
+_CN_METRICS = ["rzye", "rqye", "rzrqye", "rzmre", "rzche"]
+
+
 def fetch_china_margin(pro_api, lookback_days: int = 400) -> dict:
     """
-    Whole-market A-share margin balance = Σ rzrqye across exchanges per day.
+    Whole-market A-share margin data, aggregated on a CONSISTENT exchange basket.
 
     `pro_api` is a Tushare pro_api() handle (the page passes data_manager's).
-    rzrqye is 融资融券余额 in 元; we sum SSE + SZSE (+ BSE if present) and convert
-    to 亿元. Returns a daily series over `lookback_days`.
+    Headline series = 融资融券余额 (rzrqye) in 亿元. Also returns `cn_detail`, a
+    per-day DataFrame with 融资余额/融券余额 balances and the 融资买入/偿还/净额
+    daily flows (all 亿元) so the UI can show the nuance behind the total.
+
+    Consistent-basket rule (fixes the fake-cliff bug): naively summing rzrqye per
+    day halves the total on any day an exchange fails to report. Instead we take
+    the "core" exchanges that report on ≥80% of days (SSE+SZSE in practice; BSE
+    is sparse/tiny and drops out, matching the conventional 两融 headline) and
+    keep ONLY the days where every core exchange reported — incomplete days are
+    dropped, never summed partially.
     """
     res = _blank("CN", "China A-share 两融余额", " 亿元", "daily",
-                 "Tushare `margin` · Σ 融资融券余额 across exchanges, in 亿元.")
+                 "Tushare `margin` · 融资融券余额 (一致交易所口径), 亿元.")
+    res["cn_detail"] = None
+    res["core_exchanges"] = None
     if pro_api is None:
         res["error"] = "Tushare not initialised."
         return res
@@ -93,14 +113,44 @@ def fetch_china_margin(pro_api, lookback_days: int = 400) -> dict:
         res["error"] = "margin endpoint returned no rzrqye column (data tier?)."
         return res
     df = df.copy()
-    df["rzrqye"] = pd.to_numeric(df["rzrqye"], errors="coerce")
-    g = (df.groupby("trade_date", as_index=False)["rzrqye"].sum()
-           .rename(columns={"trade_date": "period", "rzrqye": "value"}))
-    # 元 → 亿元, and normalise YYYYMMDD → YYYY-MM-DD for display
-    g["value"] = g["value"] / 1e8
-    g["period"] = g["period"].astype(str).str.replace(
+    metric_cols = [c for c in _CN_METRICS if c in df.columns]
+    for c in metric_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # Core basket = exchanges present on ≥80% of trade dates; valid dates =
+    # those where every core exchange reported rzrqye. This is the fix.
+    piv = df.pivot_table(index="trade_date", columns="exchange_id",
+                         values="rzrqye", aggfunc="sum").sort_index()
+    coverage = piv.notna().mean()
+    core = coverage[coverage >= 0.8].index.tolist() or piv.columns.tolist()
+    valid_dates = piv[core].dropna(how="any").index
+    n_dropped = int(len(piv) - len(valid_dates))
+    sub = df[df["exchange_id"].isin(core) & df["trade_date"].isin(valid_dates)]
+    agg = sub.groupby("trade_date")[metric_cols].sum().sort_index()
+    if agg.empty:
+        res["error"] = "No trade dates with a complete exchange basket."
+        return res
+
+    agg_yi = agg / 1e8   # 元 → 亿元
+    periods = agg_yi.index.astype(str).str.replace(
         r"(\d{4})(\d{2})(\d{2})", r"\1-\2-\3", regex=True)
-    return _finalise(res, g[["period", "value"]])
+
+    # Detail frame: balances + daily financing flows, all in 亿元.
+    detail = pd.DataFrame({"period": periods.values})
+    for c in metric_cols:
+        detail[c] = agg_yi[c].values
+    if "rzmre" in detail.columns and "rzche" in detail.columns:
+        detail["net_fin"] = detail["rzmre"] - detail["rzche"]   # 净融资流入
+    res["cn_detail"] = detail
+    res["core_exchanges"] = core
+    res["note"] = (
+        f"Tushare `margin` · 一致口径（{'+'.join(map(str, core))} 齐全的交易日）· "
+        f"融资融券余额, 亿元"
+        + (f"; 已剔除 {n_dropped} 个交易所数据不齐的交易日" if n_dropped else "")
+    )
+
+    total = pd.DataFrame({"period": periods.values, "value": agg_yi["rzrqye"].values})
+    return _finalise(res, total)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

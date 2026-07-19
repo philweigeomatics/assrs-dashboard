@@ -408,6 +408,53 @@ if _lev_ok:
     )
     st.plotly_chart(_fig_lev, use_container_width=True)
 
+# ── 🇨🇳 A股两融细节 · balances + daily buy/repay flows behind the total ────────
+# The headline is a stock (balance); these are the flows that move it. A flat
+# 融资余额 can hide big gross churn, and a drop driven by a spike in 融资偿还
+# means active de-leveraging — surface both so the total isn't read in isolation.
+_cn = _levs[0]
+if _cn.get("ok") and _cn.get("cn_detail") is not None and len(_cn["cn_detail"]) >= 1:
+    with st.expander("🇨🇳 A股两融细节 · 融资/融券余额与当日资金流", expanded=False):
+        _d = _cn["cn_detail"]
+        _last = _d.iloc[-1]
+        _prev = _d.iloc[-2] if len(_d) >= 2 else None
+        _dc = st.columns(3)
+        if "rzye" in _d.columns:
+            _dl = f"{_last['rzye'] - _prev['rzye']:+,.1f} 亿元" if _prev is not None else None
+            _dc[0].metric("融资余额 · 多头杠杆", f"{_last['rzye']:,.1f} 亿元", delta=_dl,
+                          delta_color="inverse",
+                          help="投资者借钱买股的余额，是A股杠杆的主体（通常占两融的 95%+）。")
+        if "rqye" in _d.columns:
+            _dl = f"{_last['rqye'] - _prev['rqye']:+,.1f} 亿元" if _prev is not None else None
+            _dc[1].metric("融券余额 · 空头", f"{_last['rqye']:,.1f} 亿元", delta=_dl,
+                          delta_color="inverse",
+                          help="借券做空的余额，通常远小于融资余额。")
+        if "net_fin" in _d.columns:
+            _dc[2].metric("当日净融资流入", f"{_last['net_fin']:+,.1f} 亿元",
+                          help="融资买入额 − 融资偿还额。>0 净加杠杆买入，<0 净偿还去杠杆。")
+        if "rzmre" in _d.columns and "rzche" in _d.columns:
+            _flow_read = ("偿还大于买入 → 资金在去杠杆 / 获利了结 / 减仓。"
+                          if _last["rzche"] > _last["rzmre"]
+                          else "买入大于偿还 → 资金在加杠杆 / 加仓。")
+            st.caption(
+                f"当日融资买入 **{_last['rzmre']:,.1f} 亿元**，融资偿还 "
+                f"**{_last['rzche']:,.1f} 亿元**。{_flow_read} "
+                "余额是存量、买入/偿还是当日流量——余额走平也可能对应巨大的换手。"
+            )
+        if "net_fin" in _d.columns and len(_d) >= 5:
+            _fc = go.Figure()
+            _fcolors = ['#dc2626' if v >= 0 else '#16a34a' for v in _d['net_fin']]  # 红=加杠杆
+            _fc.add_trace(go.Bar(
+                x=_d['period'], y=_d['net_fin'], marker_color=_fcolors,
+                hovertemplate='%{x}<br>净融资 %{y:,.1f} 亿元<extra></extra>',
+            ))
+            _fc.update_layout(
+                title='当日净融资流入 (亿元) · 红 = 加杠杆，绿 = 去杠杆',
+                height=280, template='plotly_white',
+                margin=dict(t=40, l=55, r=20, b=45), xaxis=dict(tickangle=-45),
+            )
+            st.plotly_chart(_fc, use_container_width=True)
+
 # ── AI 中文解读 · plain-Chinese read of the leverage picture ──────────────────
 # Digest the (already-fetched) leverage dicts into a compact factual block and
 # hand it to the AI for a human-readable Chinese summary. The summary is cached
@@ -437,6 +484,19 @@ def _lev_digest(levs: list[dict]) -> str:
             pw = dw / first * 100
             seg.append(f"区间({span}, {len(s)}期) {dw:+,.1f}{u}（{pw:+.2f}%）")
         lines.append(f"- {r['label']}：" + "；".join(seg))
+        # China: append the balance/flow breakdown so the AI can read the nuance.
+        if r.get("market") == "CN" and r.get("cn_detail") is not None and len(r["cn_detail"]):
+            cd = r["cn_detail"].iloc[-1]
+            ex = []
+            if "rzye" in r["cn_detail"].columns:
+                ex.append(f"融资余额 {cd['rzye']:,.1f}亿")
+            if "rqye" in r["cn_detail"].columns:
+                ex.append(f"融券余额 {cd['rqye']:,.1f}亿")
+            if {"rzmre", "rzche"} <= set(r["cn_detail"].columns):
+                ex.append(f"当日融资买入 {cd['rzmre']:,.1f}亿、偿还 {cd['rzche']:,.1f}亿、"
+                          f"净流入 {cd['rzmre'] - cd['rzche']:+,.1f}亿")
+            if ex:
+                lines.append("  · A股细分：" + "；".join(ex))
     return "\n".join(lines)
 
 
@@ -445,6 +505,9 @@ _LEV_SYS_PROMPT = (
     "margin debt 等）数据，用简洁、专业、通俗易懂的中文写一段总结（150–250字）。"
     "要点：说明各市场当前杠杆水平及其环比/区间变化；解读这些变化所反映的风险偏好"
     "与市场情绪；对比不同市场之间的差异。A股惯例：融资余额上升通常代表风险偏好上升。"
+    "对于A股，请结合“融资余额（存量）”与“当日融资买入/偿还（流量）”一起解读：当"
+    "融资偿还明显放大或净融资转负时，即使余额变化不大，也往往意味着资金在去杠杆/"
+    "获利了结；反之为加杠杆。"
     "若某市场数据暂缺，用一句话说明即可。只做客观描述与解读，不要给出任何具体的"
     "买入/卖出或投资建议。直接输出总结正文，不要加标题或免责声明。"
 )
