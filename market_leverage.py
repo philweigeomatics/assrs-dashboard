@@ -1,6 +1,6 @@
 """
 market_leverage.py — whole-market leverage (margin-debt / 融资融券) series for
-the four markets shown on the Sector Dashboard.
+the markets shown on the Sector Dashboard (China + US).
 
 Each fetcher returns a plain dict with a common shape so the UI can render them
 uniformly and degrade gracefully when a source is unavailable:
@@ -24,10 +24,9 @@ Design notes
 * Pure functions — no Streamlit import here, so the module is unit-testable on
   its own. The page wraps each call in @st.cache_data.
 * China is sourced from Tushare (reliable). US from FINRA's public margin
-  statistics table (verified parseable). Japan and Korea do not have a clean,
-  datacenter-reachable aggregate we can trust yet, so their fetchers return a
-  documented "unavailable" result rather than fabricated numbers — see each
-  function's docstring for exactly what source is still required.
+  statistics table (verified parseable). Japan and Korea were evaluated and
+  dropped — no clean, datacenter-reachable aggregate exists (see the note above
+  fetch_all) — so the panel intentionally covers only these two.
 * Leverage here means the borrowed-money-to-buy-stock balance:
     - CN: 融资融券余额 (rzrqye), the number Chinese media quote as 两融余额.
     - US: "Debit Balances in Customers' Securities Margin Accounts" (margin debt).
@@ -210,61 +209,19 @@ def fetch_us_margin(timeout: int = 30) -> dict:
     return _finalise(res, d[["period", "value"]])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# JAPAN — pending a clean aggregate source
-# ─────────────────────────────────────────────────────────────────────────────
-def fetch_japan_margin() -> dict:
-    """
-    NOT YET WIRED to a trustworthy aggregate.
-
-    JPX's readily-linked daily file
-    (statistics-equities/margin/…/mtdaily…​.xls) is *per-issue* outstanding
-    margin in SHARES — you cannot sum shares across different issues into a
-    market total, so it is the wrong granularity for a leverage figure.
-
-    The correct source is the market-wide 信用取引現在高 (margin transaction
-    outstanding, in ¥) published *weekly*:
-      • JSDA (日本証券業協会) aggregate margin balances, or
-      • the TSE weekly market-total file (not the per-issue mtdaily file).
-    Both need a dedicated parser and, from a non-JP datacenter IP, may be
-    rate-limited or geo-restricted — hence deferred rather than faked.
-    """
-    return _blank(
-        "JP", "Japan Margin Balance", " ¥tn", "weekly",
-        "Source pending: needs JSDA/TSE weekly 信用取引現在高 (¥ aggregate), "
-        "not the per-issue share-count file.",
-        error="No trusted aggregate source wired yet.",
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# KOREA — pending the correct KRX statistic id
-# ─────────────────────────────────────────────────────────────────────────────
-def fetch_korea_margin() -> dict:
-    """
-    NOT YET WIRED to a confirmed endpoint.
-
-    KRX's data portal (data.krx.co.kr) serves downloads via a two-step OTP flow
-    (GenerateOTP → download.cmd) which is reachable, but the market-wide
-    margin-loan balance (신용거래융자 잔고) needs the exact statistic id (`bld`,
-    e.g. dbms/MDC/STAT/standard/MDCSTATxxxxx). That id has to be captured from
-    the live KRX margin-statistics menu (network tab) — blind guesses return
-    HTTP 400. KOFIA FreeSIS (freesis.kofia.or.kr) is an alternative aggregate.
-    Deferred rather than faked until the id is confirmed against the live site.
-    """
-    return _blank(
-        "KR", "Korea Margin Loans", " ₩tn", "daily",
-        "Source pending: needs the confirmed KRX `bld` for 신용거래융자 잔고 "
-        "(or KOFIA FreeSIS aggregate).",
-        error="Correct KRX statistic id not confirmed yet.",
-    )
+# Japan & Korea were evaluated and deliberately dropped: KRX's portal does not
+# publish a market-wide margin balance (it's a KOFIA statistic served from a
+# legacy frameset site), JPX's reachable file is per-issue share counts (wrong
+# granularity), and all of these foreign exchange/association sources are prone
+# to geo-blocking a datacenter IP — so a scraper working locally would likely
+# show nothing in production. If a clean, datacenter-reachable aggregate (or a
+# normalized paid provider) becomes available, add a fetch_*_margin here
+# returning the same dict shape and append it in fetch_all + the page.
 
 
 def fetch_all(pro_api) -> list[dict]:
-    """Convenience: all four markets in display order (CN, US, JP, KR)."""
+    """Convenience: the reliably-sourced markets in display order (CN, US)."""
     return [
         fetch_china_margin(pro_api),
         fetch_us_margin(),
-        fetch_japan_margin(),
-        fetch_korea_margin(),
     ]

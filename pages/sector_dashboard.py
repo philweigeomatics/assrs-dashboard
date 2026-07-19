@@ -335,10 +335,10 @@ else:
 # 市场杠杆  ·  MARKET LEVERAGE  (customer margin borrowings across CN·US·JP·KR)
 # ════════════════════════════════════════════════════════════════════════════
 # Margin debt = money customers borrow to buy stock. Rising = risk appetite /
-# potential froth; falling = de-leveraging. China 两融余额 (Tushare) and US
-# margin debt (FINRA) are live; Japan/Korea await a clean aggregate source and
-# degrade to "—" rather than showing fabricated numbers. Fetchers live in
-# market_leverage.py; each is cached at the source's natural refresh cadence.
+# potential froth; falling = de-leveraging. Panel covers the two reliably-
+# sourced markets: China 两融余额 (Tushare) and US margin debt (FINRA). Japan &
+# Korea were evaluated and dropped — no clean, datacenter-reachable aggregate
+# (see market_leverage.py). Each fetcher is cached at its natural cadence.
 
 @st.cache_data(ttl=1800, show_spinner=False)      # A-share margin updates daily
 def _lev_china():
@@ -349,25 +349,16 @@ def _lev_china():
 def _lev_us():
     return mlev.fetch_us_margin()
 
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
-def _lev_jp():
-    return mlev.fetch_japan_margin()
-
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
-def _lev_kr():
-    return mlev.fetch_korea_margin()
-
 st.markdown("---")
 st.subheader("💳 市场杠杆 · Market Leverage")
 st.caption(
     "Customer margin borrowings — money borrowed to buy stock — a direct "
-    "risk-appetite gauge. China 两融余额 (Tushare) and US margin debt (FINRA) "
-    "are live; Japan & Korea are pending a clean aggregate source. "
+    "risk-appetite gauge. China 两融余额 (Tushare) and US margin debt (FINRA). "
     "Red = rising leverage, green = falling (A-share convention)."
 )
 
-_levs = [_lev_china(), _lev_us(), _lev_jp(), _lev_kr()]
-_lev_cols = st.columns(4)
+_levs = [_lev_china(), _lev_us()]
+_lev_cols = st.columns(2)
 for _col, _r in zip(_lev_cols, _levs):
     with _col:
         if not _r["ok"] or _r["latest"] is None:
