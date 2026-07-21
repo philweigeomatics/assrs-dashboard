@@ -4016,7 +4016,27 @@ if st.session_state.active_ticker:
             # The dialog IS a Streamlit fragment, so every widget inside it — fund
             # picker, weight, Run, both AI buttons — reruns only this panel and leaves
             # the chart, simulator and every other section on the page untouched.
-            @st.dialog("🧩 Portfolio Fit | 组合适配度分析", width="large")
+            #
+            # The open flag is PERSISTENT, not consumed on read. An earlier one-shot
+            # version closed the panel on any full-script rerun, which happens more
+            # often than expected on this page (a component mounting, a widget
+            # elsewhere, a queued click landing after a slow load). Measured: dialog
+            # open -> full rerun -> dialog gone. With a persistent flag the panel is
+            # re-opened by the rerun and survives it; on_dismiss clears the flag so
+            # closing it still sticks.
+            def _pf_close():
+                st.session_state.pop("pf_open", None)
+
+            # on_dismiss is not in older Streamlit builds. Feature-detect rather than
+            # hard-require it: without it we fall back to consume-on-read, which is
+            # the previous behaviour — worse, but not broken.
+            import inspect as _inspect
+            _PF_PERSIST = "on_dismiss" in _inspect.signature(st.dialog).parameters
+            _pf_dlg_kwargs = {"width": "large"}
+            if _PF_PERSIST:
+                _pf_dlg_kwargs["on_dismiss"] = _pf_close
+
+            @st.dialog("🧩 Portfolio Fit | 组合适配度分析", **_pf_dlg_kwargs)
             def portfolio_fit_dialog(ticker, company_name):
                 portfolio_fit_section(ticker, company_name)
 
@@ -4080,9 +4100,14 @@ if st.session_state.active_ticker:
                     if st.session_state.get("pf_result_summary"):
                         st.caption(st.session_state["pf_result_summary"])
 
-                # One-shot flag: opening is an explicit click, and the flag is cleared
-                # as it is read so a dismissed dialog stays dismissed.
-                if st.session_state.pop("pf_open", False):
+                # Persistent while supported, so a full-script rerun re-opens the panel
+                # instead of silently discarding it. Closing is handled by _pf_close
+                # via on_dismiss, by the explicit Close button inside the panel, and by
+                # the pf_ticker reset when a different stock is selected.
+                if _PF_PERSIST:
+                    if st.session_state.get("pf_open"):
+                        portfolio_fit_dialog(ticker, company_name)
+                elif st.session_state.pop("pf_open", False):
                     portfolio_fit_dialog(ticker, company_name)
 
             portfolio_fit_launcher(ticker, company_name)
