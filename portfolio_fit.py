@@ -706,6 +706,143 @@ def get_revenue_mix(ticker: str) -> dict:
     return out
 
 
+# ── Quantitative explainer (single DeepSeek call) ─────────────────────────────
+
+_EXPLAIN_PROMPT = """\
+You are a senior Chinese A-share portfolio risk analyst briefing a portfolio
+manager who is deciding whether to add one stock to an existing book.
+
+You are given the COMPLETE quantitative output of a portfolio-fit analysis.
+Explain what these numbers mean together — the story they tell as a set, not a
+restatement of each figure one by one.
+
+Priorities:
+- Lead with what actually decides the question. Downside correlation, the
+  risk-share vs capital-share ratio, and the diversification ratio matter far
+  more than the headline correlation alone.
+- Point out DISAGREEMENTS between metrics, because that is where the real
+  insight is. Examples: full-window correlation is low but downside
+  correlation is high (diversification that fails exactly when needed);
+  correlation is modest but one single holding is a near-twin; risk share far
+  exceeds capital share (the position is being paid for in risk).
+- "Effective bets" is computed from weights only, so it rises mechanically
+  whenever any position is added, including an economic twin. Never cite it as
+  evidence of improved diversification. The diversification ratio is the
+  correlation-aware measure — use that instead.
+- All statistics come from a window anchored at the post-2024-09-24 A-share
+  regime start, so they describe the current regime, not a long-run average.
+  Say so if the window is short.
+- Style tilts are z-scores against the existing book, not the whole market.
+
+RULES:
+- Explain only the numbers provided. Do not compute new ones, do not estimate
+  returns, and do not forecast prices.
+- Do not contradict the rule-based verdict. If the numbers are more nuanced
+  than the label, say what the label misses.
+- This is exposure diagnostics, not investment advice. Do not tell the user to
+  buy or sell; describe what the addition does to the portfolio's risk shape.
+- Prose fields must be written in Chinese. Metric names may stay in English.
+- Return ONLY raw JSON (start { end }). No markdown fences.
+
+Schema:
+{
+  "headline": "One sentence: what these numbers say about the fit.",
+  "key_readings": [
+    {"metric": "...", "value": "...", "reading": "What this number means here."}
+  ],
+  "tensions": ["Metrics that disagree with each other, and which one to trust."],
+  "risk_shape_change": "How the portfolio's risk profile changes if this is added.",
+  "watch_outs": ["Caveats: short window, thin overlap, unstable correlation, etc."],
+  "bottom_line": "2-3 sentences a PM could act on."
+}
+"""
+
+
+def explain_quant_results(result: dict) -> dict:
+    """
+    Package the whole quantitative result set and ask DeepSeek to interpret it.
+
+    Separate from analyse_business_overlap() on purpose: that call reasons about
+    companies, this one reasons about statistics. Merging them produced a model
+    that skimmed both. Raises RuntimeError on failure.
+    """
+    m, before, after = result["metrics"], result["before"], result["after"]
+    win = result["window"]
+
+    tilt_text = "\n".join(
+        f"- {t['factor']}: candidate {t['candidate']:.3g} vs portfolio "
+        f"{t['portfolio']:.3g} ({t['z']:+.2f}σ)"
+        for t in result.get("factor_tilts", [])
+    ) or "- (no usable style factors)"
+
+    pair_text = "\n".join(
+        f"- {r['ticker']} {r['name']} ({r['industry']}), 权重 {r['weight']:.1%}: "
+        f"相关系数 {r['corr']:.2f}{' [同行业]' if r['same_industry'] else ''}"
+        for _, r in result["pairs"].head(5).iterrows()
+    )
+
+    ind_before, ind_after = result["industry_before"], result["industry_after"]
+    ind_text = "\n".join(
+        f"- {k}: {ind_before.get(k, 0):.1%} → {ind_after.get(k, 0):.1%}"
+        for k in sorted(set(ind_before) | set(ind_after),
+                        key=lambda x: -ind_after.get(x, 0))[:8]
+    )
+
+    risk_ratio = (m["risk_share"] / m["weight_share"]) if m["weight_share"] else float("nan")
+
+    excluded = (
+        f", excluded for missing data: {', '.join(result['holdings_failed'])}"
+        if result["holdings_failed"] else ""
+    )
+
+    user_msg = f"""\
+CANDIDATE: {result['candidate']} {result['candidate_name']} | 行业 {m['cand_industry']}
+PROPOSED WEIGHT: {result['new_weight']:.1%} (pro-rata dilution of existing holdings)
+RULE-BASED VERDICT: {result['verdict']['bucket']}
+  triggered by: {'; '.join(result['verdict']['reasons'])}
+
+WINDOW: {win['start']} → {win['end']}, {win['sessions']} sessions
+  regime-anchored at {REGIME_START}; low_confidence={win['low_confidence']}
+  shortest history: {win['binding_ticker']} from {win['binding_start']}
+  holdings analysed: {len(result['holdings_used'])}{excluded}
+
+RELATIONSHIP TO THE BOOK:
+- 相关性 correlation (full window): {m['corr']:.3f}
+- 相关性 correlation (recent {RECENT_WINDOW}d): {m['corr_recent']:.3f}
+- 下跌日相关性 downside-only correlation: {m['down_corr']:.3f}
+- Beta to portfolio: {m['beta']:.3f}
+- 特质方差占比 idiosyncratic variance share: {m['residual_share']:.1%}
+- 占组合风险 risk share: {m['risk_share']:.2%} vs 占资金 capital share: {m['weight_share']:.2%} \
+(ratio {risk_ratio:.2f}×)
+- 与单一持仓最高相关性 max correlation to any single holding: {m['max_pair_corr']:.3f}
+- 板块驱动相似度 sector-driver cosine: {m['sector_cosine']:.3f}
+
+PORTFOLIO BEFORE → AFTER:
+- 年化波动率 annualised vol: {before['vol']:.2%} → {after['vol']:.2%}
+- VaR 95% (1d): {before['var95']:.2%} → {after['var95']:.2%}
+- CVaR 95% (1d): {before['cvar95']:.2%} → {after['cvar95']:.2%}
+- 最大回撤 max drawdown: {before['max_dd']:.2%} → {after['max_dd']:.2%}
+- 分散化比率 diversification ratio: {before['div_ratio']:.3f} → {after['div_ratio']:.3f}
+- 有效持仓数 effective bets (weights only): {before['enb']:.2f} → {after['enb']:.2f}
+- 集中度 HHI: {before['hhi']:.4f} → {after['hhi']:.4f}
+
+MOST CORRELATED HOLDINGS:
+{pair_text}
+
+INDUSTRY EXPOSURE:
+{ind_text}
+
+STYLE TILTS (z vs the existing book):
+{tilt_text}
+"""
+
+    return ai_client.call_json(
+        _EXPLAIN_PROMPT, user_msg,
+        max_tokens=3500,
+        temperature=0.2,
+    )
+
+
 # ── Qualitative layer (single DeepSeek call) ──────────────────────────────────
 
 _OVERLAP_PROMPT = """\
