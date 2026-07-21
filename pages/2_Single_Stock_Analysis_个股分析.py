@@ -16,6 +16,7 @@ from scipy.signal import find_peaks
 from streamlit_plotly_events import plotly_events
 
 from analysis_engine import run_single_stock_analysis, simulate_next_day_indicators
+import portfolio_fit as pfit
 
 import auth_manager
 auth_manager.require_login()
@@ -4984,6 +4985,332 @@ if st.session_state.active_ticker:
                     st.info("Not enough overlapping data for rotation analysis at the current window size.")
 
             sector_affinity_section(analysis_df)
+
+            # ==================== PORTFOLIO FIT ====================
+            # Does the stock currently on this page belong in one of the user's
+            # saved mandates? Quantitative half is free and deterministic; the
+            # business-overlap read is one DeepSeek call behind its own button.
+            st.markdown("---")
+
+            def portfolio_fit_section(ticker, company_name):
+                st.subheader("🧩 Portfolio Fit | 组合适配度分析")
+                st.caption(
+                    f"Test **{company_name} ({ticker})** against one of your saved mandates: does it "
+                    "diversify the book, duplicate an exposure you already own, or deliberately "
+                    "concentrate one? Added weight is assumed to dilute existing holdings pro-rata."
+                )
+
+                uid = auth_manager.get_current_user_id()
+                funds = pfit.get_user_portfolios(uid)
+                if not funds:
+                    st.info(
+                        "No saved portfolios yet. Build and save a mandate on the "
+                        "**Portfolio Optimization** page first."
+                    )
+                    return
+
+                fmap = {f["fund_name"]: f["id"] for f in funds}
+                c1, c2, c3 = st.columns([3, 2, 2])
+                with c1:
+                    fund_name = st.selectbox(
+                        "Portfolio 组合", list(fmap.keys()), key="pf_fund_pick"
+                    )
+                with c2:
+                    weight_pct = st.number_input(
+                        "Proposed weight 拟配置权重 (%)",
+                        min_value=0.5, max_value=50.0, value=5.0, step=0.5,
+                        key="pf_weight",
+                    )
+                with c3:
+                    st.write("")
+                    st.write("")
+                    run = st.button("▶️ Run fit analysis", use_container_width=True,
+                                    key="pf_run")
+
+                fund_id = fmap[fund_name]
+                positions = pfit.get_portfolio_positions(fund_id)
+                if positions.empty:
+                    st.warning(f"'{fund_name}' has no active positions to compare against.")
+                    return
+                st.caption(f"📌 {fund_name} — {len(positions)} active holdings")
+
+                if run:
+                    # A new run invalidates the previous AI read, which was
+                    # written about a different portfolio/weight.
+                    st.session_state.pop("pf_ai", None)
+                    with st.spinner("Fetching prices and computing fit…"):
+                        st.session_state["pf_result"] = pfit.analyse_fit(
+                            ticker, weight_pct / 100.0, positions
+                        )
+                        st.session_state["pf_key"] = (fund_id, ticker, weight_pct)
+
+                res = st.session_state.get("pf_result")
+                if not res:
+                    return
+
+                # Guard against a stale result rendering under changed inputs.
+                if st.session_state.get("pf_key") != (fund_id, ticker, weight_pct):
+                    st.info("⚙️ Inputs changed — press **Run fit analysis** to refresh.")
+                    return
+
+                if not res.get("ok"):
+                    st.error(res.get("error", "Analysis failed."))
+                    return
+
+                m, before, after = res["metrics"], res["before"], res["after"]
+                win = res["window"]
+
+                # ── Verdict banner ────────────────────────────────────────────
+                label, kind = pfit.VERDICT_STYLES[res["verdict"]["bucket"]]
+                getattr(st, kind)(f"### {label}")
+                for reason in res["verdict"]["reasons"]:
+                    st.markdown(f"- {reason}")
+
+                if res["already_held"]:
+                    st.warning(
+                        f"⚠️ {ticker} is **already held** in this mandate. The analysis treats "
+                        "it as a fresh addition, so read the result as *topping up* an "
+                        "existing position."
+                    )
+
+                st.caption(
+                    f"Window: **{win['start']} → {win['end']}** ({win['sessions']} sessions, "
+                    f"anchored at the {pfit.REGIME_START} regime start). "
+                    f"Shortest history: {win['binding_ticker']} from {win['binding_start']}."
+                )
+                if win["low_confidence"]:
+                    st.warning(
+                        f"⚠️ Only {win['sessions']} overlapping sessions "
+                        f"(below {pfit.MIN_OVERLAP_DAYS}) — treat these correlations as indicative."
+                    )
+                if res["holdings_failed"]:
+                    st.warning(
+                        "⚠️ No price data for: " + ", ".join(res["holdings_failed"])
+                        + " — excluded and remaining weights renormalised."
+                    )
+
+                t_quant, t_conc, t_ai = st.tabs([
+                    "📊 数量 Quantitative",
+                    "🏭 集中度 Concentration",
+                    "🤖 业务重叠 AI Business Overlap",
+                ])
+
+                # ── Quantitative ──────────────────────────────────────────────
+                with t_quant:
+                    q1, q2, q3, q4 = st.columns(4)
+                    q1.metric("与组合相关性 Corr", f"{m['corr']:.2f}",
+                              help="Daily-return correlation to the existing book over the window.")
+                    q2.metric("下跌日相关性 Downside", f"{m['down_corr']:.2f}",
+                              help="Correlation measured only on days the portfolio fell — "
+                                   "diversification that fails here is not diversification.")
+                    q3.metric("特质方差 Idiosyncratic", f"{m['residual_share']:.0%}",
+                              help="Share of the candidate's variance not explained by the book. "
+                                   "Higher = more genuinely new.")
+                    q4.metric("Beta to book", f"{m['beta']:.2f}")
+
+                    st.markdown("**Risk paid vs capital spent**")
+                    rr = (m["risk_share"] / m["weight_share"]) if m["weight_share"] else float("nan")
+                    r1, r2, r3 = st.columns(3)
+                    r1.metric("占资金 Capital", f"{m['weight_share']:.1%}")
+                    r2.metric("占组合风险 Risk", f"{m['risk_share']:.1%}",
+                              delta=f"{rr:.2f}× capital share",
+                              delta_color="inverse" if rr > 1 else "normal")
+                    r3.metric("近60日相关性 Recent corr", f"{m['corr_recent']:.2f}",
+                              delta=f"{m['corr_recent'] - m['corr']:+.2f} vs full window")
+
+                    st.markdown("**Portfolio before → after** (pro-rata dilution)")
+                    rows = [
+                        ("年化波动率 Annualised vol", before["vol"], after["vol"], "{:.2%}", True),
+                        ("VaR 95% (1日)", before["var95"], after["var95"], "{:.2%}", True),
+                        ("CVaR 95% (1日)", before["cvar95"], after["cvar95"], "{:.2%}", True),
+                        ("最大回撤 Max drawdown", before["max_dd"], after["max_dd"], "{:.2%}", False),
+                        ("有效持仓数 Effective bets (权重口径)", before["enb"], after["enb"], "{:.2f}", False),
+                        ("分散化比率 Div. ratio (相关性口径)", before["div_ratio"], after["div_ratio"], "{:.2f}", False),
+                        ("集中度 HHI", before["hhi"], after["hhi"], "{:.3f}", True),
+                    ]
+                    tbl = []
+                    for name, b, a, fmt, higher_is_worse in rows:
+                        delta = a - b
+                        # A-share convention: red = up, green = down.
+                        worse = (delta > 0) if higher_is_worse else (delta < 0)
+                        arrow = "🔴" if delta > 0 else ("🟢" if delta < 0 else "—")
+                        tbl.append({
+                            "Metric": name,
+                            "Before": fmt.format(b),
+                            "After": fmt.format(a),
+                            "Δ": f"{arrow} {fmt.format(delta)}",
+                            "Direction": "worse" if worse else ("better" if delta != 0 else "flat"),
+                        })
+                    st.dataframe(pd.DataFrame(tbl), use_container_width=True, hide_index=True)
+                    st.caption(
+                        "⚠️ **Effective bets counts weights only** — adding any 4th position raises "
+                        "it mechanically, even an economic twin. **Diversification ratio** is the "
+                        "correlation-aware measure: if it falls, the addition bought you nothing."
+                    )
+
+                    st.markdown("**Closest existing holdings** (economic twin ranking)")
+                    pairs_disp = res["pairs"].head(8).copy()
+                    pairs_disp["weight"] = pairs_disp["weight"].map("{:.1%}".format)
+                    pairs_disp["corr"] = pairs_disp["corr"].map("{:.2f}".format)
+                    pairs_disp["same_industry"] = pairs_disp["same_industry"].map(
+                        lambda x: "✅ 同行业" if x else ""
+                    )
+                    st.dataframe(
+                        pairs_disp[["ticker", "name", "industry", "weight", "corr", "same_industry"]]
+                        .rename(columns={
+                            "ticker": "代码", "name": "名称", "industry": "行业",
+                            "weight": "权重", "corr": "相关性", "same_industry": "",
+                        }),
+                        use_container_width=True, hide_index=True,
+                    )
+
+                    if np.isfinite(m["sector_cosine"]):
+                        st.metric(
+                            "板块驱动相似度 Sector-driver similarity",
+                            f"{m['sector_cosine']:.2f}",
+                            help="Cosine similarity between the candidate's correlation-to-sector "
+                                 "profile and the portfolio's. Catches stocks with different "
+                                 "industry labels but the same underlying driver.",
+                        )
+
+                    if res["factor_tilts"]:
+                        st.markdown("**Style tilts vs the portfolio** (z-score of the existing book)")
+                        ft = pd.DataFrame(res["factor_tilts"])
+                        fig_ft = go.Figure(go.Bar(
+                            x=ft["z"], y=ft["factor"], orientation="h",
+                            marker_color=["#ef4444" if v > 0 else "#22c55e" for v in ft["z"]],
+                            text=[f"{v:+.2f}σ" for v in ft["z"]], textposition="outside",
+                        ))
+                        fig_ft.update_layout(
+                            height=260, margin=dict(l=10, r=40, t=10, b=10),
+                            xaxis_title="σ vs portfolio weighted average",
+                            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                        )
+                        st.plotly_chart(fig_ft, use_container_width=True)
+                        st.caption(
+                            "Quality/ROE is intentionally absent — it needs a per-holding "
+                            "fundamentals call, which would make this free panel expensive."
+                        )
+
+                # ── Concentration ─────────────────────────────────────────────
+                with t_conc:
+                    ib, ia = res["industry_before"], res["industry_after"]
+                    inds = sorted(set(ib) | set(ia), key=lambda k: -ia.get(k, 0))
+                    fig_ind = go.Figure()
+                    fig_ind.add_trace(go.Bar(
+                        name="Before 加仓前", y=inds,
+                        x=[ib.get(i, 0) for i in inds], orientation="h",
+                        marker_color="#94a3b8",
+                    ))
+                    fig_ind.add_trace(go.Bar(
+                        name="After 加仓后", y=inds,
+                        x=[ia.get(i, 0) for i in inds], orientation="h",
+                        marker_color="#ef4444",
+                    ))
+                    fig_ind.update_layout(
+                        barmode="group", height=max(300, len(inds) * 34),
+                        margin=dict(l=10, r=20, t=30, b=10),
+                        xaxis_tickformat=".0%", xaxis_title="Portfolio weight",
+                        legend=dict(orientation="h", y=1.02, yanchor="bottom"),
+                        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                    )
+                    st.plotly_chart(fig_ind, use_container_width=True)
+
+                    ci1, ci2 = st.columns(2)
+                    ci1.metric(
+                        f"{m['cand_industry']} 行业权重",
+                        f"{m['cand_industry_after']:.1%}",
+                        delta=f"{m['cand_industry_after'] - m['cand_industry_before']:+.1%}",
+                        delta_color="inverse",
+                    )
+                    top_after = max(ia.values()) if ia else 0
+                    ci2.metric("最大行业权重 Largest industry", f"{top_after:.1%}")
+                    if top_after > 0.50:
+                        st.error(f"⚠️ After this trade one industry is {top_after:.0%} of the book.")
+                    elif top_after > 0.35:
+                        st.warning(f"⚠️ After this trade the largest industry reaches {top_after:.0%}.")
+
+                # ── AI business overlap ───────────────────────────────────────
+                with t_ai:
+                    st.caption(
+                        "One DeepSeek call covering themes, supply-chain adjacency and revenue-mix "
+                        "overlap — the business risk that correlation cannot see."
+                    )
+                    st.info(
+                        "ℹ️ This section is **model inference, not database fact**. It can be wrong "
+                        "or stale on less-covered names. The revenue breakdown below it is the "
+                        "reported hard data.",
+                        icon="ℹ️",
+                    )
+                    if st.button("🤖 Analyse business overlap", key="pf_ai_run"):
+                        with st.spinner("Fetching revenue mix and querying DeepSeek…"):
+                            try:
+                                mix = pfit.get_revenue_mix(ticker)
+                                st.session_state["pf_ai"] = {
+                                    "data": pfit.analyse_business_overlap(res, positions, mix),
+                                    "mix": mix,
+                                }
+                            except Exception as exc:
+                                st.session_state["pf_ai"] = {"error": str(exc)}
+
+                    ai_state = st.session_state.get("pf_ai")
+                    if not ai_state:
+                        return
+                    if "error" in ai_state:
+                        st.error(f"AI analysis failed: {ai_state['error']}")
+                        return
+
+                    ai = ai_state["data"]
+                    conf = str(ai.get("confidence", "medium")).lower()
+                    st.markdown(
+                        f"**AI 结论** &nbsp;·&nbsp; 置信度 "
+                        f"{'🟢 高' if conf == 'high' else '🟡 中' if conf == 'medium' else '🔴 低'}"
+                    )
+                    st.info(ai.get("verdict_comment", "—"))
+
+                    if ai.get("single_event_risk"):
+                        st.markdown("**同时受损的单一事件 | Single event that hurts both**")
+                        st.warning(ai["single_event_risk"])
+
+                    for key, title in (
+                        ("shared_themes", "🎯 共同主题 Shared themes"),
+                        ("supply_chain_links", "🔗 产业链关系 Supply-chain links"),
+                        ("revenue_overlap", "💰 收入结构重叠 Revenue overlap"),
+                        ("shared_risk_drivers", "⚠️ 共同风险驱动 Shared risk drivers"),
+                    ):
+                        items = ai.get(key) or []
+                        if not items:
+                            continue
+                        st.markdown(f"**{title}**")
+                        st.dataframe(pd.DataFrame(items), use_container_width=True,
+                                     hide_index=True)
+
+                    mix = ai_state.get("mix") or {}
+                    if mix.get("by_product") or mix.get("by_region"):
+                        with st.expander(f"📑 {ticker} 主营收入构成 ({mix.get('period')}) — reported data"):
+                            if mix.get("by_product"):
+                                st.markdown("**按产品 By product**")
+                                st.dataframe(
+                                    pd.DataFrame(mix["by_product"]).assign(
+                                        share=lambda d: d["share"].map("{:.1%}".format)
+                                    ),
+                                    use_container_width=True, hide_index=True,
+                                )
+                            if mix.get("by_region"):
+                                st.markdown("**按地区/分部 By region / segment**")
+                                st.dataframe(
+                                    pd.DataFrame(mix["by_region"]).assign(
+                                        share=lambda d: d["share"].map("{:.1%}".format)
+                                    ),
+                                    use_container_width=True, hide_index=True,
+                                )
+
+                    st.caption(
+                        "Exposure diagnostics only — not investment advice."
+                    )
+
+            with st.expander("🧩 Portfolio Fit | 组合适配度分析", expanded=False):
+                portfolio_fit_section(ticker, company_name)
 
 else:
     st.info("👆 Enter a stock code above to begin analysis")
