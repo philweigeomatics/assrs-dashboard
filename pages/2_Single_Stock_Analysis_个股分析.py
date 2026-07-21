@@ -3587,6 +3587,24 @@ if st.session_state.active_ticker:
                     "concentrate one? Added weight is assumed to dilute existing holdings pro-rata."
                 )
 
+                # The AI sections return prose, and st.dataframe clips long cells
+                # rather than growing to fit them. Render those findings as cards so
+                # the text wraps and is readable in full. Genuinely tabular numeric
+                # output (before/after metrics, the twin ranking) stays a dataframe.
+                _LEVEL_DOT = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+
+                def _pf_card(head, chip=None, meta=None, body=None):
+                    with st.container(border=True):
+                        dot = _LEVEL_DOT.get(str(chip).lower(), "") if chip else ""
+                        title = f"**{head}**"
+                        if chip:
+                            title += f" &nbsp;&nbsp;{dot} `{chip}`"
+                        st.markdown(title)
+                        if meta:
+                            st.caption(meta)
+                        if body:
+                            st.markdown(body)
+
                 uid = auth_manager.get_current_user_id()
                 funds = pfit.get_user_portfolios(uid)
                 if not funds:
@@ -3735,7 +3753,13 @@ if st.session_state.active_ticker:
                             "Δ": f"{arrow} {fmt.format(delta)}",
                             "Direction": "worse" if worse else ("better" if delta != 0 else "flat"),
                         })
-                    st.dataframe(pd.DataFrame(tbl), use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        pd.DataFrame(tbl), use_container_width=True, hide_index=True,
+                        column_config={
+                            "Metric": st.column_config.TextColumn("Metric", width="large"),
+                            "Direction": st.column_config.TextColumn("Direction", width="small"),
+                        },
+                    )
                     st.caption(
                         "⚠️ **Effective bets counts weights only** — adding any 4th position raises "
                         "it mechanically, even an economic twin. **Diversification ratio** is the "
@@ -3753,9 +3777,13 @@ if st.session_state.active_ticker:
                         pairs_disp[["ticker", "name", "industry", "weight", "corr", "same_industry"]]
                         .rename(columns={
                             "ticker": "代码", "name": "名称", "industry": "行业",
-                            "weight": "权重", "corr": "相关性", "same_industry": "",
+                            "weight": "权重", "corr": "相关性", "same_industry": "同业",
                         }),
                         use_container_width=True, hide_index=True,
+                        column_config={
+                            "名称": st.column_config.TextColumn("名称", width="medium"),
+                            "行业": st.column_config.TextColumn("行业", width="medium"),
+                        },
                     )
 
                     if np.isfinite(m["sector_cosine"]):
@@ -3810,10 +3838,11 @@ if st.session_state.active_ticker:
                         d = qai["data"]
                         st.info(f"**{d.get('headline', '—')}**")
 
-                        if d.get("key_readings"):
-                            st.dataframe(
-                                pd.DataFrame(d["key_readings"]),
-                                use_container_width=True, hide_index=True,
+                        for kr in d.get("key_readings") or []:
+                            _pf_card(
+                                kr.get("metric", "—"),
+                                meta=f"读数 {kr.get('value', '—')}",
+                                body=kr.get("reading"),
                             )
                         if d.get("tensions"):
                             st.markdown("**⚖️ 指标冲突 | Where the metrics disagree**")
@@ -3910,18 +3939,43 @@ if st.session_state.active_ticker:
                         st.markdown("**同时受损的单一事件 | Single event that hurts both**")
                         st.warning(ai["single_event_risk"])
 
-                    for key, title in (
-                        ("shared_themes", "🎯 共同主题 Shared themes"),
-                        ("supply_chain_links", "🔗 产业链关系 Supply-chain links"),
-                        ("revenue_overlap", "💰 收入结构重叠 Revenue overlap"),
-                        ("shared_risk_drivers", "⚠️ 共同风险驱动 Shared risk drivers"),
-                    ):
-                        items = ai.get(key) or []
-                        if not items:
-                            continue
-                        st.markdown(f"**{title}**")
-                        st.dataframe(pd.DataFrame(items), use_container_width=True,
-                                     hide_index=True)
+                    def _names(codes):
+                        """Render holding codes with their names — a bare 600xxx list
+                        is unreadable without looking each one up."""
+                        nm = res["meta"].set_index("ticker")["name"].to_dict()
+                        return "、".join(
+                            f"{c} {nm[c]}" if c in nm else str(c)
+                            for c in (codes or [])
+                        ) or "—"
+
+                    if ai.get("shared_themes"):
+                        st.markdown("**🎯 共同主题 Shared themes**")
+                        for it in ai["shared_themes"]:
+                            _pf_card(it.get("theme", "—"), chip=it.get("strength"),
+                                     meta=f"涉及持仓: {_names(it.get('holdings'))}",
+                                     body=it.get("why"))
+
+                    if ai.get("supply_chain_links"):
+                        st.markdown("**🔗 产业链关系 Supply-chain links**")
+                        for it in ai["supply_chain_links"]:
+                            if str(it.get("relation", "")).lower() == "none":
+                                continue  # "no link" is noise, not a finding
+                            _pf_card(_names([it.get("holding")]),
+                                     chip=it.get("relation"), body=it.get("why"))
+
+                    if ai.get("revenue_overlap"):
+                        st.markdown("**💰 收入结构重叠 Revenue overlap**")
+                        for it in ai["revenue_overlap"]:
+                            mkts = "、".join(it.get("shared_end_markets") or []) or "—"
+                            _pf_card(_names([it.get("holding")]), chip=it.get("overlap"),
+                                     meta=f"共同终端市场: {mkts}", body=it.get("why"))
+
+                    if ai.get("shared_risk_drivers"):
+                        st.markdown("**⚠️ 共同风险驱动 Shared risk drivers**")
+                        for it in ai["shared_risk_drivers"]:
+                            _pf_card(it.get("driver", "—"),
+                                     meta=f"受影响持仓: {_names(it.get('affected'))}",
+                                     body=it.get("why"))
 
                     mix = ai_state.get("mix") or {}
                     if mix.get("by_product") or mix.get("by_region"):
@@ -3933,6 +3987,12 @@ if st.session_state.active_ticker:
                                         share=lambda d: d["share"].map("{:.1%}".format)
                                     ),
                                     use_container_width=True, hide_index=True,
+                                    column_config={
+                                        "item": st.column_config.TextColumn(
+                                            "项目", width="large"),
+                                        "share": st.column_config.TextColumn(
+                                            "占比", width="small"),
+                                    },
                                 )
                             if mix.get("by_region"):
                                 st.markdown("**按地区/分部 By region / segment**")
@@ -3941,6 +4001,12 @@ if st.session_state.active_ticker:
                                         share=lambda d: d["share"].map("{:.1%}".format)
                                     ),
                                     use_container_width=True, hide_index=True,
+                                    column_config={
+                                        "item": st.column_config.TextColumn(
+                                            "项目", width="large"),
+                                        "share": st.column_config.TextColumn(
+                                            "占比", width="small"),
+                                    },
                                 )
 
                     st.caption(
@@ -3987,24 +4053,39 @@ if st.session_state.active_ticker:
             """, unsafe_allow_html=True)
 
             # ---- Portfolio Fit launcher (sits with the P/E / P/B header block) ----
-            # Selecting a different stock is a full-script rerun, which both closes the
-            # dialog and trips the pf_ticker reset above — so the panel can never show
-            # one stock's verdict under another stock's header.
-            _pf_c1, _pf_c2 = st.columns([1, 4])
-            with _pf_c1:
-                if st.button("🧩 Portfolio Fit 组合适配度",
-                             use_container_width=True,
-                             help="Test this stock against one of your saved mandates: does it diversify, duplicate, or concentrate?",
-                             key="pf_open_btn"):
-                    st.session_state["pf_open"] = True
-            with _pf_c2:
-                if st.session_state.get("pf_result_summary"):
-                    st.caption(st.session_state["pf_result_summary"])
+            # The launcher MUST live inside its own fragment. A bare st.button at
+            # script scope triggers a full-script rerun on click, which re-runs
+            # run_single_stock_analysis and re-fetches fundamentals from Tushare
+            # (get_stock_fundamentals_live is uncached) just to open a panel.
+            # Inside a fragment, clicking reruns only this block. Verified against
+            # a probe app: module-scope button → full run count 1→2; fragment-scoped
+            # button → count unchanged, dialog still opens.
+            #
+            # Selecting a different stock IS a full rerun, which trips the pf_ticker
+            # reset above — so the panel can never show one stock's verdict under
+            # another stock's header.
+            @st.fragment
+            def portfolio_fit_launcher(ticker, company_name):
+                c1, c2 = st.columns([1, 4])
+                with c1:
+                    if st.button("🧩 Portfolio Fit 组合适配度",
+                                 use_container_width=True,
+                                 help="Test this stock against one of your saved mandates: does it diversify, duplicate, or concentrate?",
+                                 key="pf_open_btn"):
+                        st.session_state["pf_open"] = True
+                with c2:
+                    # Last verdict, so it survives dismissing the modal. Refreshes on
+                    # the next interaction with this fragment — dismissing a dialog
+                    # does not itself trigger a rerun.
+                    if st.session_state.get("pf_result_summary"):
+                        st.caption(st.session_state["pf_result_summary"])
 
-            # One-shot flag: opening is an explicit click. Dismissing the dialog is a
-            # full rerun, and because the flag was already cleared it stays closed.
-            if st.session_state.pop("pf_open", False):
-                portfolio_fit_dialog(ticker, company_name)
+                # One-shot flag: opening is an explicit click, and the flag is cleared
+                # as it is read so a dismissed dialog stays dismissed.
+                if st.session_state.pop("pf_open", False):
+                    portfolio_fit_dialog(ticker, company_name)
+
+            portfolio_fit_launcher(ticker, company_name)
 
             # ==================== MARKET STATUS (STREAMLIT NATIVE) ====================
             # Get latest row for status display
