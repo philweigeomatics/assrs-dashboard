@@ -229,7 +229,7 @@ def get_company_overview(ticker, name, industry, force_refresh=False):
         if cached:
             return cached
     user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
-    payload  = ai_client.call_json(_OVERVIEW_PROMPT, user_msg, max_tokens=4000)
+    payload  = ai_client.call_json(_OVERVIEW_PROMPT, user_msg, max_tokens=8000)
     _write_cache(ticker, "overview", payload)
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
@@ -241,7 +241,7 @@ def get_pestel(ticker: str, name: str, industry: str, force_refresh: bool = Fals
         if cached:
             return cached
     user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
-    payload  = ai_client.call_json(_PESTEL_PROMPT, user_msg, max_tokens=6000)
+    payload  = ai_client.call_json(_PESTEL_PROMPT, user_msg, max_tokens=10000)
     _write_cache(ticker, "pestel", payload)
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
@@ -252,7 +252,7 @@ def get_porters(ticker: str, name: str, industry: str, force_refresh: bool = Fal
         if cached:
             return cached
     user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
-    payload  = ai_client.call_json(_PORTERS_PROMPT, user_msg, max_tokens=4000)
+    payload  = ai_client.call_json(_PORTERS_PROMPT, user_msg, max_tokens=8000)
     _write_cache(ticker, "porters", payload)
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
@@ -269,7 +269,7 @@ def get_swot(ticker: str, name: str, industry: str,
         f"Industry: {industry}\n\n"
         f"Key metrics:\n{metrics_summary}"
     )
-    payload = ai_client.call_json(_SWOT_PROMPT, user_msg, max_tokens=6000)
+    payload = ai_client.call_json(_SWOT_PROMPT, user_msg, max_tokens=10000)
     _write_cache(ticker, "swot", payload)
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
@@ -306,7 +306,7 @@ def get_competitors(
         f"Industry: {industry}"
         f"{products_line}"
     )
-    raw      = ai_client.call_json(_COMPETITORS_PROMPT, user_msg, max_tokens=5000)
+    raw      = ai_client.call_json(_COMPETITORS_PROMPT, user_msg, max_tokens=9000)
 
     # Validate each peer against stock_basic
     raw_peers = raw.get("competitors", [])

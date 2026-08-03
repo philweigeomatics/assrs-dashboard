@@ -76,12 +76,18 @@ def generate_supply_chain_graph(ticker: str, company_name: str) -> dict:
     )
     return ai_client.call_json(
         _SYSTEM_PROMPT, user_msg,
-        # Knowledge-graph prompt asks the model to (a) reason through annual
-        # reports, investor Q&A, industry filings and then (b) emit 3–6
-        # products + 3–6 sectors + a links array as JSON. Reasoning trace
-        # alone can hit 4–5k tokens before the JSON even starts.
-        max_tokens=8000,
+        # This is recall + formatting (products, sectors, links from what the
+        # model already knows about the company), not multi-step reasoning, so
+        # reasoning_effort="low" is appropriate and directly reduces how much
+        # of max_tokens the thinking trace burns before the JSON is written —
+        # that burn, not a too-small max_tokens, was the actual cause of the
+        # "ran out" failures on obscure/thinly-documented tickers.
+        # max_tokens raised as a safety margin on top of that fix, not instead
+        # of it — an unfamiliar ticker can still make the model reason for a
+        # while even at low effort.
+        max_tokens=16000,
         temperature=0.3,
+        reasoning_effort="low",
     )
 
 

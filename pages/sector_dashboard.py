@@ -507,7 +507,7 @@ _LEV_SYS_PROMPT = (
 @st.cache_data(ttl=1800, show_spinner=False)
 def _lev_ai_summary(digest: str, _nonce: int) -> str:
     """Cached AI summary. `_nonce` lets the regenerate button bust the cache."""
-    return ai_client.call_text(_LEV_SYS_PROMPT, digest, max_tokens=2000, temperature=0.3)
+    return ai_client.call_text(_LEV_SYS_PROMPT, digest, max_tokens=4000, temperature=0.3)
 
 
 _lev_has_data = any(r.get("ok") for r in _levs)

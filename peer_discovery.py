@@ -93,7 +93,7 @@ def discover_peers(product, sector=None, force_refresh=False):
         # Peer discovery: list of A-share competitors with reasoning about
         # who actually competes in the named downstream sector. Reasoning
         # trace is the dominant cost here.
-        max_tokens=6000,
+        max_tokens=10000,
         temperature=0.2,
     )
 
@@ -251,7 +251,7 @@ def discover_layer_stocks(
         # primary_product justification. The output content is ~3x heavier
         # than the previous "exactly 3" version, so the budget is raised
         # accordingly to leave room for the reasoning trace too.
-        max_tokens=8000,
+        max_tokens=14000,
         temperature=0.2,
     )
 
@@ -341,7 +341,7 @@ def discover_layer_m2m(
 
     data = ai_client.call_json(
         _LAYER_M2M_PROMPT, user_msg,
-        max_tokens=5000,
+        max_tokens=9000,
         temperature=0.2,
     )
 
@@ -447,7 +447,7 @@ def discover_product_stocks(
 
     data = ai_client.call_json(
         _PRODUCT_STOCK_PROMPT, user_msg,
-        max_tokens=4000,
+        max_tokens=8000,
         temperature=0.2,
     )
 

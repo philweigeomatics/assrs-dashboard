@@ -19,6 +19,26 @@ Usage:
     text = ai_client.call_text(system_prompt, user_msg, max_tokens=4000)
 
 Changing the model or endpoint in this one file affects the entire app.
+
+Two DeepSeek-specific behaviors worth knowing before touching call sites:
+
+  - Thinking/reasoning mode defaults to ON, and reasoning tokens are drawn
+    from the SAME max_tokens budget as the output — not a separate pool.
+    A knowledge-heavy prompt (e.g. "recall this company's supply chain from
+    memory") can burn most of max_tokens on the reasoning trace before
+    writing any JSON, which surfaces here as the "exhausted max_tokens on
+    reasoning trace" error below. Pass reasoning_effort="low" for tasks
+    that are lookup/formatting rather than multi-step reasoning — verified
+    against DeepSeek's docs that "low" actually reduces effort on
+    deepseek-v4-flash (unlike deepseek-v4-pro, where "low" is currently
+    silently remapped to "high").
+
+  - `temperature` (and top_p / presence_penalty / frequency_penalty) is a
+    silent no-op whenever thinking mode is on — DeepSeek accepts the
+    parameter without error for backward compatibility, but it has no
+    effect. If a call site actually needs deterministic/low-randomness
+    output, that requires reasoning_effort tuning or thinking disabled
+    entirely, not a lower temperature.
 """
 
 import json
@@ -45,6 +65,7 @@ def _raw_call(
     max_tokens: int,
     temperature: float,
     timeout: int,
+    reasoning_effort: str | None = None,
 ) -> str:
     """
     Make one DeepSeek chat completion request and return the raw content string.
@@ -56,6 +77,12 @@ def _raw_call(
       - Unexpected response shapes
       - Reasoning-model token exhaustion (finish_reason='length' + reasoning_tokens > 0)
       - Empty content
+
+    reasoning_effort: "low" | "high" | "xhigh" | "max", or None to leave the
+    API default ("high") in place. Pass "low" for lookup/formatting tasks
+    that don't need multi-step reasoning — it directly reduces how many of
+    max_tokens the reasoning trace consumes, which is what actually causes
+    the exhaustion error below (see the module docstring).
 
     Raises RuntimeError with a human-readable message on any failure.
     """
@@ -73,6 +100,8 @@ def _raw_call(
         "temperature": temperature,
         "max_tokens":  max_tokens,
     }
+    if reasoning_effort is not None:
+        payload["thinking"] = {"type": "enabled", "reasoning_effort": reasoning_effort}
 
     try:
         resp = requests.post(
@@ -127,7 +156,8 @@ def _raw_call(
             raise RuntimeError(
                 f"Model exhausted {max_tokens} tokens on reasoning trace "
                 f"({reasoning_tokens} reasoning tokens) before writing output. "
-                f"Increase max_tokens and try again."
+                f"Increase max_tokens, or pass reasoning_effort='low' if this "
+                f"call is lookup/formatting rather than multi-step reasoning."
             )
         raise RuntimeError(
             f"DeepSeek returned empty content "
@@ -143,21 +173,24 @@ def call_text(
     system_prompt: str,
     user_msg: str,
     *,
-    max_tokens: int   = 4000,
+    max_tokens: int   = 8000,
     temperature: float = 0.2,
     timeout: int       = 60,
+    reasoning_effort: str | None = None,
 ) -> str:
     """
     Call DeepSeek and return the raw text content string.
 
     Use this when the response is free-form prose rather than JSON.
-    Raises RuntimeError on any failure.
+    Raises RuntimeError on any failure. See module docstring for what
+    reasoning_effort does and why temperature has no effect under thinking mode.
     """
     return _raw_call(
         system_prompt, user_msg,
         max_tokens=max_tokens,
         temperature=temperature,
         timeout=timeout,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -165,21 +198,25 @@ def call_json(
     system_prompt: str,
     user_msg: str,
     *,
-    max_tokens: int    = 4000,
+    max_tokens: int    = 8000,
     temperature: float = 0.2,
     timeout: int       = 60,
+    reasoning_effort: str | None = None,
 ) -> dict:
     """
     Call DeepSeek and return the response parsed as a JSON dict.
 
     Automatically strips accidental markdown fences (```json ... ```) before
     parsing. Raises RuntimeError on transport, API, or JSON parse failure.
+    See module docstring for what reasoning_effort does and why temperature
+    has no effect under thinking mode.
     """
     raw = _raw_call(
         system_prompt, user_msg,
         max_tokens=max_tokens,
         temperature=temperature,
         timeout=timeout,
+        reasoning_effort=reasoning_effort,
     )
 
     # Strip markdown fences if the model adds them despite instructions

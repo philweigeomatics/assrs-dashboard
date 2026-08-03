@@ -83,7 +83,7 @@ def generate_sector_theme(raw_input: str) -> dict:
         # ordered upstream→downstream with bilingual labels. JSON output is
         # often 1.5–2k tokens AND the model spends a long reasoning trace
         # picking which items belong in which layer.
-        max_tokens=8000,
+        max_tokens=14000,
         temperature=0.2,
     )
 
@@ -155,7 +155,7 @@ def match_sector_theme(sector_name: str, all_themes: list) -> dict | None:
                     for t in pool
                 ],
             }),
-            max_tokens=4000,
+            max_tokens=8000,
             temperature=0.0,
         )
         matched_id = result.get("matched_id")
@@ -253,7 +253,7 @@ def match_sectors_to_themes_batch(sectors: list, all_themes: list) -> dict:
                     for t in pool_union
                 ],
             }),
-            max_tokens=4000,
+            max_tokens=8000,
             temperature=0.0,
         )
         matches = result.get("matches", {})
@@ -351,7 +351,7 @@ def classify_ticker_across_themes(
 
     result = ai_client.call_json(
         _CLASSIFY_BATCH_PROMPT, user_msg,
-        max_tokens=5000,
+        max_tokens=9000,
         temperature=0.1,
     )
 
@@ -418,7 +418,7 @@ def classify_ticker_in_theme(
 
     result = ai_client.call_json(
         _CLASSIFY_PROMPT, user_msg,
-        max_tokens=4000,
+        max_tokens=8000,
         temperature=0.1,
     )
 

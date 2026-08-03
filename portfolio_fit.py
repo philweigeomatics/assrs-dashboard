@@ -838,7 +838,7 @@ STYLE TILTS (z vs the existing book):
 
     return ai_client.call_json(
         _EXPLAIN_PROMPT, user_msg,
-        max_tokens=3500,
+        max_tokens=7000,
         temperature=0.2,
     )
 
@@ -952,6 +952,6 @@ def analyse_business_overlap(result: dict, positions: pd.DataFrame,
 
     return ai_client.call_json(
         _OVERLAP_PROMPT, user_msg,
-        max_tokens=3500,
+        max_tokens=7000,
         temperature=0.2,
     )
