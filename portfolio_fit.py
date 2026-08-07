@@ -50,6 +50,11 @@ MIN_OVERLAP_DAYS = 120          # below this the panel flags low confidence
 RECENT_WINDOW = 60              # trading days for the "recent" correlation
 VAR_CONFIDENCE = 0.95
 
+# Holdings sent to the business-overlap AI call. Bounds the reasoning burden,
+# which scales with position count and is what exhausted the token budget on
+# large mandates. Quantitative panel is unaffected — it always uses every holding.
+_AI_MAX_HOLDINGS = 15
+
 
 # ── Window ────────────────────────────────────────────────────────────────────
 
@@ -838,7 +843,14 @@ STYLE TILTS (z vs the existing book):
 
     return ai_client.call_json(
         _EXPLAIN_PROMPT, user_msg,
-        max_tokens=7000,
+        # Left at the default (high) reasoning effort deliberately: this call is
+        # asked to find where metrics disagree with each other, which is the
+        # analytical part worth paying for. Unlike the overlap call its input is
+        # fixed-size — pairs capped at 5, industries at 8, tilts fixed — so the
+        # reasoning burden does not grow with portfolio size. Budget still
+        # raised off 7000, since that is the figure that proved insufficient
+        # for the sibling call.
+        max_tokens=12000,
         temperature=0.2,
     )
 
@@ -866,6 +878,10 @@ Assess:
 
 RULES:
 - Only name holdings that were actually given to you. Never invent tickers.
+- Report only real findings. OMIT any holding with no meaningful relationship
+  rather than emitting a "none"/"low" entry to be exhaustive — an absent entry
+  and a "no link" entry mean the same thing, and the short list is the useful
+  one. Do not feel obliged to cover every holding in every section.
 - If you are unsure about a company, say so and set confidence to "low" rather
   than guessing. A wrong supply-chain claim is worse than an absent one.
 - Explain the quantitative numbers you were given; do not contradict them, and
@@ -907,8 +923,21 @@ def analyse_business_overlap(result: dict, positions: pd.DataFrame,
     meta = result["meta"].set_index("ticker")
     wmap = positions.set_index("ticker")["weight"].to_dict()
 
+    # Cap how many holdings the model must reason about. The schema asks for a
+    # per-holding judgement across four dimensions, so the reasoning burden
+    # scales with position count — a large mandate is what exhausts the token
+    # budget before any output is written. Keep the biggest positions plus the
+    # most-correlated names, which are the ones that actually drive the overlap
+    # question; a 0.5% position's business overlap barely moves the verdict.
+    used = list(result["holdings_used"])
+    keep = sorted(used, key=lambda t: -wmap.get(t, 0.0))[:_AI_MAX_HOLDINGS]
+    for t in result["pairs"]["ticker"].head(5):
+        if t in used and t not in keep:
+            keep.append(t)
+    omitted = len(used) - len(keep)
+
     holding_lines = []
-    for t in result["holdings_used"]:
+    for t in keep:
         holding_lines.append(
             f"- {t} {meta.at[t, 'name']} | 行业 {meta.at[t, 'industry']} "
             f"| 权重 {wmap.get(t, 0):.1%}"
@@ -937,7 +966,9 @@ def analyse_business_overlap(result: dict, positions: pd.DataFrame,
         f"CANDIDATE: {result['candidate']} {result['candidate_name']} "
         f"| 行业 {m['cand_industry']} | 拟配置权重 {result['new_weight']:.1%}"
         f"{mix_text}\n\n"
-        f"CURRENT HOLDINGS ({len(holding_lines)}):\n" + "\n".join(holding_lines) + "\n\n"
+        f"CURRENT HOLDINGS ({len(holding_lines)}"
+        f"{f' of {len(used)} — smallest {omitted} omitted as immaterial' if omitted else ''}"
+        f"):\n" + "\n".join(holding_lines) + "\n\n"
         f"QUANTITATIVE RESULTS (window {result['window']['start']} to "
         f"{result['window']['end']}, {result['window']['sessions']} sessions):\n"
         f"- 与组合相关性 {m['corr']:.2f} (近{RECENT_WINDOW}日 {m['corr_recent']:.2f}, "
@@ -952,6 +983,13 @@ def analyse_business_overlap(result: dict, positions: pd.DataFrame,
 
     return ai_client.call_json(
         _OVERLAP_PROMPT, user_msg,
-        max_tokens=7000,
+        # Observed failure: 6999 of 7000 tokens went to the reasoning trace
+        # before a single output token. This call is company recall plus
+        # classification, not multi-step derivation, so "low" effort is the
+        # right lever — the earlier judgement to leave it at the "high" default
+        # was wrong. max_tokens raised as headroom on top, since the JSON body
+        # itself is substantial when several holdings genuinely overlap.
+        max_tokens=14000,
         temperature=0.2,
+        reasoning_effort="low",
     )
