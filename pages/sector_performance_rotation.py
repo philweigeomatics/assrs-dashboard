@@ -12,6 +12,7 @@ from sector_utils import (
     load_csi300_with_regime,
     build_sector_panels,
     create_performance_comparison_chart,
+    create_sector_return_heatmap,
     create_rolling_correlation_chart,
     compute_rrg_series,
     create_rrg_chart,
@@ -52,34 +53,78 @@ if not selected_sectors:
     st.stop()
 
 # ---- Performance ----
-st.subheader("📊 Sector Performance Comparison")
+st.subheader("📊 板块共振还是轮动？ · Moving together, or rotating?")
+st.caption(
+    "Each cell is one sector's move on one day — **红涨绿跌**. A column of one "
+    "colour means the whole market moved as one that day, so only timing "
+    "mattered; a column of mixed colour means sectors rotated against each "
+    "other, which is when picking sectors pays. Rows are ordered by cumulative "
+    "return over the window, shown next to each name. The strip underneath is "
+    "the spread between sectors each day."
+)
 lookback_days = st.slider("Lookback days", 30, 180, 60, 10)
-fig = create_performance_comparison_chart(v2hist, lookback_days, selected_sectors)
+fig = create_sector_return_heatmap(v2hist, lookback_days, selected_sectors)
 if fig:
     st.plotly_chart(fig, use_container_width=True)
 else:
-    st.error("Unable to create performance chart")
+    st.error("Not enough overlapping sector data to draw the heatmap.")
+
+with st.expander("📈 Cumulative lines (base 100)", expanded=False):
+    st.caption(
+        "The old view. Good for reading a level on a given date; poor at "
+        "showing whether sectors moved together, which is what the heatmap adds."
+    )
+    _line_fig = create_performance_comparison_chart(v2hist, lookback_days, selected_sectors)
+    if _line_fig:
+        st.plotly_chart(_line_fig, use_container_width=True)
 
 st.markdown("---")
 
 # ---- Rolling correlation (on excess returns now) ----
-st.subheader("📊 Rolling Excess-Return Correlations")
-st.caption("Correlations computed on **excess returns vs CSI300** so co-movement with the market is stripped out.")
+st.subheader("📊 有没有共同驱动？ · Do these sectors share a driver?")
+st.caption(
+    "Correlation over time, computed on **excess returns vs CSI300** — the "
+    "whole-market move is subtracted first. Two sectors can look 80% correlated "
+    "just because the index moved; here a high reading means they share "
+    "something *specific*, beyond both being A-shares. Watch for a line that "
+    "falls away: that's a relationship breaking down."
+)
 
-col1, col2 = st.columns([1, 2])
-with col1:
-    reference_sector = st.selectbox("Reference Sector", all_sectors)
-    window = st.slider("Rolling Window (days)", 5, 60, 20, 5)
-with col2:
-    compare_sectors = st.multiselect(
-        "Compare Against",
-        [s for s in all_sectors if s != reference_sector],
-        default=[s for s in all_sectors if s != reference_sector][:4]
-    )
+if len(selected_sectors) < 2:
+    st.info("Pick at least 2 sectors above to see rolling correlations.")
+else:
+    # This section used to read all_sectors while every other section on the
+    # page reads selected_sectors, so it ignored the picker at the top. Both
+    # widgets now derive from the same selection.
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        # Reset the reference if the top selection no longer contains it.
+        if st.session_state.get("rc_ref") not in selected_sectors:
+            st.session_state["rc_ref"] = selected_sectors[0]
+        reference_sector = st.selectbox("Reference sector", selected_sectors, key="rc_ref")
+        window = st.slider("Rolling Window (days)", 5, 60, 20, 5)
 
-if compare_sectors:
-    fig = create_rolling_correlation_chart(exret_panel, reference_sector, compare_sectors, window)
-    st.plotly_chart(fig, use_container_width=True)
+    _avail = [s for s in selected_sectors if s != reference_sector]
+
+    # A keyed widget keeps its own state, so `default=` alone would never
+    # refresh it — that's the second half of why this pane looked frozen.
+    # Re-seed only when the selection or the reference actually changes, so a
+    # deliberate hand-picked comparison isn't wiped on every rerun.
+    _sig = (tuple(sorted(selected_sectors)), reference_sector)
+    if st.session_state.get("_rc_sig") != _sig:
+        st.session_state["_rc_sig"] = _sig
+        st.session_state["rc_compare"] = _avail[:4]
+
+    with col2:
+        compare_sectors = st.multiselect("Compare against", _avail, key="rc_compare")
+
+    if compare_sectors:
+        fig = create_rolling_correlation_chart(
+            exret_panel, reference_sector, compare_sectors, window
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.caption("Pick at least one sector to compare against.")
 
 st.markdown("---")
 

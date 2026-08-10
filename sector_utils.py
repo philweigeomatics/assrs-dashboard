@@ -676,6 +676,104 @@ def create_performance_comparison_chart(hist_df, lookback_days=60, selected_sect
     return fig
 
 
+def create_sector_return_heatmap(hist_df, lookback_days=60, selected_sectors=None):
+    """
+    Daily-return heatmap — sectors as rows, trading days as columns.
+
+    Answers "are the sectors moving together or rotating?", which the
+    normalised line chart structurally cannot: a line chart shows accumulated
+    POSITION, while co-movement is about daily DIRECTION. Two sectors can end
+    the window far apart while having moved in lockstep every single day.
+
+    Reading it:
+      - a column of one colour  → the whole market moved as one that day;
+        sector selection didn't matter, only timing did
+      - a column of mixed colour → rotation; this is when picking sectors pays
+      - a row that stays red while others are green → a genuine leader
+
+    Red = up, green = down (A-share convention).
+
+    The strip underneath is cross-sectional dispersion — the spread of sector
+    returns on each day, i.e. one number for "how far apart did they move".
+    Same measure the Interaction Lab's Market Gate percentile-ranks.
+
+    Returns None when there isn't enough data to draw anything.
+    """
+    latest_date = hist_df['Date'].max()
+    start_date = latest_date - pd.Timedelta(days=lookback_days)
+    recent = hist_df[hist_df['Date'] >= start_date].copy()
+
+    pivot = recent.pivot_table(index='Date', columns='Sector', values='Close')
+
+    if selected_sectors:
+        cols = [s for s in selected_sectors if s in pivot.columns]
+        if cols:
+            pivot = pivot[cols]
+    if 'MARKET_PROXY' in pivot.columns:
+        if not selected_sectors or 'MARKET_PROXY' not in selected_sectors:
+            pivot = pivot.drop(columns=['MARKET_PROXY'])
+
+    pivot = pivot.dropna(axis=1, how='all').sort_index()
+    if pivot.empty or pivot.shape[1] == 0 or pivot.shape[0] < 3:
+        return None
+
+    rets = pivot.pct_change().iloc[1:] * 100.0
+    if rets.empty:
+        return None
+
+    # Cumulative move over the window — used to order rows and to label them,
+    # so the "who won" read survives without needing a second chart.
+    first, last = pivot.iloc[0], pivot.iloc[-1]
+    cum = ((last / first) - 1.0) * 100.0
+    order = cum.sort_values(ascending=False).index.tolist()
+    rets = rets[order]
+
+    # Symmetric colour range clipped at the 95th percentile, so one limit-up
+    # day can't wash the rest of the grid out to white.
+    absvals = np.abs(rets.values.astype(float))
+    absvals = absvals[np.isfinite(absvals)]
+    zmax = float(np.percentile(absvals, 95)) if absvals.size else 1.0
+    zmax = max(zmax, 0.5)
+
+    dates = [d.strftime('%Y-%m-%d') for d in rets.index]
+    ylabels = [f"{s}　{cum[s]:+.1f}%" for s in order]
+    dispersion = rets.std(axis=1)
+
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.78, 0.22], vertical_spacing=0.06,
+    )
+
+    fig.add_trace(go.Heatmap(
+        z=rets.T.values, x=dates, y=ylabels,
+        colorscale=[[0.0, '#15803d'], [0.5, '#f8fafc'], [1.0, '#dc2626']],
+        zmid=0, zmin=-zmax, zmax=zmax,
+        xgap=1, ygap=2,
+        colorbar=dict(title='日涨跌%', ticksuffix='%', len=0.72, y=0.62),
+        hovertemplate='%{y}<br>%{x}<br>%{z:+.2f}%<extra></extra>',
+    ), row=1, col=1)
+
+    fig.add_trace(go.Bar(
+        x=dates, y=dispersion.values,
+        marker_color='#94a3b8', showlegend=False,
+        hovertemplate='%{x}<br>离散度 dispersion %{y:.2f}%<extra></extra>',
+    ), row=2, col=1)
+
+    fig.update_layout(
+        title=f'Sector Daily Returns — Last {lookback_days} Days '
+              f'(红涨绿跌 · rows ordered by cumulative return)',
+        height=max(420, 46 * len(order) + 190),
+        template='plotly_white',
+        margin=dict(l=10, r=10, t=60, b=10),
+        bargap=0.15,
+    )
+    fig.update_yaxes(autorange='reversed', row=1, col=1)
+    fig.update_yaxes(title_text='离散度', row=2, col=1)
+    fig.update_xaxes(showgrid=False, row=1, col=1)
+    fig.update_xaxes(showgrid=False, row=2, col=1)
+    return fig
+
+
 def compute_rrg_series(close_panel, csi300_df, sectors=None,
                        rs_window=20, mom_window=5):
     """
