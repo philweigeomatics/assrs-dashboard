@@ -17,8 +17,7 @@ from sector_utils import (
     load_csi300_with_regime,
     create_sector_chart
 )
-from nav_helpers import page_link_button
-from streamlit_plotly_events import plotly_events
+import streamlit.components.v1 as components
 
 import auth_manager
 auth_manager.require_login()
@@ -153,76 +152,81 @@ else:
         tiling=dict(pad=2),
     ))
     fig_hm.update_layout(height=560, margin=dict(t=10, l=10, r=10, b=10))
-
-    # plotly_events instead of st.plotly_chart so a click on a box can be read
-    # in Python. st.plotly_chart's on_select only captures box/lasso selection,
-    # which a treemap never emits — it registers no click listener at all.
-    # Verified: the treemap does fire plotly_click, the component forwards it,
-    # and the rerun does NOT re-render the chart, so Plotly's own click-to-zoom
-    # keeps working and the current zoom level survives the round trip.
-    # Needs an explicit height because the component renders in an iframe.
-    _hm_clicked = plotly_events(
-        fig_hm, click_event=True, override_height=580, key="hm_click",
-    )
-
-    # Map the clicked box back to a ticker and prime the picker below. The
-    # component keeps returning the same click on every later rerun, so only
-    # act when the point actually changes — otherwise it would keep stomping
-    # on a stock the user picked by hand from the dropdown afterwards.
-    if _hm_clicked:
-        _pt = _hm_clicked[0].get("pointNumber")
-        if _pt is not None and st.session_state.get("_hm_last_click") != _pt:
-            st.session_state["_hm_last_click"] = _pt
-            if 0 <= _pt < len(tickers):
-                _clicked_ticker = tickers[_pt]
-                # Sector and root boxes carry an empty ticker — ignore those and
-                # let them just zoom, which is what clicking a sector should do.
-                if _clicked_ticker:
-                    st.session_state["hm_jump_pick"] = _clicked_ticker
+    st.plotly_chart(fig_hm, use_container_width=True)
     st.caption(
         f"box 大小 = 流通市值 · 颜色 = {_fmt_d} 当日涨跌（红涨绿跌）· "
         "板块 % 为成分股市值加权平均 · 板块分组与市场广度一致。"
         "　**点击个股方块可填入下方研报入口**（点击板块方块仍为放大）。"
     )
 
-    # ── Jump to the Equity Report for any stock in the heatmap ────────────────
-    # Clicking a box itself can't do this: single-click and double-click are
-    # both already bound by Plotly to treemap zoom / zoom-reset, and Streamlit
-    # registers no click listener on the chart at all — only box/lasso select,
-    # which a treemap never emits. So the jump lives next to the chart instead.
-    # Sorted by move size so the boxes that stand out visually are at the top.
-    _jump_df = _hm_df.reindex(
-        _hm_df["pct_chg"].abs().sort_values(ascending=False).index
+    # ── Clicked-stock link ────────────────────────────────────────────────────
+    # One line of text under the chart that turns into a real <a> for whichever
+    # stock box was last clicked, so it can be right-clicked / middle-clicked
+    # into a new tab like any other link.
+    #
+    # Done entirely client-side rather than through a Streamlit widget: the
+    # ticker already rides along in the treemap's customdata, so a listener on
+    # Plotly's own click event can rewrite the anchor in place. That means no
+    # rerun, no round trip to Python, and — importantly — the chart is still a
+    # plain st.plotly_chart, so click-to-zoom is untouched.
+    st.markdown(
+        '<div id="hm-jump-slot" style="min-height:1.9rem;padding:2px 0;'
+        'font-size:0.9rem;color:rgba(49,51,63,0.6);">'
+        '点击上方个股方块以生成研报链接 · Click a stock box above to get its report link'
+        '</div>',
+        unsafe_allow_html=True,
     )
-    _jump_labels = {
-        r["ticker"]: f'{r["ticker"]} · {r["stock"]} · {r["pct_chg"]:+.2f}% · {r["sector"]}'
-        for _, r in _jump_df.iterrows()
-    }
+    components.html(
+        """
+<script>
+(function () {
+  const doc = window.parent.document;
 
-    _j1, _j2 = st.columns([3, 1])
-    with _j1:
-        _jump_pick = st.selectbox(
-            "📄 打开个股研报 · Open Equity Report",
-            options=[""] + list(_jump_labels.keys()),
-            format_func=lambda t: "点击热力图方块，或搜索代码/名称… Click a box, or search…"
-                                  if t == "" else _jump_labels.get(t, t),
-            key="hm_jump_pick",
-            help="Click a stock box on the heatmap above, or type a code or "
-                 "name here. Sorted by today's move.",
-        )
-    with _j2:
-        st.write("")
-        st.write("")
-        page_link_button(
-            "equity-brief",
-            "📄 Equity Report",
-            params={"ticker": _jump_pick},
-            style="primary",
-            disabled=not _jump_pick,
-            use_container_width=True,
-            help="Open this stock's Equity Report. "
-                 "Middle-click / right-click → Open in new tab.",
-        )
+  function findTreemap() {
+    return [...doc.querySelectorAll('.js-plotly-plot')].find(
+      g => g.data && g.data[0] && g.data[0].type === 'treemap'
+    );
+  }
+
+  function attach() {
+    const gd = findTreemap();
+    const slot = doc.getElementById('hm-jump-slot');
+    if (!gd || !slot) return false;
+    if (gd.__hmJumpBound) return true;   // survive Streamlit re-renders
+    gd.__hmJumpBound = true;
+
+    gd.on('plotly_click', function (e) {
+      const pt = e.points && e.points[0];
+      if (!pt || !pt.customdata) return;
+      const ticker = pt.customdata[1];
+      // Sector / root boxes carry an empty ticker — those just zoom.
+      if (!ticker) return;
+      const label = (pt.label || '').replace(/</g, '&lt;');
+      slot.innerHTML =
+        '<a href="/equity-brief?ticker=' + encodeURIComponent(ticker) + '" ' +
+        'target="_self" style="font-size:0.95rem;font-weight:600;' +
+        'color:rgb(255,75,75);text-decoration:none;">' +
+        '\\u{1F4C4} ' + ticker + ' ' + label + ' — 打开个股研报 Open Equity Report</a>' +
+        '<span style="font-size:0.8rem;color:rgba(49,51,63,0.55);"> ' +
+        '（右键可在新标签页打开 · right-click to open in a new tab）</span>';
+    });
+    return true;
+  }
+
+  // The chart may not exist yet on first paint, and Streamlit re-renders the
+  // page on any widget interaction elsewhere, which replaces the graph div.
+  if (!attach()) {
+    let tries = 0;
+    const iv = setInterval(function () {
+      if (attach() || ++tries > 40) clearInterval(iv);
+    }, 250);
+  }
+  setInterval(attach, 2000);   // cheap: no-ops once already bound
+})();
+</script>
+        """,
+        height=0,
+    )
 
 # ===================================================================
 # SECTION 1: CSI 300 INDEX WITH VOLATILITY INDICATORS
