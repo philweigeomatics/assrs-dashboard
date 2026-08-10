@@ -233,10 +233,16 @@ else:
     # refresh it — that's the second half of why this pane looked frozen.
     # Re-seed only when the selection or the reference actually changes, so a
     # deliberate hand-picked comparison isn't wiped on every rerun.
+    #
+    # Seed with EVERY available sector, not a first-N slice. Slicing made the
+    # options list follow the top picker while the plotted lines didn't: add a
+    # sector up top, watch the chart not change, conclude it's still broken.
+    # The top picker is already the place where the choice is narrowed — this
+    # pane shouldn't quietly re-narrow it.
     _sig = (tuple(sorted(selected_sectors)), reference_sector)
     if st.session_state.get("_rc_sig") != _sig:
         st.session_state["_rc_sig"] = _sig
-        st.session_state["rc_compare"] = _avail[:4]
+        st.session_state["rc_compare"] = _avail
 
     with col2:
         compare_sectors = st.multiselect("Compare against", _avail, key="rc_compare")
