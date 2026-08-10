@@ -676,6 +676,93 @@ def create_performance_comparison_chart(hist_df, lookback_days=60, selected_sect
     return fig
 
 
+def build_rotation_digest(close_panel, exret_panel, csi300_df, sectors,
+                          lookback=60, history_window=252):
+    """
+    Assemble the numbers that describe the CURRENT rotation regime, in one dict.
+
+    Exists because this page's problem isn't any single chart — it's that six
+    sections each answer a fragment and nothing states the conclusion. This
+    gathers the fragments so one reader (human or model) can state it.
+
+    Everything here is measured over the same window so the pieces are
+    comparable, and dispersion is percentile-ranked against `history_window`
+    rather than compared to an absolute threshold — the same treatment the
+    Interaction Lab's Market Gate applies, so the two pages agree.
+
+    Returns None when there isn't enough overlapping data.
+    """
+    cols = [s for s in sectors if s in close_panel.columns]
+    if len(cols) < 2:
+        return None
+
+    cp = close_panel[cols].dropna(how='all').sort_index()
+    if cp.shape[0] < 5:
+        return None
+    win = cp.tail(lookback)
+    if win.shape[0] < 5:
+        return None
+
+    out = {
+        'start': win.index.min().strftime('%Y-%m-%d'),
+        'end':   win.index.max().strftime('%Y-%m-%d'),
+        'sessions': int(win.shape[0]),
+        'lookback': int(lookback),
+        'n_sectors': len(cols),
+    }
+
+    cum = ((win.iloc[-1] / win.iloc[0]) - 1.0) * 100.0
+    out['sector_returns'] = cum.sort_values(ascending=False).round(2).to_dict()
+
+    # Benchmark over the same window, so "leading" means leading something.
+    out['csi300_return'] = None
+    if csi300_df is not None and 'Close' in csi300_df.columns:
+        c = csi300_df['Close'].dropna()
+        c = c[(c.index >= win.index.min()) & (c.index <= win.index.max())]
+        if len(c) > 1:
+            out['csi300_return'] = round(float((c.iloc[-1] / c.iloc[0] - 1.0) * 100.0), 2)
+
+    # Dispersion: how far apart the sectors moved, ranked against its own past.
+    ex = exret_panel[cols].dropna(how='all')
+    out['dispersion_pctile'] = None
+    out['dispersion'] = None
+    if not ex.empty:
+        disp_daily = ex.std(axis=1)
+        disp_roll = disp_daily.rolling(lookback).mean().dropna()
+        cur = disp_daily.tail(lookback).mean()
+        if len(disp_roll) >= 10 and pd.notna(cur):
+            out['dispersion'] = round(float(cur) * 100, 3)
+            hist = disp_roll.tail(history_window)
+            out['dispersion_pctile'] = round(float((hist < cur).sum() / len(hist)), 3)
+
+    # Leadership churn — how often the best sector of the day changes. High
+    # churn with high dispersion is noise, not a trend worth chasing.
+    rw = win.pct_change().dropna(how='all')
+
+    # Average pairwise correlation on RAW returns. It must not be computed on
+    # excess returns: those have the market factor already subtracted, and
+    # correlation is scale-invariant, so an excess-return version reads the
+    # same in a co-moving market as in a rotating one and cannot answer "do
+    # they move together" at all. Verified against synthetic regimes.
+    if rw.shape[0] >= 10 and rw.shape[1] >= 2:
+        cm = rw.corr()
+        iu = np.triu_indices_from(cm.values, k=1)
+        vals = cm.values[iu]
+        vals = vals[np.isfinite(vals)]
+        if vals.size:
+            out['avg_pairwise_corr'] = round(float(vals.mean()), 3)
+
+    if not rw.empty:
+        leaders = rw.idxmax(axis=1).dropna()
+        if len(leaders) > 1:
+            switches = int((leaders != leaders.shift(1)).sum() - 1)
+            out['leader_switches'] = switches
+            out['leader_switch_rate'] = round(switches / max(len(leaders) - 1, 1), 3)
+            out['days_in_lead'] = leaders.value_counts().head(4).to_dict()
+
+    return out
+
+
 def create_sector_return_heatmap(hist_df, lookback_days=60, selected_sectors=None):
     """
     Daily-return heatmap — sectors as rows, trading days as columns.

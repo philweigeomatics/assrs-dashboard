@@ -3,9 +3,13 @@ Sector Analysis - Performance & Rotation
 Track sector performance, true RRG-style rotation, lead-lag interactions,
 and a next-rotation read from the transition matrix.
 """
+import json
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+
+import ai_client
 
 from sector_utils import (
     load_v2_data,
@@ -13,6 +17,7 @@ from sector_utils import (
     build_sector_panels,
     create_performance_comparison_chart,
     create_sector_return_heatmap,
+    build_rotation_digest,
     create_rolling_correlation_chart,
     compute_rrg_series,
     create_rrg_chart,
@@ -77,6 +82,124 @@ with st.expander("📈 Cumulative lines (base 100)", expanded=False):
     _line_fig = create_performance_comparison_chart(v2hist, lookback_days, selected_sectors)
     if _line_fig:
         st.plotly_chart(_line_fig, use_container_width=True)
+
+st.markdown("---")
+
+# ---- AI read of the whole rotation picture ----
+# The page's difficulty was never one chart; it's that each section answers a
+# fragment and none states the conclusion. This sends the fragments as one
+# bundle and asks for the conclusion. Behind a button — one DeepSeek call.
+_ROT_PROMPT = """\
+You are a senior Chinese A-share strategist briefing a portfolio manager.
+
+You are given measurements of the CURRENT sector regime. Explain what they say
+TOGETHER — the state of the market, not a restatement of each number.
+
+Answer, in this order:
+1. Is this a rotating market or a co-moving one? Dispersion percentile and
+   average pairwise correlation decide this, not the individual returns.
+2. Who is actually leading, and is that leadership stable or churning? A high
+   leader-switch rate means today's winner tells you little about tomorrow's.
+3. Does sector selection even pay right now? When dispersion sits low in its
+   own history, sectors move as one and timing matters more than picking. Say
+   so plainly when that is the case.
+
+RULES:
+- Dispersion is percentile-ranked against its own past year, so "high" means
+  high FOR THIS MARKET, not high in absolute terms.
+- Sector returns are relative to the CSI 300 figure given; a sector up 3% in a
+  market up 5% is lagging, not winning.
+- Do not invent numbers, forecast prices, or recommend specific trades. This is
+  a description of market structure.
+- Write in Chinese. Metric names may stay in English.
+- Return ONLY raw JSON (start { end }). No markdown fences.
+
+Schema:
+{
+  "headline": "One sentence: rotating, co-moving, or in between.",
+  "regime": "轮动 | 共振 | 混合",
+  "leadership": "Who leads and whether it is holding or churning.",
+  "selection_pays": "Whether picking sectors is worth it right now, and why.",
+  "watch_outs": ["Caveats — short window, unstable leadership, etc."],
+  "bottom_line": "2-3 sentences a PM could act on."
+}
+"""
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _rotation_ai_read(digest_json: str, _nonce: int) -> dict:
+    """Cached on the digest itself, so identical inputs don't re-bill a call."""
+    return ai_client.call_json(
+        _ROT_PROMPT, digest_json,
+        max_tokens=9000,
+        temperature=0.3,
+        # Reading a fixed set of supplied statistics — classification and
+        # explanation, not multi-step derivation.
+        reasoning_effort="low",
+    )
+
+
+st.subheader("🤖 综合解读 · What all of this adds up to")
+st.caption(
+    "Bundles the numbers behind every section on this page — dispersion vs its "
+    "own history, each sector's return against CSI 300, how often leadership "
+    "changes — and asks for the one conclusion the charts don't state."
+)
+
+_digest = build_rotation_digest(
+    close_panel, exret_panel, csi300_df, selected_sectors, lookback=lookback_days
+)
+
+if _digest is None:
+    st.info("Not enough overlapping sector data for a summary at this window.")
+else:
+    if st.button("🤖 解读当前板块格局 · Read the current regime", key="rot_ai_btn"):
+        with st.spinner("Asking DeepSeek to read the regime…"):
+            try:
+                st.session_state["rot_ai"] = {
+                    "data": _rotation_ai_read(json.dumps(_digest, ensure_ascii=False), 0)
+                }
+            except Exception as exc:
+                st.session_state["rot_ai"] = {"error": str(exc)}
+
+    _r = st.session_state.get("rot_ai")
+    if _r and "error" in _r:
+        st.error(f"AI read failed: {_r['error']}")
+    elif _r:
+        _d = _r["data"]
+        st.info(f"**{_d.get('headline', '—')}**")
+        m1, m2 = st.columns(2)
+        with m1:
+            st.metric("判定 Regime", _d.get("regime", "—"))
+            if _digest.get("dispersion_pctile") is not None:
+                st.metric("离散度百分位 Dispersion pctile",
+                          f"{_digest['dispersion_pctile'] * 100:.0f}%")
+        with m2:
+            if _digest.get("avg_pairwise_corr") is not None:
+                st.metric("平均两两相关 Avg pairwise corr",
+                          f"{_digest['avg_pairwise_corr']:.2f}")
+            if _digest.get("leader_switch_rate") is not None:
+                st.metric("领涨切换率 Leader switch rate",
+                          f"{_digest['leader_switch_rate'] * 100:.0f}%")
+
+        if _d.get("leadership"):
+            st.markdown("**领涨情况 Leadership**")
+            st.write(_d["leadership"])
+        if _d.get("selection_pays"):
+            st.markdown("**选板块值得吗 Does selection pay?**")
+            st.write(_d["selection_pays"])
+        for _w in _d.get("watch_outs") or []:
+            st.warning(_w)
+        if _d.get("bottom_line"):
+            st.success(_d["bottom_line"])
+        st.caption(
+            f"Window {_digest['start']} → {_digest['end']} "
+            f"({_digest['sessions']} sessions). Market-structure description, "
+            "not investment advice."
+        )
+
+    with st.expander("📋 Numbers sent to the model", expanded=False):
+        st.json(_digest)
 
 st.markdown("---")
 
