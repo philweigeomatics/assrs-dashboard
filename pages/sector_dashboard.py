@@ -13,10 +13,12 @@ import market_leverage as mlev
 import ai_client
 
 from sector_utils import (
-    load_v2_data, 
+    load_v2_data,
     load_csi300_with_regime,
     create_sector_chart
 )
+from nav_helpers import page_link_button
+from streamlit_plotly_events import plotly_events
 
 import auth_manager
 auth_manager.require_login()
@@ -151,11 +153,76 @@ else:
         tiling=dict(pad=2),
     ))
     fig_hm.update_layout(height=560, margin=dict(t=10, l=10, r=10, b=10))
-    st.plotly_chart(fig_hm, use_container_width=True)
+
+    # plotly_events instead of st.plotly_chart so a click on a box can be read
+    # in Python. st.plotly_chart's on_select only captures box/lasso selection,
+    # which a treemap never emits — it registers no click listener at all.
+    # Verified: the treemap does fire plotly_click, the component forwards it,
+    # and the rerun does NOT re-render the chart, so Plotly's own click-to-zoom
+    # keeps working and the current zoom level survives the round trip.
+    # Needs an explicit height because the component renders in an iframe.
+    _hm_clicked = plotly_events(
+        fig_hm, click_event=True, override_height=580, key="hm_click",
+    )
+
+    # Map the clicked box back to a ticker and prime the picker below. The
+    # component keeps returning the same click on every later rerun, so only
+    # act when the point actually changes — otherwise it would keep stomping
+    # on a stock the user picked by hand from the dropdown afterwards.
+    if _hm_clicked:
+        _pt = _hm_clicked[0].get("pointNumber")
+        if _pt is not None and st.session_state.get("_hm_last_click") != _pt:
+            st.session_state["_hm_last_click"] = _pt
+            if 0 <= _pt < len(tickers):
+                _clicked_ticker = tickers[_pt]
+                # Sector and root boxes carry an empty ticker — ignore those and
+                # let them just zoom, which is what clicking a sector should do.
+                if _clicked_ticker:
+                    st.session_state["hm_jump_pick"] = _clicked_ticker
     st.caption(
         f"box 大小 = 流通市值 · 颜色 = {_fmt_d} 当日涨跌（红涨绿跌）· "
         "板块 % 为成分股市值加权平均 · 板块分组与市场广度一致。"
+        "　**点击个股方块可填入下方研报入口**（点击板块方块仍为放大）。"
     )
+
+    # ── Jump to the Equity Report for any stock in the heatmap ────────────────
+    # Clicking a box itself can't do this: single-click and double-click are
+    # both already bound by Plotly to treemap zoom / zoom-reset, and Streamlit
+    # registers no click listener on the chart at all — only box/lasso select,
+    # which a treemap never emits. So the jump lives next to the chart instead.
+    # Sorted by move size so the boxes that stand out visually are at the top.
+    _jump_df = _hm_df.reindex(
+        _hm_df["pct_chg"].abs().sort_values(ascending=False).index
+    )
+    _jump_labels = {
+        r["ticker"]: f'{r["ticker"]} · {r["stock"]} · {r["pct_chg"]:+.2f}% · {r["sector"]}'
+        for _, r in _jump_df.iterrows()
+    }
+
+    _j1, _j2 = st.columns([3, 1])
+    with _j1:
+        _jump_pick = st.selectbox(
+            "📄 打开个股研报 · Open Equity Report",
+            options=[""] + list(_jump_labels.keys()),
+            format_func=lambda t: "点击热力图方块，或搜索代码/名称… Click a box, or search…"
+                                  if t == "" else _jump_labels.get(t, t),
+            key="hm_jump_pick",
+            help="Click a stock box on the heatmap above, or type a code or "
+                 "name here. Sorted by today's move.",
+        )
+    with _j2:
+        st.write("")
+        st.write("")
+        page_link_button(
+            "equity-brief",
+            "📄 Equity Report",
+            params={"ticker": _jump_pick},
+            style="primary",
+            disabled=not _jump_pick,
+            use_container_width=True,
+            help="Open this stock's Equity Report. "
+                 "Middle-click / right-click → Open in new tab.",
+        )
 
 # ===================================================================
 # SECTION 1: CSI 300 INDEX WITH VOLATILITY INDICATORS
