@@ -252,12 +252,16 @@ else:
 st.markdown("---")
 
 # ---- RRG ----
-st.subheader("🔄 Relative Rotation Graph (vs CSI300)")
+# Answer first, picture second. The quadrant breakdown always carried the
+# information; it just sat underneath a scatter that becomes unreadable once
+# several sectors each draw a trajectory. The chart is still here, one click
+# away, for anyone who wants to see the paths.
+st.subheader("🔄 谁在领先？ · Who is leading, and is it holding?")
 st.caption(
-    "Proper RRG: **x = RS-Ratio** (sector strength vs CSI300, centred at 100), "
-    "**y = RS-Momentum** (rate of change of RS-Ratio, centred at 100). "
-    "The tail shows the trajectory over the chosen window — direction of travel is "
-    "what tells you whether a sector is *rotating into* a quadrant or drifting out."
+    "Each sector's position against CSI 300, and whether that position is "
+    "**improving or fading**. Arrows show direction of travel. Sectors tend to "
+    "travel clockwise — 改善 → 领先 → 走弱 → 落后 — so a name in 走弱 is often "
+    "an exit signal even while it is still ahead."
 )
 
 c1, c2, c3 = st.columns(3)
@@ -268,8 +272,11 @@ with c2:
     mom_window = st.selectbox("Momentum lag (days)", [3, 5, 10, 20], index=1,
                               help="How many days back to compare RS-Ratio for momentum.")
 with c3:
-    tail_length = st.selectbox("Tail length (days)", [5, 10, 20, 40], index=1,
-                               help="How many trading days of trajectory to draw per sector.")
+    # Default 5 rather than 10: the tails are what turn this chart into
+    # spaghetti once more than a few sectors are selected.
+    tail_length = st.selectbox("Tail length (days)", [5, 10, 20, 40], index=0,
+                               help="How many trading days of trajectory to draw per sector. "
+                                    "Shorter is easier to read with many sectors.")
 
 if csi300_df is None or 'Close' not in (csi300_df.columns if csi300_df is not None else []):
     st.error("CSI300 data unavailable — cannot build RRG. Check data_manager.get_index_data_live('000300.SH').")
@@ -290,21 +297,31 @@ else:
     if fig is None or rotation_df is None or rotation_df.empty:
         st.warning("Not enough overlapping CSI300 / sector data to build the RRG.")
     else:
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Quadrant breakdown — labels match what create_rrg_chart writes
-        st.markdown("#### 📊 Quadrant Breakdown")
+        # Quadrant cards FIRST — this is the readable answer. Order runs the way
+        # sectors actually travel (clockwise) rather than by quadrant name, so
+        # the cycle reads left to right.
+        _QUADS = [
+            ("Improving", "改善 Improving", "behind but catching up",   "#185FA5"),
+            ("Leading",   "领先 Leading",   "ahead & still gaining",    "#0F6E56"),
+            ("Weakening", "走弱 Weakening", "ahead but losing steam",   "#854F0B"),
+            ("Lagging",   "落后 Lagging",   "behind & still sliding",   "#A32D2D"),
+        ]
         quad_cols = st.columns(4)
-        for idx, quadrant in enumerate(["Leading", "Improving", "Weakening", "Lagging"]):
-            with quad_cols[idx]:
-                in_quad = rotation_df[rotation_df['Quadrant'] == quadrant]
-                st.markdown(f"**{quadrant}** ({len(in_quad)})")
+        for _col, (_key, _title, _sub, _colour) in zip(quad_cols, _QUADS):
+            with _col:
+                in_quad = rotation_df[rotation_df["Quadrant"] == _key]
+                st.markdown(
+                    f"<div style='font-size:13px;font-weight:600;color:{_colour}'>{_title}"
+                    f" ({len(in_quad)})</div>"
+                    f"<div style='font-size:11px;color:rgba(120,120,120,.9);"
+                    f"margin:2px 0 8px'>{_sub}</div>",
+                    unsafe_allow_html=True,
+                )
                 if in_quad.empty:
-                    st.caption("None")
+                    st.caption("—")
                 else:
                     for _, row in in_quad.iterrows():
-                        # Direction-of-travel arrow from tail deltas
-                        dx, dy = row['ΔRS_Ratio_tail'], row['ΔRS_Momentum_tail']
+                        dx, dy = row["ΔRS_Ratio_tail"], row["ΔRS_Momentum_tail"]
                         if dx > 0 and dy > 0:
                             arrow = "↗"
                         elif dx < 0 and dy > 0:
@@ -313,12 +330,28 @@ else:
                             arrow = "↙"
                         else:
                             arrow = "↘"
-                        st.markdown(f"• {row['Sector']} {arrow}")
+                        st.markdown(
+                            f"<div style='font-size:14px;line-height:1.9'>{row['Sector']} "
+                            f"<span style='color:{_colour}'>{arrow}</span></div>",
+                            unsafe_allow_html=True,
+                        )
+
+        st.caption("顺时针轮动 · sectors travel clockwise: 改善 → 领先 → 走弱 → 落后 → 改善")
+
+        # Scatter second, and collapsed — it's the part that gets unreadable.
+        with st.expander("📉 散点图与轨迹 · Scatter chart & trajectories", expanded=False):
+            st.caption(
+                "**x = RS-Ratio** (strength vs CSI 300, centred at 100), "
+                "**y = RS-Momentum** (whether that strength is rising or falling, "
+                "also centred at 100). The tail is each sector's path over the last "
+                f"{tail_length} sessions. Shorten the tail above if it's crowded."
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
         with st.expander("Raw RRG table", expanded=False):
             st.dataframe(
                 rotation_df.round(2).sort_values(
-                    ['Quadrant', 'RS_Ratio'], ascending=[True, False]
+                    ["Quadrant", "RS_Ratio"], ascending=[True, False]
                 ),
                 hide_index=True,
             )
