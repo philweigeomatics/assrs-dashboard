@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 import data_manager as dm
 import market_leverage as mlev
 import ai_client
+import analysis_engine as ae
 
 from sector_utils import (
     load_v2_data,
@@ -257,6 +258,7 @@ with st.spinner("加载 CSI 300 数据..."):
 
 if chart_df is not None and not chart_df.empty:
     # Show current regime
+    latest_regime = None      # may stay None if the HMM produced nothing
     if 'Market_Regime' in chart_df.columns and chart_df['Market_Regime'].notna().any():
         latest_regime = chart_df['Market_Regime'].dropna().iloc[-1]
 
@@ -269,6 +271,64 @@ if chart_df is not None and not chart_df.empty:
             st.warning(f"⚠️ 当前波动状态: {latest_regime} (高波动)")
         else:
             st.error(f"🔴 当前波动状态: {latest_regime} (极端波动)")
+
+    # ── Anchored volatility regime, shown next to the HMM's answer ────────────
+    # The HMM above rolling z-scores its inputs over 90 days before the model
+    # sees them, so it is self-normalising: through a sustained turbulent
+    # stretch its trailing mean rises to meet the new level and the label drifts
+    # back to "Normal" while volatility is still objectively high. It answers
+    # "is today unusual versus recent days" — a different question.
+    #
+    # This panel fixes the ruler instead: Yang-Zhang volatility ranked against
+    # every session since the 2024-09-24 structural break. It also shows the
+    # LEVEL, which a bare label hides — "28% annualised, 91st percentile" is
+    # actionable in a way "High Volatility" is not.
+    #
+    # Needs more history than the 365-day chart load to reach past the anchor.
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _csi300_vol_history(lookback_days: int = 900):
+        return dm.get_index_data_live('000300.SH', lookback_days=lookback_days,
+                                      freq='daily')
+
+    try:
+        _vol_src = _csi300_vol_history()
+        _vr = ae.compute_vol_regime(_vol_src) if _vol_src is not None else {"ok": False}
+    except Exception as _exc:
+        _vr = {"ok": False, "reason": str(_exc)}
+
+    if _vr.get("ok"):
+        _v1, _v2, _v3 = st.columns([1.4, 1, 1])
+        with _v1:
+            getattr(st, _vr["kind"])(f"**{_vr['label']}** · {_vr['percentile']:.0%} 百分位")
+        with _v2:
+            st.metric("20日波动率 (年化)", f"{_vr['current']:.1%}")
+        with _v3:
+            st.metric("高波动门槛 High starts at", f"{_vr['hi_thresh']:.1%}")
+
+        _agree = None
+        if latest_regime:
+            _agree = any(k in latest_regime and k in _vr["label"]
+                         for k in ("High", "Low", "Normal"))
+
+        if _agree is False:
+            st.caption(
+                f"⚖️ 两种方法不一致 — HMM 说 **{latest_regime}**，锚定百分位说 "
+                f"**{_vr['label']}**。Disagreement is informative: the HMM reads "
+                "change *relative to recent months*, this reads level *against the "
+                "whole post-2024-09-24 market*. HMM higher usually means volatility "
+                "rose sharply but is not high outright."
+            )
+
+        st.caption(
+            f"{_vr['estimator']} · {_vr['window']}日窗口 · ranked against "
+            f"{_vr['n_obs']} sessions since {_vr['hist_start']} "
+            f"(anchor {_vr['anchor']}) · 中位数 {_vr['median']:.1%} · "
+            f"低波动 < {_vr['lo_thresh']:.1%} · as of {_vr['as_of']}"
+            + ("" if _vr["anchored"] else
+               " · ⚠️ 锚点后数据不足，已改用全部可用历史 (not anchored)")
+        )
+    elif _vr.get("reason"):
+        st.caption(f"锚定波动率分位暂不可用 · anchored volatility unavailable ({_vr['reason']})")
 
     # Prepare dates
     dates = chart_df.index.strftime('%Y-%m-%d').tolist()
