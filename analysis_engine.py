@@ -86,10 +86,16 @@ REGIME_METHOD = 'HMM'   # 'HMM', 'JUMP', or 'ATR'
 # change in A-shares. Statistical baselines (BB-width squeeze percentile,
 # RSI dynamic percentile bands) must NOT span this break — a "bottom 10%"
 # reading against the prior bear regime is not comparable to the same
-# reading in the current regime. We anchor on 2024-10-10 (after the Oct 1–7
-# National Day holiday and its chaotic first re-open week) so percentile
-# windows never reach before it. Update this if a future break occurs.
-REGIME_ANCHOR = pd.Timestamp("2024-10-10")
+# reading in the current regime. We anchor after the Oct 1–7 National Day
+# holiday and its chaotic re-open week so percentile windows never reach
+# before it. Update this if a future break occurs.
+#
+# SINGLE SOURCE OF TRUTH for the whole app — portfolio_fit imports this rather
+# than keeping its own copy. It previously held 2024-10-14 here and 2024-10-10
+# in portfolio_fit; two constants meaning the same thing drift apart silently.
+# Settled on the 14th, the Monday a full week after the 8 Oct re-open, so the
+# window starts clear of that week rather than two sessions into it.
+REGIME_ANCHOR = pd.Timestamp("2024-10-14")
 
 
 # ============================================================

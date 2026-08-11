@@ -42,7 +42,15 @@ from db_manager import db
 
 # Start of the post-2024-09-24 A-share regime. Analysis never reaches behind
 # this date, no matter how much history a stock has.
-REGIME_START = "2024-10-14"
+#
+# Imported rather than redeclared: analysis_engine.REGIME_ANCHOR is the single
+# source of truth. This module used to hold its own copy, which drifted four
+# days from the engine's — harmless numerically, but two constants meaning the
+# same thing will keep drifting. Kept as a string here because the window
+# helpers below work in dates, not Timestamps.
+from analysis_engine import REGIME_ANCHOR as _REGIME_ANCHOR
+
+REGIME_START = _REGIME_ANCHOR.strftime("%Y-%m-%d")
 
 MAX_LOOKBACK_YEARS = 3
 TRADING_DAYS = 242
