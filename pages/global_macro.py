@@ -190,18 +190,40 @@ else:
                 delta=f"{_r['pct']:+.2f}%",
                 delta_color="inverse",
             )
-            st.caption(f"{_r['cn']} · {_r['date']}")
+            # A bare date hides a 14-hour spread across these rows, so show the
+            # moment each session actually closed in Beijing terms, and say so
+            # when that market has since reopened and this number is a session
+            # behind what is happening there now.
+            _sx = _r.get("session") or {}
+            if _sx.get("ok"):
+                _age = _sx["hours_ago"]
+                _age_s = (f"{_age:.0f}小时前" if _age < 48
+                          else f"{_age / 24:.0f}天前")
+                st.caption(
+                    f"{_r['cn']} · 收盘 {_sx['closed_bj_str']} 北京时间 · {_age_s}"
+                    + ("　🟢 已开盘 trading now" if _sx["is_open"] else "")
+                )
+            else:
+                st.caption(f"{_r['cn']} · {_r['date']}")
 
     if _b["proxy"]:
         st.warning(
-            "⚠️ **These are US-listed ETF proxies, not the indices themselves.** "
-            "Twelve Data's free tier excludes index symbols, so Nikkei is read "
-            "through EWJ, KOSPI through EWY, and so on. Two consequences: they "
-            "are **USD-denominated**, so a move can come from the currency "
-            "rather than the market (a KRW slide shows up as EWY falling even "
-            "if KOSPI held), and they trade **US hours**, so a close is the US "
-            "session's read on that market, not the Tokyo or Seoul close. "
-            "For true index levels, Tushare's `index_global` is used "
-            "automatically when your account has the points for it."
+            "⚠️ **These are US-listed ETF proxies, not the indices themselves** "
+            "— Tushare `index_global` was unavailable, and Twelve Data's free "
+            "tier excludes index symbols, so Nikkei is read through EWJ, KOSPI "
+            "through EWY. The gap is not small: on 2026-08-18 **EWY showed "
+            "−8.13% while KOSPI actually closed −1.55%**. The proxies are "
+            "USD-denominated, so currency moves read as market moves, and they "
+            "trade **US hours**, so every row above carries a New York "
+            "timestamp rather than that market's own close. Treat direction as "
+            "indicative and ignore the magnitude."
+        )
+    else:
+        st.caption(
+            "Real index levels, each stamped with its own market's close "
+            "converted to Beijing time — the same trade date means very "
+            "different moments (Tokyo's close is 14:00 Beijing that day; "
+            "New York's is 04:00 Beijing the next), so a US number can be "
+            "hours old while an Asian one is a full session behind."
         )
     st.caption(f"Source: {_b['source']}")

@@ -53,13 +53,70 @@ TENORS: list[tuple[str, str, float]] = [
 # Overseas board. Tushare code first, Twelve Data ETF proxy second.
 # The proxies are US-listed and USD-denominated, so they carry FX and trade on
 # US hours — see fetch_global_board() for why that matters.
+#
+# tz / open / close are the market's OWN session, and they are here because a
+# bare trade_date lies by omission. Every row can read "2026-08-18" while
+# referring to moments 14 hours apart: Tokyo's close is 14:00 Beijing the same
+# day, New York's is 04:00 Beijing the NEXT day. At an A-share open, the US
+# number is hours old and the Tokyo number is a session behind with Tokyo
+# already trading again. session_context() turns the date into an actual moment.
 BOARD: list[dict] = [
-    {"label": "S&P 500",    "cn": "标普500",   "ts": "SPX",  "etf": "SPY"},
-    {"label": "Nasdaq",     "cn": "纳斯达克",   "ts": "IXIC", "etf": "QQQ"},
-    {"label": "Nikkei 225", "cn": "日经225",   "ts": "N225", "etf": "EWJ"},
-    {"label": "KOSPI",      "cn": "韩国综合",   "ts": "KS11", "etf": "EWY"},
-    {"label": "Hang Seng",  "cn": "恒生",      "ts": "HSI",  "etf": "EWH"},
+    {"label": "S&P 500",    "cn": "标普500",  "ts": "SPX",  "etf": "SPY",
+     "tz": "America/New_York", "open": (9, 30), "close": (16, 0)},
+    {"label": "Nasdaq",     "cn": "纳斯达克",  "ts": "IXIC", "etf": "QQQ",
+     "tz": "America/New_York", "open": (9, 30), "close": (16, 0)},
+    {"label": "Nikkei 225", "cn": "日经225",  "ts": "N225", "etf": "EWJ",
+     "tz": "Asia/Tokyo",       "open": (9, 0),  "close": (15, 0)},
+    {"label": "KOSPI",      "cn": "韩国综合",  "ts": "KS11", "etf": "EWY",
+     "tz": "Asia/Seoul",       "open": (9, 0),  "close": (15, 30)},
+    {"label": "Hang Seng",  "cn": "恒生",     "ts": "HSI",  "etf": "EWH",
+     "tz": "Asia/Hong_Kong",   "open": (9, 30), "close": (16, 0)},
 ]
+
+BEIJING = "Asia/Shanghai"
+
+
+def session_context(trade_date: str, tz_name: str,
+                    open_hm: tuple, close_hm: tuple, now=None) -> dict:
+    """
+    Turn a bare trade_date into a moment, expressed in Beijing time.
+
+    Returns when that session actually closed (Beijing), how many hours ago
+    that was, and whether the market is trading right now — which is the case
+    that matters: a Tokyo close from "today" is already superseded by the time
+    an A-share session opens the following morning.
+
+    Holidays are not modelled; `is_open` is a freshness hint, not a trading
+    calendar. Returns {"ok": False} on anything unparseable rather than raising.
+    """
+    from datetime import datetime, time as _time
+    from zoneinfo import ZoneInfo
+
+    try:
+        d = pd.to_datetime(str(trade_date)).date()
+        mtz = ZoneInfo(tz_name)
+        btz = ZoneInfo(BEIJING)
+        closed_local = datetime.combine(d, _time(*close_hm), tzinfo=mtz)
+        closed_bj = closed_local.astimezone(btz)
+
+        now_bj = (now or datetime.now(btz)).astimezone(btz)
+        hours_ago = (now_bj - closed_bj).total_seconds() / 3600.0
+
+        now_local = now_bj.astimezone(mtz)
+        is_open = (
+            now_local.weekday() < 5
+            and _time(*open_hm) <= now_local.time() <= _time(*close_hm)
+        )
+        return {
+            "ok": True,
+            "closed_bj": closed_bj,
+            "closed_bj_str": closed_bj.strftime("%m-%d %H:%M"),
+            "hours_ago": hours_ago,
+            "is_open": is_open,
+            "local_close_str": closed_local.strftime("%m-%d %H:%M"),
+        }
+    except Exception:
+        return {"ok": False}
 
 
 def _secret(name: str) -> str:
@@ -291,9 +348,12 @@ def _board_from_tushare(pro_api) -> list[dict] | None:
             if pct is None or pd.isna(pct):
                 prev = df.iloc[-2]["close"] if len(df) > 1 else None
                 pct = ((last["close"] / prev) - 1) * 100 if prev else float("nan")
+            _td = str(last["trade_date"])
             rows.append({"label": item["label"], "cn": item["cn"],
                          "value": float(last["close"]), "pct": float(pct),
-                         "date": str(last["trade_date"]), "proxy": False})
+                         "date": _td, "proxy": False,
+                         "session": session_context(
+                             _td, item["tz"], item["open"], item["close"])})
         except Exception:
             return None
     return rows or None
@@ -331,10 +391,15 @@ def _board_from_twelvedata(timeout: int = 25) -> list[dict]:
                 close = float(vals[0]["close"])
                 prev = float(vals[1]["close"]) if len(vals) > 1 else None
                 pct = ((close / prev) - 1) * 100 if prev else float("nan")
+                # The proxy trades in New York regardless of which market it
+                # tracks, so its session is the US one — not Tokyo's or Seoul's.
                 rows.append({"label": item["label"], "cn": item["cn"], "ok": True,
                              "value": close, "pct": pct,
                              "date": vals[0]["datetime"], "proxy": True,
-                             "symbol": item["etf"]})
+                             "symbol": item["etf"],
+                             "session": session_context(
+                                 vals[0]["datetime"], "America/New_York",
+                                 (9, 30), (16, 0))})
             except Exception as exc:
                 rows.append({"label": item["label"], "cn": item["cn"], "ok": False,
                              "reason": f"{type(exc).__name__}"})
