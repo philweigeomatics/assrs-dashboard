@@ -67,6 +67,7 @@ pages = {
     ],
     "🌍 Macro 宏观": [
         st.Page("pages/macro_commodities.py", title="Macro & Commodities 宏观与大宗", url_path="macro-commodities"),
+        st.Page("pages/global_macro.py", title="Global Macro 全球宏观", url_path="global-macro"),
     ],
     "📖 About 关于": [
         st.Page("pages/about.py", title="声明"),
