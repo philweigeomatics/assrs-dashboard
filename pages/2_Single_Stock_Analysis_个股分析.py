@@ -1392,18 +1392,29 @@ def create_single_stock_chart_analysis(
             showlegend=True
         ), row=1, col=1)
 
+    # Line style carries meaning here: SOLID = simple moving average, DASHED =
+    # exponential. EMA5 is the only dashed line among the averages, so it can
+    # be picked out from MA5 without reading the legend — the two share a
+    # 5-day window and otherwise sit almost on top of each other.
     fig.add_trace(go.Scatter(
         x=dates, y=df['EMA5'],
         name='EMA5',
-        line=dict(color='#a855f7', width=1.5, dash='dot'),
+        line=dict(color='#a855f7', width=1.5, dash='dash'),
         showlegend=True
     ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
         x=dates, y=df['MA20'], name='MA20',
-        line=dict(color='#fbbf24', dash='dot', width=1.5),
+        line=dict(color='#fbbf24', width=1.5),
         showlegend=True
     ), row=1, col=1)
+
+    if 'MA60' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=dates, y=df['MA60'], name='MA60',
+            line=dict(color='#f97316', width=2),
+            showlegend=True
+        ), row=1, col=1)
     
     fig.add_trace(go.Scatter(
         x=dates, y=df['MA50'], name='MA50',
