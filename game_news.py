@@ -27,7 +27,12 @@ from datetime import datetime, timedelta
 import requests
 
 GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
-_MIN_GAP_SECONDS = 6.0
+# GDELT documents ~1 request per 5s, but the limit behaves like a shared-IP
+# quota with a longer memory: after a burst, even a trivial query keeps
+# returning the limit notice for a while, and a throttled response still costs
+# ~12s to come back. 10s of self-pacing keeps normal play under it; heavy use
+# will still hit a cooldown that no client-side spacing can shorten.
+_MIN_GAP_SECONDS = 10.0
 _last_call = [0.0]
 
 _RISK_PROMPT = """\
@@ -47,11 +52,17 @@ tariffs on consumer electronics", "domestic semiconductor capex", "policy
 support for renewables", "consumer confidence and discretionary spending".
 Bad: anything naming a company, a specific plant, or a single product line.
 
+search_terms feed a keyword news search that does EXACT matching, so long
+phrases match nothing. Each must be ONE or TWO words — a noun a journalist
+would actually write in a headline. "semiconductor", "tariffs", "lithium",
+"property", "shipbuilding". Never a descriptive phrase like "domestic
+semiconductor capital expenditure".
+
 Return ONLY raw JSON (start { end }), no markdown:
 {
-  "themes": ["3-6 short macro themes, in English, usable as news keywords"],
+  "themes": ["3-6 macro themes in English, readable by a human"],
   "cn": ["the same themes in Chinese, same order"],
-  "search_terms": ["3-5 short English phrases for a news search, no company names"]
+  "search_terms": ["3-5 ONE-or-TWO word search keywords, no company names"]
 }
 """
 
@@ -151,10 +162,58 @@ MACRO_QUERY = ('(china economy OR "chinese stocks" OR "trade war" OR tariff '
                'OR "interest rate" OR geopolitics OR war)')
 
 
-def build_query(search_terms: "list[str] | None") -> str:
-    """Theme terms OR-ed together; falls back to the broad macro query."""
-    terms = [t.strip() for t in (search_terms or []) if t and t.strip()]
-    if not terms:
+# Words that carry no search signal but bloat a phrase into unmatchability.
+_STOP = {"the", "a", "an", "of", "on", "in", "for", "and", "or", "to", "with",
+         "domestic", "global", "chinese", "china", "policy", "risk", "sector",
+         "demand", "cycle", "costs", "cost", "prices", "price"}
+
+
+def _condense(term: str) -> str:
+    """
+    Reduce a descriptive theme to something GDELT can actually match.
+
+    A quoted string is an EXACT phrase match against article text, so
+    "export tariffs on consumer electronics" matches essentially nothing — no
+    article contains that precise five-word run.
+
+    The obvious fix, keeping the first two content words, is also wrong: it
+    manufactures phrases that never occur. "steel and coking coal input costs"
+    became "steel coking", which no journalist has ever written. Words are only
+    kept together when they were ADJACENT in the original, which is the only
+    case where the pair plausibly appears in prose. Anything longer collapses
+    to its single most distinctive word, unquoted, which always matches.
+    """
+    words = [w for w in "".join(
+        c if c.isalnum() or c.isspace() else " " for c in term).split()]
+    content = [w for w in words if len(w) > 2 and w.lower() not in _STOP]
+    if not content:
+        return ""
+    # Adjacent pair in the source → safe to keep as a phrase.
+    if len(content) == 2 and words.index(content[0]) + 1 == words.index(content[1]):
+        return f"{content[0]} {content[1]}"
+    # Otherwise a single word: longest is a decent proxy for most specific.
+    return max(content, key=len)
+
+
+def build_query(search_terms: "list[str] | None", max_terms: int = 4) -> str:
+    """
+    Theme terms OR-ed into ONE request — never one request per theme, which
+    would multiply against GDELT's rate limit for no benefit.
+
+    Single words go in bare; a surviving two-word pair is quoted, which is
+    tight enough to still match real headlines.
+    """
+    seen, parts = set(), []
+    for raw in (search_terms or []):
+        t = _condense(str(raw))
+        if not t or t.lower() in seen:
+            continue
+        seen.add(t.lower())
+        parts.append(f'"{t}"' if " " in t else t)
+        if len(parts) >= max_terms:
+            break
+    if not parts:
         return MACRO_QUERY
-    quoted = [f'"{t}"' if " " in t else t for t in terms[:4]]
-    return "(" + " OR ".join(quoted) + ")"
+    # Anchored to China so a bare word like "semiconductor" doesn't return
+    # global noise unrelated to the market being played.
+    return "(" + " OR ".join(parts) + ") (china OR chinese)"
