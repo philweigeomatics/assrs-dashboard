@@ -1066,6 +1066,82 @@ def detect_support_resistance(df, swing_window=4, cluster_pct=0.015,
     return zones[:top_n]
 
 
+def split_legends_by_panel(fig, panel_titles=None, font_size=10):
+    """
+    Give every subplot its OWN legend, parked beside that subplot.
+
+    A single shared legend lists all ~56 series in one column, so a toggle in
+    the middle of it gives no clue whether it belongs to MACD, ADX or the price
+    panel. Plotly supports multiple legends (plotly.js 2.24+ / plotly.py 5.15+)
+    via `trace.legend='legend2'` plus a matching `layout.legend2`, which lets
+    each panel's controls sit next to the panel they drive.
+
+    Rows are recovered from each trace's y-axis rather than tracked at add time,
+    so this works without touching seventy-odd add_trace calls. Row 1 owns a
+    secondary y-axis, which shifts the numbering: 'y'/'y2' are both row 1, and
+    'yN' for N>=3 is row N-1.
+
+    Each legend is anchored at the TOP of its panel so it grows downward into
+    the gap above the next panel. Panel height plus the vertical spacing below
+    it is the room available; at 1950px with a 10px font every panel fits,
+    the tightest being ADX at 17 entries in ~269px.
+    """
+    def _row_of(trace):
+        ax = getattr(trace, "yaxis", None) or "y"
+        num = 1 if ax == "y" else int(ax[1:] or 1)
+        return 1 if num <= 2 else num - 1
+
+    def _axis_key(row):
+        # inverse of _row_of: row 1 -> 'yaxis', row N -> 'yaxis{N+1}'
+        return "yaxis" if row == 1 else f"yaxis{row + 1}"
+
+    rows = sorted({_row_of(t) for t in fig.data})
+    counts = {r: 0 for r in rows}
+    for t in fig.data:
+        r = _row_of(t)
+        t.legend = "legend" if r == 1 else f"legend{r}"
+        if getattr(t, "showlegend", None) is not False:
+            counts[r] += 1
+
+    height = getattr(fig.layout, "height", None) or 1950
+    spacing_px = 0.03 * height          # matches make_subplots(vertical_spacing)
+
+    for r in rows:
+        dom = getattr(getattr(fig.layout, _axis_key(r), None), "domain", None)
+        if not dom:
+            continue
+
+        title = None
+        if panel_titles and r <= len(panel_titles):
+            title = str(panel_titles[r - 1])
+
+        # Shrink the font for a panel whose legend would otherwise run past the
+        # panel below it. ADX is the binding case — 17 entries in ~269px fits at
+        # size 10 with about a pixel to spare, which is no margin at all for a
+        # future trace. Sizing from the actual room removes that fragility.
+        room = (dom[1] - dom[0]) * height + spacing_px
+        n = max(counts.get(r, 0), 1)
+        title_px = (font_size + 1) * 1.7 if title else 0
+        usable = max(room - 14 - title_px, 20)
+        size = font_size
+        while size > 8 and n * size * 1.45 > usable:
+            size -= 1
+
+        cfg = dict(
+            x=1.01, xanchor="left",
+            y=dom[1], yanchor="top",
+            bgcolor="rgba(255,255,255,0.92)",
+            bordercolor="rgba(120,120,120,0.5)", borderwidth=1,
+            font=dict(size=size),
+            itemsizing="constant",
+        )
+        if title:
+            cfg["title"] = dict(text=f"<b>{title}</b>",
+                                font=dict(size=size + 1))
+        fig.layout[("legend" if r == 1 else f"legend{r}")] = cfg
+    return fig
+
+
 def create_single_stock_chart_analysis(
     df: pd.DataFrame,
     fundamentals_df: pd.DataFrame = None,
@@ -1267,10 +1343,27 @@ def create_single_stock_chart_analysis(
     ), row=1, col=1)
     
     # Moving Averages
+    # MA5 and MA10 are the two short averages A-share charts conventionally
+    # show; EMA5 stays alongside MA5 so the faster-reacting exponential and the
+    # simple average can be compared directly on the same window.
+    if 'MA5' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=dates, y=df['MA5'], name='MA5',
+            line=dict(color='#ec4899', width=1.2),
+            showlegend=True
+        ), row=1, col=1)
+
+    if 'MA10' in df.columns:
+        fig.add_trace(go.Scatter(
+            x=dates, y=df['MA10'], name='MA10',
+            line=dict(color='#14b8a6', width=1.2),
+            showlegend=True
+        ), row=1, col=1)
+
     fig.add_trace(go.Scatter(
         x=dates, y=df['EMA5'],
         name='EMA5',
-        line=dict(color='#a855f7', width=1.5),
+        line=dict(color='#a855f7', width=1.5, dash='dot'),
         showlegend=True
     ), row=1, col=1)
 
@@ -2381,7 +2474,10 @@ def create_single_stock_chart_analysis(
     #   yaxis10 = Row 9 (Rel Perf, if has_comp — managed by update_yaxes above)
     _bottom_xaxis = f'xaxis{n_rows}_title'
     fig.update_layout(
-        height=1820 + (150 if has_comp else 0),
+        # 1950 rather than 1820: per-panel legends need the panel's own band
+        # plus the spacing gap to fit. Measured worst case is ADX with 17
+        # entries — ~252px of legend against ~269px of room at this height.
+        height=1950 + (150 if has_comp else 0),
         template='plotly_white',
         xaxis_rangeslider_visible=False,
         hovermode='x unified',
@@ -2394,6 +2490,8 @@ def create_single_stock_chart_analysis(
         yaxis6_title='ADX',
         yaxis6_range=[0, 60],
         showlegend=True,
+        # Per-panel legends are attached by split_legends_by_panel() below;
+        # this stays as the fallback shape for row 1 before that runs.
         legend=dict(
             orientation="v",
             yanchor="top",
@@ -2405,6 +2503,15 @@ def create_single_stock_chart_analysis(
             borderwidth=1
         )
     )
+
+    # One legend per panel, so a toggle sits beside the chart it controls.
+    # Short labels rather than the subplot titles — those are already on screen,
+    # and truncating them produced headers like "MACD (12, 26,".
+    _legend_labels = ['Price', 'Volume / OBV', 'MACD', 'RSI', 'ADX',
+                      'Z-Score', 'P/E', '主力净流入']
+    if has_comp:
+        _legend_labels.append('Rel. Perf')
+    split_legends_by_panel(fig, panel_titles=_legend_labels)
 
     # Smart tick selection
     total_dates = len(dates)

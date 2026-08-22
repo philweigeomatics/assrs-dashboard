@@ -20,6 +20,7 @@ from sklearn.preprocessing import StandardScaler
 
 # ── Moving Averages ─────────────────────────────────────────
 MA_SHORT   = 5
+MA_SHORT2  = 10    # 10-day SMA — the other short average A-share charts show
 MA_MID     = 20
 MA_LONG    = 50
 MA_MACRO   = 200
@@ -242,6 +243,7 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
     # ── Moving Averages ──────────────────────────────────────
     df_analysis['MA5']   = ta.trend.sma_indicator(df_analysis['Close'], window=MA_SHORT)
+    df_analysis['MA10']  = ta.trend.sma_indicator(df_analysis['Close'], window=MA_SHORT2)
     df_analysis['EMA5']  = ta.trend.ema_indicator(df_analysis['Close'], window=MA_SHORT)
     df_analysis['MA20']  = ta.trend.sma_indicator(df_analysis['Close'], window=MA_MID)
     df_analysis['MA50']  = ta.trend.sma_indicator(df_analysis['Close'], window=MA_LONG)

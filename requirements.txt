@@ -2,7 +2,7 @@ streamlit>=1.37.0
 extra-streamlit-components
 pandas
 numpy
-plotly
+plotly>=5.15
 ta
 tushare
 scipy
