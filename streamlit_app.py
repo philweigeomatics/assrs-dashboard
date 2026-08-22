@@ -61,6 +61,7 @@ pages = {
         st.Page("pages/lead_lag_analysis.py", title="Lead-Lag 领先滞后", url_path="lead-lag"),
         st.Page("pages/sentiment_mean_reversion.py", title="Mean Reversion 反转候选", url_path="mean-reversion"),
         st.Page("pages/t_trading_scanner.py", title="T-Trading Scanner 做T候选", url_path="t-trading"),
+        st.Page("pages/paper_trading.py", title="Blind Replay 盲盘复盘", url_path="blind-replay"),
     ],
     "🔔 Alerts 提示": [
         st.Page("pages/4_Todays_Alerts_今日提醒.py", title="Today's Alerts 今日提醒"),
