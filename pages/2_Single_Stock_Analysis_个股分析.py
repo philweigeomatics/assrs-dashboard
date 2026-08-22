@@ -21,6 +21,7 @@ from analysis_engine import (
     REGIME_ANCHOR,
 )
 import portfolio_fit as pfit
+import accumulation_signals as acsig
 
 
 # ── Main-chart window ─────────────────────────────────────────────────────────
@@ -4759,6 +4760,175 @@ if st.session_state.active_ticker:
                     st.error("无法计算模拟结果")
 
             chart_and_simulator(analysis_df, fundamentals_df, blocks, ticker)
+            st.markdown("---")
+
+            # ==================== 吸筹 / 出货 SIGNALS ====================
+            @st.fragment
+            def accumulation_distribution_section(analysis_df, ticker):
+                st.subheader("🧭 吸筹 / 出货 信号 · Accumulation vs Distribution")
+                st.caption(
+                    "Neither price nor money flow alone separates these — the tell is "
+                    "flow **diverging** from price, read against where price sits in "
+                    "its own range. Money in while price refuses to move is absorption; "
+                    "price still rising while money leaves is distribution."
+                )
+
+                _win = st.select_slider(
+                    "Evaluation window (sessions)", options=[10, 20, 30, 40], value=20,
+                    key="acd_window",
+                    help="Most of these are conditions over a window, not single days.",
+                )
+
+                _mf = None
+                try:
+                    _mfdf = load_moneyflow(ticker, date.today())
+                    if _mfdf is not None and not _mfdf.empty:
+                        _mf = _mfdf['main_net']
+                except Exception:
+                    _mf = None
+
+                res = acsig.detect(analysis_df, _mf, window=_win)
+                if not res.get("ok"):
+                    st.info(f"Not enough data — {res.get('reason')}")
+                    return
+                summ = acsig.summarise(res)
+
+                getattr(st, summ["tone"])(
+                    f"**{summ['verdict']}** — 吸筹 {summ['n_acc']} 项 / 出货 "
+                    f"{summ['n_dist']} 项 firing · 区间位置 "
+                    f"{res['range_position']:.0%} of its 120-day range"
+                    if res.get("range_position") is not None else
+                    f"**{summ['verdict']}** — 吸筹 {summ['n_acc']} / 出货 {summ['n_dist']}"
+                )
+
+                def _when(s):
+                    """The answer to 'when did this happen' — different by kind."""
+                    if s["kind"] == "event":
+                        if not s["count_60"]:
+                            return "—"
+                        return (f"{s['count_60']}× in 60 sessions · latest {s['last']}"
+                                + (f" · {', '.join(s['dates'][-3:])}" if s["dates"] else ""))
+                    if s["run"]:
+                        return f"持续 {s['run']} 个交易日 · since {s['since']}"
+                    if s["last"]:
+                        return f"not now · last true {s['last']} · {s['count_60']}× in 60d"
+                    return "—"
+
+                def _box(title, colour, signals, empty_msg):
+                    st.markdown(
+                        f"<div style='font-size:15px;font-weight:600;color:{colour};"
+                        f"margin-bottom:6px'>{title}</div>", unsafe_allow_html=True)
+                    if not signals:
+                        st.caption(empty_msg)
+                        return
+                    for s in signals:
+                        with st.container(border=True):
+                            st.markdown(
+                                f"**{s['cn']}** · {s['label']}"
+                                + (f" &nbsp;`{s['value']}`" if s.get("value") else ""),
+                                unsafe_allow_html=True)
+                            st.caption(f"🕒 {_when(s)}")
+                            st.caption(s["detail"])
+
+                c_acc, c_dis = st.columns(2)
+                with c_acc:
+                    _box("🟥 吸筹 Accumulation", "#dc2626", summ["acc_live"],
+                         "No accumulation signals currently firing.")
+                with c_dis:
+                    _box("🟩 出货 Distribution", "#15803d", summ["dist_live"],
+                         "No distribution signals currently firing.")
+
+                if not res["has_flow"]:
+                    st.warning(
+                        "⚠️ 主力资金 data unavailable for this stock, so the five "
+                        "flow-based detectors are inactive rather than negative — "
+                        "what you see is only the price/volume half."
+                    )
+
+                # A timeline answers "when" far better than any sentence: rows are
+                # detectors, columns are sessions, a cell is lit when that detector
+                # was true. Windowed signals show as runs, events as isolated marks.
+                with st.expander("📅 时间线 · When each signal was active", expanded=False):
+                    _n = st.select_slider("Sessions shown", options=[60, 120, 250],
+                                          value=120, key="acd_timeline_n")
+                    rows, labels, colours = [], [], []
+                    _idx = None
+                    _acc_keys = {s["key"] for s in res["accumulation"]}
+                    for s in res["accumulation"] + res["distribution"]:
+                        if not s.get("available") or s["flags"] is None:
+                            continue
+                        f = s["flags"].fillna(False).astype(bool).tail(_n)
+                        if _idx is None:
+                            # Take the index from the first AVAILABLE detector —
+                            # accumulation[0] is flow-based and is None whenever
+                            # 主力 data is missing, which is exactly the case
+                            # this panel still has to render.
+                            _idx = f.index
+                        if not f.any():
+                            continue
+                        rows.append(f.astype(int).values)
+                        side = "吸筹" if s["key"] in _acc_keys else "出货"
+                        labels.append(f"{side} · {s['cn']}")
+                        colours.append("#dc2626" if side == "吸筹" else "#15803d")
+                    if not rows or _idx is None:
+                        st.caption("Nothing fired in this span.")
+                    else:
+                        _x = [d.strftime("%Y-%m-%d") for d in _idx]
+                        fig_tl = go.Figure()
+                        for i, (r, lab, col) in enumerate(zip(rows, labels, colours)):
+                            ys = [lab if v else None for v in r]
+                            fig_tl.add_trace(go.Scatter(
+                                x=_x, y=ys, mode="markers",
+                                marker=dict(symbol="square", size=7, color=col),
+                                name=lab, showlegend=False,
+                                hovertemplate="%{y}<br>%{x}<extra></extra>"))
+                        fig_tl.update_layout(
+                            height=max(220, 26 * len(rows) + 90),
+                            template="plotly_white",
+                            margin=dict(l=10, r=10, t=10, b=40),
+                            xaxis=dict(type="category", tickangle=-45,
+                                       nticks=12, showgrid=False),
+                            yaxis=dict(categoryorder="array",
+                                       categoryarray=labels[::-1]),
+                        )
+                        st.plotly_chart(fig_tl, use_container_width=True)
+                        st.caption(
+                            "Red = 吸筹, green = 出货. A continuous band is a "
+                            "windowed condition holding; isolated squares are "
+                            "single-session events."
+                        )
+
+                with st.expander("🔬 All detectors, including those not firing", expanded=False):
+                    _rows = []
+                    for side, key in (("吸筹", "accumulation"), ("出货", "distribution")):
+                        for s in res[key]:
+                            _rows.append({
+                                "": side,
+                                "指标 Signal": f"{s['cn']} / {s['label']}",
+                                "类型": {"window": "窗口", "event": "事件",
+                                         "state": "状态"}[s["kind"]],
+                                "状态": ("n/a" if not s["available"]
+                                         else "✅ 触发" if (s["active"] or
+                                                          (s["kind"] == "event" and s["recent"]))
+                                         else "—"),
+                                "时间 When": _when(s) if s["available"] else "data unavailable",
+                            })
+                    st.dataframe(pd.DataFrame(_rows), hide_index=True,
+                                 use_container_width=True,
+                                 column_config={
+                                     "指标 Signal": st.column_config.TextColumn(width="large"),
+                                     "时间 When": st.column_config.TextColumn(width="large"),
+                                 })
+
+                st.caption(
+                    f"Window {_win} sessions · as of {res['as_of']} · "
+                    "主力 flow is classified by ORDER SIZE, not by who traded — "
+                    "algos slice orders to avoid exactly this footprint, so treat "
+                    "it as a proxy. These patterns are descriptive; test any of "
+                    "them in Setup-Conditioned Expectancy below before trusting them."
+                )
+
+            accumulation_distribution_section(analysis_df, ticker)
             st.markdown("---")
 
             st.subheader("🎯 Setup-Conditioned Expectancy")
