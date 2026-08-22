@@ -82,45 +82,125 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Stock selection ───────────────────────────────────────────────────────────
 
+def eligible_universe(data_manager, listed_before: str = "20210101") -> list:
+    """
+    Candidates worth dealing, read from stock_basic.
+
+    stock_basic holds ~5,500 codes but the app only keeps per-ticker PRICE
+    tables for the couple of hundred in its sector map, so most picks have to
+    be fetched live. Filtering here is what stops that being slow: a candidate
+    rejected on metadata costs nothing, while one rejected after a live fetch
+    costs a round trip.
+
+    Excluded, and why:
+      listed too recently — cannot have warmup + history + play behind it.
+      ST / *ST / 退 — ±5% limits and delisting mechanics, different game.
+      北交所 (4xx/8xx/920xxx) — ±30% limits, also a different game.
+    """
+    try:
+        df = data_manager.db.read_table(
+            "stock_basic", columns="symbol,name,industry,list_date")
+    except Exception:
+        # Fall back to the name-only helper rather than failing outright.
+        try:
+            return [{"ticker": s["ticker"], "name": s["name"], "industry": ""}
+                    for s in data_manager.get_all_stock_basic()]
+        except Exception:
+            return []
+    if df is None or df.empty:
+        return []
+
+    out = []
+    for _, r in df.iterrows():
+        t = str(r.get("symbol") or "").strip()
+        nm = str(r.get("name") or "").strip()
+        if len(t) != 6 or not nm:
+            continue
+        if t[0] not in ("0", "3", "6"):          # main / ChiNext / STAR only
+            continue
+        if "ST" in nm.upper() or "退" in nm:
+            continue
+        ld = str(r.get("list_date") or "")
+        if len(ld) == 8 and ld > listed_before:
+            continue
+        out.append({"ticker": t, "name": nm,
+                    "industry": str(r.get("industry") or "")})
+    return out
+
+
+def _load_prices(data_manager, ticker: str, need: int):
+    """
+    DB first, live second.
+
+    A per-ticker table is effectively instant; the live call is a round trip.
+    Only ~188 tickers are maintained locally, so most deals still go live —
+    but the ones that don't are free.
+    """
+    try:
+        df = data_manager.get_single_stock_data_from_db(ticker)
+        if df is not None and not df.empty and len(df) >= need:
+            return df, "db"
+    except Exception:
+        pass
+    try:
+        # 3 years, not 5: warmup + history + a 180-session game needs ~370
+        # bars, so 5 years was fetching roughly double what the game can use.
+        df = data_manager.get_single_stock_data_live(ticker, lookback_years=3)
+        return df, "live"
+    except Exception:
+        return None, "live"
+
+
 def pick_random_stock(data_manager, play_bars: int = DEFAULT_PLAY_BARS,
-                      attempts: int = 12, seed: "int | None" = None) -> dict:
+                      attempts: int = 12, seed: "int | None" = None,
+                      prefer_db: bool = False) -> dict:
     """
     Choose a random A-share with enough history to run a full game.
 
-    Returns {"ok", "ticker", "name", "industry", "data"} — `data` already
-    carries indicators. The caller must keep ticker/name away from the UI until
-    the player reveals it.
+    Returns {"ok", "ticker", "name", "industry", "data", "source"} — `data`
+    already carries indicators. The caller must keep ticker/name out of the UI
+    until the player reveals it.
+
+    `prefer_db=True` restricts to tickers already cached locally: instant, but
+    only the ~188 maintained names, which a regular player would start to
+    recognise. Off by default because variety is the point of the game.
     """
     rng = random.Random(seed)
     need = WARMUP_BARS + MIN_HISTORY_BARS + play_bars
 
-    try:
-        universe = data_manager.get_all_stock_basic()
-    except Exception as exc:
-        return {"ok": False, "reason": f"stock list unavailable: {exc}"}
+    universe = eligible_universe(data_manager)
     if not universe:
-        return {"ok": False, "reason": "stock_basic is empty"}
+        return {"ok": False, "reason": "no eligible stocks in stock_basic"}
 
-    tried = set()
-    for _ in range(attempts):
-        pick = rng.choice(universe)
-        t = str(pick.get("ticker", "")).strip()
-        if not t or t in tried:
-            continue
-        tried.add(t)
+    if prefer_db:
+        # The locally-maintained set is the sector map — ONE call. Probing
+        # db.table_exists() per ticker instead means thousands of sequential
+        # Supabase round trips, which hangs for minutes.
         try:
-            raw = data_manager.get_single_stock_data_live(t, lookback_years=5)
+            local = {t for v in data_manager.get_sector_stock_map().values()
+                     for t in v}
+            cached = [u for u in universe if u["ticker"] in local]
+            if cached:
+                universe = cached
         except Exception:
-            continue
-        if raw is None or raw.empty or len(raw) < need:
+            pass
+
+    rng.shuffle(universe)
+    for pick in universe[:attempts]:
+        t = pick["ticker"]
+        raw, source = _load_prices(data_manager, t, need)
+        if raw is None or raw.empty:
             continue
         raw = raw.sort_index()
-        if raw[["Open", "High", "Low", "Close", "Volume"]].isna().any().any():
-            raw = raw.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
-            if len(raw) < need:
-                continue
-        return {"ok": True, "ticker": t, "name": pick.get("name", t),
-                "industry": pick.get("industry", ""), "data": compute_indicators(raw)}
+        cols = ["Open", "High", "Low", "Close", "Volume"]
+        if any(c not in raw.columns for c in cols):
+            continue
+        raw = raw.dropna(subset=cols)
+        if len(raw) < need:
+            continue
+        return {"ok": True, "ticker": t, "name": pick["name"],
+                "industry": pick.get("industry", ""), "source": source,
+                "data": compute_indicators(raw)}
 
     return {"ok": False,
             "reason": f"no stock with {need}+ sessions found in {attempts} tries"}
