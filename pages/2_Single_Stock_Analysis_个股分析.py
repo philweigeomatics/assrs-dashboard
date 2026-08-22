@@ -15,8 +15,40 @@ from scipy import stats
 from scipy.signal import find_peaks
 from streamlit_plotly_events import plotly_events
 
-from analysis_engine import run_single_stock_analysis, simulate_next_day_indicators
+from analysis_engine import (
+    run_single_stock_analysis,
+    simulate_next_day_indicators,
+    REGIME_ANCHOR,
+)
 import portfolio_fit as pfit
+
+
+# ── Main-chart window ─────────────────────────────────────────────────────────
+# The chart PLOTS everything back to the regime anchor but OPENS showing only
+# the most recent year, so panning left reaches the earlier data the way any
+# trading terminal behaves. Plotting only a year, as this did before, made that
+# history unreachable no matter how far you dragged.
+INITIAL_VISIBLE_BARS = 250          # ≈ one trading year in the opening view
+
+
+def chart_window(df):
+    """
+    The exact slice the main chart draws.
+
+    Shared rather than duplicated: the box-select measure tool maps pixel
+    positions back to dates by rebuilding this same index, so if the two ever
+    disagree every measurement is silently off by the difference.
+
+    Falls back to a plain tail() for anything listed after the anchor or
+    otherwise too short to be worth anchoring.
+    """
+    if df is None or getattr(df, "empty", True):
+        return df
+    d = df.sort_index()
+    anchored = d[d.index >= pd.Timestamp(REGIME_ANCHOR)]
+    if len(anchored) >= 60:
+        return anchored
+    return d.tail(INITIAL_VISIBLE_BARS)
 
 import auth_manager
 auth_manager.require_login()
@@ -135,7 +167,7 @@ def _measure_selected_range(event, analysis_df):
     points = _get(sel, "points")
     boxes  = _get(sel, "box")
 
-    plot_idx = analysis_df.tail(250).index   # same window the chart draws
+    plot_idx = chart_window(analysis_df).index   # same window the chart draws
     labels = [d.strftime('%Y-%m-%d') for d in plot_idx]
 
     xs = [p.get("x") for p in points if isinstance(p, dict) and p.get("x") is not None]
@@ -1168,7 +1200,7 @@ def create_single_stock_chart_analysis(
     When a comparison stock is active a 7th panel is added showing relative performance
     (comparison % return minus main % return) as a green/red filled area.
     """
-    df = df.tail(250).sort_index()
+    df = chart_window(df)
     dates = df.index.strftime('%Y-%m-%d').tolist()
 
     # Pre-align comparison data so has_comp is stable before make_subplots
@@ -2513,16 +2545,20 @@ def create_single_stock_chart_analysis(
         _legend_labels.append('Rel. Perf')
     split_legends_by_panel(fig, panel_titles=_legend_labels)
 
-    # Smart tick selection
+    # Smart tick selection.
+    # Density is set from the OPENING window, not the full plotted span — the
+    # chart now holds everything back to the regime anchor, and spacing ticks
+    # across all of that leaves the default one-year view nearly bare.
     total_dates = len(dates)
-    if total_dates <= 30:
+    _visible = min(total_dates, INITIAL_VISIBLE_BARS)
+    if _visible <= 30:
         tick_interval = 1
-    elif total_dates <= 60:
+    elif _visible <= 60:
         tick_interval = 3
-    elif total_dates <= 120:
+    elif _visible <= 120:
         tick_interval = 5
     else:
-        tick_interval = max(5, total_dates // 20)
+        tick_interval = max(5, _visible // 20)
 
     tick_vals = dates[::tick_interval]
 
@@ -2537,6 +2573,41 @@ def create_single_stock_chart_analysis(
     )
     for row in range(1, n_rows):
         fig.update_xaxes(type='category', showticklabels=False, row=row, col=1)
+
+    # Open on the most recent year, with the rest reachable by dragging left.
+    # On a category axis the range is in category-index units, and the ±0.5
+    # padding puts the edge between bars rather than through one.
+    # Applied to every x-axis: shared_xaxes links them, so this is what makes
+    # all nine panels pan and zoom together.
+    if total_dates > INITIAL_VISIBLE_BARS:
+        _from = total_dates - INITIAL_VISIBLE_BARS
+        fig.update_xaxes(range=[_from - 0.5, total_dates - 0.5])
+
+        # Plotly autoscales y over ALL data, not just what's in view, so
+        # holding two years while showing one would flatten the price panel
+        # into the middle of an axis sized for history that's off-screen.
+        # Scale the price axis to the opening window instead. Bands and the
+        # long averages are included because they sit outside High/Low.
+        _vis = df.iloc[_from:]
+        _lows = [_vis['Low'].min()]
+        _highs = [_vis['High'].max()]
+        for _c, _bucket in (('BB_Lower', _lows), ('MA200', _lows),
+                            ('BB_Upper', _highs), ('MA200', _highs)):
+            if _c in _vis.columns and _vis[_c].notna().any():
+                _bucket.append(_vis[_c].min() if _bucket is _lows
+                               else _vis[_c].max())
+        try:
+            _lo, _hi = float(min(_lows)), float(max(_highs))
+            if _hi > _lo:
+                _pad = (_hi - _lo) * 0.06
+                fig.update_yaxes(range=[_lo - _pad, _hi + _pad],
+                                 row=1, col=1, secondary_y=False)
+        except (TypeError, ValueError):
+            pass   # leave autoscale alone rather than risk a broken axis
+
+        # Panels below keep autoscale: RSI and ADX are already pinned to fixed
+        # ranges, and the oscillators are centred on zero, so an off-screen
+        # extreme costs far less there than it does on price.
 
     # ===== Ghost (what-if) overlay =====
     if show_ghost and sim_result is not None:
