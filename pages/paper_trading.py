@@ -237,28 +237,41 @@ def game():
             else:
                 st.warning(f"Theme extraction failed: {risk.get('reason','')[:120]}")
 
-            src = st.radio("Feed", ["主题 Themes", "全球宏观 Global macro"],
-                           horizontal=True, key="bp_news_src")
+            src = st.radio(
+                "Feed",
+                ["主题 Themes", "全球宏观 Macro", "🌍 世界大事 World events"],
+                horizontal=True, key="bp_news_src",
+                help="Themes and Macro come from The Guardian (dated, archive "
+                     "back years). World events is Wikipedia's curated daily "
+                     "log — keyless and the deepest archive of the three.",
+            )
             query = (game_news.build_query(risk.get("search_terms"))
                      if src.startswith("主题") else game_news.MACRO_QUERY)
 
             cache = S.setdefault("bp_news_cache", {})
-            ckey = f"{today}|{query}"
+            ckey = f"{today}|{src}|{query}"
             if st.button("📥 Load news for " + today):
-                with st.spinner("Querying GDELT…"):
-                    cache[ckey] = game_news.fetch_news(
-                        query, today, window_days=2,
-                        redact=[pick["name"], pick["ticker"]])
+                with st.spinner("Fetching…"):
+                    if src.startswith("🌍"):
+                        cache[ckey] = game_news.fetch_world_events(today)
+                    else:
+                        cache[ckey] = game_news.fetch_guardian(
+                            query, today, window_days=2,
+                            redact=[pick["name"], pick["ticker"]])
                 st.rerun(scope="fragment")
+            if not src.startswith("🌍"):
+                st.caption(f"query: `{query}`")
 
             got = cache.get(ckey)
             if got is None:
                 st.caption("Not loaded for this date yet.")
             elif got.get("throttled"):
                 st.warning(
-                    "GDELT is rate-limiting (shared free endpoint, ~1 request "
-                    "per 5s). Wait a moment and load again — this is the source "
-                    "being busy, **not** an absence of news that day."
+                    "Source is rate-limiting right now — this is the feed being "
+                    "busy, **not** an absence of news that day. The Guardian's "
+                    "shared `test` key is capped; a free key from "
+                    "open-platform.theguardian.com/access raises it to 5,000 "
+                    "calls/day — add it as `GUARDIAN_API_KEY` in secrets."
                 )
             elif not got.get("ok"):
                 st.info(f"News unavailable: {got.get('reason')}")

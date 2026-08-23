@@ -26,6 +26,8 @@ from datetime import datetime, timedelta
 
 import requests
 
+GUARDIAN_URL = "https://content.guardianapis.com/search"
+WIKI_API = "https://en.wikipedia.org/w/api.php"
 GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 # GDELT documents ~1 request per 5s, but the limit behaves like a shared-IP
 # quota with a longer memory: after a burst, even a trivial query keeps
@@ -160,6 +162,114 @@ def fetch_news(query: str, day: str, window_days: int = 1,
 
 MACRO_QUERY = ('(china economy OR "chinese stocks" OR "trade war" OR tariff '
                'OR "interest rate" OR geopolitics OR war)')
+
+
+# ── Guardian Open Platform ────────────────────────────────────────────────────
+# Chosen over GDELT as the primary source after testing both: a dedicated key
+# instead of a shared-IP quota, date filtering that is strictly respected
+# (asked for 2024-10-14..15, got only 2024-10-15 — nothing later), archive
+# depth confirmed back to 2021, and keyword queries that actually return
+# matches. GDELT stays available but is no longer the default.
+
+def _guardian_key() -> str:
+    """
+    The user's own key if present, else Guardian's public evaluation key.
+
+    "test" genuinely works and is rate-limited rather than blocked, so the game
+    is playable before signing up — but a free key from
+    open-platform.theguardian.com/access lifts it to 5,000 calls/day.
+    """
+    try:
+        return _secret("GUARDIAN_API_KEY")
+    except Exception:
+        return "test"
+
+
+def fetch_guardian(query: str, day: str, window_days: int = 2,
+                   max_records: int = 8, timeout: int = 25,
+                   redact: "list[str] | None" = None) -> dict:
+    """Articles published in the window ENDING on `day`. Never later."""
+    try:
+        d = datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        return {"ok": False, "articles": [], "throttled": False, "reason": "bad date"}
+
+    try:
+        r = requests.get(GUARDIAN_URL, timeout=timeout,
+                         headers={"User-Agent": "Mozilla/5.0"},
+                         params={"api-key": _guardian_key(), "q": query,
+                                 "from-date": (d - timedelta(days=window_days)).strftime("%Y-%m-%d"),
+                                 "to-date": d.strftime("%Y-%m-%d"),
+                                 "page-size": str(max_records),
+                                 "order-by": "newest"})
+        if r.status_code == 429:
+            return {"ok": False, "articles": [], "throttled": True,
+                    "reason": "Guardian rate limit — add your own free "
+                              "GUARDIAN_API_KEY to raise it"}
+        if r.status_code != 200:
+            return {"ok": False, "articles": [], "throttled": False,
+                    "reason": f"Guardian HTTP {r.status_code}"}
+        results = r.json().get("response", {}).get("results", []) or []
+    except Exception as exc:
+        return {"ok": False, "articles": [], "throttled": False,
+                "reason": f"{type(exc).__name__}: {exc}"}
+
+    bad = [b.lower() for b in (redact or []) if b and len(b) > 1]
+    out = []
+    for a in results:
+        title = str(a.get("webTitle", "")).strip()
+        if not title or any(b in title.lower() for b in bad):
+            continue
+        out.append({"title": title, "url": a.get("webUrl", ""),
+                    "domain": a.get("sectionName", "The Guardian"),
+                    "seendate": str(a.get("webPublicationDate", ""))[:10],
+                    "language": "en"})
+    return {"ok": True, "articles": out, "throttled": False, "reason": None}
+
+
+# ── Wikipedia Current Events ──────────────────────────────────────────────────
+# Keyless, and the archive goes back further than either news API — a 2024
+# lookup returned events cleanly. Curated one-line world events per exact date,
+# which is precisely the "wars, disasters, policy" layer the game wants and is
+# inherently macro, so it can never identify the stock.
+
+def fetch_world_events(day: str, timeout: int = 25,
+                       max_records: int = 10) -> dict:
+    """Curated world events for that exact date, from Wikipedia."""
+    import re
+    try:
+        d = datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        return {"ok": False, "articles": [], "throttled": False, "reason": "bad date"}
+
+    title = f"Portal:Current_events/{d.year}_{d.strftime('%B')}_{d.day}"
+    try:
+        r = requests.get(WIKI_API, timeout=timeout,
+                         headers={"User-Agent": "assrs-dashboard/1.0 (blind replay game)"},
+                         params={"action": "parse", "page": title, "prop": "text",
+                                 "format": "json", "formatversion": "2"})
+        j = r.json()
+        if "error" in j:
+            return {"ok": True, "articles": [], "throttled": False,
+                    "reason": f"no page for {day}"}
+        html = j.get("parse", {}).get("text", "")
+    except Exception as exc:
+        return {"ok": False, "articles": [], "throttled": False,
+                "reason": f"{type(exc).__name__}: {exc}"}
+
+    out = []
+    for li in re.findall(r"<li>(.*?)</li>", html, re.S):
+        href = re.search(r'href="(/wiki/[^"#]+)"', li)
+        text = re.sub(r"<[^>]+>", "", li)
+        text = re.sub(r"\s+", " ", text).replace("&amp;", "&").strip()
+        if not (25 <= len(text) <= 320):
+            continue
+        out.append({"title": text, "domain": "Wikipedia · current events",
+                    "url": f"https://en.wikipedia.org{href.group(1)}" if href else "",
+                    "seendate": day, "language": "en"})
+        if len(out) >= max_records:
+            break
+    return {"ok": True, "articles": out, "throttled": False, "reason": None}
 
 
 # Words that carry no search signal but bloat a phrase into unmatchability.
