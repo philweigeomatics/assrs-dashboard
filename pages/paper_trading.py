@@ -21,6 +21,7 @@ from chart_utils import split_legends_by_panel
 import data_manager
 import game_news
 import paper_trading as pt
+import trade_review
 
 auth_manager.require_login()
 
@@ -534,6 +535,83 @@ def game():
         st.metric("你的收益 Your return", f"{perf['pnl_pct']:+.2f}%",
                   delta=f"{perf['pnl_pct'] - perf['buy_hold_pct']:+.2f}% vs B&H",
                   delta_color="inverse")
+
+    # ── 复盘 Review ───────────────────────────────────────────────────────
+    # Available mid-game, not gated to the end. The window stops at today, so
+    # every figure in it is something already lived through — asking at the
+    # moment the mistake is felt is when the lesson actually lands.
+    with st.expander("📋 复盘 · What did I miss?", expanded=False):
+        if not g.trades:
+            st.caption("先做几笔交易再来复盘 · make some trades first.")
+        else:
+            rv = trade_review.build_review(g, df)
+            if not rv.get("ok"):
+                st.caption(rv.get("reason", "—"))
+            else:
+                _m = rv["metrics"]
+                st.caption(
+                    f"区间 {rv['window']['from']} → {rv['window']['to']} "
+                    f"({rv['window']['bars']} 个交易日，含首次买入前 "
+                    f"{rv['window']['pre_entry_bars']} 日铺垫)。只统计到今天为止，"
+                    "不含任何你还没看到的行情。"
+                )
+                q = st.columns(4)
+                q[0].metric("收益 vs 买入持有", f"{_m['vs_buy_hold']:+.2f}%",
+                            help="你的收益减去一直持有不动的收益。")
+                q[1].metric("卖飞幅度 Avg forgone",
+                            f"{_m['avg_forgone_after_sell_pct']:+.2f}%"
+                            if _m["avg_forgone_after_sell_pct"] is not None else "—",
+                            help="每次卖出后，到今天为止最高价比卖出价高多少。"
+                                 "数值大 = 卖飞（cutting winners short）。")
+                q[2].metric("买入后最大浮亏",
+                            f"{_m['avg_mae_after_buy_pct']:+.2f}%"
+                            if _m["avg_mae_after_buy_pct"] is not None else "—")
+                q[3].metric("手续费占比", f"{_m['fees_pct_of_capital']:.3f}%",
+                            help=f"共 ¥{_m['fees_paid']:,.2f} · "
+                                 f"每20日 {_m['trades_per_20d']} 笔")
+
+                if st.button("🤖 让 AI 复盘 · Ask AI what I missed",
+                             key="bp_review_btn", type="primary"):
+                    with st.spinner("正在复盘…"):
+                        try:
+                            S["bp_review"] = {"data": trade_review.explain(rv)}
+                        except Exception as exc:
+                            S["bp_review"] = {"error": str(exc)}
+                        S["bp_review_asof"] = today
+
+                _rr = S.get("bp_review")
+                if _rr and S.get("bp_review_asof") != today:
+                    st.caption(f"（下方复盘生成于 {S.get('bp_review_asof')}，"
+                               "已不是今天——可重新生成）")
+                if _rr and "error" in _rr:
+                    st.error(f"复盘失败：{_rr['error']}")
+                elif _rr:
+                    _d = _rr["data"]
+                    st.info(f"**{_d.get('headline','—')}**")
+                    _bm = _d.get("biggest_mistake") or {}
+                    if _bm:
+                        st.markdown("#### 🔴 最主要的问题")
+                        st.markdown(f"**{_bm.get('what','')}** — {_bm.get('when','')}")
+                        for s in _bm.get("signals_missed") or []:
+                            st.markdown(f"- 漏看：{s}")
+                        if _bm.get("cost"):
+                            st.warning(f"代价：{_bm['cost']}")
+                    if _d.get("secondary_issues"):
+                        st.markdown("#### 次要问题")
+                        for s in _d["secondary_issues"]:
+                            st.markdown(f"- {s}")
+                    if _d.get("inaction_review"):
+                        st.markdown("#### 空仓/无操作的日子")
+                        st.write(_d["inaction_review"])
+                    if _d.get("what_you_did_well"):
+                        st.markdown("#### ✅ 做对的地方")
+                        for s in _d["what_you_did_well"]:
+                            st.markdown(f"- {s}")
+                    if _d.get("one_habit_to_change"):
+                        st.success(f"**要改的一个习惯：** {_d['one_habit_to_change']}")
+
+                with st.expander("查看发给 AI 的逐日数据", expanded=False):
+                    st.code("\n".join(rv["timeline"]), language=None)
 
     st.markdown("---")
     b1, b2 = st.columns([1, 1])
