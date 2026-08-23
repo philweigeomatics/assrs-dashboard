@@ -87,11 +87,20 @@ def build_review(game, df: pd.DataFrame, pre_bars: int = PRE_ENTRY_BARS) -> dict
     pos, lines, compressed = 0, [], 0
     quiet_run: list = []
 
+    # How aggressively idle stretches are summarised. Long games get a lower
+    # threshold: with trades scattered through a hundred sessions the quiet
+    # runs are short, so a fixed "4 or more" barely compresses anything and the
+    # timeline stays enormous. Idle days are never DROPPED — a compressed run
+    # still reports its length, price change and where RSI/ADX went, because a
+    # stretch of doing nothing is itself a decision worth reviewing.
+    _min_quiet = (3 if len(win) > 120 else
+                  4 if len(win) > MAX_DETAIL_ROWS else 10 ** 9)
+
     def _flush():
         nonlocal quiet_run, compressed
         if not quiet_run:
             return
-        if len(quiet_run) >= 4 and len(win) > MAX_DETAIL_ROWS:
+        if len(quiet_run) >= _min_quiet:
             a, b = quiet_run[0], quiet_run[-1]
             chg = (b[1]["Close"] / a[1]["Close"] - 1) * 100
             lines.append(
@@ -272,5 +281,25 @@ def explain(review: dict) -> dict:
 - 买入后平均最大浮亏：{m['avg_mae_after_buy_pct'] if m['avg_mae_after_buy_pct'] is not None else '—'}%
 - 当前持股 {m['shares_now']} 股
 """
-    return ai_client.call_json(_PROMPT, user, max_tokens=9000,
-                               temperature=0.4, reasoning_effort="low")
+    # Budget scales with the review, because a fixed cap only fits the game
+    # length it was chosen for. A hundred-played sessions is a long timeline to
+    # reason over before a word of JSON is written, and DeepSeek draws the
+    # reasoning trace from this SAME allowance — so at 9,000 the trace could
+    # consume the lot and the call failed with nothing emitted.
+    #
+    # ~250 tokens per timeline row covers reading each day plus the reasoning
+    # it provokes; the floor keeps short games comfortable and the ceiling
+    # stops a pathological window from running away.
+    rows = len(review.get("timeline", []))
+    budget = min(32000, max(14000, 12000 + rows * 250))
+
+    # The timeout has to move with the budget. ai_client defaults to 60s, and
+    # a larger allowance simply takes longer to generate — raising max_tokens
+    # alone converted "exhausted the token budget" into "read timed out",
+    # which is the same failure wearing a different hat. Observed: a ~23k
+    # budget overran 60s.
+    timeout = min(300, max(120, 90 + rows * 3))
+
+    return ai_client.call_json(_PROMPT, user, max_tokens=budget,
+                               temperature=0.4, reasoning_effort="low",
+                               timeout=timeout)

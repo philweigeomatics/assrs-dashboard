@@ -619,7 +619,7 @@ def game():
 
                 if st.button("🤖 让 AI 复盘 · Ask AI what I missed",
                              key="bp_review_btn", type="primary"):
-                    with st.spinner("正在复盘…"):
+                    with st.spinner("正在复盘…长局可能需要 1-2 分钟"):
                         try:
                             S["bp_review"] = {"data": trade_review.explain(rv)}
                         except Exception as exc:
