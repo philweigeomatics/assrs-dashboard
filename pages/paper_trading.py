@@ -151,73 +151,179 @@ def game():
                   row=2, col=1)
     fig.add_trace(go.Scatter(x=dates, y=vis["Vol_MA20"], name="Vol MA20",
                              line=dict(color="#64748b", width=1)), row=2, col=1)
-    _obv = vis["OBV"]
-    _vmax = float(vis["Volume"].max() or 1)
-    _rng = float(_obv.max() - _obv.min()) or 1.0
-    fig.add_trace(go.Scatter(
-        x=dates, y=(_obv - _obv.min()) / _rng * _vmax, name="OBV (scaled)",
-        line=dict(color="#7c3aed", width=1.4),
-        hovertemplate="OBV %{customdata:,.0f}<extra></extra>",
-        customdata=_obv), row=2, col=1)
+    # OBV and OBV momentum are rescaled onto the volume axis exactly as the
+    # Technical Analysis page does it — their absolute levels are arbitrary, so
+    # only the SHAPE against price matters, and hover shows the true value.
+    _vmin, _vmax = float(vis["Volume"].min()), float(vis["Volume"].max())
+
+    def _rescale(s):
+        lo, hi = float(s.min()), float(s.max())
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi == lo or _vmax == _vmin:
+            return None
+        return (s - lo) / (hi - lo) * (_vmax - _vmin) + _vmin, lo, hi
+
+    _o = _rescale(vis["OBV"])
+    if _o:
+        fig.add_trace(go.Scatter(
+            x=dates, y=_o[0], name="Vol-Scaled OBV",
+            line=dict(color="#f59e0b", width=3), mode="lines",
+            hovertemplate="OBV: %{customdata:,.0f}<extra></extra>",
+            customdata=vis["OBV"]), row=2, col=1)
+
+    _m = vis["OBV_Momentum"].replace([np.inf, -np.inf], np.nan)
+    _mm = _rescale(_m.dropna()) if _m.notna().any() else None
+    if _mm:
+        _lo, _hi = _mm[1], _mm[2]
+        _disp = (_m - _lo) / (_hi - _lo) * (_vmax - _vmin) + _vmin
+        fig.add_trace(go.Scatter(
+            x=dates, y=_disp, name="OBV动能(20日)",
+            line=dict(color="#3b82f6", width=1.6), mode="lines",
+            hovertemplate="OBV动能: %{customdata:+.2f}× 日均量<extra></extra>",
+            customdata=_m), row=2, col=1)
+        if _lo <= 0 <= _hi:   # the accumulation / distribution divide
+            fig.add_hline(y=(0 - _lo) / (_hi - _lo) * (_vmax - _vmin) + _vmin,
+                          line_dash="dot", line_color="rgba(59,130,246,0.55)",
+                          line_width=1, row=2, col=1,
+                          annotation_text="OBV动能=0",
+                          annotation_position="bottom right",
+                          annotation_font=dict(size=8, color="#3b82f6"))
 
     # ── 3 · MACD with turn markers ──
-    fig.add_trace(go.Bar(x=dates, y=vis["MACD_Hist"], name="Hist", showlegend=False,
-                         marker_color=["#dc2626" if v >= 0 else "#22c55e"
-                                       for v in vis["MACD_Hist"].fillna(0)]),
+    fig.add_trace(go.Bar(x=dates, y=vis["MACD_Hist"] * 2.5,
+                         name="MACD Histogram (2.5x)",
+                         marker=dict(color=["#ef4444" if v > 0 else "#22c55e"
+                                            for v in vis["MACD_Hist"].fillna(0)])),
                   row=3, col=1)
     fig.add_trace(go.Scatter(x=dates, y=vis["MACD"], name="MACD",
-                             line=dict(color="#2a78d6", width=1.4)), row=3, col=1)
-    fig.add_trace(go.Scatter(x=dates, y=vis["MACD_Signal"], name="Signal",
-                             line=dict(color="#eb6834", width=1.2)), row=3, col=1)
-    for flag, lab, sym, colour in (("MACD_Bottoming", "MACD Bottoming", "triangle-up", "#dc2626"),
-                                   ("MACD_Peaking", "MACD Peaking", "triangle-down", "#15803d"),
-                                   ("MACD_GoldenCross", "金叉 Golden", "star", "#dc2626"),
-                                   ("MACD_DeadCross", "死叉 Dead", "x", "#15803d")):
+                             line=dict(color="#2563eb", width=2)), row=3, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=vis["MACD_Signal"], name="MACD Signal",
+                             line=dict(color="#f97316", width=2)), row=3, col=1)
+    fig.add_hline(y=0, line_dash="solid", line_color="gray", line_width=1, row=3, col=1)
+
+    # Labelled scenario markers, same palette and placement as the TA page.
+    _scen = vis["MACD_Scenario"].fillna("")
+    _has = _scen != ""
+    if _has.any():
+        _cmap = {"Crossover": "#10b981", "Approaching": "#3b82f6",
+                 "Bottoming": "#f59e0b", "Momentum": "#ef4444"}
+        _lbl = _scen[_has]
+        fig.add_trace(go.Scatter(
+            x=[d for d, m in zip(dates, _has.values) if m],
+            y=vis["MACD"][_has] * 1.12, mode="markers+text", name="MACD Triggers",
+            marker=dict(color=[_cmap.get(x, "#6b7280") for x in _lbl], size=12,
+                        symbol="circle", line=dict(width=2, color="white")),
+            text=_lbl, textposition="top center",
+            textfont=dict(size=9, color="black"),
+            hovertemplate="%{text}<br>MACD: %{y:.4f}<extra></extra>"), row=3, col=1)
+
+    for flag, lab, colour, edge, mult in (
+            ("MACD_Peaking", "MACD Peaking", "#ffee00", "#000000", 1.15),
+            ("MACD_BearishCrossover", "Bearish Cross", "#f30000", "#7f1d1d", 0.85)):
         msk = vis[flag].fillna(False).values.astype(bool)
         if msk.any():
             fig.add_trace(go.Scatter(
                 x=[d for d, m in zip(dates, msk) if m],
-                y=vis["MACD"][msk], mode="markers", name=lab,
-                marker=dict(symbol=sym, size=9, color=colour)), row=3, col=1)
+                y=vis["MACD"][msk] * mult, mode="markers", name=lab,
+                marker=dict(color=colour, size=12, symbol="triangle-down",
+                            line=dict(width=2, color=edge)),
+                hovertemplate=f"<b>{lab}</b><br>MACD: %{{y:.4f}}<extra></extra>"),
+                row=3, col=1)
 
-    # ── 4 · RSI with dynamic bands + arrows ──
-    fig.add_trace(go.Scatter(x=dates, y=vis["RSI_14"], name="RSI",
-                             line=dict(color="#7c3aed", width=1.5)), row=4, col=1)
-    for col, lab in (("RSI_P90", "P90"), ("RSI_P10", "P10")):
-        fig.add_trace(go.Scatter(x=dates, y=vis[col], name=f"RSI {lab}",
-                                 line=dict(color="rgba(148,163,184,.8)", width=1,
-                                           dash="dot"), showlegend=False), row=4, col=1)
-    for flag, lab, sym, colour in (("RSI_Bottoming", "RSI 见底", "arrow-up", "#dc2626"),
-                                   ("RSI_Peaking", "RSI 见顶", "arrow-down", "#15803d")):
+    # ── 4 · RSI with dynamic percentile bands ──
+    fig.add_trace(go.Scatter(x=dates, y=vis["RSI_14"], name="RSI(14)",
+                             line=dict(color="#7c3aed", width=2)), row=4, col=1)
+    for flag, lab, colour, sym in (
+            ("RSI_Bottoming", "🔵 RSI 极低 (P10)", "#3b82f6", "triangle-up"),
+            ("RSI_Peaking", "🔴 RSI 极高 (P90)", "#ef4444", "triangle-down")):
         msk = vis[flag].fillna(False).values.astype(bool)
         if msk.any():
             fig.add_trace(go.Scatter(
                 x=[d for d, m in zip(dates, msk) if m],
                 y=vis["RSI_14"][msk], mode="markers", name=lab,
-                marker=dict(symbol=sym, size=11, color=colour)), row=4, col=1)
-    for lvl in (30, 70):
+                marker=dict(symbol=sym, size=11, color=colour,
+                            line=dict(width=1, color="white"))), row=4, col=1)
+    for _c, _lab in (("RSI_P90", None), ("RSI_P10", None)):
+        fig.add_trace(go.Scatter(x=dates, y=vis[_c], showlegend=False, name=_c,
+                                 line=dict(color="rgba(148,163,184,.55)", width=1,
+                                           dash="dot")), row=4, col=1)
+    for lvl, txt in ((70, "超买 70"), (50, "中性 50"), (30, "超卖 30")):
         fig.add_hline(y=lvl, line_dash="dot", line_width=1,
-                      line_color="rgba(148,163,184,.55)", row=4, col=1)
+                      line_color="rgba(148,163,184,.8)", row=4, col=1,
+                      annotation_text=txt, annotation_position="right",
+                      annotation_font=dict(size=8, color="#64748b"))
 
-    # ── 5 · ADX trend analysis ──
-    fig.add_trace(go.Scatter(x=dates, y=vis["ADX"], name="ADX",
-                             line=dict(color="#0f172a", width=2)), row=5, col=1)
+    # ── 5 · ADX trend analysis, with the nine lifecycle states ──
+    fig.add_trace(go.Scatter(x=dates, y=vis["ADX_BB_Upper"], name="ADX BB Upper",
+                             line=dict(color="rgba(148,163,184,.45)", width=1),
+                             showlegend=False), row=5, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=vis["ADX_BB_Lower"], name="ADX BB Lower",
+                             line=dict(color="rgba(148,163,184,.45)", width=1),
+                             fill="tonexty", fillcolor="rgba(148,163,184,.13)",
+                             showlegend=False), row=5, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=vis["ADX"], name="ADX (Raw)",
+                             line=dict(color="#0f172a", width=1.4)), row=5, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=vis["ADX_LOWESS"], name="ADX Smoothed",
+                             line=dict(color="#7c3aed", width=2)), row=5, col=1)
     fig.add_trace(go.Scatter(x=dates, y=vis["DI_Plus"], name="+DI",
-                             line=dict(color="#dc2626", width=1.2)), row=5, col=1)
+                             line=dict(color="#ef4444", width=1.2)), row=5, col=1)
     fig.add_trace(go.Scatter(x=dates, y=vis["DI_Minus"], name="-DI",
-                             line=dict(color="#15803d", width=1.2)), row=5, col=1)
-    for lvl, txt in ((20, "weak"), (30, "strong")):
-        fig.add_hline(y=lvl, line_dash="dot", line_width=1,
-                      line_color="rgba(148,163,184,.7)", row=5, col=1)
+                             line=dict(color="#22c55e", width=1.2)), row=5, col=1)
+
+    _PAT = {"Bottoming": ("🔄 Bottoming", "#f59e0b", "circle"),
+            "Reversing Up": ("🔺 Reversing Up", "#10b981", "triangle-up"),
+            "Accelerating Up": ("🚀 Accelerating", "#dc2626", "triangle-up"),
+            "Strong Trend": ("💪 Strong", "#16a34a", "square"),
+            "Losing Steam": ("⚠️ Losing Steam", "#eab308", "diamond"),
+            "Peaking": ("🔴 Peaking", "#ef4444", "triangle-down"),
+            "Reversing Down": ("🔻 Reversing Down", "#f97316", "triangle-down"),
+            "Accelerating Down": ("📉 Accelerating Down", "#7f1d1d", "triangle-down"),
+            "Slowing Down": ("🔽 Slowing Down", "#3b82f6", "diamond")}
+    _pat = vis["ADX_Pattern"].fillna("Neutral")
+    for key, (lab, colour, sym) in _PAT.items():
+        msk = (_pat == key).values
+        if msk.any():
+            fig.add_trace(go.Scatter(
+                x=[d for d, m in zip(dates, msk) if m],
+                y=vis["ADX_LOWESS"][msk], mode="markers", name=lab,
+                marker=dict(color=colour, size=9, symbol=sym,
+                            line=dict(width=1, color="white")),
+                hovertemplate=f"{lab}<br>ADX %{{y:.1f}}<extra></extra>"), row=5, col=1)
+    for _f, _lab, _col, _sym in (
+            ("DI_Screaming_Buy", "🚀 DI Screaming Buy", "#dc2626", "star"),
+            ("DI_Screaming_Sell", "🛑 DI Screaming Sell", "#15803d", "x")):
+        msk = vis[_f].fillna(False).values.astype(bool)
+        if msk.any():
+            fig.add_trace(go.Scatter(
+                x=[d for d, m in zip(dates, msk) if m],
+                y=vis["ADX"][msk], mode="markers", name=_lab,
+                marker=dict(color=_col, size=12, symbol=_sym)), row=5, col=1)
+    for lvl, txt in ((25, "Strong Trend (25)"), (20, "Weak Trend (20)")):
+        fig.add_hline(y=lvl, line_dash="dash", line_width=1,
+                      line_color="rgba(100,116,139,.75)", row=5, col=1,
+                      annotation_text=txt, annotation_position="right",
+                      annotation_font=dict(size=8, color="#64748b"))
 
     # ── 6 · Z-Score price + volume ──
-    fig.add_trace(go.Bar(x=dates, y=vis["Volume_ZScore"], name="Vol Z",
-                         marker_color="rgba(100,116,139,.55)"), row=6, col=1)
+    fig.add_trace(go.Bar(x=dates, y=vis["Volume_ZScore"], name="Volume Z",
+                         marker=dict(color="rgba(100,116,139,.5)")), row=6, col=1)
     fig.add_trace(go.Scatter(x=dates, y=vis["Price_ZScore"], name="Price Z",
-                             line=dict(color="#2a78d6", width=1.6)), row=6, col=1)
-    for lvl in (-2, 0, 2):
-        fig.add_hline(y=lvl, line_dash="dot", line_width=1,
-                      line_color="rgba(148,163,184,.6)", row=6, col=1)
+                             line=dict(color="#2563eb", width=2)), row=6, col=1)
+    _pz = vis["Price_ZScore"]
+    for cond, lab, colour, sym in ((_pz <= -2.5, "Oversold (Z ≤ -2.5)", "#22c55e", "triangle-up"),
+                                   (_pz >= 2.0, "Overbought (Z ≥ +2.0)", "#ef4444", "triangle-down")):
+        msk = cond.fillna(False).values
+        if msk.any():
+            fig.add_trace(go.Scatter(
+                x=[d for d, m in zip(dates, msk) if m], y=_pz[msk],
+                mode="markers", name=lab,
+                marker=dict(color=colour, size=10, symbol=sym,
+                            line=dict(width=1, color="white"))), row=6, col=1)
+    for lvl, txt, dash in ((2.0, "Overbought (+2.0)", "dot"), (0, None, "solid"),
+                           (-2.5, "Oversold (-2.5)", "dot")):
+        fig.add_hline(y=lvl, line_dash=dash, line_width=1,
+                      line_color="rgba(148,163,184,.7)", row=6, col=1,
+                      **({"annotation_text": txt, "annotation_position": "right",
+                          "annotation_font": dict(size=8, color="#64748b")} if txt else {}))
 
     fig.update_layout(height=1180, template="plotly_white",
                       xaxis_rangeslider_visible=False, hovermode="x unified",
@@ -233,7 +339,7 @@ def game():
                      tickmode="array", tickvals=dates[::_step], row=6, col=1)
     st.plotly_chart(fig, use_container_width=True)
 
-    _phase = str(vis["ADX_Phase"].iloc[-1] or "—")
+    _phase = str(vis["ADX_Pattern"].iloc[-1] or "—")
     st.caption(
         f"ADX {float(vis['ADX'].iloc[-1]):.1f} · {_phase} &nbsp;|&nbsp; "
         f"RSI {float(vis['RSI_14'].iloc[-1]):.1f} "

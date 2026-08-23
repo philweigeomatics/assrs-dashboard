@@ -49,6 +49,7 @@ TRANSFER_FEE = 0.00001
 # warmup included — keeps every moving average and percentile band built purely
 # from post-regime data. ~485 sessions exist after the anchor, which is enough
 # for a 180-session game plus warmup with ~165 possible start positions.
+import analysis_engine as ae
 from analysis_engine import REGIME_ANCHOR
 
 WARMUP_BARS = 80           # MA60 needs 60; 80 leaves it settled before day one
@@ -104,10 +105,31 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # A turn is only knowable one bar AFTER it happens — the histogram must
     # have fallen and then risen. Marking the low itself would require knowing
     # the next bar, which is precisely the leak being avoided.
+    _gap = d["MACD"] - d["MACD_Signal"]
     d["MACD_Bottoming"] = (_hg > _hg.shift(1)) & (_hg.shift(1) <= _hg.shift(2)) & (d["MACD"] < 0)
     d["MACD_Peaking"] = (_hg < _hg.shift(1)) & (_hg.shift(1) >= _hg.shift(2)) & (d["MACD"] > 0)
-    d["MACD_GoldenCross"] = (d["MACD"] > d["MACD_Signal"]) & (d["MACD"].shift(1) <= d["MACD_Signal"].shift(1))
-    d["MACD_DeadCross"] = (d["MACD"] < d["MACD_Signal"]) & (d["MACD"].shift(1) >= d["MACD_Signal"].shift(1))
+    d["MACD_ClassicCrossover"] = (_gap > 0) & (_gap.shift(1) <= 0)
+    d["MACD_BearishCrossover"] = (_gap < 0) & (_gap.shift(1) >= 0)
+    # Still below the signal line but closing on it for two bars — the setup
+    # that precedes a crossover, which is the point of flagging it separately.
+    d["MACD_Approaching"] = (_gap < 0) & (_gap > _gap.shift(1)) & \
+                            (_gap.shift(1) > _gap.shift(2))
+    d["MACD_MomentumBuilding"] = (_hg > 0) & (_hg > _hg.shift(1)) & \
+                                 (_hg.shift(1) > _hg.shift(2))
+
+    def _macd_label(r):
+        if r["MACD_ClassicCrossover"]:
+            return "Crossover"
+        if r["MACD_Approaching"]:
+            return "Approaching"
+        if r["MACD_Bottoming"]:
+            return "Bottoming"
+        if r["MACD_MomentumBuilding"]:
+            return "Momentum"
+        return ""
+    d["MACD_Scenario"] = d[["MACD_ClassicCrossover", "MACD_Approaching",
+                            "MACD_Bottoming", "MACD_MomentumBuilding"]].apply(
+        _macd_label, axis=1)
 
     # ── RSI with dynamic bands ──
     delta = c.diff()
@@ -134,23 +156,37 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     d["DI_Minus"] = 100 * minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / atr.replace(0, np.nan)
     dx = 100 * (d["DI_Plus"] - d["DI_Minus"]).abs() / (d["DI_Plus"] + d["DI_Minus"]).replace(0, np.nan)
     d["ADX"] = dx.ewm(alpha=1 / 14, adjust=False).mean()
-    d["ADX_Slope"] = _trailing_slope(d["ADX"], 5)
 
-    def _phase(r):
-        a, s = r["ADX"], r["ADX_Slope"]
-        if pd.isna(a) or pd.isna(s):
-            return ""
-        if a < 20:
-            return "盘整 Ranging" if abs(s) < 0.15 else ("转强 Building" if s > 0 else "转弱 Fading")
-        if a >= 30:
-            return "强趋势 Strong" if s >= -0.15 else "见顶回落 Peaking"
-        return "趋势形成 Emerging" if s > 0 else "趋势减弱 Weakening"
-    d["ADX_Phase"] = d[["ADX", "ADX_Slope"]].apply(_phase, axis=1)
+    # The Technical Analysis page smooths ADX with savgol_filter, which is
+    # centered. analysis_engine already ships an EWM fallback for when scipy is
+    # unavailable, and that fallback is causal — so using it deliberately gives
+    # the same downstream machinery without reading future bars. Every ADX
+    # derivative below therefore matches the TA page's definitions exactly.
+    _adxf = d["ADX"].bfill().fillna(0)
+    d["ADX_LOWESS"] = _adxf.ewm(span=ae.ADX_EWM_SPAN, adjust=False).mean()
+    d["ADX_BB_Middle"] = d["ADX_LOWESS"].rolling(ae.ADX_BB_WINDOW).mean()
+    d["ADX_BB_Std"] = d["ADX_LOWESS"].rolling(ae.ADX_BB_WINDOW).std()
+    d["ADX_BB_Upper"] = d["ADX_BB_Middle"] + ae.ADX_BB_STD * d["ADX_BB_Std"]
+    d["ADX_BB_Lower"] = d["ADX_BB_Middle"] - ae.ADX_BB_STD * d["ADX_BB_Std"]
+    d["ADX_Slope"] = _trailing_slope(d["ADX_LOWESS"], ae.ADX_SLOPE_WINDOW)
+    d["ADX_Acceleration"] = d["ADX_Slope"].diff()
+    # Reuse the real classifier rather than re-deriving it: same nine lifecycle
+    # states, same thresholds, so the panel reads identically to the TA page.
+    d = ae.apply_adx_patterns(d)
+    d["DI_Screaming_Buy"] = (d["DI_Plus"] > d["DI_Minus"]) & \
+        (d["DI_Plus"].shift(1) <= d["DI_Minus"].shift(1)) & (d["ADX"] > ae.ADX_WEAK)
+    d["DI_Screaming_Sell"] = (d["DI_Minus"] > d["DI_Plus"]) & \
+        (d["DI_Minus"].shift(1) <= d["DI_Plus"].shift(1)) & (d["ADX"] > ae.ADX_WEAK)
 
     # ── Volume / OBV / z-scores ──
     d["OBV"] = (np.sign(c.diff().fillna(0)) * v).cumsum()
-    d["OBV_MA20"] = d["OBV"].rolling(20).mean()
     d["Vol_MA20"] = v.rolling(20).mean()
+    # OBV动能 — the SLOPE of OBV, not its level. Cumulative OBV's level is
+    # arbitrary (it depends where the series starts); its 20-day change divided
+    # by average volume is zero-centred and reads directly as current
+    # accumulation force in units of "× average daily volume".
+    d["OBV_Momentum"] = (d["OBV"] - d["OBV"].shift(20)) / \
+                        v.rolling(20, min_periods=1).mean().replace(0, np.nan)
     d["Volume_ZScore"] = ((v - v.rolling(100, min_periods=20).mean())
                           / v.rolling(100, min_periods=20).std().replace(0, np.nan))
     d["Price_ZScore"] = ((c - c.rolling(100, min_periods=20).mean())
