@@ -52,6 +52,14 @@ TRANSFER_FEE = 0.00001
 import analysis_engine as ae
 from analysis_engine import REGIME_ANCHOR
 
+# Z-score windows. These are two different measurements, not one setting:
+#   VOL_Z_WINDOW   — analysis_engine's VOL_LOOKBACK, the long baseline that
+#                    accumulation_signals reads as "unusually heavy volume".
+#   PANEL_Z_WINDOW — the Z-Score panel on the Technical Analysis chart, which
+#                    asks how unusual TODAY is against the last month.
+VOL_Z_WINDOW = 100
+PANEL_Z_WINDOW = 20
+
 WARMUP_BARS = 80           # MA60 needs 60; 80 leaves it settled before day one
 MIN_HISTORY_BARS = 60      # ≈3 months visible before the first playable day
 DEFAULT_PLAY_BARS = 120
@@ -187,10 +195,27 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # accumulation force in units of "× average daily volume".
     d["OBV_Momentum"] = (d["OBV"] - d["OBV"].shift(20)) / \
                         v.rolling(20, min_periods=1).mean().replace(0, np.nan)
-    d["Volume_ZScore"] = ((v - v.rolling(100, min_periods=20).mean())
-                          / v.rolling(100, min_periods=20).std().replace(0, np.nan))
-    d["Price_ZScore"] = ((c - c.rolling(100, min_periods=20).mean())
-                         / c.rolling(100, min_periods=20).std().replace(0, np.nan))
+    # TWO different z-scores, on purpose, because the app already uses two.
+    #
+    # Volume_ZScore over 100 sessions is analysis_engine's definition
+    # (VOL_LOOKBACK), and accumulation_signals keys off it — "volume unusually
+    # heavy versus this stock's normal" over a long baseline.
+    d["Volume_ZScore"] = ((v - v.rolling(VOL_Z_WINDOW, min_periods=20).mean())
+                          / v.rolling(VOL_Z_WINDOW, min_periods=20).std().replace(0, np.nan))
+
+    # The Z-Score PANEL is a different question: how unusual is TODAY, against
+    # the last month. It standardises daily RETURNS rather than price level —
+    # a level z-score answers "how far from the mean is price", which is close
+    # to Bollinger %b and not what the panel's divergence read needs. Matches
+    # the Technical Analysis chart exactly: 20 sessions, returns, population
+    # std, so the same bar reads the same on both pages.
+    _rets = c.pct_change()
+    d["Price_Z"] = ((_rets - _rets.rolling(PANEL_Z_WINDOW).mean())
+                    / _rets.rolling(PANEL_Z_WINDOW).std(ddof=0).replace(0, np.nan))
+    d["Volume_Z"] = ((v - v.rolling(PANEL_Z_WINDOW).mean())
+                     / v.rolling(PANEL_Z_WINDOW).std(ddof=0).replace(0, np.nan))
+    # Retained so nothing referencing the old name breaks; the panel uses Price_Z.
+    d["Price_ZScore"] = d["Price_Z"]
     return d
 
 

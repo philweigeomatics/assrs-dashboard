@@ -327,11 +327,14 @@ def game():
                       annotation_font=dict(size=8, color="#64748b"))
 
     # ── 6 · Z-Score price + volume ──
-    fig.add_trace(go.Bar(x=dates, y=vis["Volume_ZScore"], name="Volume Z",
+    # 20-session z-scores on daily returns — the panel's own measure, matching
+    # the TA chart. Volume_ZScore (100d) is a different column, used by the
+    # 吸筹/出货 detectors, and deliberately not shown here.
+    fig.add_trace(go.Bar(x=dates, y=vis["Volume_Z"], name="Volume Z",
                          marker=dict(color="rgba(100,116,139,.5)")), row=6, col=1)
-    fig.add_trace(go.Scatter(x=dates, y=vis["Price_ZScore"], name="Price Z",
+    fig.add_trace(go.Scatter(x=dates, y=vis["Price_Z"], name="Price Z",
                              line=dict(color="#2563eb", width=2)), row=6, col=1)
-    _pz = vis["Price_ZScore"]
+    _pz = vis["Price_Z"]
     for cond, lab, colour, sym in ((_pz <= -2.5, "Oversold (Z ≤ -2.5)", "#22c55e", "triangle-up"),
                                    (_pz >= 2.0, "Overbought (Z ≥ +2.0)", "#ef4444", "triangle-down")):
         msk = cond.fillna(False).values
@@ -372,7 +375,7 @@ def game():
         f"ADX {float(vis['ADX'].iloc[-1]):.1f} · {_phase} &nbsp;|&nbsp; "
         f"RSI {float(vis['RSI_14'].iloc[-1]):.1f} "
         f"(band {float(vis['RSI_P10'].iloc[-1]):.0f}–{float(vis['RSI_P90'].iloc[-1]):.0f}) "
-        f"&nbsp;|&nbsp; Vol Z {float(vis['Volume_ZScore'].iloc[-1]):+.2f}",
+        f"&nbsp;|&nbsp; Vol Z(20) {float(vis['Volume_Z'].iloc[-1]):+.2f}",
         unsafe_allow_html=True)
 
     # ── 吸筹 / 出货 ───────────────────────────────────────────────────────
