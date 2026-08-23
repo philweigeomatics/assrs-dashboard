@@ -255,12 +255,19 @@ def game():
                     if src.startswith("🌍"):
                         cache[ckey] = game_news.fetch_world_events(today)
                     else:
+                        # Themes look back a week, macro two days. A specific
+                        # theme produces only a handful of Guardian hits even
+                        # across a full week, so a two-day window on themes is
+                        # empty most days — which reads as "broken" rather than
+                        # "nothing on that topic happened".
+                        _win = 7 if src.startswith("主题") else 2
                         cache[ckey] = game_news.fetch_guardian(
-                            query, today, window_days=2,
+                            query, today, window_days=_win,
                             redact=[pick["name"], pick["ticker"]])
                 st.rerun(scope="fragment")
             if not src.startswith("🌍"):
-                st.caption(f"query: `{query}`")
+                _w = 7 if src.startswith("主题") else 2
+                st.caption(f"query: `{query}` · looking back {_w} days from {today}")
 
             got = cache.get(ckey)
             if got is None:

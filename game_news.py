@@ -324,6 +324,10 @@ def build_query(search_terms: "list[str] | None", max_terms: int = 4) -> str:
             break
     if not parts:
         return MACRO_QUERY
-    # Anchored to China so a bare word like "semiconductor" doesn't return
-    # global noise unrelated to the market being played.
-    return "(" + " OR ".join(parts) + ") (china OR chinese)"
+    # The AND is load-bearing. Guardian treats two juxtaposed groups —
+    # "(themes) (china OR chinese)" — as OR, so an anchor meant to NARROW the
+    # search widened it to "anything mentioning china" and the theme feed
+    # returned the same articles as the macro feed. Measured on one date:
+    # juxtaposed 94 results, explicit AND 2 results with zero overlap against
+    # macro, and those two actually about chips.
+    return "(" + " OR ".join(parts) + ") AND (china OR chinese)"
