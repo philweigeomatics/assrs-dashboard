@@ -35,16 +35,18 @@ st.caption(
 S = st.session_state
 
 
-def _start_game(cash: float, play_bars: int):
+def _start_game(cash: float, play_bars: int, hist_bars: int):
     with st.spinner("Picking a stock…"):
-        pick = pt.pick_random_stock(data_manager, play_bars=play_bars)
+        pick = pt.pick_random_stock(data_manager, play_bars=play_bars,
+                                    hist_bars=hist_bars)
     if not pick.get("ok"):
         S["bp_error"] = pick.get("reason", "could not pick a stock")
         S.pop("bp_game", None)
         return
     S["bp_error"] = None
     S["bp_pick"] = pick
-    S["bp_game"] = pt.new_game(pick, cash=cash, play_bars=play_bars)
+    S["bp_game"] = pt.new_game(pick, cash=cash, play_bars=play_bars,
+                               hist_bars=hist_bars)
     # Cleared so a new stock never shows the previous one's themes or articles.
     S.pop("bp_risk", None)
     S.pop("bp_news_cache", None)
@@ -53,24 +55,34 @@ def _start_game(cash: float, play_bars: int):
 # ── Setup ─────────────────────────────────────────────────────────────────────
 if "bp_game" not in S:
     st.subheader("开始新局 · New game")
-    c1, c2, c3 = st.columns([1, 1, 1])
+    # Two genuinely different numbers, so neither has to be inferred from the
+    # other: how much chart you START with, and how many decisions you GET.
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
     with c1:
         _cash = st.number_input("起始资金 Starting cash (¥)", 10_000, 10_000_000,
                                 100_000, 10_000, key="bp_cash")
     with c2:
-        _bars = st.select_slider("要交易多少天 Sessions to play",
-                                 options=[30, 60, 90, 120, 180], value=120,
-                                 key="bp_bars",
-                                 help="How many decisions you get. You begin at "
-                                      "session 1 with ~60 sessions of chart "
-                                      "history already visible behind you.")
+        _hist = st.select_slider(
+            "开局可见历史 History at start", options=[30, 60, 90, 120, 180],
+            value=60, key="bp_hist",
+            help="How many past sessions are already drawn on the chart before "
+                 "your first decision. Context only — you did not trade these.")
     with c3:
+        _bars = st.select_slider(
+            "最多可交易天数 Sessions you play", options=[30, 60, 90, 120, 180],
+            value=120, key="bp_bars",
+            help="How many decisions you get from here on. This is the number "
+                 "the session counter counts up to.")
+    with c4:
         st.write("")
         st.write("")
-        if st.button("🎲 抽取股票 Deal me a stock", type="primary",
-                     use_container_width=True):
-            _start_game(float(_cash), int(_bars))
+        if st.button("🎲 抽取股票 Deal", type="primary", use_container_width=True):
+            _start_game(float(_cash), int(_bars), int(_hist))
             st.rerun()
+    st.caption(
+        "两个数字不同：**开局可见历史**是发牌时已经画在图上的过去，"
+        "**最多可交易天数**是你从第1天起还能做多少次决策。"
+    )
     if S.get("bp_error"):
         st.error(S["bp_error"])
     st.stop()
@@ -93,11 +105,13 @@ def game():
     # session 1 and you advance forward, so 180 is how many decisions remain,
     # not how much history is drawn. The chart still shows ~60 sessions of past
     # data behind day 1 — that history is context, not part of the count.
+    _hb = int(getattr(g, "hist_bars", pt.MIN_HISTORY_BARS))
     m = st.columns(6)
-    m[0].metric("已进行 Session", f"{perf['day']} / {perf['play_bars']}",
-                help="Sessions played so far out of the number you chose. You "
-                     "start at 1 and advance one session per decision; the "
-                     "chart behind day 1 is context you did not trade.")
+    m[0].metric("已交易 Sessions played", f"{perf['day']}",
+                delta=f"还剩 {max(perf['play_bars'] - perf['day'], 0)} 天",
+                delta_color="off",
+                help=f"你已经做了 {perf['day']} 次决策，最多 {perf['play_bars']} 次。"
+                     f"图上第1天之前的 {_hb} 个交易日是发牌时给的历史，不计入。")
     m[1].metric("当前日期 Date", today)
     m[2].metric("收盘 Close", f"¥{price:,.2f}",
                 delta=f"{(price / float(df.iloc[g.cur_idx - 1]['Close']) - 1) * 100:+.2f}%"
@@ -404,9 +418,8 @@ def game():
                                     min(100, max_buy), 100, key="bp_qty_b")
             if st.button(f"🔴 买入 Buy @ ¥{price:.2f}", use_container_width=True,
                          disabled=max_buy < 100):
-                r = pt.buy(g, int(qty_b), price, today)
+                r = pt.buy(g, int(qty_b), price, today, advance_after=True)
                 if r["ok"]:
-                    pt.advance(g)
                     st.rerun(scope="fragment")
                 else:
                     st.error(r["reason"])
@@ -417,9 +430,8 @@ def game():
                                     min(100, sellable), 100, key="bp_qty_s")
             if st.button(f"🟢 卖出 Sell @ ¥{price:.2f}", use_container_width=True,
                          disabled=sellable < 1):
-                r = pt.sell(g, int(qty_s), price, today)
+                r = pt.sell(g, int(qty_s), price, today, advance_after=True)
                 if r["ok"]:
-                    pt.advance(g)
                     st.rerun(scope="fragment")
                 else:
                     st.error(r["reason"])
@@ -624,7 +636,8 @@ def game():
             st.rerun(scope="fragment")
     with b2:
         if st.button("🔄 换一只 · New stock, restart", use_container_width=True):
-            _start_game(g.initial_cash, g.play_bars)
+            _start_game(g.initial_cash, g.play_bars,
+                        int(getattr(g, "hist_bars", pt.MIN_HISTORY_BARS)))
             st.rerun()
 
 

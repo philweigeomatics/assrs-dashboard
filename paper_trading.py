@@ -266,6 +266,7 @@ def _load_prices(data_manager, ticker: str, need: int):
 
 
 def pick_random_stock(data_manager, play_bars: int = DEFAULT_PLAY_BARS,
+                      hist_bars: int = MIN_HISTORY_BARS,
                       attempts: int = 12, seed: "int | None" = None,
                       prefer_db: bool = False) -> dict:
     """
@@ -280,7 +281,7 @@ def pick_random_stock(data_manager, play_bars: int = DEFAULT_PLAY_BARS,
     recognise. Off by default because variety is the point of the game.
     """
     rng = random.Random(seed)
-    need = WARMUP_BARS + MIN_HISTORY_BARS + play_bars
+    need = WARMUP_BARS + int(hist_bars) + play_bars
 
     universe = eligible_universe(data_manager)
     if not universe:
@@ -323,13 +324,14 @@ def pick_random_stock(data_manager, play_bars: int = DEFAULT_PLAY_BARS,
             "reason": f"no stock with {need}+ sessions found in {attempts} tries"}
 
 
-def choose_start(n_bars: int, play_bars: int, seed: "int | None" = None) -> int:
+def choose_start(n_bars: int, play_bars: int, hist_bars: int = MIN_HISTORY_BARS,
+                 seed: "int | None" = None) -> int:
     """
-    Index of the first playable day: random, but leaving warmup + visible
-    history behind it and a full game ahead of it.
+    Index of the first playable day: random, but leaving warmup + the chosen
+    visible history behind it and a full game ahead of it.
     """
     rng = random.Random(seed)
-    lo = WARMUP_BARS + MIN_HISTORY_BARS
+    lo = WARMUP_BARS + int(hist_bars)
     hi = n_bars - play_bars - 1
     return lo if hi <= lo else rng.randint(lo, hi)
 
@@ -355,6 +357,7 @@ class GameState:
     start_idx: int
     cur_idx: int
     play_bars: int
+    hist_bars: int          # sessions of chart visible BEFORE session 1
     cash: float
     initial_cash: float
     # lots: [{"shares": int, "price": float, "date": "YYYY-MM-DD"}] — kept as
@@ -391,11 +394,13 @@ class GameState:
 
 def new_game(pick: dict, cash: float = 100_000.0,
              play_bars: int = DEFAULT_PLAY_BARS,
+             hist_bars: int = MIN_HISTORY_BARS,
              seed: "int | None" = None) -> GameState:
     df = pick["data"]
-    start = choose_start(len(df), play_bars, seed=seed)
+    start = choose_start(len(df), play_bars, hist_bars=hist_bars, seed=seed)
     return GameState(ticker=pick["ticker"], name=pick["name"],
                      start_idx=start, cur_idx=start, play_bars=play_bars,
+                     hist_bars=int(hist_bars),
                      cash=float(cash), initial_cash=float(cash))
 
 
@@ -431,8 +436,21 @@ def advance(g: GameState) -> bool:
     return True
 
 
-def buy(g: GameState, shares: int, price: float, date: str) -> dict:
-    """Buy at the close. Multiples of 100 only; must be affordable with costs."""
+def buy(g: GameState, shares: int, price: float, date: str,
+        advance_after: bool = False) -> dict:
+    """
+    Buy at the close. Multiples of 100 only; must be affordable with costs.
+
+    `advance_after` moves to the next session as part of the SAME undo step.
+    That matters: the UI always trades and then advances, and when buy and
+    advance each pushed their own snapshot, one revert only undid the advance
+    — landing back on the purchase date with the shares still held, so
+    repeating the trade doubled the position. One user action must be one
+    undo entry.
+
+    Validation happens before the snapshot, so a rejected order leaves no
+    undo step behind.
+    """
     if shares <= 0 or shares % LOT:
         return {"ok": False, "reason": f"买入必须是 {LOT} 的整数倍 · multiples of {LOT}"}
     value = shares * price
@@ -446,10 +464,13 @@ def buy(g: GameState, shares: int, price: float, date: str) -> dict:
     g.lots.append({"shares": shares, "price": price, "date": date})
     g.trades.append({"date": date, "side": "buy", "shares": shares, "price": price,
                      "value": value, "fees": costs["total"], "day": g.day_number()})
+    if advance_after and not g.finished():
+        g.cur_idx += 1          # no second snapshot — same undo step
     return {"ok": True, "fees": costs["total"]}
 
 
-def sell(g: GameState, shares: int, price: float, date: str) -> dict:
+def sell(g: GameState, shares: int, price: float, date: str,
+         advance_after: bool = False) -> dict:
     """
     Sell at the close, T+1 enforced.
 
@@ -485,6 +506,8 @@ def sell(g: GameState, shares: int, price: float, date: str) -> dict:
 
     g.trades.append({"date": date, "side": "sell", "shares": shares, "price": price,
                      "value": value, "fees": costs["total"], "day": g.day_number()})
+    if advance_after and not g.finished():
+        g.cur_idx += 1          # same undo step as the sale — see buy()
     return {"ok": True, "fees": costs["total"]}
 
 
@@ -495,7 +518,7 @@ def visible_frame(g: GameState, df: pd.DataFrame) -> pd.DataFrame:
     Everything the player is allowed to see: history up to and including today,
     never beyond. This slice is the anti-lookahead guarantee.
     """
-    lo = max(0, g.start_idx - MIN_HISTORY_BARS)
+    lo = max(0, g.start_idx - int(getattr(g, "hist_bars", MIN_HISTORY_BARS)))
     return df.iloc[lo:g.cur_idx + 1]
 
 
