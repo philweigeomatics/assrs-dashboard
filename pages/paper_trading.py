@@ -17,6 +17,7 @@ from plotly.subplots import make_subplots
 
 import accumulation_signals as acsig
 import auth_manager
+from chart_utils import split_legends_by_panel
 import data_manager
 import game_news
 import paper_trading as pt
@@ -111,8 +112,11 @@ def game():
     vis = pt.visible_frame(g, df)
     dates = [d.strftime("%Y-%m-%d") for d in vis.index]
 
+    # ADX gets the deepest band of the lower panels: its legend carries the
+    # nine lifecycle markers plus ±DI and the screaming signals, ~15 entries,
+    # and at the old 0.13 it was driven to the 8pt font floor and still spilled.
     fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.028,
-                        row_heights=[0.34, 0.13, 0.15, 0.13, 0.13, 0.12],
+                        row_heights=[0.30, 0.12, 0.14, 0.12, 0.20, 0.12],
                         subplot_titles=("价格 Price", "成交量 & OBV", "MACD",
                                         "RSI", "ADX Trend Analysis",
                                         "Z-Score · Price + Volume"))
@@ -325,11 +329,10 @@ def game():
                       **({"annotation_text": txt, "annotation_position": "right",
                           "annotation_font": dict(size=8, color="#64748b")} if txt else {}))
 
-    fig.update_layout(height=1180, template="plotly_white",
+    fig.update_layout(height=1400, template="plotly_white",
                       xaxis_rangeslider_visible=False, hovermode="x unified",
-                      margin=dict(l=10, r=10, t=40, b=10), bargap=0.15,
-                      legend=dict(orientation="h", yanchor="bottom", y=1.015, x=0,
-                                  font=dict(size=9)))
+                      # Right margin holds the per-panel legends attached below.
+                      margin=dict(l=10, r=170, t=40, b=10), bargap=0.15)
     fig.update_yaxes(range=[0, 100], row=4, col=1)
     fig.update_yaxes(range=[0, 60], row=5, col=1)
     fig.update_yaxes(title_text="Volume", row=2, col=1)
@@ -337,6 +340,12 @@ def game():
     fig.update_xaxes(type="category", showticklabels=False)
     fig.update_xaxes(type="category", tickangle=-45, showticklabels=True,
                      tickmode="array", tickvals=dates[::_step], row=6, col=1)
+
+    # One legend per panel, beside the panel it drives — same treatment as the
+    # Technical Analysis chart, via the shared helper.
+    split_legends_by_panel(
+        fig, n_rows=6,
+        panel_titles=["Price", "Volume & OBV", "MACD", "RSI", "ADX", "Z-Score"])
     st.plotly_chart(fig, use_container_width=True)
 
     _phase = str(vis["ADX_Pattern"].iloc[-1] or "—")
