@@ -47,9 +47,13 @@ def _start_game(cash: float, play_bars: int, hist_bars: int):
     S["bp_pick"] = pick
     S["bp_game"] = pt.new_game(pick, cash=cash, play_bars=play_bars,
                                hist_bars=hist_bars)
-    # Cleared so a new stock never shows the previous one's themes or articles.
-    S.pop("bp_risk", None)
-    S.pop("bp_news_cache", None)
+    # Cleared so a new stock never shows the previous one's themes, articles,
+    # review — or order sizes. Widget state is keyed, so without this the buy
+    # and sell quantities from the last stock carry into the new one, where
+    # they may not even be affordable.
+    for _k in ("bp_risk", "bp_news_cache", "bp_review", "bp_review_asof",
+               "bp_qty_b", "bp_qty_s", "bp_sell_all"):
+        S.pop(_k, None)
 
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
@@ -412,29 +416,57 @@ def game():
         st.markdown("#### 今日决策 · Today's decision")
         a1, a2, a3, a4 = st.columns([1.2, 1.2, 1, 1])
 
+        # NO max_value on these inputs, deliberately. Streamlit silently
+        # DISCARDS an entry above max_value: the box goes on displaying what
+        # was typed while the script receives the previous value, so clicking
+        # Buy after typing an unaffordable size quietly traded the 100-share
+        # default instead. Verified in a probe — typing 700 into a field capped
+        # at 500 submitted 100, and wrapping it in st.form behaves identically,
+        # so the limit is enforced here in code where it can be explained.
         max_buy = int((g.cash // (price * 100 * (1 + pt.COMMISSION_RATE))) * 100)
+        sellable = g.sellable(today)
+
         with a1:
-            qty_b = st.number_input("买入股数 Buy (×100)", 0, max(max_buy, 0),
-                                    min(100, max_buy), 100, key="bp_qty_b")
+            qty_b = st.number_input("买入股数 Buy", min_value=0, step=100,
+                                    value=min(100, max(max_buy, 0)),
+                                    key="bp_qty_b")
+            st.caption(f"最多可买 **{max_buy:,}** 股 · ¥{price * 100:,.0f}/手")
             if st.button(f"🔴 买入 Buy @ ¥{price:.2f}", use_container_width=True,
                          disabled=max_buy < 100):
-                r = pt.buy(g, int(qty_b), price, today, advance_after=True)
-                if r["ok"]:
-                    st.rerun(scope="fragment")
+                q = int(qty_b)
+                if q > max_buy:
+                    st.error(f"超出可买上限：最多 {max_buy:,} 股（现金 "
+                             f"¥{g.cash:,.0f}）。请改小数量。")
                 else:
-                    st.error(r["reason"])
+                    r = pt.buy(g, q, price, today, advance_after=True)
+                    if r["ok"]:
+                        st.rerun(scope="fragment")
+                    else:
+                        st.error(r["reason"])
+            if max_buy < 100:
+                st.caption(f"现金不足一手（需 ¥{price * 100:,.0f}）")
 
-        sellable = g.sellable(today)
         with a2:
-            qty_s = st.number_input("卖出股数 Sell", 0, max(sellable, 0),
-                                    min(100, sellable), 100, key="bp_qty_s")
+            qty_s = st.number_input("卖出股数 Sell", min_value=0, step=100,
+                                    value=min(100, max(sellable, 0)),
+                                    key="bp_qty_s")
+            st.caption(f"可卖 **{sellable:,}** 股" +
+                       (f" · 持仓 {g.shares:,}" if g.shares != sellable else ""))
+            _all = st.checkbox("全部卖出 Sell all", key="bp_sell_all",
+                               help="清仓时允许不足100股的零股一次性卖出。")
             if st.button(f"🟢 卖出 Sell @ ¥{price:.2f}", use_container_width=True,
                          disabled=sellable < 1):
-                r = pt.sell(g, int(qty_s), price, today, advance_after=True)
-                if r["ok"]:
-                    st.rerun(scope="fragment")
+                q = sellable if _all else int(qty_s)
+                if q > sellable:
+                    st.error(f"超出可卖数量：最多 {sellable:,} 股"
+                             + ("（T+1：今日买入的部分明日才可卖）"
+                                if g.shares > sellable else "") + "。")
                 else:
-                    st.error(r["reason"])
+                    r = pt.sell(g, q, price, today, advance_after=True)
+                    if r["ok"]:
+                        st.rerun(scope="fragment")
+                    else:
+                        st.error(r["reason"])
             if g.shares and not sellable:
                 st.caption("T+1：今日买入明日才可卖")
 
