@@ -38,8 +38,11 @@ RSI_LOOKBACK    = 252   # rolling window for dynamic percentile bands
 
 # ── ADX / DMI ────────────────────────────────────────────────
 ADX_WINDOW          = 14   # standard Wilder period  (was 10 – too noisy)
-ADX_SG_WINDOW       = 7    # Savitzky-Golay window length (must be odd)
-ADX_SG_POLYORDER    = 2    # Savitzky-Golay polynomial order
+# RETIRED: Savitzky-Golay is a CENTERED filter and leaked future bars into
+# ADX_LOWESS. Kept only so single_debugger.py still imports; nothing in the app
+# smooths with them any more. Do not reintroduce — see the note at ADX_LOWESS.
+ADX_SG_WINDOW       = 7    # (unused)
+ADX_SG_POLYORDER    = 2    # (unused)
 ADX_EWM_SPAN        = 9    # EWM fallback span when SG is unavailable
 ADX_SLOPE_WINDOW    = 5    # linear-regression window for slope
 ADX_BB_WINDOW       = 20   # Bollinger-Band window on ADX itself
@@ -371,13 +374,21 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
     # ── ADX Smoothing ─────────────────────────────────────────
     # FIX: fillna(method='ffill') is deprecated — use .ffill() directly.
     adx_filled = df_analysis['ADX'].ffill()
-    try:
-        from scipy.signal import savgol_filter
-        df_analysis['ADX_LOWESS'] = savgol_filter(
-            adx_filled, window_length=ADX_SG_WINDOW, polyorder=ADX_SG_POLYORDER
-        )
-    except Exception:
-        df_analysis['ADX_LOWESS'] = adx_filled.ewm(span=ADX_EWM_SPAN, adjust=False).mean()
+    # CAUSAL smoothing. This was savgol_filter, which is a CENTERED window:
+    # every point was computed from ~3 bars before AND 3 bars after it, so the
+    # smoothed series could not be produced in real time and quietly rewrote
+    # its own recent history as new bars arrived.
+    #
+    # Measured on a synthetic ADX series: the value at bar 200 read 18.07 when
+    # computed on day 200 and 18.47 three days later — a +0.39 revision to a bar
+    # already printed, settling only once the half-window had passed. The slope
+    # sign, which is what ADX_Pattern keys off, differed from the causal version
+    # on 26% of bars, so up to a quarter of pattern labels were provisional and
+    # any expectancy measured on them was flattered by hindsight.
+    #
+    # EWM was already the fallback here and is now the only path: same span,
+    # strictly backward looking, and a printed bar never changes again.
+    df_analysis['ADX_LOWESS'] = adx_filled.ewm(span=ADX_EWM_SPAN, adjust=False).mean()
 
     # ADX Bollinger Bands
     # FIX: was computed on raw ADX while slope was computed on ADX_LOWESS, creating
@@ -1202,13 +1213,11 @@ def simulate_next_day_indicators(df: pd.DataFrame,
 
     # Reproduce the same smoothing pipeline as the main engine
     adx_filled_sim = df_sim['ADX'].ffill()
-    try:
-        from scipy.signal import savgol_filter
-        df_sim['ADX_LOWESS'] = savgol_filter(
-            adx_filled_sim, window_length=ADX_SG_WINDOW, polyorder=ADX_SG_POLYORDER
-        )
-    except Exception:
-        df_sim['ADX_LOWESS'] = adx_filled_sim.ewm(span=ADX_EWM_SPAN, adjust=False).mean()
+    # Same causal smoothing as the main engine — see the note there. It matters
+    # doubly in the simulator: a centered filter would let the hypothetical
+    # next-day bar reach backwards and alter the ADX of days already closed,
+    # so the "what if tomorrow" panel would silently restate yesterday.
+    df_sim['ADX_LOWESS'] = adx_filled_sim.ewm(span=ADX_EWM_SPAN, adjust=False).mean()
 
     def _sim_slope(y):
         if len(y) < 3 or np.isnan(y).any(): return 0.0
