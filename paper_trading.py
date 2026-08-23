@@ -43,40 +43,118 @@ COMMISSION_MIN = 5.0
 STAMP_DUTY_SELL = 0.0005
 TRANSFER_FEE = 0.00001
 
-WARMUP_BARS = 130          # burn-in so MA60/BB are valid on the first shown bar
+# Never touch a bar before the 2024-09-24 regime change. A window straddling it
+# would be decided by the policy break rather than by anything readable on the
+# chart, which is the opposite of what this trains. Clamping the whole series —
+# warmup included — keeps every moving average and percentile band built purely
+# from post-regime data. ~485 sessions exist after the anchor, which is enough
+# for a 180-session game plus warmup with ~165 possible start positions.
+from analysis_engine import REGIME_ANCHOR
+
+WARMUP_BARS = 80           # MA60 needs 60; 80 leaves it settled before day one
 MIN_HISTORY_BARS = 60      # ≈3 months visible before the first playable day
 DEFAULT_PLAY_BARS = 120
 
 
 # ── Indicators (all strictly causal) ──────────────────────────────────────────
 
+def _trailing_slope(s: pd.Series, window: int = 5) -> pd.Series:
+    """
+    Slope from a TRAILING linear fit.
+
+    The Technical Analysis page derives ADX slope from a Savitzky-Golay
+    smooth, which is centered and therefore reads bars after the one it
+    labels. Fitting only the trailing window gives the same shape of
+    information without seeing the future.
+    """
+    def _f(a):
+        if np.isnan(a).any():
+            return np.nan
+        return np.polyfit(np.arange(len(a)), a, 1)[0]
+    return s.rolling(window).apply(_f, raw=True)
+
+
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Backward-looking indicator set, matching the Technical Analysis page in
-    definition but computed independently so nothing centered can creep in.
+    The Technical Analysis page's indicator set, rebuilt strictly causally.
+
+    Column names match analysis_engine where they overlap (RSI_14,
+    Volume_ZScore, BB_Width_Percentile...) so accumulation_signals.detect()
+    consumes this frame unchanged.
     """
     d = df.sort_index().copy()
     c, h, l, v = d["Close"], d["High"], d["Low"], d["Volume"]
 
+    # ── Moving averages / bands ──
     for w in (5, 10, 20, 60):
         d[f"MA{w}"] = c.rolling(w).mean()
     d["EMA5"] = c.ewm(span=5, adjust=False).mean()
-
     mid, sd = c.rolling(20).mean(), c.rolling(20).std()
     d["BB_Upper"], d["BB_Lower"] = mid + 2 * sd, mid - 2 * sd
+    d["BB_Width"] = (d["BB_Upper"] - d["BB_Lower"]) / c
+    # Trailing percentile — the squeeze read, without a forward-looking rank.
+    d["BB_Width_Percentile"] = d["BB_Width"].rolling(120, min_periods=20).rank(pct=True)
 
+    # ── MACD, with turn markers ──
     ef, es = c.ewm(span=12, adjust=False).mean(), c.ewm(span=26, adjust=False).mean()
     d["MACD"] = ef - es
     d["MACD_Signal"] = d["MACD"].ewm(span=9, adjust=False).mean()
     d["MACD_Hist"] = d["MACD"] - d["MACD_Signal"]
+    _hg = d["MACD_Hist"]
+    # A turn is only knowable one bar AFTER it happens — the histogram must
+    # have fallen and then risen. Marking the low itself would require knowing
+    # the next bar, which is precisely the leak being avoided.
+    d["MACD_Bottoming"] = (_hg > _hg.shift(1)) & (_hg.shift(1) <= _hg.shift(2)) & (d["MACD"] < 0)
+    d["MACD_Peaking"] = (_hg < _hg.shift(1)) & (_hg.shift(1) >= _hg.shift(2)) & (d["MACD"] > 0)
+    d["MACD_GoldenCross"] = (d["MACD"] > d["MACD_Signal"]) & (d["MACD"].shift(1) <= d["MACD_Signal"].shift(1))
+    d["MACD_DeadCross"] = (d["MACD"] < d["MACD_Signal"]) & (d["MACD"].shift(1) >= d["MACD_Signal"].shift(1))
 
+    # ── RSI with dynamic bands ──
     delta = c.diff()
     gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
     loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
-    d["RSI"] = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+    d["RSI_14"] = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+    d["RSI"] = d["RSI_14"]                      # alias for the chart
+    # Percentile bands beat fixed 30/70: what counts as oversold differs by name.
+    d["RSI_P10"] = d["RSI_14"].rolling(120, min_periods=30).quantile(0.10)
+    d["RSI_P90"] = d["RSI_14"].rolling(120, min_periods=30).quantile(0.90)
+    d["RSI_Bottoming"] = (d["RSI_14"] > d["RSI_14"].shift(1)) & \
+                         (d["RSI_14"].shift(1) <= d["RSI_P10"].shift(1))
+    d["RSI_Peaking"] = (d["RSI_14"] < d["RSI_14"].shift(1)) & \
+                       (d["RSI_14"].shift(1) >= d["RSI_P90"].shift(1))
 
+    # ── ADX / DI (Wilder — causal by construction) ──
+    up, dn = h.diff(), -l.diff()
+    plus_dm = ((up > dn) & (up > 0)) * up
+    minus_dm = ((dn > up) & (dn > 0)) * dn
+    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    d["ATR"] = atr
+    d["DI_Plus"] = 100 * plus_dm.ewm(alpha=1 / 14, adjust=False).mean() / atr.replace(0, np.nan)
+    d["DI_Minus"] = 100 * minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / atr.replace(0, np.nan)
+    dx = 100 * (d["DI_Plus"] - d["DI_Minus"]).abs() / (d["DI_Plus"] + d["DI_Minus"]).replace(0, np.nan)
+    d["ADX"] = dx.ewm(alpha=1 / 14, adjust=False).mean()
+    d["ADX_Slope"] = _trailing_slope(d["ADX"], 5)
+
+    def _phase(r):
+        a, s = r["ADX"], r["ADX_Slope"]
+        if pd.isna(a) or pd.isna(s):
+            return ""
+        if a < 20:
+            return "盘整 Ranging" if abs(s) < 0.15 else ("转强 Building" if s > 0 else "转弱 Fading")
+        if a >= 30:
+            return "强趋势 Strong" if s >= -0.15 else "见顶回落 Peaking"
+        return "趋势形成 Emerging" if s > 0 else "趋势减弱 Weakening"
+    d["ADX_Phase"] = d[["ADX", "ADX_Slope"]].apply(_phase, axis=1)
+
+    # ── Volume / OBV / z-scores ──
     d["OBV"] = (np.sign(c.diff().fillna(0)) * v).cumsum()
+    d["OBV_MA20"] = d["OBV"].rolling(20).mean()
     d["Vol_MA20"] = v.rolling(20).mean()
+    d["Volume_ZScore"] = ((v - v.rolling(100, min_periods=20).mean())
+                          / v.rolling(100, min_periods=20).std().replace(0, np.nan))
+    d["Price_ZScore"] = ((c - c.rolling(100, min_periods=20).mean())
+                         / c.rolling(100, min_periods=20).std().replace(0, np.nan))
     return d
 
 
@@ -196,6 +274,9 @@ def pick_random_stock(data_manager, play_bars: int = DEFAULT_PLAY_BARS,
         if any(c not in raw.columns for c in cols):
             continue
         raw = raw.dropna(subset=cols)
+        # Clamp BEFORE computing indicators, so no moving average or percentile
+        # band is contaminated by pre-regime bars either.
+        raw = raw[raw.index >= pd.Timestamp(REGIME_ANCHOR)]
         if len(raw) < need:
             continue
         return {"ok": True, "ticker": t, "name": pick["name"],

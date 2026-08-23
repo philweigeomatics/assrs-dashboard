@@ -15,6 +15,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+import accumulation_signals as acsig
 import auth_manager
 import data_manager
 import game_news
@@ -55,9 +56,12 @@ if "bp_game" not in S:
         _cash = st.number_input("起始资金 Starting cash (¥)", 10_000, 10_000_000,
                                 100_000, 10_000, key="bp_cash")
     with c2:
-        _bars = st.select_slider("交易日数 Sessions to play",
+        _bars = st.select_slider("要交易多少天 Sessions to play",
                                  options=[30, 60, 90, 120, 180], value=120,
-                                 key="bp_bars")
+                                 key="bp_bars",
+                                 help="How many decisions you get. You begin at "
+                                      "session 1 with ~60 sessions of chart "
+                                      "history already visible behind you.")
     with c3:
         st.write("")
         st.write("")
@@ -83,9 +87,16 @@ def game():
     over = g.finished()
 
     # ── Status bar ────────────────────────────────────────────────────────
+    # "1 / 180" is the session you are ON, not a date range: the game starts at
+    # session 1 and you advance forward, so 180 is how many decisions remain,
+    # not how much history is drawn. The chart still shows ~60 sessions of past
+    # data behind day 1 — that history is context, not part of the count.
     m = st.columns(6)
-    m[0].metric("交易日 Session", f"{perf['day']} / {perf['play_bars']}")
-    m[1].metric("日期 Date", today)
+    m[0].metric("已进行 Session", f"{perf['day']} / {perf['play_bars']}",
+                help="Sessions played so far out of the number you chose. You "
+                     "start at 1 and advance one session per decision; the "
+                     "chart behind day 1 is context you did not trade.")
+    m[1].metric("当前日期 Date", today)
     m[2].metric("收盘 Close", f"¥{price:,.2f}",
                 delta=f"{(price / float(df.iloc[g.cur_idx - 1]['Close']) - 1) * 100:+.2f}%"
                 if g.cur_idx > 0 else None, delta_color="inverse")
@@ -100,10 +111,11 @@ def game():
     vis = pt.visible_frame(g, df)
     dates = [d.strftime("%Y-%m-%d") for d in vis.index]
 
-    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.04,
-                        row_heights=[0.52, 0.13, 0.19, 0.16],
-                        subplot_titles=("价格 Price", "成交量 Volume",
-                                        "MACD", "RSI"))
+    fig = make_subplots(rows=6, cols=1, shared_xaxes=True, vertical_spacing=0.028,
+                        row_heights=[0.34, 0.13, 0.15, 0.13, 0.13, 0.12],
+                        subplot_titles=("价格 Price", "成交量 & OBV", "MACD",
+                                        "RSI", "ADX Trend Analysis",
+                                        "Z-Score · Price + Volume"))
     fig.add_trace(go.Candlestick(
         x=dates, open=vis["Open"], high=vis["High"], low=vis["Low"],
         close=vis["Close"], name="K线",
@@ -132,13 +144,23 @@ def game():
                 marker=dict(symbol=sym, size=13, color=colour,
                             line=dict(width=1, color="white"))), row=1, col=1)
 
+    # ── 2 · Volume & OBV (OBV on its own scale, as on the TA page) ──
     fig.add_trace(go.Bar(x=dates, y=vis["Volume"], name="Volume", showlegend=False,
                          marker_color=["#dc2626" if c >= o else "#22c55e"
                                        for c, o in zip(vis["Close"], vis["Open"])]),
                   row=2, col=1)
     fig.add_trace(go.Scatter(x=dates, y=vis["Vol_MA20"], name="Vol MA20",
                              line=dict(color="#64748b", width=1)), row=2, col=1)
+    _obv = vis["OBV"]
+    _vmax = float(vis["Volume"].max() or 1)
+    _rng = float(_obv.max() - _obv.min()) or 1.0
+    fig.add_trace(go.Scatter(
+        x=dates, y=(_obv - _obv.min()) / _rng * _vmax, name="OBV (scaled)",
+        line=dict(color="#7c3aed", width=1.4),
+        hovertemplate="OBV %{customdata:,.0f}<extra></extra>",
+        customdata=_obv), row=2, col=1)
 
+    # ── 3 · MACD with turn markers ──
     fig.add_trace(go.Bar(x=dates, y=vis["MACD_Hist"], name="Hist", showlegend=False,
                          marker_color=["#dc2626" if v >= 0 else "#22c55e"
                                        for v in vis["MACD_Hist"].fillna(0)]),
@@ -147,24 +169,111 @@ def game():
                              line=dict(color="#2a78d6", width=1.4)), row=3, col=1)
     fig.add_trace(go.Scatter(x=dates, y=vis["MACD_Signal"], name="Signal",
                              line=dict(color="#eb6834", width=1.2)), row=3, col=1)
+    for flag, lab, sym, colour in (("MACD_Bottoming", "MACD Bottoming", "triangle-up", "#dc2626"),
+                                   ("MACD_Peaking", "MACD Peaking", "triangle-down", "#15803d"),
+                                   ("MACD_GoldenCross", "金叉 Golden", "star", "#dc2626"),
+                                   ("MACD_DeadCross", "死叉 Dead", "x", "#15803d")):
+        msk = vis[flag].fillna(False).values.astype(bool)
+        if msk.any():
+            fig.add_trace(go.Scatter(
+                x=[d for d, m in zip(dates, msk) if m],
+                y=vis["MACD"][msk], mode="markers", name=lab,
+                marker=dict(symbol=sym, size=9, color=colour)), row=3, col=1)
 
-    fig.add_trace(go.Scatter(x=dates, y=vis["RSI"], name="RSI",
+    # ── 4 · RSI with dynamic bands + arrows ──
+    fig.add_trace(go.Scatter(x=dates, y=vis["RSI_14"], name="RSI",
                              line=dict(color="#7c3aed", width=1.5)), row=4, col=1)
+    for col, lab in (("RSI_P90", "P90"), ("RSI_P10", "P10")):
+        fig.add_trace(go.Scatter(x=dates, y=vis[col], name=f"RSI {lab}",
+                                 line=dict(color="rgba(148,163,184,.8)", width=1,
+                                           dash="dot"), showlegend=False), row=4, col=1)
+    for flag, lab, sym, colour in (("RSI_Bottoming", "RSI 见底", "arrow-up", "#dc2626"),
+                                   ("RSI_Peaking", "RSI 见顶", "arrow-down", "#15803d")):
+        msk = vis[flag].fillna(False).values.astype(bool)
+        if msk.any():
+            fig.add_trace(go.Scatter(
+                x=[d for d, m in zip(dates, msk) if m],
+                y=vis["RSI_14"][msk], mode="markers", name=lab,
+                marker=dict(symbol=sym, size=11, color=colour)), row=4, col=1)
     for lvl in (30, 70):
         fig.add_hline(y=lvl, line_dash="dot", line_width=1,
-                      line_color="rgba(148,163,184,.8)", row=4, col=1)
+                      line_color="rgba(148,163,184,.55)", row=4, col=1)
 
-    fig.update_layout(height=760, template="plotly_white",
+    # ── 5 · ADX trend analysis ──
+    fig.add_trace(go.Scatter(x=dates, y=vis["ADX"], name="ADX",
+                             line=dict(color="#0f172a", width=2)), row=5, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=vis["DI_Plus"], name="+DI",
+                             line=dict(color="#dc2626", width=1.2)), row=5, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=vis["DI_Minus"], name="-DI",
+                             line=dict(color="#15803d", width=1.2)), row=5, col=1)
+    for lvl, txt in ((20, "weak"), (30, "strong")):
+        fig.add_hline(y=lvl, line_dash="dot", line_width=1,
+                      line_color="rgba(148,163,184,.7)", row=5, col=1)
+
+    # ── 6 · Z-Score price + volume ──
+    fig.add_trace(go.Bar(x=dates, y=vis["Volume_ZScore"], name="Vol Z",
+                         marker_color="rgba(100,116,139,.55)"), row=6, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=vis["Price_ZScore"], name="Price Z",
+                             line=dict(color="#2a78d6", width=1.6)), row=6, col=1)
+    for lvl in (-2, 0, 2):
+        fig.add_hline(y=lvl, line_dash="dot", line_width=1,
+                      line_color="rgba(148,163,184,.6)", row=6, col=1)
+
+    fig.update_layout(height=1180, template="plotly_white",
                       xaxis_rangeslider_visible=False, hovermode="x unified",
-                      margin=dict(l=10, r=10, t=40, b=10),
-                      legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
-                                  font=dict(size=10)))
+                      margin=dict(l=10, r=10, t=40, b=10), bargap=0.15,
+                      legend=dict(orientation="h", yanchor="bottom", y=1.015, x=0,
+                                  font=dict(size=9)))
     fig.update_yaxes(range=[0, 100], row=4, col=1)
+    fig.update_yaxes(range=[0, 60], row=5, col=1)
+    fig.update_yaxes(title_text="Volume", row=2, col=1)
     _step = max(1, len(dates) // 10)
     fig.update_xaxes(type="category", showticklabels=False)
     fig.update_xaxes(type="category", tickangle=-45, showticklabels=True,
-                     tickmode="array", tickvals=dates[::_step], row=4, col=1)
+                     tickmode="array", tickvals=dates[::_step], row=6, col=1)
     st.plotly_chart(fig, use_container_width=True)
+
+    _phase = str(vis["ADX_Phase"].iloc[-1] or "—")
+    st.caption(
+        f"ADX {float(vis['ADX'].iloc[-1]):.1f} · {_phase} &nbsp;|&nbsp; "
+        f"RSI {float(vis['RSI_14'].iloc[-1]):.1f} "
+        f"(band {float(vis['RSI_P10'].iloc[-1]):.0f}–{float(vis['RSI_P90'].iloc[-1]):.0f}) "
+        f"&nbsp;|&nbsp; Vol Z {float(vis['Volume_ZScore'].iloc[-1]):+.2f}",
+        unsafe_allow_html=True)
+
+    # ── 吸筹 / 出货 ───────────────────────────────────────────────────────
+    with st.expander("🧭 吸筹 / 出货 · Accumulation vs Distribution", expanded=False):
+        # Fed the SAME truncated frame the chart draws, so the panel can only
+        # see what the player can see.
+        _res = acsig.detect(vis, None, window=20)
+        if not _res.get("ok"):
+            st.caption(f"Not enough history yet — {_res.get('reason')}")
+        else:
+            _s = acsig.summarise(_res)
+            st.info(f"**{_s['verdict']}** — 吸筹 {_s['n_acc']} / 出货 {_s['n_dist']}"
+                    + (f" · 区间位置 {_res['range_position']:.0%}"
+                       if _res.get("range_position") is not None else ""))
+            _c1, _c2 = st.columns(2)
+            for _col, _title, _colour, _live in (
+                    (_c1, "🟥 吸筹 Accumulation", "#dc2626", _s["acc_live"]),
+                    (_c2, "🟩 出货 Distribution", "#15803d", _s["dist_live"])):
+                with _col:
+                    st.markdown(f"<b style='color:{_colour}'>{_title}</b>",
+                                unsafe_allow_html=True)
+                    if not _live:
+                        st.caption("—")
+                    for _sg in _live:
+                        _when = (f"{_sg['count_60']}× · last {_sg['last']}"
+                                 if _sg["kind"] == "event"
+                                 else f"{_sg['run']}d since {_sg['since']}")
+                        st.markdown(f"- **{_sg['cn']}** · {_sg['label']}  \n"
+                                    f"  <span style='font-size:11px;color:#64748b'>🕒 {_when}</span>",
+                                    unsafe_allow_html=True)
+            st.caption(
+                "主力资金 detectors are inactive here — money-flow data is not "
+                "loaded for the hidden stock, so this is the price/volume half "
+                "only. Signals are computed on the visible window alone."
+            )
 
     # ── Actions ───────────────────────────────────────────────────────────
     if over:
