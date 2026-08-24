@@ -799,6 +799,9 @@ def _add_ghost_traces(fig, df, dates, sim_result, price_change_pct, has_comp, n_
             open=[sim_result['open_tomorrow']], high=[sim_result['high_tomorrow']],
             low=[sim_result['low_tomorrow']], close=[price_tmr],
             name='👻 Ghost · K线', legendgroup='ghost', showlegend=False,
+            text=[f"涨跌 {price_change_pct:+.2f}%<br>振幅 "
+                  f"{(sim_result['high_tomorrow'] - sim_result['low_tomorrow']) / close_today * 100:.2f}%"],
+            hoverinfo='x+open+high+low+close+text',
             increasing=dict(line=dict(color='#ef4444', width=1),
                             fillcolor='rgba(239,68,68,0.18)'),
             decreasing=dict(line=dict(color='#22c55e', width=1),
@@ -1346,10 +1349,24 @@ def create_single_stock_chart_analysis(
     ), row=1, col=1)
     
     # Candlestick
+    # 振幅 (amplitude) — the day's full high-to-low travel as a % of the
+    # PREVIOUS close, which is the A-share convention and why it can exceed the
+    # close-to-close change: a bar that opens up 5%, sells to -3% and closes
+    # flat shows ~0% change but ~8% amplitude, and that difference is the whole
+    # story of the session.
+    _prev_close = df['Close'].shift(1)
+    _pct_chg = (df['Close'] / _prev_close - 1) * 100
+    _amp = (df['High'] - df['Low']) / _prev_close * 100
+    _k_hover = [
+        (f"涨跌 {c:+.2f}%<br>振幅 {a:.2f}%"
+         if pd.notna(c) and pd.notna(a) else "")
+        for c, a in zip(_pct_chg, _amp)
+    ]
     fig.add_trace(go.Candlestick(
         x=dates,
         open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
         name='Price', showlegend=True,
+        text=_k_hover, hoverinfo='x+open+high+low+close+text',
         increasing=dict(line=dict(color='#ef4444')),
         decreasing=dict(line=dict(color='#22c55e'))
     ), row=1, col=1)
@@ -2572,7 +2589,13 @@ def create_single_stock_chart_analysis(
     # all nine panels pan and zoom together.
     if total_dates > INITIAL_VISIBLE_BARS:
         _from = total_dates - INITIAL_VISIBLE_BARS
-        fig.update_xaxes(range=[_from - 0.5, total_dates - 0.5])
+        # The ghost bar is drawn at a date AFTER the last real one, so it
+        # becomes an extra category past the right edge of this range and would
+        # sit just off-screen. Pan the window right by a few slots when it is
+        # on, leaving the simulated candle visible with a margin beside it.
+        _right = (total_dates + 3.5) if (show_ghost and sim_result is not None)             else (total_dates - 0.5)
+        fig.update_xaxes(range=[_from - 0.5 + (4 if (show_ghost and sim_result is not None) else 0),
+                                _right])
 
         # Plotly autoscales y over ALL data, not just what's in view, so
         # holding two years while showing one would flatten the price panel
@@ -4832,6 +4855,9 @@ if st.session_state.active_ticker:
                                 unsafe_allow_html=True)
                             st.caption(f"🕒 {_when(s)}")
                             st.caption(s["detail"])
+                            if s.get("rule"):
+                                with st.popover("判定规则 rule"):
+                                    st.markdown(s["rule"])
 
                 c_acc, c_dis = st.columns(2)
                 with c_acc:
@@ -4900,6 +4926,73 @@ if st.session_state.active_ticker:
                             "windowed condition holding; isolated squares are "
                             "single-session events."
                         )
+
+                # ── Tomorrow's signals, using the What-If bar ─────────────
+                # The simulated bar is appended to the real history and the
+                # whole detector set is re-run on it, so this is the same code
+                # path as today's reading rather than a separate estimate.
+                if st.session_state.get("show_ghost"):
+                    with st.expander("👻 明日信号预演 · Signals with the simulated bar",
+                                     expanded=False):
+                        try:
+                            _pc = float(st.session_state.get("sim_price", 0.0))
+                            _vm = float(st.session_state.get("sim_volume", 0.0)) * 1e6
+                            _c0 = float(analysis_df["Close"].iloc[-1])
+                            _ct = _c0 * (1 + _pc / 100.0)
+                            _o = float(st.session_state.get("sim_open", _c0))
+                            _h = max(float(st.session_state.get("sim_high", _ct)), _o, _ct)
+                            _l = min(float(st.session_state.get("sim_low", _ct)), _o, _ct)
+                            _nb = analysis_df.index[-1] + pd.Timedelta(days=1)
+                            _ext = pd.concat([
+                                analysis_df[["Open", "High", "Low", "Close", "Volume"]],
+                                pd.DataFrame({"Open": [_o], "High": [_h], "Low": [_l],
+                                              "Close": [_ct], "Volume": [_vm]},
+                                             index=[_nb])])
+                            with st.spinner("重算明日信号…"):
+                                _ext_an = run_single_stock_analysis(_ext.copy())
+                                _tmr = acsig.detect(_ext_an, None, window=_win)
+                            _st = acsig.summarise(_tmr)
+                            st.caption(
+                                f"假设明日 收{_ct:.2f} ({_pc:+.2f}%) 开{_o:.2f} "
+                                f"高{_h:.2f} 低{_l:.2f} 量{_vm/1e6:.1f}M")
+                            st.info(f"明日：**{_st['verdict']}** — 吸筹 {_st['n_acc']} / "
+                                    f"出货 {_st['n_dist']}（今日 {summ['n_acc']} / "
+                                    f"{summ['n_dist']}）")
+                            _now = {x["key"] for x in summ["acc_live"] + summ["dist_live"]}
+                            _new = {x["key"] for x in _st["acc_live"] + _st["dist_live"]}
+                            _lk = {x["key"]: x for x in _tmr["accumulation"] + _tmr["distribution"]}
+                            _ok = {x["key"]: x for x in res["accumulation"] + res["distribution"]}
+                            _on, _off = sorted(_new - _now), sorted(_now - _new)
+                            if _on:
+                                st.markdown("**➕ 明日新增触发**")
+                                for k in _on:
+                                    st.markdown(f"- {_lk[k]['cn']} · {_lk[k]['label']}")
+                            if _off:
+                                st.markdown("**➖ 明日不再触发**")
+                                for k in _off:
+                                    st.markdown(f"- {_ok[k]['cn']} · {_ok[k]['label']}")
+                            if not _on and not _off:
+                                st.caption("与今日相同——这根K线不改变任何信号。")
+                        except Exception as _exc:
+                            st.caption(f"暂时无法预演：{_exc}")
+
+                with st.expander("📖 判定规则总表 · How each signal is computed",
+                                 expanded=False):
+                    st.caption(
+                        "所有判定都在**同一个窗口**内计算（上方滑块），并且都用"
+                        "**当日及之前**的数据——不含任何未来信息。"
+                        "多数条件还要求价格处在区间的相应一端：吸筹看下半部，"
+                        "出货看上半部，因为同样的资金行为在区间两端含义相反。"
+                    )
+                    for _side, _key, _colr in (("🟥 吸筹", "accumulation", "#dc2626"),
+                                               ("🟩 出货", "distribution", "#15803d")):
+                        st.markdown(f"<b style='color:{_colr}'>{_side}</b>",
+                                    unsafe_allow_html=True)
+                        for _s in res[_key]:
+                            _t = {"window": "窗口", "event": "事件", "state": "状态"}[_s["kind"]]
+                            st.markdown(
+                                f"- **{_s['cn']}** ({_s['label']}) `{_t}`  \n"
+                                f"  {_s.get('rule') or _s['detail']}")
 
                 with st.expander("🔬 All detectors, including those not firing", expanded=False):
                     _rows = []

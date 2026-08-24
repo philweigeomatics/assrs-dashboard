@@ -82,13 +82,55 @@ def run_info(flags: pd.Series, recent: int = RECENT_WINDOW) -> dict:
     }
 
 
+# Plain-language rule for each detector, shown in the UI. Kept beside the
+# implementations so a rule and its description cannot drift apart.
+RULES = {
+    "down_absorption":
+        "窗口内**下跌日**的主力净流入平均值 > 0，且至少有4个下跌日。"
+        "价格在跌，大单却仍在净买入 → 有人在接货。",
+    "flow_decoupled":
+        "|corr(当日涨跌, 主力净流入)| < 0.2，且累计净流入仍在上升。"
+        "正常情况下资金跟着价格走；相关性接近0说明买入不看价格。",
+    "obv_divergence_bull":
+        "OBV 的20日斜率 > 0，同时价格斜率接近0（|斜率| < 0.0015）。"
+        "只用量能就能看到的吸筹：成交在买方堆积，价格却没动。",
+    "vol_compression":
+        "布林带宽度处于自身（2024-09-24之后）历史的**后25%**。区间在收窄。",
+    "rising_floor":
+        "10日最低价比一个窗口前更高，同时价格整体走平。卖方被逐步抬高成本。",
+    "low_in_range":
+        "价格位于120日唐奇安通道的**下方40%**。在区间高位谈吸筹意义不大。",
+    "heavy_inflow_down_day":
+        "单日：主力净流入 z 值 > 1.5 **且**当天收跌。这是逐笔的脚印，带日期。",
+    "flow_divergence_bear":
+        "价格20日斜率 > 0，但累计主力净流入在**下降**，且价格位于区间上半部。"
+        "股价还在涨，主力资金却在撤 → 有人借着强势出货。",
+    "outflow_on_up_days":
+        "窗口内**上涨日**的主力净流入平均值 < 0（至少4个上涨日），且价格在区间上半部。"
+        "反弹被当成出货的流动性。",
+    "volume_stall":
+        "成交量 z > 1（明显放量），但5日平均实体/振幅 < 0.35（收盘贴近开盘），"
+        "且价格在区间上半部。放量却不涨 = 筹码在换手。",
+    "upper_shadows":
+        "5日平均上影线占比 > 45%，且价格位于区间55%以上。盘中冲高反复被打回。",
+    "rsi_divergence":
+        "价格接近40日新高（≥99.5%），但 RSI 明显低于同期高点（差 >5），"
+        "且价格在区间60%以上。动能不确认价格。",
+    "failed_breakout":
+        "单日：最高价突破前20日高点，但**收盘又跌回其下**，且在区间上半部。",
+    "high_in_range":
+        "价格位于120日唐奇安通道的**上方25%**。只有在高位才谈得上出货。",
+}
+
+
 def _sig(key, label, cn, kind, flags, detail, value=None, available=True):
     """Package one detector's boolean series with its timing summary."""
     info = run_info(flags) if available else {
         "active": False, "recent": False, "run": 0,
         "since": None, "last": None, "count_60": 0, "dates": []}
     return {"key": key, "label": label, "cn": cn, "kind": kind,
-            "detail": detail, "value": value, "available": available,
+            "detail": detail, "rule": RULES.get(key, ""),
+            "value": value, "available": available,
             "flags": flags if available else None, **info}
 
 
