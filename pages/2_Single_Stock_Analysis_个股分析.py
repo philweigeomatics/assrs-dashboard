@@ -801,7 +801,6 @@ def _add_ghost_traces(fig, df, dates, sim_result, price_change_pct, has_comp, n_
             name='👻 Ghost · K线', legendgroup='ghost', showlegend=False,
             text=[f"涨跌 {price_change_pct:+.2f}%<br>振幅 "
                   f"{(sim_result['high_tomorrow'] - sim_result['low_tomorrow']) / close_today * 100:.2f}%"],
-            hoverinfo='x+open+high+low+close+text',
             increasing=dict(line=dict(color='#ef4444', width=1),
                             fillcolor='rgba(239,68,68,0.18)'),
             decreasing=dict(line=dict(color='#22c55e', width=1),
@@ -1366,7 +1365,7 @@ def create_single_stock_chart_analysis(
         x=dates,
         open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
         name='Price', showlegend=True,
-        text=_k_hover, hoverinfo='x+open+high+low+close+text',
+        text=_k_hover,
         increasing=dict(line=dict(color='#ef4444')),
         decreasing=dict(line=dict(color='#22c55e'))
     ), row=1, col=1)
