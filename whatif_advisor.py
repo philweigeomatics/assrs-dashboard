@@ -216,20 +216,114 @@ def _crossings(df: pd.DataFrame, sim: dict) -> list[dict]:
     return out
 
 
+# ───────────────── the last REAL bar, shaped like a sim ──────────────────
+def sim_from_real_bar(df: pd.DataFrame) -> dict | None:
+    """
+    Describe the last REAL session in the shape simulate_next_day_indicators()
+    returns, so the whole pipeline downstream reads either kind of bar.
+
+    "Today" becomes the second-to-last session and "tomorrow" the last one —
+    i.e. the question shifts from "if this bar printed" to "this bar just
+    printed". Values are read straight out of the computed columns rather than
+    re-simulated: the simulator has to estimate ADX and the MA/BOLL recursions
+    forward, but for a bar that actually exists the engine has already done
+    the exact arithmetic, and re-deriving it would only introduce error.
+    """
+    if df is None or len(df) < 30:
+        return None
+    a, b = df.iloc[-2], df.iloc[-1]          # a = today, b = the bar to read
+
+    def v(row, col):
+        return _f(row.get(col)) if col in df.columns else None
+
+    prev = _f(b.get("prev_close")) or _f(a.get("Close"))
+    vol20_b = _f(df["Volume"].rolling(20, min_periods=1).mean().iloc[-1])
+    vol20_a = _f(df["Volume"].iloc[:-1].rolling(20, min_periods=1).mean().iloc[-1])
+
+    # OBV动能: net signed volume over 20 sessions / average daily volume —
+    # the same ratio the simulator forms, just with both ends already real.
+    def obv_mom(idx, avg):
+        if "OBV" not in df.columns or len(df) < 21 + abs(idx) - 1 or not avg:
+            return None
+        o_now, o_then = _f(df["OBV"].iloc[idx]), _f(df["OBV"].iloc[idx - 20])
+        return (o_now - o_then) / avg if (o_now is not None and o_then is not None) else None
+
+    # Signals come from the engine's own detector columns, so the box agrees
+    # with what the chart is drawing rather than re-deriving its own opinion.
+    def flag(col, row=b):
+        return bool(row.get(col)) if col in df.columns else False
+
+    mac_a, sig_a = v(a, "MACD"), v(a, "MACD_Signal")
+    mac_b, sig_b = v(b, "MACD"), v(b, "MACD_Signal")
+    crossed_up = (mac_a is not None and sig_a is not None and mac_b is not None
+                  and sig_b is not None and mac_a < sig_a and mac_b > sig_b)
+    crossed_dn = (mac_a is not None and sig_a is not None and mac_b is not None
+                  and sig_b is not None and mac_a > sig_a and mac_b < sig_b)
+
+    return {
+        "input_price_change_pct": ((_f(b["Close"]) / prev - 1) * 100) if prev else None,
+        "input_volume": _f(b["Volume"]),
+        "close_today": _f(a["Close"]), "close_tomorrow": _f(b["Close"]),
+
+        "macd_today": mac_a, "macd_tomorrow": mac_b,
+        "macd_signal_today": sig_a, "macd_signal_tomorrow": sig_b,
+        "macd_hist_today": v(a, "MACD_Hist"), "macd_hist_tomorrow": v(b, "MACD_Hist"),
+
+        "rsi_today": v(a, "RSI_14"), "rsi_tomorrow": v(b, "RSI_14"),
+        "rsi_p10": v(b, "RSI_P10"), "rsi_p90": v(b, "RSI_P90"),
+
+        "adx_today": v(a, "ADX"), "adx_tomorrow": v(b, "ADX"),
+        "adx_pattern": str(b.get("ADX_Pattern") or ""),
+        "di_plus_today": v(a, "DI_Plus"), "di_plus_tomorrow": v(b, "DI_Plus"),
+        "di_minus_today": v(a, "DI_Minus"), "di_minus_tomorrow": v(b, "DI_Minus"),
+
+        "open_tomorrow": _f(b["Open"]), "high_tomorrow": _f(b["High"]),
+        "low_tomorrow": _f(b["Low"]), "ohl_supplied": True,
+
+        "ma_today": {f"MA{n}": v(a, f"MA{n}") for n in (5, 10, 20, 50, 60, 200)},
+        "ma_tomorrow": {f"MA{n}": v(b, f"MA{n}") for n in (5, 10, 20, 50, 60, 200)},
+        "ema5_today": v(a, "EMA5"), "ema5_tomorrow": v(b, "EMA5"),
+        "bb_today": {"upper": v(a, "BB_Upper"), "lower": v(a, "BB_Lower")},
+        "bb_tomorrow": {"upper": v(b, "BB_Upper"), "lower": v(b, "BB_Lower")},
+
+        "obv_mom_today": obv_mom(-2, vol20_a),
+        "obv_mom_tomorrow": obv_mom(-1, vol20_b),
+
+        "volume_today": _f(a["Volume"]), "volume_tomorrow": _f(b["Volume"]),
+        # The 10-day average BEFORE this bar, so "volume vs 10d" measures the
+        # bar against its own run-up rather than against a window it is in.
+        "volume_10d_avg": _f(df["Volume"].iloc[:-1].rolling(10).mean().iloc[-1]),
+
+        "signals": {
+            "MACD_Bottoming": flag("MACD_Bottoming"),
+            "MACD_Bullish_Cross": crossed_up,
+            "MACD_Bearish_Cross": crossed_dn,
+            "RSI_Bottoming": flag("RSI_Bottoming"),
+            "RSI_Peaking": flag("RSI_Peaking"),
+            "ADX_Pattern": str(b.get("ADX_Pattern") or ""),
+            "DI_Screaming_Buy": flag("DI_Screaming_Buy"),
+        },
+    }
+
+
 # ─────────────────────────────── the brief ───────────────────────────────
 def build_brief(df: pd.DataFrame, sim: dict, *,
                 ticker: str | None = None, name: str | None = None,
                 ad_today: dict | None = None, ad_tomorrow: dict | None = None,
-                ad_window: int = 20,
+                ad_window: int = 20, mode: str = "simulated",
+                bar_date: str | None = None,
                 timeline_bars: int = TIMELINE_BARS) -> dict:
     """
-    Package today's tape, the simulated bar, and every state change between
-    them into one deterministic brief.
+    Package the tape leading in, the bar under the microscope, and every state
+    change between them into one deterministic brief.
 
-    df   : output of run_single_stock_analysis (real history, no sim bar)
-    sim  : output of simulate_next_day_indicators
+    df   : output of run_single_stock_analysis, ending at the bar BEFORE the
+           one being read — that bar is the "today" everything is measured from
+    sim  : output of simulate_next_day_indicators, or of sim_from_real_bar()
+    mode : "simulated" for a What-If bar, "actual" for the last real session.
+           Only changes how the bar is described; the maths is identical.
     ad_* : optional accumulation_signals.summarise() results for today and for
-           the simulated bar, so the 吸筹/出货 read travels with the rest.
+           the bar being read, so the 吸筹/出货 read travels with the rest.
     """
     if df is None or len(df) < 30 or not sim:
         return {"ok": False, "reason": "not enough history or no simulation"}
@@ -286,8 +380,10 @@ def build_brief(df: pd.DataFrame, sim: dict, *,
     return {
         "ok": True,
         "stock": {"ticker": ticker, "name": name},
+        "mode": mode,
         "asof": {"last_real_session": str(df.index[-1].date()),
-                 "sim_session": str((df.index[-1] + pd.Timedelta(days=1)).date()),
+                 "sim_session": (bar_date or
+                                 str((df.index[-1] + pd.Timedelta(days=1)).date())),
                  "bars_of_history": len(df)},
         "timeline": tl,
         "today": {
@@ -344,10 +440,19 @@ def build_brief(df: pd.DataFrame, sim: dict, *,
     }
 
 
+_INTRO = {
+    "simulated": (
+        '你是一位资深的A股技术分析教练。学员在"明日指标模拟器"里假设了一根K线，\n'
+        '现在的场景是：**这根K线已经基本走完，还有几分钟收盘（尾盘）**，\n'
+        '盘面就是数据里那根K线的样子。'),
+    "actual": (
+        '你是一位资深的A股技术分析教练。下面是该股**最新一个真实交易日**的盘面，\n'
+        '现在的场景是：**这根K线已经基本走完，还有几分钟收盘（尾盘）**。\n'
+        '注意：这是真实成交出来的K线，不是假设——O/H/L/收盘/成交量都是实际数据。'),
+}
+
 _PROMPT = """\
-你是一位资深的A股技术分析教练。学员在"明日指标模拟器"里假设了一根K线，
-现在的场景是：**这根K线已经基本走完，还有几分钟收盘（尾盘）**，
-盘面就是数据里"模拟的这根K线"的样子。
+{intro}
 
 你的任务：把这根K线读懂，然后说清楚**在这个尾盘时点该怎么处理**，
 以及**明天开盘后按什么条件行动**。
@@ -442,14 +547,20 @@ def explain(brief: dict) -> dict:
         ad_txt = "  （未计算）"
 
     sig_on = [k for k, v in (s.get("signals") or {}).items() if v is True]
-    ohl_note = ("O/H/L 由用户明确指定" if s["ohl_supplied"]
+    actual = brief.get("mode") == "actual"
+    ohl_note = ("O/H/L 为真实成交数据" if actual
+                else "O/H/L 由用户明确指定" if s["ohl_supplied"]
                 else "O/H/L 为估算值（用户只给了收盘涨跌幅），形态解读需留余地")
+    bar_label = "这根真实K线" if actual else "模拟的这根K线"
+    when = (f"上一交易日：{a['last_real_session']} · 本次解读的交易日：{a['sim_session']}"
+            if actual else
+            f"最后一个真实交易日：{a['last_real_session']} · 模拟的这根K线：{a['sim_session']}")
 
     user = f"""\
 标的：{who}（只做技术面推演）
-最后一个真实交易日：{a['last_real_session']} · 模拟的这根K线：{a['sim_session']}
+{when}
 
-【模拟的这根K线 —— 尾盘时点，盘面已成型】
+【{bar_label} —— 尾盘时点，盘面已成型】
   开 {_n(s['open'])} 高 {_n(s['high'])} 低 {_n(s['low'])} 收 {_n(s['close'])}
   涨跌 {_n(s['pct_change'], '{:+.2f}')}% · 振幅 {_n(s['amplitude_pct'])}% · 跳空 {_n(s['gap_pct'], '{:+.2f}')}%
   收盘位于当日振幅的 {_n(s['close_position_in_bar'], '{:.0%}')} 处
@@ -494,6 +605,8 @@ def explain(brief: dict) -> dict:
     timeout = min(240, max(120, 90 + rows * 2))
 
     return ai_client.call_json(
-        _PROMPT.format(rw=RANGE_WINDOW), user,
+        _PROMPT.format(rw=RANGE_WINDOW,
+                       intro=_INTRO.get(brief.get("mode", "simulated"),
+                                        _INTRO["simulated"])), user,
         max_tokens=budget, temperature=0.4,
         reasoning_effort="low", timeout=timeout)

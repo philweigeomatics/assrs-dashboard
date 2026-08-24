@@ -5035,13 +5035,28 @@ if st.session_state.active_ticker:
             # gives siblings no other channel.
             @st.fragment
             def whatif_ai_section(analysis_df, ticker, company_name):
-                st.subheader("🤖 尾盘推演 · If this bar prints, how do I trade it?")
+                # Which bar gets read follows the 👻 Ghost toggle, because that
+                # toggle already means "am I looking at the what-if or at the
+                # real tape". Ghost on → the simulated bar. Ghost off → the last
+                # real session, where the question stops being hypothetical:
+                # this bar just printed, what is the trade at its close.
+                _ghost = bool(st.session_state.get("show_ghost"))
+                _win = int(st.session_state.get("acd_window", 20))
+
+                st.subheader("🤖 尾盘推演 · " + (
+                    "If this bar prints, how do I trade it?" if _ghost
+                    else "This bar just printed — how do I trade it?"))
                 st.caption(
-                    "Takes the What-If bar above and asks: it is 尾盘, this candle "
-                    "is essentially formed — what does it say, and what is the "
-                    "trade? Every crossing (金叉/死叉/突破/区间切换) is computed "
-                    "here and handed to the model as fact, so it argues about "
-                    "signals rather than hunting for them. 技术推演，非投资建议。"
+                    ("Takes the What-If bar above and asks: it is 尾盘, this "
+                     "candle is essentially formed — what does it say, and what "
+                     "is the trade? " if _ghost else
+                     "👻 Ghost is off, so this reads the **last real session** "
+                     "instead of a hypothetical: it is 尾盘 of that day, the "
+                     "candle is formed — what does it say, and what is the "
+                     "trade? Toggle 👻 Ghost on to read the What-If bar instead. ")
+                    + "Every crossing (金叉/死叉/突破/区间切换) is computed here "
+                      "and handed to the model as fact, so it argues about "
+                      "signals rather than hunting for them. 技术推演，非投资建议。"
                 )
 
                 _c0 = float(analysis_df["Close"].iloc[-1])
@@ -5052,48 +5067,74 @@ if st.session_state.active_ticker:
                 _l = min(float(st.session_state.get("sim_low", _ct)), _o, _ct)
                 _vm = float(st.session_state.get(
                     "sim_volume", analysis_df["Volume"].rolling(10).mean().iloc[-1] / 1e6)) * 1e6
-                _win = int(st.session_state.get("acd_window", 20))
 
                 # Identifies the exact scenario an answer belongs to, so a
                 # stored read is never shown against inputs it didn't see.
-                _sig = (ticker, str(analysis_df.index[-1].date()),
-                        round(_pc, 4), round(_o, 4), round(_h, 4), round(_l, 4),
-                        round(_vm, 1), _win)
+                # The mode is part of it: flipping the toggle changes which bar
+                # was read, which makes any stored answer about the other one.
+                if _ghost:
+                    _sig = ("sim", ticker, str(analysis_df.index[-1].date()),
+                            round(_pc, 4), round(_o, 4), round(_h, 4),
+                            round(_l, 4), round(_vm, 1), _win)
+                    _hdr = (f"推演这根K线：开 {_o:.2f} 高 {_h:.2f} 低 {_l:.2f} "
+                            f"收 {_ct:.2f} ({_pc:+.2f}%) · 量 {_vm/1e6:.2f}M "
+                            f"· 吸筹/出货窗口 {_win}日")
+                else:
+                    _lb = analysis_df.iloc[-1]
+                    _lprev = analysis_df["Close"].iloc[-2] if len(analysis_df) > 1 else _lb["Close"]
+                    _lpct = (_lb["Close"] / _lprev - 1) * 100 if _lprev else 0.0
+                    _sig = ("real", ticker, str(analysis_df.index[-1].date()), _win)
+                    _hdr = (f"解读最后一个真实交易日 "
+                            f"{analysis_df.index[-1].date()}：开 {_lb['Open']:.2f} "
+                            f"高 {_lb['High']:.2f} 低 {_lb['Low']:.2f} "
+                            f"收 {_lb['Close']:.2f} ({_lpct:+.2f}%) · "
+                            f"量 {_lb['Volume']/1e6:.2f}M · 吸筹/出货窗口 {_win}日")
 
                 st.markdown(
                     f"<div style='color:#6b7280;font-size:12px;margin:-4px 0 8px 0;'>"
-                    f"推演这根K线：开 {_o:.2f} 高 {_h:.2f} 低 {_l:.2f} 收 {_ct:.2f} "
-                    f"({_pc:+.2f}%) · 量 {_vm/1e6:.2f}M · 吸筹/出货窗口 {_win}日"
-                    f"</div>", unsafe_allow_html=True)
+                    f"{_hdr}</div>", unsafe_allow_html=True)
 
-                _go = st.button("🤖 推演这根K线 · Ask DeepSeek",
-                                type="primary", key="whatif_ai_go",
-                                help="一次调用约 20-60 秒。改动上方模拟器参数后可重新推演。")
+                _go = st.button(
+                    "🤖 " + ("推演这根K线" if _ghost else "解读最新交易日")
+                    + " · Ask DeepSeek",
+                    type="primary", key="whatif_ai_go",
+                    help=("一次调用约 20-60 秒。" + (
+                        "改动上方模拟器参数后可重新推演。" if _ghost
+                        else "打开 👻 Ghost 可改为推演模拟的明日K线。")))
 
                 if _go:
                     try:
                         with st.spinner("计算状态变化并推演中…（约 20-60 秒）"):
-                            _sim = simulate_next_day_indicators(
-                                analysis_df, _pc, _vm,
-                                open_tomorrow=_o, high_tomorrow=_h, low_tomorrow=_l)
-                            if not _sim:
-                                st.error("模拟失败：历史数据不足。")
+                            if _ghost:
+                                _hist = analysis_df
+                                _sim = simulate_next_day_indicators(
+                                    analysis_df, _pc, _vm,
+                                    open_tomorrow=_o, high_tomorrow=_h, low_tomorrow=_l)
+                                _bar_date, _mode = None, "simulated"
+                                # Same code path as the 明日信号预演 box: append
+                                # the simulated bar and re-run the real detectors.
+                                _nb = analysis_df.index[-1] + pd.Timedelta(days=1)
+                                _ad_src = run_single_stock_analysis(pd.concat([
+                                    analysis_df[["Open", "High", "Low", "Close", "Volume"]],
+                                    pd.DataFrame({"Open": [_o], "High": [_h], "Low": [_l],
+                                                  "Close": [_ct], "Volume": [_vm]},
+                                                 index=[_nb])]).copy())
+                            else:
+                                # "Today" becomes the bar before the last, so the
+                                # last real bar is the one under the microscope.
+                                _hist = analysis_df.iloc[:-1]
+                                _sim = wadv.sim_from_real_bar(analysis_df)
+                                _bar_date = str(analysis_df.index[-1].date())
+                                _mode, _ad_src = "actual", analysis_df
+                            if _sim is None or len(_hist) < 30:
+                                st.error("历史数据不足，无法推演。")
                                 return
-                            # Same code path as the 明日信号预演 box: append the
-                            # simulated bar and re-run the real detectors on it.
-                            _ad_t = acsig.summarise(
-                                acsig.detect(analysis_df, None, window=_win))
-                            _nb = analysis_df.index[-1] + pd.Timedelta(days=1)
-                            _ext = pd.concat([
-                                analysis_df[["Open", "High", "Low", "Close", "Volume"]],
-                                pd.DataFrame({"Open": [_o], "High": [_h], "Low": [_l],
-                                              "Close": [_ct], "Volume": [_vm]},
-                                             index=[_nb])])
-                            _ad_m = acsig.summarise(acsig.detect(
-                                run_single_stock_analysis(_ext.copy()), None, window=_win))
+                            _ad_t = acsig.summarise(acsig.detect(_hist, None, window=_win))
+                            _ad_m = acsig.summarise(acsig.detect(_ad_src, None, window=_win))
                             _brief = wadv.build_brief(
-                                analysis_df, _sim, ticker=ticker, name=company_name,
-                                ad_today=_ad_t, ad_tomorrow=_ad_m, ad_window=_win)
+                                _hist, _sim, ticker=ticker, name=company_name,
+                                ad_today=_ad_t, ad_tomorrow=_ad_m, ad_window=_win,
+                                mode=_mode, bar_date=_bar_date)
                             _out = wadv.explain(_brief)
                         st.session_state["whatif_ai_result"] = {
                             "sig": _sig, "out": _out,
@@ -5107,9 +5148,16 @@ if st.session_state.active_ticker:
                 if not _res:
                     return
                 if _res["sig"] != _sig:
+                    _was_sim = (_res["sig"] or ("sim",))[0] == "sim"
                     st.warning(
-                        "⚠️ 模拟器参数已改动，下面显示的是**上一次**推演的结果。"
-                        "点击上方按钮重新推演。")
+                        ("⚠️ 已切换推演对象（👻 Ghost "
+                         + ("关闭" if _was_sim else "打开")
+                         + "），下面显示的是**上一次**"
+                         + ("模拟K线" if _was_sim else "真实交易日")
+                         + "的推演结果。"
+                         if _was_sim != _ghost else
+                         "⚠️ 模拟器参数已改动，下面显示的是**上一次**推演的结果。")
+                        + "点击上方按钮重新推演。")
 
                 _o_ = _res["out"]
                 _call = str((_o_.get("stance") or {}).get("call", "—"))
