@@ -150,6 +150,17 @@ def _raw_call(
                      .get("completion_tokens_details", {})
                      .get("reasoning_tokens", 0)
         )
+        # Occasionally the model writes the FINISHED answer into the reasoning
+        # channel and emits nothing on `content`, while still reporting
+        # finish_reason='stop' — it believes it is done, it just used the wrong
+        # pipe. Measured on deepseek-v4-flash at roughly 1 call in 6 for a
+        # JSON-output prompt; the salvaged text was complete and correct.
+        # Treat that as a delivery accident rather than a failure: raising here
+        # discards a paid-for, complete answer. Only 'stop' qualifies — under
+        # 'length' the trace is genuinely truncated mid-thought.
+        reasoning = (message.get("reasoning_content") or "").strip()
+        if finish_reason == "stop" and reasoning:
+            return reasoning
         # Reasoning model (e.g. deepseek-v4-flash) exhausted max_tokens on its
         # thinking trace before producing any output.
         if finish_reason == "length" and reasoning_tokens > 0:
@@ -223,6 +234,14 @@ def call_json(
     if raw.startswith("```"):
         parts = raw.split("```")
         raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
+
+    # Take the outermost {...}. Needed because _raw_call may have salvaged the
+    # answer from the reasoning channel, where the JSON can sit behind a line
+    # or two of thinking-out-loud rather than starting at character zero.
+    if not raw.startswith("{"):
+        i, j = raw.find("{"), raw.rfind("}")
+        if i >= 0 and j > i:
+            raw = raw[i:j + 1]
 
     try:
         return json.loads(raw)

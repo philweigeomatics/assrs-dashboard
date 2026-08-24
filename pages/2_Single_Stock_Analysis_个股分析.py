@@ -22,6 +22,7 @@ from analysis_engine import (
 )
 import portfolio_fit as pfit
 import accumulation_signals as acsig
+import whatif_advisor as wadv
 from chart_utils import split_legends_by_panel
 
 
@@ -5024,6 +5025,168 @@ if st.session_state.active_ticker:
                 )
 
             accumulation_distribution_section(analysis_df, ticker)
+            st.markdown("---")
+
+            # ==================== 尾盘推演 · AI READ OF THE WHAT-IF BAR ====
+            # Its own fragment: the DeepSeek call must not re-run the chart,
+            # and the chart's slider must not re-run the DeepSeek call. The
+            # simulator inputs are read back out of session_state rather than
+            # passed in, because they live in a sibling fragment and Streamlit
+            # gives siblings no other channel.
+            @st.fragment
+            def whatif_ai_section(analysis_df, ticker, company_name):
+                st.subheader("🤖 尾盘推演 · If this bar prints, how do I trade it?")
+                st.caption(
+                    "Takes the What-If bar above and asks: it is 尾盘, this candle "
+                    "is essentially formed — what does it say, and what is the "
+                    "trade? Every crossing (金叉/死叉/突破/区间切换) is computed "
+                    "here and handed to the model as fact, so it argues about "
+                    "signals rather than hunting for them. 技术推演，非投资建议。"
+                )
+
+                _c0 = float(analysis_df["Close"].iloc[-1])
+                _pc = float(st.session_state.get("sim_price", 0.0))
+                _ct = _c0 * (1 + _pc / 100.0)
+                _o = float(st.session_state.get("sim_open", _c0))
+                _h = max(float(st.session_state.get("sim_high", _ct)), _o, _ct)
+                _l = min(float(st.session_state.get("sim_low", _ct)), _o, _ct)
+                _vm = float(st.session_state.get(
+                    "sim_volume", analysis_df["Volume"].rolling(10).mean().iloc[-1] / 1e6)) * 1e6
+                _win = int(st.session_state.get("acd_window", 20))
+
+                # Identifies the exact scenario an answer belongs to, so a
+                # stored read is never shown against inputs it didn't see.
+                _sig = (ticker, str(analysis_df.index[-1].date()),
+                        round(_pc, 4), round(_o, 4), round(_h, 4), round(_l, 4),
+                        round(_vm, 1), _win)
+
+                st.markdown(
+                    f"<div style='color:#6b7280;font-size:12px;margin:-4px 0 8px 0;'>"
+                    f"推演这根K线：开 {_o:.2f} 高 {_h:.2f} 低 {_l:.2f} 收 {_ct:.2f} "
+                    f"({_pc:+.2f}%) · 量 {_vm/1e6:.2f}M · 吸筹/出货窗口 {_win}日"
+                    f"</div>", unsafe_allow_html=True)
+
+                _go = st.button("🤖 推演这根K线 · Ask DeepSeek",
+                                type="primary", key="whatif_ai_go",
+                                help="一次调用约 20-60 秒。改动上方模拟器参数后可重新推演。")
+
+                if _go:
+                    try:
+                        with st.spinner("计算状态变化并推演中…（约 20-60 秒）"):
+                            _sim = simulate_next_day_indicators(
+                                analysis_df, _pc, _vm,
+                                open_tomorrow=_o, high_tomorrow=_h, low_tomorrow=_l)
+                            if not _sim:
+                                st.error("模拟失败：历史数据不足。")
+                                return
+                            # Same code path as the 明日信号预演 box: append the
+                            # simulated bar and re-run the real detectors on it.
+                            _ad_t = acsig.summarise(
+                                acsig.detect(analysis_df, None, window=_win))
+                            _nb = analysis_df.index[-1] + pd.Timedelta(days=1)
+                            _ext = pd.concat([
+                                analysis_df[["Open", "High", "Low", "Close", "Volume"]],
+                                pd.DataFrame({"Open": [_o], "High": [_h], "Low": [_l],
+                                              "Close": [_ct], "Volume": [_vm]},
+                                             index=[_nb])])
+                            _ad_m = acsig.summarise(acsig.detect(
+                                run_single_stock_analysis(_ext.copy()), None, window=_win))
+                            _brief = wadv.build_brief(
+                                analysis_df, _sim, ticker=ticker, name=company_name,
+                                ad_today=_ad_t, ad_tomorrow=_ad_m, ad_window=_win)
+                            _out = wadv.explain(_brief)
+                        st.session_state["whatif_ai_result"] = {
+                            "sig": _sig, "out": _out,
+                            "crossings": _brief.get("crossings", []),
+                        }
+                    except Exception as _exc:
+                        st.session_state.pop("whatif_ai_result", None)
+                        st.error(f"推演失败：{_exc}")
+
+                _res = st.session_state.get("whatif_ai_result")
+                if not _res:
+                    return
+                if _res["sig"] != _sig:
+                    st.warning(
+                        "⚠️ 模拟器参数已改动，下面显示的是**上一次**推演的结果。"
+                        "点击上方按钮重新推演。")
+
+                _o_ = _res["out"]
+                _call = str((_o_.get("stance") or {}).get("call", "—"))
+                # A-share convention: bullish is red, bearish is green.
+                _tone = ("#dc2626" if any(k in _call for k in ("买入", "加仓"))
+                         else "#15803d" if any(k in _call for k in ("减仓", "清仓"))
+                         else "#6b7280")
+
+                st.markdown(
+                    f"<div style='border-left:4px solid {_tone};padding:8px 14px;"
+                    f"margin:6px 0 12px 0;background:rgba(127,127,127,.06);'>"
+                    f"<div style='font-size:17px;font-weight:700'>{_o_.get('headline','')}</div>"
+                    f"<div style='margin-top:6px;font-size:15px'>"
+                    f"<b style='color:{_tone}'>{_call}</b> · 信心 "
+                    f"{(_o_.get('stance') or {}).get('conviction','—')}</div></div>",
+                    unsafe_allow_html=True)
+
+                if _o_.get("bar_read"):
+                    st.markdown(f"**这根K线在说什么** — {_o_['bar_read']}")
+
+                if _res.get("crossings"):
+                    with st.expander(f"🔧 程序算出的状态变化 · {len(_res['crossings'])} 项"
+                                     "（这些是事实，模型只负责解读）", expanded=True):
+                        for _c in _res["crossings"]:
+                            _arrow = "🔺" if _c["dir"] == "up" else "🔻"
+                            st.markdown(f"{_arrow} **{_c['what']}** — {_c['detail']}")
+                else:
+                    st.caption("🔧 这根K线不触发任何状态变化。")
+
+                if _o_.get("key_changes"):
+                    st.markdown("**关键变化**")
+                    for _k in _o_["key_changes"]:
+                        st.markdown(f"- {_k}")
+
+                _cb, _cs = st.columns(2)
+                with _cb:
+                    with st.container(border=True):
+                        st.markdown("<b style='color:#dc2626'>🔺 看多理由</b>",
+                                    unsafe_allow_html=True)
+                        st.markdown(_o_.get("bull_case", "—"))
+                with _cs:
+                    with st.container(border=True):
+                        st.markdown("<b style='color:#15803d'>🔻 看空理由</b>",
+                                    unsafe_allow_html=True)
+                        st.markdown(_o_.get("bear_case", "—"))
+
+                _stance = _o_.get("stance") or {}
+                with st.container(border=True):
+                    st.markdown(f"**为什么是「{_call}」** — {_stance.get('why','—')}")
+                    _h1, _h2 = st.columns(2)
+                    with _h1:
+                        st.markdown(f"**已持仓** — {_stance.get('if_holding','—')}")
+                    with _h2:
+                        st.markdown(f"**空仓** — {_stance.get('if_flat','—')}")
+
+                _lv = _o_.get("levels") or {}
+                _l1, _l2 = st.columns(2)
+                with _l1:
+                    st.success(f"**✅ 确认条件** — {_lv.get('confirm','—')}")
+                with _l2:
+                    st.error(f"**❌ 证伪条件** — {_lv.get('invalidate','—')}")
+                if _lv.get("note"):
+                    st.caption(_lv["note"])
+
+                if _o_.get("next_session_plan"):
+                    st.info(f"**📋 明日计划** — {_o_['next_session_plan']}")
+
+                if _o_.get("what_would_change_my_mind"):
+                    with st.expander("🔄 会推翻这个判断的信号"):
+                        for _w in _o_["what_would_change_my_mind"]:
+                            st.markdown(f"- {_w}")
+
+                with st.expander("⚠️ 局限与风险提示"):
+                    for _cv in (_o_.get("caveats") or ["—"]):
+                        st.markdown(f"- {_cv}")
+
+            whatif_ai_section(analysis_df, ticker, company_name)
             st.markdown("---")
 
             st.subheader("🎯 Setup-Conditioned Expectancy")
