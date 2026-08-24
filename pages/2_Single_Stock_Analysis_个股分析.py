@@ -791,20 +791,62 @@ def _add_ghost_traces(fig, df, dates, sim_result, price_change_pct, has_comp, n_
     up = price_tmr >= close_today
     price_color = '#ef4444' if up else '#22c55e'   # red=up (A-share)
 
-    fig.add_trace(go.Scatter(
-        x=pair_x, y=[close_today, price_tmr],
-        mode='lines+markers',
-        name='👻 Ghost · Price',
-        legendgroup='ghost', legendgrouptitle_text='What-If (tomorrow)',
-        line=dict(color=price_color, width=2.5, dash='dot'),
-        marker=dict(
-            size=[0, 14], symbol='circle-open',
-            color=price_color, line=dict(color=price_color, width=2.5),
-        ),
-        hovertemplate=(f'<b>Tomorrow (sim)</b><br>Close: ¥%{{y:.2f}}<br>'
-                       f'Δ: {price_change_pct:+.2f}%<extra></extra>'),
-        showlegend=True,
-    ), row=1, col=1)
+    if sim_result.get('ohl_supplied'):
+        # Real K-line for the simulated bar. Hollow body + dashed-looking thin
+        # border so it reads as hypothetical beside the solid real candles.
+        fig.add_trace(go.Candlestick(
+            x=[next_bday],
+            open=[sim_result['open_tomorrow']], high=[sim_result['high_tomorrow']],
+            low=[sim_result['low_tomorrow']], close=[price_tmr],
+            name='👻 Ghost · K线', legendgroup='ghost', showlegend=False,
+            increasing=dict(line=dict(color='#ef4444', width=1),
+                            fillcolor='rgba(239,68,68,0.18)'),
+            decreasing=dict(line=dict(color='#22c55e', width=1),
+                            fillcolor='rgba(34,197,94,0.18)'),
+            whiskerwidth=0.4,
+        ), row=1, col=1)
+    else:
+        fig.add_trace(go.Scatter(
+            x=pair_x, y=[close_today, price_tmr],
+            mode='lines', name='👻 Ghost · Price',
+            legendgroup='ghost', showlegend=False,
+            line=dict(color='#6366f1', width=2.5, dash='dash'),
+            hovertemplate=('<b>Tomorrow (sim)</b><br>Close: ¥%{y:.2f}<br>'
+                           f'Δ: {price_change_pct:+.2f}%<extra></extra>'),
+        ), row=1, col=1)
+
+    # Moving averages, EMA and Bollinger extended one bar — each is the last
+    # N-1 real closes plus tomorrow's, so they are exact, not approximations.
+    _ma_col = {'MA5': '#ec4899', 'MA10': '#14b8a6', 'MA20': '#fbbf24',
+               'MA50': '#3b82f6', 'MA60': '#f97316', 'MA200': '#374151'}
+    _mt, _my = sim_result.get('ma_tomorrow') or {}, sim_result.get('ma_today') or {}
+    for _k, _c in _ma_col.items():
+        _a, _b = _my.get(_k), _mt.get(_k)
+        if _a is None or _b is None:
+            continue
+        fig.add_trace(go.Scatter(
+            x=pair_x, y=[_a, _b], mode='lines', name=f'👻 {_k}',
+            legendgroup='ghost', showlegend=False,
+            line=dict(color=_c, width=1.4, dash='dash'),
+            hovertemplate=f'<b>Tomorrow (sim)</b><br>{_k}: %{{y:.2f}}<extra></extra>',
+        ), row=1, col=1)
+    if sim_result.get('ema5_tomorrow') is not None:
+        fig.add_trace(go.Scatter(
+            x=pair_x, y=[sim_result['ema5_today'], sim_result['ema5_tomorrow']],
+            mode='lines', name='👻 EMA5', legendgroup='ghost', showlegend=False,
+            line=dict(color='#a855f7', width=1.4, dash='dot'),
+            hovertemplate='<b>Tomorrow (sim)</b><br>EMA5: %{y:.2f}<extra></extra>',
+        ), row=1, col=1)
+    _bt, _bd = sim_result.get('bb_tomorrow') or {}, sim_result.get('bb_today') or {}
+    for _k in ('upper', 'lower'):
+        if _bt.get(_k) is None or _bd.get(_k) is None:
+            continue
+        fig.add_trace(go.Scatter(
+            x=pair_x, y=[_bd[_k], _bt[_k]], mode='lines',
+            name=f'👻 BB {_k}', legendgroup='ghost', showlegend=False,
+            line=dict(color='rgba(148,163,184,0.9)', width=1, dash='dash'),
+            hovertemplate=f'<b>Tomorrow (sim)</b><br>BB {_k}: %{{y:.2f}}<extra></extra>',
+        ), row=1, col=1)
 
     # ----- Row 2: Volume bar + scaled OBV line -----
     vol_tmr = float(sim_result.get('volume_tomorrow', df['Volume'].iloc[-1]))
@@ -831,16 +873,32 @@ def _add_ghost_traces(fig, df, dates, sim_result, price_change_pct, has_comp, n_
             y0, y1 = _rescale(obv_today_raw), _rescale(obv_tmr_raw)
             fig.add_trace(go.Scatter(
                 x=pair_x, y=[y0, y1],
-                mode='lines+markers',
+                mode='lines',
                 name='👻 Ghost · OBV',
                 legendgroup='ghost',
                 line=dict(color='#f59e0b', width=2.5, dash='dot'),
-                marker=dict(size=[0, 11], symbol='circle-open',
-                            color='#f59e0b',
-                            line=dict(color='#f59e0b', width=2.5)),
                 customdata=[obv_today_raw, obv_tmr_raw],
                 hovertemplate='<b>Tomorrow (sim)</b><br>OBV: %{customdata:.2f}<extra></extra>',
                 showlegend=False,
+            ), row=2, col=1)
+
+    # OBV动能 — the panel plots it rescaled onto the volume axis, so the ghost
+    # segment has to be mapped the same way or it lands off-panel.
+    _omt, _omy = sim_result.get('obv_mom_tomorrow'), sim_result.get('obv_mom_today')
+    if _omt is not None and _omy is not None and 'OBV' in df.columns:
+        _mser = ((df['OBV'] - df['OBV'].shift(20))
+                 / df['Volume'].rolling(20, min_periods=1).mean().replace(0, np.nan))
+        _mser = _mser.replace([np.inf, -np.inf], np.nan).dropna()
+        _vmn, _vmx = float(df['Volume'].min()), float(df['Volume'].max())
+        if len(_mser) and _mser.max() != _mser.min() and _vmx > _vmn:
+            _lo, _hi = float(_mser.min()), float(_mser.max())
+            _map = lambda v: (v - _lo) / (_hi - _lo) * (_vmx - _vmn) + _vmn
+            fig.add_trace(go.Scatter(
+                x=pair_x, y=[_map(_omy), _map(_omt)], mode='lines',
+                name='👻 Ghost · OBV动能', legendgroup='ghost', showlegend=False,
+                line=dict(color='#3b82f6', width=1.6, dash='dash'),
+                customdata=[_omy, _omt],
+                hovertemplate='<b>Tomorrow (sim)</b><br>OBV动能: %{customdata:+.2f}× 日均量<extra></extra>',
             ), row=2, col=1)
 
     # ----- Row 3: MACD line + signal + histogram (×2.5 like the real trace) -----
@@ -852,23 +910,17 @@ def _add_ghost_traces(fig, df, dates, sim_result, price_change_pct, has_comp, n_
 
     fig.add_trace(go.Scatter(
         x=pair_x, y=[macd_today, macd_tmr],
-        mode='lines+markers', name='👻 Ghost · MACD',
+        mode='lines', name='👻 Ghost · MACD',
         legendgroup='ghost',
         line=dict(color='#2563eb', width=2.5, dash='dot'),
-        marker=dict(size=[0, 11], symbol='circle-open',
-                    color='#2563eb',
-                    line=dict(color='#2563eb', width=2.5)),
         hovertemplate='<b>Tomorrow (sim)</b><br>MACD: %{y:.4f}<extra></extra>',
         showlegend=False,
     ), row=3, col=1)
     fig.add_trace(go.Scatter(
         x=pair_x, y=[sig_today, sig_tmr],
-        mode='lines+markers', name='👻 Ghost · Signal',
+        mode='lines', name='👻 Ghost · Signal',
         legendgroup='ghost',
         line=dict(color='#f97316', width=2.5, dash='dot'),
-        marker=dict(size=[0, 11], symbol='circle-open',
-                    color='#f97316',
-                    line=dict(color='#f97316', width=2.5)),
         hovertemplate='<b>Tomorrow (sim)</b><br>Signal: %{y:.4f}<extra></extra>',
         showlegend=False,
     ), row=3, col=1)
@@ -889,12 +941,9 @@ def _add_ghost_traces(fig, df, dates, sim_result, price_change_pct, has_comp, n_
     rsi_tmr = float(sim_result['rsi_tomorrow'])
     fig.add_trace(go.Scatter(
         x=pair_x, y=[rsi_today, rsi_tmr],
-        mode='lines+markers', name='👻 Ghost · RSI',
+        mode='lines', name='👻 Ghost · RSI',
         legendgroup='ghost',
         line=dict(color='#1f2937', width=2.5, dash='dot'),
-        marker=dict(size=[0, 11], symbol='circle-open',
-                    color='#1f2937',
-                    line=dict(color='#1f2937', width=2.5)),
         hovertemplate='<b>Tomorrow (sim)</b><br>RSI(14): %{y:.1f}<extra></extra>',
         showlegend=False,
     ), row=4, col=1)
@@ -904,16 +953,27 @@ def _add_ghost_traces(fig, df, dates, sim_result, price_change_pct, has_comp, n_
     adx_tmr = float(sim_result['adx_tomorrow'])
     fig.add_trace(go.Scatter(
         x=pair_x, y=[adx_today, adx_tmr],
-        mode='lines+markers', name='👻 Ghost · ADX',
+        mode='lines', name='👻 Ghost · ADX',
         legendgroup='ghost',
         line=dict(color='#64748b', width=2.5, dash='dot'),
-        marker=dict(size=[0, 11], symbol='circle-open',
-                    color='#64748b',
-                    line=dict(color='#64748b', width=2.5)),
         hovertemplate=('<b>Tomorrow (sim)</b><br>ADX: %{y:.1f}'
                        '<br><i>approx.</i><extra></extra>'),
         showlegend=False,
     ), row=5, col=1)
+
+    # ±DI were being simulated but never drawn — ADX alone cannot show which
+    # side is gaining, which is most of what this panel is read for.
+    for _k, _lab, _c in (('di_plus', '+DI', '#ef4444'),
+                         ('di_minus', '-DI', '#22c55e')):
+        _a, _b = sim_result.get(f'{_k}_today'), sim_result.get(f'{_k}_tomorrow')
+        if _a is None or _b is None:
+            continue
+        fig.add_trace(go.Scatter(
+            x=pair_x, y=[_a, _b], mode='lines',
+            name=f'👻 Ghost · {_lab}', legendgroup='ghost', showlegend=False,
+            line=dict(color=_c, width=1.4, dash='dash'),
+            hovertemplate=f'<b>Tomorrow (sim)</b><br>{_lab}: %{{y:.2f}}<extra></extra>',
+        ), row=5, col=1)
 
     # ----- Row 6: Z-Score Oscillator (price-Z line + volume-Z bar) -----
     # Mirror the panel's rolling-20 z-score logic, but include tomorrow's
@@ -972,12 +1032,9 @@ def _add_ghost_traces(fig, df, dates, sim_result, price_change_pct, has_comp, n_
     # Price-Z ghost segment (purple, matches panel)
     fig.add_trace(go.Scatter(
         x=pair_x, y=[price_z_today, price_z_tmr],
-        mode='lines+markers', name='👻 Ghost · Price Z',
+        mode='lines', name='👻 Ghost · Price Z',
         legendgroup='ghost',
         line=dict(color='#7c3aed', width=2.5, dash='dot'),
-        marker=dict(size=[0, 11], symbol='circle-open',
-                    color='#7c3aed',
-                    line=dict(color='#7c3aed', width=2.5)),
         hovertemplate='<b>Tomorrow (sim)</b><br>Price Z: %{y:.2f}<extra></extra>',
         showlegend=False,
     ), row=6, col=1)
@@ -990,12 +1047,9 @@ def _add_ghost_traces(fig, df, dates, sim_result, price_change_pct, has_comp, n_
             pe_tmr = pe_t * (price_tmr / close_today)
             fig.add_trace(go.Scatter(
                 x=pair_x, y=[pe_t, pe_tmr],
-                mode='lines+markers', name='👻 Ghost · P/E',
+                mode='lines', name='👻 Ghost · P/E',
                 legendgroup='ghost',
                 line=dict(color='#0ea5e9', width=2.5, dash='dot'),
-                marker=dict(size=[0, 11], symbol='circle-open',
-                            color='#0ea5e9',
-                            line=dict(color='#0ea5e9', width=2.5)),
                 hovertemplate=('<b>Tomorrow (sim)</b><br>P/E (EPS held): %{y:.2f}'
                                '<extra></extra>'),
                 showlegend=False,
@@ -4451,6 +4505,38 @@ if st.session_state.active_ticker:
                     )
                 volume_tomorrow = vol_input_millions * 1e6
                 target_price = close_yesterday * (1 + price_change / 100)
+
+                # Optional O/H/L for the simulated bar. Left off, high and low
+                # are only ESTIMATED from the mean true range and open is
+                # assumed flat, which is enough to keep ADX moving but no more.
+                # Supplying the real shape makes ±DI essentially exact —
+                # measured against a held-out real bar, DI+ error fell from
+                # 0.470 to 0.003 — and lets the ghost be drawn as a candle.
+                _use_ohl = st.checkbox(
+                    "🕯️ 指定明日开/高/低 (画K线) · Specify tomorrow's O/H/L",
+                    key="sim_use_ohl",
+                    help="不填时用均幅估算高低点、开盘价按今收计算，"
+                         "只够让ADX有输入；填了才能画出真正的K线，"
+                         "±DI 也会从估算变成精确。")
+                sim_open = sim_high = sim_low = None
+                if _use_ohl:
+                    _o1, _o2, _o3 = st.columns(3)
+                    _lo_d = min(close_yesterday, target_price) * 0.99
+                    _hi_d = max(close_yesterday, target_price) * 1.01
+                    with _o1:
+                        sim_open = st.number_input(
+                            "开 Open", value=float(close_yesterday), step=0.01,
+                            format="%.2f", key="sim_open")
+                    with _o2:
+                        sim_high = st.number_input(
+                            "高 High", value=float(_hi_d), step=0.01,
+                            format="%.2f", key="sim_high")
+                    with _o3:
+                        sim_low = st.number_input(
+                            "低 Low", value=float(_lo_d), step=0.01,
+                            format="%.2f", key="sim_low")
+                    if sim_high < max(sim_open, target_price) or                        sim_low > min(sim_open, target_price):
+                        st.caption("⚠️ 高/低已自动扩展以包含开盘价与收盘价。")
                 with sim_caption:
                     st.markdown(
                         f"<div style='padding-top:32px; color:#6b7280; font-size:13px;'>"
@@ -4463,7 +4549,9 @@ if st.session_state.active_ticker:
 
                 # ── Compute simulation (cheap, runs every rerun) ────────────
                 sim_result = simulate_next_day_indicators(
-                    analysis_df, price_change, volume_tomorrow
+                    analysis_df, price_change, volume_tomorrow,
+                    open_tomorrow=sim_open, high_tomorrow=sim_high,
+                    low_tomorrow=sim_low,
                 )
 
                 # ── Load comparison data ────────────────────────────────────

@@ -1109,7 +1109,10 @@ def detect_market_regime(
 
 def simulate_next_day_indicators(df: pd.DataFrame,
                                   price_change_pct: float,
-                                  volume: float) -> dict | None:
+                                  volume: float,
+                                  open_tomorrow: float | None = None,
+                                  high_tomorrow: float | None = None,
+                                  low_tomorrow: float | None = None) -> dict | None:
     """
     Simulate what technical indicators would look like tomorrow.
 
@@ -1121,6 +1124,13 @@ def simulate_next_day_indicators(df: pd.DataFrame,
         df:                DataFrame produced by run_single_stock_analysis()
         price_change_pct:  Hypothetical tomorrow % price change
         volume:            Hypothetical tomorrow volume
+        open/high/low_tomorrow: Optional explicit OHL for the simulated bar.
+            When omitted, high and low are ESTIMATED as the close range padded
+            by 0.2x the mean true range and open is assumed flat at today's
+            close. That estimate is only a stand-in so ADX has something to
+            chew on — supplying the real shape makes ADX and ±DI exact rather
+            than approximate, and lets the ghost be drawn as a candle instead
+            of a bare line.
 
     Returns:
         Dictionary with simulated indicator values and signals, or None if too short.
@@ -1194,9 +1204,19 @@ def simulate_next_day_indicators(df: pd.DataFrame,
     # ── Exact ADX simulation via mini-df ─────────────────────
     df_sim = df[['High', 'Low', 'Close']].tail(100).copy()
 
-    recent_tr      = (df_sim['High'] - df_sim['Low']).mean()
-    high_tomorrow  = max(close_today, close_tomorrow) + (recent_tr * 0.2)
-    low_tomorrow   = min(close_today, close_tomorrow) - (recent_tr * 0.2)
+    recent_tr = (df_sim['High'] - df_sim['Low']).mean()
+    _est_high = max(close_today, close_tomorrow) + (recent_tr * 0.2)
+    _est_low  = min(close_today, close_tomorrow) - (recent_tr * 0.2)
+
+    open_tmr = float(open_tomorrow) if open_tomorrow else float(close_today)
+    high_tmr = float(high_tomorrow) if high_tomorrow else float(_est_high)
+    low_tmr  = float(low_tomorrow)  if low_tomorrow  else float(_est_low)
+    # A candle must contain its own open and close, whatever was typed.
+    high_tmr = max(high_tmr, open_tmr, close_tomorrow)
+    low_tmr  = min(low_tmr,  open_tmr, close_tomorrow)
+    ohl_supplied = bool(high_tomorrow and low_tomorrow)
+
+    high_tomorrow, low_tomorrow = high_tmr, low_tmr
     tomorrow_idx   = df_sim.index[-1] + pd.Timedelta(days=1)
 
     df_sim = pd.concat([df_sim, pd.DataFrame(
@@ -1286,6 +1306,46 @@ def simulate_next_day_indicators(df: pd.DataFrame,
         'DI_Screaming_Buy':  di_screaming_buy,
     }
 
+    # ── Moving averages / Bollinger / OBV momentum for the ghost ──────────
+    # A rolling mean at a NEW bar is the last N-1 real closes plus tomorrow's,
+    # so each of these is exact rather than an approximation.
+    _closes = df['Close']
+
+    def _ma_tmr(n: int):
+        if len(_closes) < n - 1:
+            return None
+        return float((_closes.iloc[-(n - 1):].sum() + close_tomorrow) / n)
+
+    ma_tomorrow = {f'MA{n}': _ma_tmr(n) for n in (5, 10, 20, 50, 60, 200)}
+    ma_today = {f'MA{n}': (float(latest[f'MA{n}'])
+                           if f'MA{n}' in df.columns and pd.notna(latest.get(f'MA{n}'))
+                           else None)
+                for n in (5, 10, 20, 50, 60, 200)}
+
+    _a5 = 2 / (MA_SHORT + 1)
+    ema5_today = float(latest['EMA5']) if 'EMA5' in df.columns else float(close_today)
+    ema5_tomorrow = _a5 * close_tomorrow + (1 - _a5) * ema5_today
+
+    _bbwin = df['Close'].iloc[-(BB_WINDOW - 1):].tolist() + [close_tomorrow]
+    _bbmid = float(np.mean(_bbwin))
+    _bbsd = float(np.std(_bbwin, ddof=0))
+    bb_tomorrow = {'mid': _bbmid,
+                   'upper': _bbmid + BB_STD * _bbsd,
+                   'lower': _bbmid - BB_STD * _bbsd}
+
+    # OBV动能 = net signed volume over 20 sessions / average daily volume,
+    # both including the simulated bar.
+    obv_mom_tomorrow = None
+    if 'OBV' in df.columns and len(df) >= 20:
+        _obv_20_ago = float(df['OBV'].iloc[-20])
+        if vol_20d_avg_tomorrow:
+            obv_mom_tomorrow = (obv_tomorrow - _obv_20_ago) / vol_20d_avg_tomorrow
+    obv_mom_today = None
+    if 'OBV' in df.columns and len(df) >= 21:
+        _avg_t = float(df['Volume'].rolling(20, min_periods=1).mean().iloc[-1])
+        if _avg_t:
+            obv_mom_today = (obv_today - float(df['OBV'].iloc[-21])) / _avg_t
+
     return {
         'input_price_change_pct': price_change_pct,
         'input_volume':           volume,
@@ -1312,6 +1372,30 @@ def simulate_next_day_indicators(df: pd.DataFrame,
         'adx_today':              adx_today,
         'adx_tomorrow':           adx_tomorrow,
         'adx_pattern':            adx_pattern,
+        # ±DI were computed all along for the screaming-cross test but never
+        # returned, so the ghost could not draw them alongside ADX.
+        'di_plus_today':          di_plus_today,
+        'di_plus_tomorrow':       di_plus_tmr,
+        'di_minus_today':         di_minus_today,
+        'di_minus_tomorrow':      di_minus_tmr,
+
+        'open_tomorrow':          open_tmr,
+        'high_tomorrow':          high_tmr,
+        'low_tomorrow':           low_tmr,
+        'ohl_supplied':           ohl_supplied,
+
+        'ma_today':               ma_today,
+        'ma_tomorrow':            ma_tomorrow,
+        'ema5_today':             ema5_today,
+        'ema5_tomorrow':          ema5_tomorrow,
+        'bb_tomorrow':            bb_tomorrow,
+        'bb_today': {'mid':   float(latest.get('BB_Upper', np.nan)) if False else None,
+                     'upper': (float(latest['BB_Upper'])
+                               if 'BB_Upper' in df.columns and pd.notna(latest.get('BB_Upper')) else None),
+                     'lower': (float(latest['BB_Lower'])
+                               if 'BB_Lower' in df.columns and pd.notna(latest.get('BB_Lower')) else None)},
+        'obv_mom_today':          obv_mom_today,
+        'obv_mom_tomorrow':       obv_mom_tomorrow,
 
         'obv_scaled_today':       obv_scaled_today,
         'obv_scaled_tomorrow':    obv_scaled_tomorrow,
