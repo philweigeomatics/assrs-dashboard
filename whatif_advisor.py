@@ -33,8 +33,17 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-TIMELINE_BARS = 20          # recent real sessions given as context
+# Context is given at three resolutions, because one resolution cannot serve
+# both jobs. Twenty daily bars is the right amount of DETAIL — a month of tape,
+# enough to see the setup that produced this bar without burying it. But the
+# numbers in the brief reference far longer windows than that: MA60 is a
+# quarter, the volume Z-score is baselined on 100 sessions, and range position
+# is measured over 120. Handing over those numbers with only 20 bars behind
+# them asks the model to judge a 120-day range from a 20-day window, so weekly
+# bars carry the reach out to RANGE_WINDOW at about a fifth of the tokens.
+TIMELINE_BARS = 20          # detailed daily sessions
 RANGE_WINDOW = 120          # window for "where in its range" position
+WEEKLY_REACH = 120          # total sessions of context, daily + weekly combined
 
 
 # ─────────────────────────── small formatters ────────────────────────────
@@ -213,6 +222,115 @@ def _crossings(df: pd.DataFrame, sim: dict) -> list[dict]:
             if (vz_t < thr <= vz_m) or (vz_t >= thr > vz_m):
                 out.append({"what": "量能", "dir": "up" if vz_m > vz_t else "down",
                             "detail": f"跨过{nm}阈值（Z {vz_t:+.1f} → {vz_m:+.1f}）"})
+    return out
+
+
+# ──────────────── weekly reach, and structural facts ─────────────────────
+def _weekly_tape(df: pd.DataFrame, detail_bars: int, reach: int) -> list[str]:
+    """
+    The stretch BEFORE the detailed daily window, compressed to weekly bars.
+
+    Covers the span the daily lines cannot reach without spending a line per
+    session. A week is the natural next unit up for a swing read, and the
+    weekly close against MA20/MA60 is what says whether the current level has
+    been fought over before or is new ground.
+    """
+    hist = df.iloc[-reach:-detail_bars] if len(df) > detail_bars else df.iloc[0:0]
+    if hist.empty:
+        return []
+    agg = {"Open": "first", "High": "max", "Low": "min",
+           "Close": "last", "Volume": "sum"}
+    for c in ("MA20", "MA60"):
+        if c in hist.columns:
+            agg[c] = "last"
+    w = hist.resample("W").agg(agg).dropna(subset=["Close"])
+    if w.empty:
+        return []
+    prev = w["Close"].shift(1)
+    out = []
+    for i, (idx, r) in enumerate(w.iterrows()):
+        pct = ((r["Close"] / prev.iloc[i] - 1) * 100) if pd.notna(prev.iloc[i]) else None
+        stack = " ".join(
+            f"{'>' if r['Close'] >= r[c] else '<'}{c}"
+            for c in ("MA20", "MA60") if c in w.columns and pd.notna(r.get(c)))
+        out.append(" · ".join([
+            f"W{idx.date()}",
+            f"H{r['High']:.2f} L{r['Low']:.2f} C{r['Close']:.2f}",
+            f"{_n(pct, '{:+.2f}')}%",
+            stack or "—",
+        ]))
+    return out
+
+
+def _since(mask: pd.Series) -> int | None:
+    """Sessions since a boolean series was last True (0 = the last bar)."""
+    idx = np.flatnonzero(np.asarray(mask, dtype=bool))
+    return int(len(mask) - 1 - idx[-1]) if len(idx) else None
+
+
+def _structure(df: pd.DataFrame) -> dict:
+    """
+    Facts about where this bar sits in the larger structure.
+
+    These are the questions a model will otherwise answer by guessing: how long
+    since the last MACD cross, when price last changed sides on MA60, whether
+    the quarter line is being respected or whipsawed, how far the nearest swing
+    extreme is. All cheap to compute exactly, all expensive to get wrong.
+    """
+    c = df["Close"]
+    out: dict = {}
+
+    if {"MACD", "MACD_Signal"} <= set(df.columns):
+        m, s = df["MACD"], df["MACD_Signal"]
+        out["days_since_macd_golden"] = _since(
+            (m.shift(1) <= s.shift(1)).fillna(False) & (m > s))
+        out["days_since_macd_death"] = _since(
+            (m.shift(1) >= s.shift(1)).fillna(False) & (m < s))
+
+    for w in (20, 60):
+        col = f"MA{w}"
+        if col not in df.columns:
+            continue
+        above = c >= df[col]
+        prev_above = above.shift(1, fill_value=False)
+        out[f"days_since_ma{w}_up"] = _since(above & ~prev_above)
+        out[f"days_since_ma{w}_down"] = _since(~above & prev_above)
+        # Whipsaw count: a level crossed many times is a level nobody defends,
+        # so a fresh cross of it means much less than a first cross would.
+        flips = (above != above.shift(1, fill_value=above.iloc[0])).iloc[-RANGE_WINDOW:]
+        out[f"ma{w}_crosses_{RANGE_WINDOW}d"] = int(flips.sum())
+        out[f"above_ma{w}_now"] = bool(above.iloc[-1])
+
+    # Consecutive up/down closes ending at today; signed, 0 for a flat close.
+    d = np.sign(c.diff().fillna(0).values)
+    last = d[-1] if len(d) else 0
+    streak = 0
+    if last != 0:
+        k = len(d) - 1
+        while k >= 0 and d[k] == last:
+            streak += 1
+            k -= 1
+    out["streak"] = int(streak * last)
+
+    # Nearest swing extremes and distance to them.
+    for w in (20, 60, RANGE_WINDOW):
+        sub = df.tail(w)
+        hi, lo = float(sub["High"].max()), float(sub["Low"].min())
+        out[f"high_{w}d"] = hi
+        out[f"low_{w}d"] = lo
+        out[f"pct_below_high_{w}d"] = (float(c.iloc[-1]) / hi - 1) * 100
+        out[f"pct_above_low_{w}d"] = (float(c.iloc[-1]) / lo - 1) * 100
+        out[f"high_{w}d_date"] = str(sub["High"].idxmax().date())
+        out[f"low_{w}d_date"] = str(sub["Low"].idxmin().date())
+
+    # Volatility regime: recent realised vol against its own longer baseline.
+    r = c.pct_change()
+    if len(r) > 100:
+        near = float(r.tail(20).std(ddof=0) * np.sqrt(252) * 100)
+        base = float(r.tail(100).std(ddof=0) * np.sqrt(252) * 100)
+        out["vol_20d_annual_pct"] = near
+        out["vol_100d_annual_pct"] = base
+        out["vol_ratio"] = (near / base) if base else None
     return out
 
 
@@ -437,6 +555,8 @@ def build_brief(df: pd.DataFrame, sim: dict, *,
         "crossings": _crossings(df, sim),
         "accumulation_distribution": ad,
         "range": {"window": RANGE_WINDOW, "high": rhi, "low": rlo},
+        "weekly": _weekly_tape(df, timeline_bars, WEEKLY_REACH),
+        "structure": _structure(df),
     }
 
 
@@ -457,10 +577,22 @@ _PROMPT = """\
 你的任务：把这根K线读懂，然后说清楚**在这个尾盘时点该怎么处理**，
 以及**明天开盘后按什么条件行动**。
 
-你会拿到三样东西：
-1. 最近若干个真实交易日的逐日行情与指标；
-2. 今日（最后一个真实交易日）与这根模拟K线的完整指标对照；
-3. **crossings**——已经由程序精确算出的状态变化（金叉/死叉/突破/区间切换等）。
+你会拿到这些东西：
+1. 最近约{tl}个真实交易日的**逐日**行情与指标（近景）；
+2. 更早一段时间的**周线**概览，一直回溯到约{rw}个交易日之前（远景）——
+   这是为了让你能判断MA60、量能Z（100日基准）、区间位置（{rw}日）这类
+   长周期数值，光看{tl}天是判断不了的；
+3. **结构事实**——距上次MACD金叉/死叉多少天、上次上穿/下穿MA20/MA60
+   多少天、MA被反复穿越的次数、连涨连跌、各周期高低点与距离、波动率状态；
+4. 今日与这根K线的完整指标对照；
+5. **crossings**——已经由程序精确算出的状态变化（金叉/死叉/突破/区间切换等）。
+
+怎么用远景和结构事实：
+- 一个信号"是不是第一次出现"决定了它的分量。距上次金叉才3天的金叉，
+  和距上次金叉60天的金叉，不是一回事。
+- MA被反复穿越很多次，说明这条均线没人守，那么"突破MA"的意义就要打折。
+- 站上MA60这类判断，必须结合周线看这个位置以前有没有被反复争夺。
+- 波动率比值说明当前是放大还是收敛，直接影响止损该放多宽。
 
 关于 crossings 的硬性要求：
 - 这些是**算好的事实**，直接采信、直接引用。
@@ -546,6 +678,46 @@ def explain(brief: dict) -> dict:
     else:
         ad_txt = "  （未计算）"
 
+    st_struct = brief.get("structure") or {}
+
+    def _days(k, label):
+        v = st_struct.get(k)
+        return f"{label} {v} 个交易日前" if v is not None else f"{label} 区间内未出现"
+
+    def _swing(w):
+        return (f"  近{w}日：高 {_n(st_struct.get(f'high_{w}d'))}"
+                f"（{st_struct.get(f'high_{w}d_date','—')}，距 "
+                f"{_n(st_struct.get(f'pct_below_high_{w}d'), '{:+.2f}')}%）"
+                f" · 低 {_n(st_struct.get(f'low_{w}d'))}"
+                f"（{st_struct.get(f'low_{w}d_date','—')}，距 "
+                f"{_n(st_struct.get(f'pct_above_low_{w}d'), '{:+.2f}')}%）")
+
+    _stk = st_struct.get("streak", 0) or 0
+    _vr = st_struct.get("vol_ratio")
+    struct_txt = "\n".join([
+        "  " + _days("days_since_macd_golden", "上次MACD金叉：") +
+        " · " + _days("days_since_macd_death", "上次死叉："),
+        "  " + _days("days_since_ma20_up", "上次上穿MA20：") +
+        " · " + _days("days_since_ma20_down", "上次下穿MA20："),
+        "  " + _days("days_since_ma60_up", "上次上穿MA60：") +
+        " · " + _days("days_since_ma60_down", "上次下穿MA60："),
+        f"  近{RANGE_WINDOW}日 MA20 被穿越 "
+        f"{st_struct.get(f'ma20_crosses_{RANGE_WINDOW}d','—')} 次 · MA60 被穿越 "
+        f"{st_struct.get(f'ma60_crosses_{RANGE_WINDOW}d','—')} 次"
+        "（次数多=该均线没人守，突破意义打折）",
+        f"  当前：{'连涨' if _stk > 0 else '连跌' if _stk < 0 else '持平'} "
+        f"{abs(_stk)} 天 · 现价在 MA20 "
+        f"{'上方' if st_struct.get('above_ma20_now') else '下方'} · MA60 "
+        f"{'上方' if st_struct.get('above_ma60_now') else '下方'}",
+        _swing(20), _swing(60), _swing(RANGE_WINDOW),
+        f"  波动率：近20日年化 {_n(st_struct.get('vol_20d_annual_pct'), '{:.1f}')}% "
+        f"vs 近100日 {_n(st_struct.get('vol_100d_annual_pct'), '{:.1f}')}% "
+        f"（比值 {_n(_vr)}，>1.2 放大 / <0.8 收敛）",
+    ])
+
+    weekly_txt = ("\n".join("  " + x for x in (brief.get("weekly") or []))
+                  or "  （历史不足，无周线概览）")
+
     sig_on = [k for k, v in (s.get("signals") or {}).items() if v is True]
     actual = brief.get("mode") == "actual"
     ohl_note = ("O/H/L 为真实成交数据" if actual
@@ -593,19 +765,25 @@ def explain(brief: dict) -> dict:
 【吸筹 / 出货（{ad.get('window')}日窗口）】
 {ad_txt}
 
-【最近 {len(brief['timeline'])} 个真实交易日】
+【结构事实 —— 这根K线所处的大局，程序算出，直接采信】
+{struct_txt}
+
+【远景：周线概览（{len(brief.get('weekly') or [])} 周，覆盖逐日窗口之前的时段）】
+{weekly_txt}
+
+【近景：最近 {len(brief['timeline'])} 个真实交易日（逐日）】
 {chr(10).join('  ' + x for x in brief['timeline'])}
 """
 
     # Far more bounded than the 复盘: one bar to reason about instead of a
     # whole game, so a near-flat budget is honest here. The floor is still
     # generous because the reasoning trace shares this same allowance.
-    rows = len(brief.get("timeline", []))
-    budget = min(20000, max(12000, 9000 + rows * 120))
+    rows = len(brief.get("timeline", [])) + len(brief.get("weekly", []))
+    budget = min(22000, max(13000, 9000 + rows * 120))
     timeout = min(240, max(120, 90 + rows * 2))
 
     return ai_client.call_json(
-        _PROMPT.format(rw=RANGE_WINDOW,
+        _PROMPT.format(rw=RANGE_WINDOW, tl=len(brief.get("timeline") or []),
                        intro=_INTRO.get(brief.get("mode", "simulated"),
                                         _INTRO["simulated"])), user,
         max_tokens=budget, temperature=0.4,
