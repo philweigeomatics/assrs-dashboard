@@ -4486,66 +4486,56 @@ if st.session_state.active_ticker:
                 scale_mode = "pct" if scale_choice == "Same % Scale" else "new"
 
                 # ── Simulator input sub-row (always visible) ────────────────
-                sim_p, sim_v, sim_caption = st.columns([2, 2, 4])
-                with sim_p:
-                    price_change = st.slider(
-                        "📈 明日Δ% Price change",
-                        min_value=-10.0, max_value=10.0, value=0.0, step=0.1,
-                        format="%.1f%%",
-                        key="sim_price",
-                        help="正数=上涨，负数=下跌",
-                    )
-                with sim_v:
-                    vol_input_millions = st.number_input(
-                        "📦 明日成交量 (M)",
-                        min_value=vol_min_M, max_value=vol_max_M,
-                        value=vol_10d_avg / 1e6, step=vol_step_M, format="%.3f",
-                        key="sim_volume",
-                        help="以百万为单位",
-                    )
-                volume_tomorrow = vol_input_millions * 1e6
+                # One row: Δ% then the three prices then volume. O/H/L are
+                # always present rather than behind a toggle — they are what
+                # makes the ghost a real candle and ±DI exact, so hiding them
+                # by default hid the better behaviour.
+                _c1, _c2, _c3, _c4, _c5 = st.columns([1.1, 1, 1, 1, 1.2])
+                with _c1:
+                    price_change = st.number_input(
+                        "明日Δ%", min_value=-20.0, max_value=20.0,
+                        value=0.0, step=0.1, format="%.2f", key="sim_price",
+                        help="正数=上涨。主板±10%，创业板/科创板±20%。")
                 target_price = close_yesterday * (1 + price_change / 100)
 
-                # Optional O/H/L for the simulated bar. Left off, high and low
-                # are only ESTIMATED from the mean true range and open is
-                # assumed flat, which is enough to keep ADX moving but no more.
-                # Supplying the real shape makes ±DI essentially exact —
-                # measured against a held-out real bar, DI+ error fell from
-                # 0.470 to 0.003 — and lets the ghost be drawn as a candle.
-                _use_ohl = st.checkbox(
-                    "🕯️ 指定明日开/高/低 (画K线) · Specify tomorrow's O/H/L",
-                    key="sim_use_ohl",
-                    help="不填时用均幅估算高低点、开盘价按今收计算，"
-                         "只够让ADX有输入；填了才能画出真正的K线，"
-                         "±DI 也会从估算变成精确。")
-                sim_open = sim_high = sim_low = None
-                if _use_ohl:
-                    _o1, _o2, _o3 = st.columns(3)
-                    _lo_d = min(close_yesterday, target_price) * 0.99
-                    _hi_d = max(close_yesterday, target_price) * 1.01
-                    with _o1:
-                        sim_open = st.number_input(
-                            "开 Open", value=float(close_yesterday), step=0.01,
-                            format="%.2f", key="sim_open")
-                    with _o2:
-                        sim_high = st.number_input(
-                            "高 High", value=float(_hi_d), step=0.01,
-                            format="%.2f", key="sim_high")
-                    with _o3:
-                        sim_low = st.number_input(
-                            "低 Low", value=float(_lo_d), step=0.01,
-                            format="%.2f", key="sim_low")
-                    if sim_high < max(sim_open, target_price) or                        sim_low > min(sim_open, target_price):
-                        st.caption("⚠️ 高/低已自动扩展以包含开盘价与收盘价。")
-                with sim_caption:
-                    st.markdown(
-                        f"<div style='padding-top:32px; color:#6b7280; font-size:13px;'>"
-                        f"昨收 ¥{close_yesterday:.2f} → 明日 ¥{target_price:.2f} "
-                        f"({price_change:+.2f}%)  ·  vol {vol_input_millions:.1f}M "
-                        f"(昨 {vol_yesterday/1e6:.1f}M · 10日均 {vol_10d_avg/1e6:.1f}M)"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+                # Re-seed O/H/L whenever Δ% changes, so the candle always
+                # matches the close being simulated. Editing them afterwards
+                # sticks; changing Δ% again re-seeds, because at that point it
+                # is a different bar.
+                _sig = round(float(price_change), 4)
+                if st.session_state.get("_sim_ohl_sig") != _sig:
+                    st.session_state["_sim_ohl_sig"] = _sig
+                    st.session_state["sim_open"] = float(close_yesterday)
+                    st.session_state["sim_high"] = float(
+                        max(close_yesterday, target_price) * 1.005)
+                    st.session_state["sim_low"] = float(
+                        min(close_yesterday, target_price) * 0.995)
+
+                with _c2:
+                    sim_open = st.number_input("开 O", step=0.01, format="%.2f",
+                                               key="sim_open")
+                with _c3:
+                    sim_high = st.number_input("高 H", step=0.01, format="%.2f",
+                                               key="sim_high")
+                with _c4:
+                    sim_low = st.number_input("低 L", step=0.01, format="%.2f",
+                                              key="sim_low")
+                with _c5:
+                    vol_input_millions = st.number_input(
+                        "量 Vol (M)", min_value=vol_min_M, max_value=vol_max_M,
+                        value=vol_10d_avg / 1e6, step=vol_step_M, format="%.2f",
+                        key="sim_volume", help="以百万股为单位")
+                volume_tomorrow = vol_input_millions * 1e6
+
+                st.markdown(
+                    f"<div style='color:#6b7280;font-size:12px;margin:-6px 0 4px 0;'>"
+                    f"昨收 ¥{close_yesterday:.2f} → 明日 ¥{target_price:.2f} "
+                    f"({price_change:+.2f}%) · O{sim_open:.2f} H{sim_high:.2f} "
+                    f"L{sim_low:.2f} · 量 {vol_input_millions:.1f}M "
+                    f"(昨 {vol_yesterday/1e6:.1f}M · 10日均 {vol_10d_avg/1e6:.1f}M)"
+                    f"</div>", unsafe_allow_html=True)
+                if sim_high < max(sim_open, target_price) or                    sim_low > min(sim_open, target_price):
+                    st.caption("⚠️ 高/低会自动扩展以包含开盘价与收盘价。")
 
                 # ── Compute simulation (cheap, runs every rerun) ────────────
                 sim_result = simulate_next_day_indicators(
