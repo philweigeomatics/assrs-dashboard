@@ -4434,6 +4434,20 @@ if st.session_state.active_ticker:
             #    real-estate the simulator inputs used to occupy below.
             @st.fragment
             def chart_and_simulator(analysis_df, fundamentals_df, blocks, ticker):
+                # ── Reset the simulator when the stock changes ───────────────
+                # session_state is per-SESSION, not per-stock, so every one of
+                # these inputs follows you to the next ticker. O/H/L are the
+                # dangerous ones: they are absolute prices, so carrying ¥1300
+                # onto a ¥10 stock builds a what-if bar that is pure nonsense —
+                # and the volume bounds are derived per-stock, so a carried-over
+                # value can land outside the new min/max entirely.
+                if st.session_state.get("_sim_ticker") != ticker:
+                    st.session_state["_sim_ticker"] = ticker
+                    for _k in ("sim_open", "sim_high", "sim_low",
+                               "sim_volume", "_sim_ohl_sig"):
+                        st.session_state.pop(_k, None)
+                    st.session_state["sim_price"] = 0.0
+
                 # ── Sim defaults & bounds ────────────────────────────────────
                 latest = analysis_df.iloc[-1]
                 vol_10d_avg = analysis_df['Volume'].rolling(10).mean().iloc[-1]
@@ -4524,8 +4538,11 @@ if st.session_state.active_ticker:
                 # Re-seed O/H/L whenever Δ% changes, so the candle always
                 # matches the close being simulated. Editing them afterwards
                 # sticks; changing Δ% again re-seeds, because at that point it
-                # is a different bar.
-                _sig = round(float(price_change), 4)
+                # is a different bar. The ticker and yesterday's close are in
+                # the signature too: the same Δ% on a different stock, or on a
+                # new session, is also a different bar.
+                _sig = (ticker, round(float(close_yesterday), 4),
+                        round(float(price_change), 4))
                 if st.session_state.get("_sim_ohl_sig") != _sig:
                     st.session_state["_sim_ohl_sig"] = _sig
                     st.session_state["sim_open"] = float(close_yesterday)
@@ -5068,10 +5085,15 @@ if st.session_state.active_ticker:
                 _vm = float(st.session_state.get(
                     "sim_volume", analysis_df["Volume"].rolling(10).mean().iloc[-1] / 1e6)) * 1e6
 
-                # Identifies the exact scenario an answer belongs to, so a
-                # stored read is never shown against inputs it didn't see.
-                # The mode is part of it: flipping the toggle changes which bar
-                # was read, which makes any stored answer about the other one.
+                # Two levels of identity, because they deserve different
+                # treatment. _key is WHICH TAPE was read — stock plus latest
+                # session. If that changes, the stored answer is about another
+                # company (or another day) and is thrown away outright: showing
+                # 茅台's read under a different ticker is worse than showing
+                # nothing. _sig is which SCENARIO on that tape — the simulator
+                # inputs and the ghost mode. Those changing leaves the answer
+                # still about this stock, so it is kept and flagged stale.
+                _key = (ticker, str(analysis_df.index[-1].date()))
                 if _ghost:
                     _sig = ("sim", ticker, str(analysis_df.index[-1].date()),
                             round(_pc, 4), round(_o, 4), round(_h, 4),
@@ -5137,7 +5159,7 @@ if st.session_state.active_ticker:
                                 mode=_mode, bar_date=_bar_date)
                             _out = wadv.explain(_brief)
                         st.session_state["whatif_ai_result"] = {
-                            "sig": _sig, "out": _out,
+                            "key": _key, "sig": _sig, "out": _out,
                             "crossings": _brief.get("crossings", []),
                         }
                     except Exception as _exc:
@@ -5145,6 +5167,11 @@ if st.session_state.active_ticker:
                         st.error(f"推演失败：{_exc}")
 
                 _res = st.session_state.get("whatif_ai_result")
+                # A read of a different stock (or of a tape that has since
+                # gained a session) is not stale, it is wrong. Drop it.
+                if _res and _res.get("key") != _key:
+                    st.session_state.pop("whatif_ai_result", None)
+                    _res = None
                 if not _res:
                     return
                 if _res["sig"] != _sig:
