@@ -418,18 +418,29 @@ else:
     _bdf = pd.DataFrame(_box_rows).sort_values(
         ["信号", "质量"], ascending=[True, False])
     _c1, _c2 = st.columns(2)
+    # NOTE: these must be if/else STATEMENTS, not `a() if c else b()` used as
+    # an expression statement. Streamlit's magic renders the value of any bare
+    # expression in the script, so the conditional-expression form handed it
+    # the DeltaGenerator returned by st.dataframe and it printed that object's
+    # repr and full docstring onto the page.
     with _c1:
         _low = _bdf[_bdf["信号"].str.contains("下沿|跌破")]
         st.markdown(f"**🔻 贴近下沿 / 跌破 · {len(_low)}**")
         st.caption("支撑位——箱体交易的买入侧，跌破则是失效信号")
-        st.dataframe(_low.drop(columns=["_pos"]), use_container_width=True,
-                     hide_index=True) if not _low.empty else st.caption("—")
+        if not _low.empty:
+            st.dataframe(_low.drop(columns=["_pos"]), use_container_width=True,
+                         hide_index=True)
+        else:
+            st.caption("—")
     with _c2:
         _high = _bdf[_bdf["信号"].str.contains("上沿|突破")]
         st.markdown(f"**🔺 贴近上沿 / 突破 · {len(_high)}**")
         st.caption("压力位——箱体交易的卖出侧，突破则是启动信号")
-        st.dataframe(_high.drop(columns=["_pos"]), use_container_width=True,
-                     hide_index=True) if not _high.empty else st.caption("—")
+        if not _high.empty:
+            st.dataframe(_high.drop(columns=["_pos"]), use_container_width=True,
+                         hide_index=True)
+        else:
+            st.caption("—")
     st.caption("质量 0–1：由上下沿触及次数、走势平坦度、收盘留在箱内的比例、"
                "以及持续时间加权得出。0.7 以上是结构清晰的箱体。")
 
