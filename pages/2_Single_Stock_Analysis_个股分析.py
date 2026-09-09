@@ -22,6 +22,7 @@ from analysis_engine import (
 )
 import portfolio_fit as pfit
 import accumulation_signals as acsig
+import box_detection as bxd
 import whatif_advisor as wadv
 from chart_utils import split_legends_by_panel
 
@@ -1431,13 +1432,28 @@ def create_single_stock_chart_analysis(
     if blocks:
         colors = ['rgba(255, 99, 71, 0.2)', 'rgba(255, 165, 0, 0.2)', 'rgba(255, 215, 0, 0.2)']
         recent_blocks = blocks[-3:]  # Get last 3 blocks
-    
+
         for idx, block in enumerate(recent_blocks):
-            color = colors[idx % len(colors)]
-            color = colors[idx % len(colors)]
             start_date = block['start'].strftime('%Y-%m-%d')
             end_date = block['end'].strftime('%Y-%m-%d')
-            
+
+            # A channel is not a box, so it does not get a rectangle. Drawing
+            # one across a trend is what made the old boxes misleading: a band
+            # with a floor and a ceiling implies both were defended, and in a
+            # 通道 neither was. Label the stretch instead and draw nothing.
+            if block.get('kind') and block['kind'] != 'BOX':
+                fig.add_annotation(
+                    x=end_date, y=block['top'],
+                    text=f"{block['status_cn']}<br>{block['drift_pct']:+.1f}% · R²{block['r2']:.2f}",
+                    showarrow=True, arrowhead=2, arrowsize=1, ay=-30,
+                    font=dict(size=9, color='#6b7280'),
+                    bgcolor='rgba(255,255,255,0.85)',
+                    bordercolor='#9ca3af', borderwidth=1, borderpad=3,
+                    row=1, col=1
+                )
+                continue
+
+            color = colors[idx % len(colors)]
             fig.add_shape(
                 type='rect', x0=start_date, x1=end_date,
                 y0=block['bot'], y1=block['top'],
@@ -1445,10 +1461,26 @@ def create_single_stock_chart_analysis(
                 line=dict(color='rgba(0,0,0,0.3)', width=1, dash='dash'),
                 row=1, col=1
             )
-            
+
+            # The edges are ZONES, not lines — support is 48.00–48.15, not
+            # 48.05 — so the touch band is drawn as a thin strip at each edge.
+            _z = block.get('zone')
+            if _z:
+                for _lvl, _lo, _hi in ((block['top'], block['top'] - _z, block['top']),
+                                       (block['bot'], block['bot'], block['bot'] + _z)):
+                    fig.add_shape(
+                        type='rect', x0=start_date, x1=end_date, y0=_lo, y1=_hi,
+                        fillcolor='rgba(107,114,128,0.18)', line=dict(width=0),
+                        row=1, col=1
+                    )
+
+            _t = (f"箱体 {block['bot']:.2f}–{block['top']:.2f}"
+                  f"<br>{block.get('height_pct', 0):.1f}% · {block.get('n_sessions', 0)}日"
+                  f"<br>触及 上{block.get('touches_top', 0)}/下{block.get('touches_bot', 0)}"
+                  f" · 质量{block.get('quality', 0):.2f}"
+                  f"<br>{block.get('status_cn', block['status'])}")
             fig.add_annotation(
-                x=end_date, y=block['top'] * 1.02,
-                text=f"Box {idx+1}<br>{block['bot']:.2f}-{block['top']:.2f}<br>{block['status']}",
+                x=end_date, y=block['top'] * 1.02, text=_t,
                 showarrow=True, arrowhead=2, arrowsize=1, ay=-30,
                 font=dict(size=9, color='black'),
                 bgcolor='rgba(255,255,255,0.85)',
@@ -3765,8 +3797,14 @@ if st.session_state.active_ticker:
             st.error("Not enough data to compute signals.")
         else:
             with st.spinner("Calculating trading blocks...检测交易区间"):
-                # Detect trading blocks
-                blocks = calculate_multiple_blocks(analysis_df, lookback=60)
+                # 箱体 detection. The old calculate_multiple_blocks drew a box for
+                # EVERY segment — its edges were the band holding 70% of volume,
+                # which is a statistic rather than a level anyone defended, so
+                # trends and channels came out as boxes too. box_detection only
+                # returns a box when both edges were actually touched more than
+                # once and the window went nowhere; directional windows come
+                # back tagged as 上升/下降通道 instead.
+                blocks = bxd.detect_boxes(analysis_df)
 
             # ==================== PORTFOLIO FIT ====================
             # Defined before the header so the launcher button below it can call the
@@ -4384,29 +4422,34 @@ if st.session_state.active_ticker:
                     st.caption("等待信号")
 
             with col5:
-                st.markdown("**📦 Trading Block**")
-                if blocks:
-                    block = blocks[-1]
-                    status = block['status']
-                    
-                    # Only show if it's the active block
-                    if block.get('is_active', False):
-                        if status == 'BREAKOUT':
-                            st.error("BREAKOUT")
-                        elif status == 'BREAKDOWN':
-                            st.success("BREAKDOWN")
-                        elif status == 'INSIDE':
-                            st.warning("INSIDE")
-                        else:
-                            st.info(status)
-                        
-                        st.caption(f"¥{block['bot']:.2f}-¥{block['top']:.2f}")
-                    else:
-                        st.info("NO ACTIVE BLOCK")
-                        st.caption("Historical block only")
+                st.markdown("**📦 箱体 Trading Box**")
+                _act = next((b for b in blocks if b.get('is_active')), None) if blocks else None
+                if _act is None:
+                    st.info("无箱体")
+                    st.caption("没有被反复确认的上下沿" if blocks else "无明确区间")
+                elif _act.get('kind') != 'BOX':
+                    # Saying "no box, this is a channel" is more useful than
+                    # saying nothing, and stops a trend being traded as a range.
+                    st.info(_act['status_cn'])
+                    st.caption(f"净漂移 {_act['drift_pct']:+.1f}% · R² {_act['r2']:.2f}"
+                               f" · 不是箱体")
                 else:
-                    st.info("无")
-                    st.caption("无明确区间")
+                    status = _act['status']
+                    # A-share convention: breakout up = red, breakdown = green.
+                    if status == 'BREAKOUT':
+                        st.error(f"向上突破 {_act['top']:.2f}")
+                    elif status == 'BREAKDOWN':
+                        st.success(f"向下跌破 {_act['bot']:.2f}")
+                    elif status == 'AT_RESISTANCE':
+                        st.success("贴近上沿")
+                    elif status == 'AT_SUPPORT':
+                        st.error("贴近下沿")
+                    else:
+                        st.warning("箱体中部")
+                    st.caption(f"¥{_act['bot']:.2f}–¥{_act['top']:.2f} "
+                               f"({_act['height_pct']:.1f}%) · 位置 {_act['position']:.0%}")
+                    st.caption(f"触及 上{_act['touches_top']}/下{_act['touches_bot']} · "
+                               f"{_act['n_sessions']}日 · 质量 {_act['quality']:.2f}")
 
             with col6:
                 st.markdown("**📊 Market Regime**")

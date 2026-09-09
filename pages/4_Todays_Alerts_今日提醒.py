@@ -13,6 +13,7 @@ import data_manager
 
 # Import from shared engine
 from analysis_engine import run_single_stock_analysis
+import box_detection as bxd
 
 import auth_manager
 auth_manager.require_login()
@@ -72,6 +73,45 @@ def get_beijing_date():
 def init_signals_tables():
     """Initialize the signals cache tables"""
     data_manager.create_signals_tables()
+
+
+# ── 箱体 edge alerts ─────────────────────────────────────────────────────────
+# Encoded INTO the Signals string rather than a new column, because the cache
+# stores a fixed 10-column schema and the display already derives its bull/bear
+# counts by parsing that string. The bracketed form is machine-readable so the
+# dedicated 箱体 section below can pull the numbers back out of a cached row.
+_BOX_RE = None
+
+
+def _box_signal(analysis_df):
+    """
+    (marker, label, box) for a stock sitting at the edge of a live box.
+
+    Returns (None, None, box) when a box exists but price is mid-range — worth
+    knowing, not worth alerting on — and (None, None, None) when there is no
+    box at all, which is most of the time and is the point of the exercise.
+    """
+    try:
+        info = bxd.box_alert(analysis_df)
+    except Exception:
+        return None, None, None
+    if info is None:
+        return None, None, None
+    b = info["box"]
+    tag = (f"[{b['bot']:.2f}-{b['top']:.2f}] 位置{info['position']*100:.0f}%"
+           f" 触{b['touches_top']}/{b['touches_bot']} 质{b['quality']:.2f}")
+    st_ = info["status"]
+    # A-share reading: at the floor is the buy side (▲), at the ceiling the
+    # sell side (▼). A breakdown is bearish even though it happens at the floor.
+    if st_ == "AT_SUPPORT":
+        return "bull", f"箱体下沿 {tag}", b
+    if st_ == "AT_RESISTANCE":
+        return "bear", f"箱体上沿 {tag}", b
+    if st_ == "BREAKOUT":
+        return "bull", f"箱体突破 {tag}", b
+    if st_ == "BREAKDOWN":
+        return "bear", f"箱体跌破 {tag}", b
+    return None, None, b
 
 
 def _extract_signals(latest):
@@ -143,6 +183,18 @@ def scan_my_watchlist():
             stock_name = data_manager.get_stock_name_from_db(ticker) or ticker
 
             bull, bear = _extract_signals(latest)
+
+            # 箱体 edge test. Added to the same bull/bear sets so it ranks and
+            # filters like every other signal — and checked BEFORE the
+            # empty-signal skip, because "sitting on a support that has held
+            # four times" is the whole alert even on a day when nothing else
+            # fires. That skip is why a box-only stock used to vanish.
+            _bmark, _blabel, _box = _box_signal(analysis_df)
+            if _bmark == "bull":
+                bull.append(_blabel)
+            elif _bmark == "bear":
+                bear.append(_blabel)
+
             if not bull and not bear:
                 continue   # no signals → not in the table at all
 
@@ -329,6 +381,57 @@ with col3:
     st.metric("⚖️ Mixed", int((df['Type'] == '⚖️ Mixed').sum()))
 with col4:
     st.metric("📊 Stocks with signals", len(df))
+
+st.markdown("---")
+
+# ==================== 箱体 EDGE ALERTS ====================
+# Pulled back out of the Signals string so this works from a cached snapshot
+# too — the cache keeps only the 10-column schema, and the string is the one
+# field that survives the round trip.
+import re as _re
+
+_BOX_PAT = _re.compile(
+    r"([▲▼])\s*箱体(下沿|上沿|突破|跌破)\s*\[([\d.]+)-([\d.]+)\]\s*"
+    r"位置(-?\d+)%\s*触(\d+)/(\d+)\s*质([\d.]+)")
+
+_box_rows = []
+for _, _r in df.iterrows():
+    for _m in _BOX_PAT.finditer(str(_r.get("Signals", ""))):
+        _mark, _where, _bot, _top, _pos, _tt, _tb, _q = _m.groups()
+        _box_rows.append({
+            "Ticker": _r["Ticker"], "Name": _r["Name"],
+            "Price": float(_r.get("Price", 0)),
+            "位置": f"{_pos}%",
+            "_pos": int(_pos),
+            "箱体": f"¥{float(_bot):.2f} – ¥{float(_top):.2f}",
+            "幅度": f"{(float(_top)/float(_bot)-1)*100:.1f}%",
+            "信号": f"{_mark} {_where}",
+            "触及": f"上{_tt}/下{_tb}",
+            "质量": float(_q),
+        })
+
+st.subheader("📦 箱体边缘提醒 · Box Edge Alerts")
+if not _box_rows:
+    st.info("观察列表中没有股票正处于箱体上下沿。"
+            "（只有上下沿都被反复确认、且走势没有方向的区间才算箱体）")
+else:
+    _bdf = pd.DataFrame(_box_rows).sort_values(
+        ["信号", "质量"], ascending=[True, False])
+    _c1, _c2 = st.columns(2)
+    with _c1:
+        _low = _bdf[_bdf["信号"].str.contains("下沿|跌破")]
+        st.markdown(f"**🔻 贴近下沿 / 跌破 · {len(_low)}**")
+        st.caption("支撑位——箱体交易的买入侧，跌破则是失效信号")
+        st.dataframe(_low.drop(columns=["_pos"]), use_container_width=True,
+                     hide_index=True) if not _low.empty else st.caption("—")
+    with _c2:
+        _high = _bdf[_bdf["信号"].str.contains("上沿|突破")]
+        st.markdown(f"**🔺 贴近上沿 / 突破 · {len(_high)}**")
+        st.caption("压力位——箱体交易的卖出侧，突破则是启动信号")
+        st.dataframe(_high.drop(columns=["_pos"]), use_container_width=True,
+                     hide_index=True) if not _high.empty else st.caption("—")
+    st.caption("质量 0–1：由上下沿触及次数、走势平坦度、收盘留在箱内的比例、"
+               "以及持续时间加权得出。0.7 以上是结构清晰的箱体。")
 
 st.markdown("---")
 
