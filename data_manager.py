@@ -1787,12 +1787,25 @@ def get_cached_signals(scan_date):
         return None
 
 def save_signals_to_cache(df, scan_date, scan_duration):
-    """Save scanned signals to database cache."""
-
+    """Save scanned signals to database cache, for the logged-in user."""
     user_id = auth_manager.get_current_user_id()
     if user_id is None:
         return False
-    
+    return save_signals_to_cache_for_user(df, scan_date, scan_duration, user_id)
+
+
+def save_signals_to_cache_for_user(df, scan_date, scan_duration, user_id):
+    """
+    Same as save_signals_to_cache, but for an EXPLICIT user.
+
+    The nightly GitHub Actions scan has no Streamlit session and so no
+    "current user" — it writes every user's snapshot in one run. Taking the
+    user_id as an argument is what lets the page and the job share one write
+    path instead of the job reimplementing the schema.
+    """
+    if user_id is None:
+        return False
+
     if df is None or df.empty:
         return False
     
@@ -1849,6 +1862,60 @@ def save_signals_to_cache(df, scan_date, scan_duration):
     except Exception as e:
         print(f"Error saving signals to cache: {e}")
         return False
+
+def get_latest_signal_snapshot_date(max_age_days=14):
+    """
+    Most recent scan_date this user has a snapshot for, or None.
+
+    The page used to look up only TODAY's calendar date and scan on a miss.
+    That turned every morning into an 80-stock scan: the nightly job writes
+    the snapshot under the trading session it computed (e.g. Friday), and a
+    Monday-morning visit looks for Monday, misses, and rescans data that has
+    not changed since Friday's close. Serving the latest snapshot instead
+    removes that trigger without needing a trading calendar.
+    """
+    user_id = auth_manager.get_current_user_id()
+    if user_id is None:
+        return None
+    try:
+        df = db.read_table('signals_scan_metadata',
+                           filters={'user_id': user_id},
+                           columns='scan_date', order_by='-scan_date', limit=1)
+        if df is None or df.empty:
+            return None
+        latest = str(df.iloc[0]['scan_date'])
+        age = (datetime.now().date() - datetime.strptime(latest[:10], '%Y-%m-%d').date()).days
+        return latest if age <= max_age_days else None
+    except Exception as e:
+        print(f"Error finding latest snapshot: {e}")
+        return None
+
+
+def get_all_watchlists():
+    """
+    {user_id: [tickers]} across EVERY user. For the nightly scan only.
+
+    Deliberately not session-scoped: it runs with the service key in GitHub
+    Actions, where there is no logged-in user and the point is to serve all
+    of them. Never call this from a page.
+    """
+    try:
+        df = db.read_table('watchlist', columns='user_id,ticker', limit=100000)
+    except Exception as e:
+        print(f"Error reading watchlists: {e}")
+        return {}
+    if df is None or df.empty:
+        return {}
+    if len(df) >= 1000:
+        # PostgREST caps a response at 1000 rows by default; if we are at the
+        # cap, rows may be silently missing — say so rather than scan a subset.
+        print(f"[data_manager] ⚠️ watchlist read returned {len(df)} rows — "
+              f"may be truncated at the API row cap")
+    out = {}
+    for uid, grp in df.dropna(subset=['user_id']).groupby('user_id'):
+        out[uid] = sorted(set(grp['ticker'].astype(str)))
+    return out
+
 
 def get_scan_metadata(scan_date):
     """Get metadata about the last scan."""

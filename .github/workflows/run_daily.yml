@@ -62,3 +62,21 @@ jobs:
             git push
             echo "Changes pushed successfully"
           fi
+
+      # 6. Pre-compute every user's Today's-Alerts snapshot.
+      #    Scanning 80 stocks inside Streamlit Community Cloud gets throttled:
+      #    each stock runs a walk-forward HMM that is deliberately CPU-heavy.
+      #    Doing it here means the page only ever reads the cache. Runs after
+      #    the CSV commit with `always()`, so neither step can block the other;
+      #    it exits non-zero if any ticker still fails after a retry, which
+      #    marks the run failed and sends the failure email.
+      - name: Scan all watchlists for Today's Alerts
+        if: always()
+        timeout-minutes: 90
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python scan_watchlists.py
