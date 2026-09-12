@@ -120,9 +120,16 @@ def _deposit(edges: np.ndarray, low: float, avg: float, high: float) -> np.ndarr
     return w / s
 
 
+def _concentration(grid: np.ndarray, chips: np.ndarray) -> float:
+    """(p90-p10)/(p90+p10). 0 = one price, higher = spread out."""
+    p90, p10 = _pctl(grid, chips, 0.90), _pctl(grid, chips, 0.10)
+    return (p90 - p10) / (p90 + p10) if (p90 + p10) else float("nan")
+
+
 def compute_chips(df: pd.DataFrame, turnover_pct: pd.Series, *,
                   decay: float = 1.0, bins: int = GRID_BINS,
-                  avg_price: pd.Series | None = None) -> dict:
+                  avg_price: pd.Series | None = None,
+                  snapshot_every: int = 0) -> dict:
     """
     Run the model over `df` and return the final distribution plus diagnostics.
 
@@ -166,7 +173,17 @@ def compute_chips(df: pd.DataFrame, turnover_pct: pd.Series, *,
     chips = _deposit(edges, l_arr[0], a_arr[0], h_arr[0])
     seed_remaining = 1.0
 
+    # The evolution is free: the loop already holds the full distribution on
+    # every bar, so recording it costs a reduction per step rather than a
+    # second pass. Snapshots are what make "how has this CHANGED" answerable —
+    # a single end-state cannot show chips migrating up into a rally, which is
+    # the whole 吸筹 / 派发 read.
     winner_hist = np.empty(len(d))
+    conc_hist = np.empty(len(d))
+    avg_hist = np.empty(len(d))
+    peak_hist = np.empty(len(d))
+    snaps, snap_dates = [], []
+
     for i in range(len(d)):
         k = turn[i]
         if k > 0:
@@ -177,6 +194,12 @@ def compute_chips(df: pd.DataFrame, turnover_pct: pd.Series, *,
         if s > 0:
             chips /= s                      # guard drift, mass is always 1
         winner_hist[i] = chips[grid < c_arr[i]].sum()
+        conc_hist[i] = _concentration(grid, chips)
+        avg_hist[i] = (grid * chips).sum()
+        peak_hist[i] = grid[int(np.argmax(chips))]
+        if snapshot_every and (i % snapshot_every == 0 or i == len(d) - 1):
+            snaps.append(chips.copy())
+            snap_dates.append(d.index[i])
 
     return {
         "ok": True,
@@ -184,6 +207,11 @@ def compute_chips(df: pd.DataFrame, turnover_pct: pd.Series, *,
         "edges": edges,
         "chips": chips,
         "winner_history": pd.Series(winner_hist, index=d.index),
+        "concentration_history": pd.Series(conc_hist, index=d.index),
+        "avg_cost_history": pd.Series(avg_hist, index=d.index),
+        "peak_history": pd.Series(peak_hist, index=d.index),
+        "snapshots": np.array(snaps) if snaps else None,
+        "snapshot_dates": snap_dates,
         "seed_remaining": float(seed_remaining),
         "converged": bool(seed_remaining < SEED_CONVERGED),
         "cum_turnover": float(turn.sum()),
@@ -247,16 +275,138 @@ def chip_metrics(res: dict, price: float) -> dict:
     }
 
 
+def find_peaks(grid: np.ndarray, chips: np.ndarray,
+               min_share: float = 0.12, min_gap_pct: float = 8.0,
+               max_valley: float = 0.60) -> list[dict]:
+    """
+    Locate the chip peaks — 单峰密集 vs 双峰 is the whole visual read.
+
+    Three rules, and the third is the one that matters. Share and separation
+    alone still called every smooth distribution three-peaked, because a
+    histogram has ripples and any ripple is a local maximum; a term that reads
+    3 on almost everything adds nothing to a ranking but noise. So a second
+    peak must also be SEPARATED BY A REAL VALLEY: the lowest point between it
+    and a bigger peak has to fall to `max_valley` of the smaller peak's
+    height. That is what distinguishes two clusters of cost basis from one
+    cluster with a bumpy top, which is exactly the 单峰 / 双峰 question.
+    """
+    if chips.sum() <= 0:
+        return []
+    # Smooth lightly first: we are looking for structure, not for every bin.
+    k = max(3, len(grid) // 60)
+    sm = np.convolve(chips, np.ones(k) / k, mode="same")
+
+    cand = []
+    for i in range(1, len(sm) - 1):
+        if sm[i] >= sm[i - 1] and sm[i] > sm[i + 1]:
+            band = np.abs(grid - grid[i]) <= grid[i] * min_gap_pct / 200.0
+            cand.append({"i": i, "price": float(grid[i]),
+                         "share": float(chips[band].sum()),
+                         "height": float(sm[i])})
+    cand.sort(key=lambda p: -p["share"])
+
+    kept: list[dict] = []
+    for p in cand:
+        if p["share"] < min_share:
+            continue
+        if any(abs(p["price"] - q["price"]) / q["price"] * 100 < min_gap_pct
+               for q in kept):
+            continue
+        # Must be its own mode, not a shoulder of one already kept.
+        distinct = True
+        for q in kept:
+            a, b = sorted((p["i"], q["i"]))
+            valley = sm[a:b + 1].min()
+            if valley > max_valley * min(p["height"], q["height"]):
+                distinct = False
+                break
+        if distinct:
+            kept.append(p)
+    for p in kept:
+        p.pop("i", None)
+    return sorted(kept, key=lambda p: p["price"])
+
+
+def score_setup(m: dict, *, conc_60d_ago: float | None = None) -> dict:
+    """
+    Rank a chip structure as a LONG setup, 0–1, with the components exposed.
+
+    The textbook base is 低位单峰密集 with price at or just above the peak:
+    one tight cluster of cost basis, little supply stranded overhead, and the
+    cluster still tightening. Each term below is one of those words, kept
+    separate so a ranking can be argued with rather than taken on faith.
+
+    This is a structure score, not a forecast — it says the overhead is thin
+    and the holders agree on a price, not that the stock goes up.
+    """
+    if not m.get("ok"):
+        return {"score": float("nan"), "parts": {}, "label": "—"}
+
+    conc = m.get("concentration", float("nan"))
+    # 单峰密集: concentration under ~0.10 is tight, over ~0.35 is scattered.
+    tight = float(np.clip((0.35 - conc) / 0.25, 0, 1)) if np.isfinite(conc) else 0.0
+
+    # Overhead supply. Trapped holders above are the sellers a rally must eat
+    # through, so less is better — but a winner_rate near 100% is its own risk
+    # (everyone is in profit and free to leave), so the preference peaks near
+    # 75% rather than running to the top.
+    w = m.get("winner_rate", 0.0)
+    overhead = float(np.clip(1 - abs(w - 0.75) / 0.75, 0, 1))
+
+    # Peak as support: the dominant cluster sitting at or below price means the
+    # weight of cost basis is underneath, not overhead.
+    peak, px = m.get("peak_price"), m.get("price")
+    if peak and px:
+        rel = (px - peak) / px * 100.0          # % price sits above the peak
+        support = float(np.clip((rel + 5.0) / 15.0, 0, 1))
+    else:
+        support = 0.5
+
+    # Tightening = 吸筹 in progress. Unknown is scored neutral, never as a win.
+    if conc_60d_ago and np.isfinite(conc) and conc_60d_ago > 0:
+        tightening = float(np.clip((conc_60d_ago - conc) / (0.3 * conc_60d_ago), 0, 1))
+    else:
+        tightening = 0.5
+
+    unimodal = 1.0 if m.get("n_peaks", 0) <= 1 else 0.4 if m.get("n_peaks") == 2 else 0.1
+
+    score = (0.28 * tight + 0.24 * overhead + 0.22 * support
+             + 0.14 * tightening + 0.12 * unimodal)
+    label = ("🔴 单峰密集·上方轻" if score >= 0.70 else
+             "🟠 结构尚可" if score >= 0.55 else
+             "⚪ 一般" if score >= 0.40 else "🟢 上方套牢重")
+    return {
+        "score": round(float(score), 3),
+        "label": label,
+        "parts": {"tight": round(tight, 2), "overhead": round(overhead, 2),
+                  "support": round(support, 2), "tightening": round(tightening, 2),
+                  "unimodal": round(unimodal, 2)},
+    }
+
+
 def analyse(df: pd.DataFrame, turnover_pct: pd.Series, *,
             decay: float = 1.0, bins: int = GRID_BINS,
-            avg_price: pd.Series | None = None) -> dict:
+            avg_price: pd.Series | None = None,
+            snapshot_every: int = 0) -> dict:
     """Convenience: run the model and return metrics plus the raw arrays."""
     res = compute_chips(df, turnover_pct, decay=decay, bins=bins,
-                        avg_price=avg_price)
+                        avg_price=avg_price, snapshot_every=snapshot_every)
     if not res.get("ok"):
         return res
     m = chip_metrics(res, float(df["Close"].iloc[-1]))
-    m["grid"] = res["grid"]
-    m["chips"] = res["chips"]
-    m["winner_history"] = res["winner_history"]
+
+    peaks = find_peaks(res["grid"], res["chips"])
+    m["peaks"] = peaks
+    m["n_peaks"] = len(peaks)
+    m["peak_price"] = (max(peaks, key=lambda p: p["share"])["price"]
+                       if peaks else float(res["grid"][int(np.argmax(res["chips"]))]))
+
+    ch = res["concentration_history"]
+    prev = float(ch.iloc[-61]) if len(ch) > 61 else None
+    m["concentration_60d_ago"] = prev
+    m.update({f"setup_{k}": v for k, v in score_setup(m, conc_60d_ago=prev).items()})
+
+    for k in ("grid", "chips", "winner_history", "concentration_history",
+              "avg_cost_history", "peak_history", "snapshots", "snapshot_dates"):
+        m[k] = res[k]
     return m

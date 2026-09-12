@@ -14,6 +14,7 @@ import data_manager
 # Import from shared engine
 from analysis_engine import run_single_stock_analysis
 import box_detection as bxd
+import chip_distribution as cdist
 
 import auth_manager
 auth_manager.require_login()
@@ -443,6 +444,104 @@ else:
             st.caption("—")
     st.caption("质量 0–1：由上下沿触及次数、走势平坦度、收盘留在箱内的比例、"
                "以及持续时间加权得出。0.7 以上是结构清晰的箱体。")
+
+st.markdown("---")
+
+# ==================== 筹码结构扫描 ====================
+# Kept OUT of the main signal scan and its cache on purpose. That cache stores
+# a fixed 10-column schema, and chip structure is a dozen numbers per stock;
+# squeezing them into the Signals string the way the box alert does would be
+# unreadable. This has its own cache instead, and its own button, because it
+# costs an extra daily_basic call per stock (~0.8s) that nobody should pay for
+# on a page load they did not ask for.
+st.subheader("🧮 筹码结构扫描 · Chip Structure Scan")
+st.caption(
+    "谁在什么价位持有这只股票。找的是 **低位单峰密集**：筹码集中在一个价位、"
+    "上方套牢盘轻、主峰在现价下方构成支撑。评分只描述结构，不是涨跌预测。"
+)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _scan_chips(tickers: tuple, day: str, decay: float):
+    """
+    One row per stock. Cached on (watchlist, trading day, decay) — the maths is
+    ~90ms, the two API calls behind it are ~2s, so the cache exists to avoid
+    re-fetching, not to avoid computing.
+    """
+    out, failed = [], []
+    for tk in tickers:
+        try:
+            d = data_manager.get_single_stock_data_live(tk, lookback_years=3)
+            if d is None or len(d) < 120:
+                failed.append(tk)
+                continue
+            f = data_manager.get_stock_fundamentals_live(
+                tk, d.index.min().strftime("%Y%m%d"), d.index.max().strftime("%Y%m%d"))
+            if f is None or "Turnover_Rate" not in f.columns:
+                failed.append(tk)
+                continue
+            m = cdist.analyse(d, f["Turnover_Rate"].reindex(d.index), decay=decay)
+            if not m.get("ok"):
+                failed.append(tk)
+                continue
+            out.append({
+                "Ticker": tk,
+                "Name": data_manager.get_stock_name_from_db(tk) or tk,
+                "评分": m["setup_score"],
+                "结构": m["setup_label"],
+                "价格": round(m["price"], 2),
+                "主峰": round(m["peak_price"], 2),
+                "峰数": m["n_peaks"],
+                "获利盘": round(m["winner_rate"] * 100, 1),
+                "集中度": round(m["concentration"], 3),
+                "平均成本": round(m["weight_avg"], 2),
+                "距主峰%": round((m["price"] / m["peak_price"] - 1) * 100, 1),
+                "收敛": "✓" if m["converged"] else "⚠",
+            })
+        except Exception:
+            failed.append(tk)
+    return out, failed
+
+
+_cs1, _cs2, _cs3 = st.columns([1, 1, 2])
+with _cs1:
+    _scan_decay = st.select_slider("衰减系数", options=[0.8, 1.0, 1.2],
+                                   value=1.0, key="chipscan_decay")
+with _cs2:
+    _go_scan = st.button("🧮 扫描筹码结构", type="secondary", key="chipscan_go")
+with _cs3:
+    st.caption(f"约 {len(MY_WATCHLIST)} 只 × ~2 秒；结果缓存到当日收盘。")
+
+if _go_scan:
+    st.session_state["chipscan_on"] = True
+
+if st.session_state.get("chipscan_on"):
+    with st.spinner("计算筹码分布…"):
+        _rows, _failed = _scan_chips(tuple(MY_WATCHLIST), today_str, _scan_decay)
+    if not _rows:
+        st.info("没有可计算的股票（需要换手率数据与至少 120 个交易日）。")
+    else:
+        _cdf = pd.DataFrame(_rows).sort_values("评分", ascending=False)
+        _unconv = int((_cdf["收敛"] == "⚠").sum())
+        if _unconv:
+            st.caption(
+                f"⚠ {_unconv} 只标记为未收敛：换手率太低，三年历史不足以冲掉初始假设，"
+                f"它们的数字参考价值有限。")
+        st.dataframe(
+            _cdf, use_container_width=True, hide_index=True,
+            column_config={
+                "评分": st.column_config.ProgressColumn(
+                    "评分", min_value=0.0, max_value=1.0, format="%.2f"),
+                "获利盘": st.column_config.NumberColumn("获利盘 %", format="%.1f%%"),
+                "距主峰%": st.column_config.NumberColumn("距主峰 %", format="%+.1f%%"),
+            })
+        st.caption(
+            "**主峰** = 持有量最大的成本价位。**距主峰%** 为正表示现价在主峰上方"
+            "（主峰构成支撑），为负表示主峰在上方（是压力）。"
+            "**集中度** 越小筹码越集中。**峰数** >1 说明上方或下方还有另一批成本。")
+        if _failed:
+            st.caption(f"跳过 {len(_failed)} 只：{', '.join(_failed[:12])}"
+                       + ("…" if len(_failed) > 12 else ""))
 
 st.markdown("---")
 
