@@ -23,6 +23,7 @@ from analysis_engine import (
 import portfolio_fit as pfit
 import accumulation_signals as acsig
 import box_detection as bxd
+import chip_distribution as cdist
 import whatif_advisor as wadv
 from chart_utils import split_legends_by_panel
 
@@ -5085,6 +5086,138 @@ if st.session_state.active_ticker:
                 )
 
             accumulation_distribution_section(analysis_df, ticker)
+            st.markdown("---")
+
+            # ==================== 筹码分布 CHIP DISTRIBUTION ====================
+            # Computed locally rather than pulled from Tushare's cyq_perf,
+            # which needs 5000 points. It is a derived quantity, not a feed —
+            # the only extra input beyond OHLC is the turnover rate, and
+            # fundamentals_df already carries it, so this costs no API call.
+            @st.fragment
+            def chip_distribution_section(analysis_df, fundamentals_df, ticker):
+                st.subheader("🧮 筹码分布 · Chip (Cost) Distribution")
+                st.caption(
+                    "Where the float's **cost basis** sits. Each session, the "
+                    "turnover fraction of the float changes hands and re-prices "
+                    "to that day's range; iterate and you get who paid what. "
+                    "获利盘 is the share of the float currently in profit. "
+                    "Computed here from OHLC + 换手率 — same algorithm 通达信 uses "
+                    "— so it does not need Tushare's 5000-point cyq_perf."
+                )
+
+                _t = None
+                if fundamentals_df is not None and not fundamentals_df.empty:
+                    if "Turnover_Rate" in fundamentals_df.columns:
+                        _t = fundamentals_df["Turnover_Rate"].reindex(analysis_df.index)
+                if _t is None or _t.notna().sum() < 30:
+                    st.info("缺少换手率数据（daily_basic），无法计算筹码分布。")
+                    return
+
+                _c1, _c2 = st.columns([1, 3])
+                with _c1:
+                    _decay = st.select_slider(
+                        "衰减系数 decay", options=[0.6, 0.8, 1.0, 1.2, 1.5],
+                        value=1.0, key="chip_decay",
+                        help=("Multiplier on turnover. 1.0 uses the exchange's own "
+                              "rate — the honest default. Higher makes the "
+                              "distribution forget older cost basis faster."))
+
+                _res = cdist.analyse(analysis_df, _t, decay=_decay)
+                if not _res.get("ok"):
+                    st.info(f"无法计算：{_res.get('reason')}")
+                    return
+
+                _px = float(analysis_df["Close"].iloc[-1])
+
+                # Honesty about warm-up: the model starts from a guess, and
+                # what survives of that guess is prod(1-h). For a low-turnover
+                # name like a distiller, three years is not enough history to
+                # wash it out, and the reader deserves to know that the number
+                # is partly an artefact rather than being handed it straight.
+                if not _res["converged"]:
+                    st.warning(
+                        f"⚠️ 换手不足，结果尚未收敛：累计换手仅 "
+                        f"{_res['cum_turnover_pct']:.0f}%，初始假设仍占 "
+                        f"{_res['seed_remaining']:.1%} 权重。"
+                        f"低换手率的股票需要更长历史才能得到可靠的筹码分布——"
+                        f"请把下方数字当作参考而非结论。")
+
+                m1, m2, m3, m4 = st.columns(4)
+                with m1:
+                    # A-share convention: more profit = red.
+                    _w = _res["winner_rate"]
+                    st.metric("获利盘 Winner", f"{_w:.1%}")
+                    st.caption("🔴 多数获利" if _w >= 0.5 else "🟢 多数套牢")
+                with m2:
+                    _d = (_px / _res["weight_avg"] - 1) * 100
+                    st.metric("平均成本 Avg cost", f"¥{_res['weight_avg']:.2f}",
+                              delta=f"{_d:+.1f}% vs 现价")
+                with m3:
+                    st.metric("集中度 Concentration", f"{_res['concentration']:.3f}")
+                    st.caption("越小越集中，上方套牢盘越少")
+                with m4:
+                    st.metric("成本中位 Median cost", f"¥{_res['cost_50pct']:.2f}")
+
+                # Horizontal histogram: price on y so it reads against the
+                # price chart above, mass on x.
+                _g, _c = _res["grid"], _res["chips"]
+                _keep = _c > _c.max() * 0.002
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=_c[_keep] * 100, y=_g[_keep], orientation="h",
+                    marker=dict(color=np.where(_g[_keep] < _px, "#ef4444", "#22c55e")),
+                    name="筹码", hovertemplate="¥%{y:.2f}<br>%{x:.2f}%<extra></extra>",
+                ))
+                fig.add_hline(y=_px, line=dict(color="#111827", width=2),
+                              annotation_text=f"现价 ¥{_px:.2f}",
+                              annotation_position="right")
+                for _lvl, _lbl, _col in ((_res["cost_50pct"], "成本中位", "#6b7280"),
+                                         (_res["weight_avg"], "平均成本", "#2563eb")):
+                    fig.add_hline(y=_lvl, line=dict(color=_col, width=1, dash="dot"),
+                                  annotation_text=_lbl, annotation_position="left")
+                fig.update_layout(
+                    height=430, margin=dict(l=10, r=10, t=30, b=10),
+                    xaxis_title="筹码占比 %", yaxis_title="价格 ¥",
+                    showlegend=False, bargap=0.05,
+                )
+                st.plotly_chart(fig, use_container_width=True,
+                                key=f"chips_{ticker}")
+
+                with st.expander("成本分位 · cost percentiles（对应 cyq_perf 字段）"):
+                    st.dataframe(pd.DataFrame([{
+                        "cost_5pct": round(_res["cost_5pct"], 2),
+                        "cost_15pct": round(_res["cost_15pct"], 2),
+                        "cost_50pct": round(_res["cost_50pct"], 2),
+                        "cost_85pct": round(_res["cost_85pct"], 2),
+                        "cost_95pct": round(_res["cost_95pct"], 2),
+                        "weight_avg": round(_res["weight_avg"], 2),
+                        "winner_rate": round(_res["winner_rate"], 4),
+                        "his_low": round(_res["his_low"], 2),
+                        "his_high": round(_res["his_high"], 2),
+                    }]), use_container_width=True, hide_index=True)
+                    st.caption(
+                        f"累计换手 {_res['cum_turnover_pct']:.0f}% · "
+                        f"初始假设残留 {_res['seed_remaining']:.2%} · "
+                        f"{_res['sessions']} 个交易日 · 衰减系数 {_decay}")
+
+                with st.expander("📖 怎么算出来的 · how this is computed"):
+                    st.markdown(
+                        "每个交易日做两件事：\n\n"
+                        "1. **衰减**：当日换手率 h 的筹码换手了，它们的成本不再是原来的价格，"
+                        "所以所有existing筹码乘以 (1−h)；\n"
+                        "2. **派发**：同样的 h 重新分布到当日的 [最低, 最高] 区间，"
+                        "形状是以当日均价为顶点的三角形（成交集中在均价附近，"
+                        "平均分布会高估最高价附近的成交）。\n\n"
+                        "`筹码 ← 筹码 × (1−h) + h × 三角形(低, 均, 高)`\n\n"
+                        "迭代整段历史即得成本结构，获利盘就是现价下方的筹码占比。\n\n"
+                        "**初始假设为什么不影响结果**：每天都把它乘以 (1−h)，"
+                        "所以残留恰好是 ∏(1−h)。这个数字会被算出来并显示在上面，"
+                        "低于 1% 时结果由市场决定而不是由假设决定。\n\n"
+                        "**价格用前复权**：否则除权后的历史成本和今天的价格不在同一个"
+                        "尺度上，获利盘会算错。换手率本身与复权无关（股数比股数）。"
+                    )
+
+            chip_distribution_section(analysis_df, fundamentals_df, ticker)
             st.markdown("---")
 
             # ==================== 尾盘推演 · AI READ OF THE WHAT-IF BAR ====
