@@ -1,0 +1,6 @@
+# API-only dependencies. The analysis engine's own dependencies come from the
+# repository-root requirements.txt, which the Dockerfile installs first.
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pyjwt[crypto]>=2.9
+requests>=2.31

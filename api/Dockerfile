@@ -1,0 +1,39 @@
+# ASSRS API container for Cloud Run.
+#
+# BUILD CONTEXT MUST BE THE REPOSITORY ROOT, not api/:
+#   docker build -f api/Dockerfile .
+# The API imports analysis_engine.py, data_manager.py, box_detection.py and
+# friends straight from the root, so the Streamlit app and the API always run
+# the same analysis code. In Cloud Build: Dockerfile = /api/Dockerfile,
+# context = / (repo root).
+
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # One BLAS thread: Cloud Run gives this container 1 vCPU, and the HMM's
+    # numpy/sklearn work oversubscribes and slows down with more.
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1
+
+WORKDIR /app
+
+# Dependencies first, in their own layer, so a code-only change reuses it.
+COPY requirements.txt /tmp/requirements-root.txt
+COPY api/requirements.txt /tmp/requirements-api.txt
+RUN pip install -r /tmp/requirements-root.txt -r /tmp/requirements-api.txt
+
+# Root-level Python modules (the shared analysis code) and the API package.
+COPY *.py ./
+COPY api ./api
+
+# Cloud Run injects PORT; 8080 is its default.
+ENV PORT=8080
+EXPOSE 8080
+
+# One worker per container: Cloud Run scales by adding containers, and a
+# second worker would just halve the memory each HMM run has to work with.
+CMD exec uvicorn api.main:app --host 0.0.0.0 --port ${PORT} --workers 1 --timeout-keep-alive 65

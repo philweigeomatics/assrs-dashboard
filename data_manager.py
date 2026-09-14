@@ -272,7 +272,11 @@ def get_search_history(limit=10):
             company_name = row.get('company_name', ticker)
             results.append({
                 'ticker':  ticker,
-                'display': f"{company_name} ({ticker})"
+                'display': f"{company_name} ({ticker})",
+                # Added for the SPA combobox, which lays name and code out
+                # separately. Existing callers only read ticker/display.
+                'name':    company_name,
+                'timestamp': row.get('timestamp'),
             })
         return results
     except Exception as e:

@@ -1,0 +1,15 @@
+# Build context for api/Dockerfile is the repo root; keep it small and keep
+# secrets and the frontend out of the image.
+.git
+.github
+.streamlit
+**/__pycache__
+**/*.pyc
+web
+pages
+*.csv
+*.db
+*.sqlite
+api/tests
+supabase
+.claude

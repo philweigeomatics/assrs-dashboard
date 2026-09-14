@@ -370,7 +370,37 @@ def restore_session_from_cookie() -> bool:
 
 # ── Session-state helpers ──────────────────────────────────────────────────────
 
+# ── Request-scoped user, for the API ───────────────────────────────────────────
+# The FastAPI service (api/) has no Streamlit session, but it reuses every
+# per-user function in data_manager (search history, watchlist, portfolios),
+# all of which ask get_current_user_id(). The API verifies the caller's
+# Supabase token, resolves their app_users row, and sets it here for the
+# duration of that one request. A ContextVar rather than a module global so
+# two concurrent requests can never see each other's user.
+#
+# Streamlit never sets it, so for the Streamlit app get_current_user() falls
+# straight through to session_state exactly as before.
+import contextvars
+from contextlib import contextmanager
+
+_REQUEST_USER: contextvars.ContextVar = contextvars.ContextVar(
+    "assrs_request_user", default=None)
+
+
+@contextmanager
+def request_user(user: dict):
+    """Act as `user` (an app_users row: needs at least 'id') inside the block."""
+    token = _REQUEST_USER.set(user)
+    try:
+        yield
+    finally:
+        _REQUEST_USER.reset(token)
+
+
 def get_current_user():
+    user = _REQUEST_USER.get()
+    if user is not None:
+        return user
     return st.session_state.get("current_user", None)
 
 
