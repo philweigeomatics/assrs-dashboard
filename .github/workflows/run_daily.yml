@@ -73,10 +73,17 @@ jobs:
       - name: Scan all watchlists for Today's Alerts
         if: always()
         timeout-minutes: 90
+        # Same secret set as the main.py step. Importing data_manager pulls in
+        # api_config and db_config, which REQUIRE all four of SUPABASE_URL,
+        # SUPABASE_KEY, TUSHARE_TOKEN and DEEPSEEK_API_KEY at import time —
+        # even though the scan itself never calls DeepSeek. A step only sees
+        # the secrets its own env block maps; leaving one out fails on import.
         env:
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           PYTHONUNBUFFERED: "1"
         run: |
           python scan_watchlists.py
