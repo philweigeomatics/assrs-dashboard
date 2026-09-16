@@ -2,10 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api";
-import { supabase } from "../lib/supabase";
-import { useAuth } from "../auth/AuthProvider";
 import type { CompareResult, SimResult, StockRef } from "../lib/types";
 import { StockPicker } from "../components/StockPicker";
+import { NavBar } from "../components/NavBar";
 import { InfoHeader } from "../components/InfoHeader";
 import { ChipPanel } from "../components/ChipPanel";
 import { ChartStack, type Tool } from "../components/chart/ChartStack";
@@ -17,8 +16,8 @@ import { SectorPanel } from "../components/SectorPanel";
 import { CompareStats } from "../components/CompareStats";
 
 export function TechnicalAnalysis() {
-  const { dev } = useAuth();
   const qc = useQueryClient();
+  useEffect(() => { document.title = "ASSRS · 个股分析"; }, []);
   const [params, setParams] = useSearchParams();
   const ticker = params.get("t");
 
@@ -72,25 +71,14 @@ export function TechnicalAnalysis() {
 
   return (
     <div className="min-h-screen">
-      <header className="sticky top-0 z-40 bg-canvas/90 backdrop-blur border-b border-line">
-        <div className="max-w-[1800px] mx-auto px-3 h-14 flex items-center gap-4">
-          <span className="font-semibold text-[15px] shrink-0">📈 个股分析</span>
-          <StockPicker
-            stocks={stocks.data ?? []}
-            history={history.data ?? []}
-            current={current}
-            onPick={pick}
-          />
-          <div className="ml-auto flex items-center gap-3 shrink-0">
-            {dev && <span className="text-[12px] text-brand-ink">本地开发模式</span>}
-            {!dev && (
-              <button onClick={() => supabase.auth.signOut()} className="text-[13px] text-ink-mute hover:text-ink">
-                退出
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
+      <NavBar>
+        <StockPicker
+          stocks={stocks.data ?? []}
+          history={history.data ?? []}
+          current={current}
+          onPick={pick}
+        />
+      </NavBar>
 
       <main className="max-w-[1800px] mx-auto px-3 py-3 flex flex-col gap-3">
         {!ticker && (

@@ -281,3 +281,54 @@ export type PairStats = {
     years: Num;
   } | null;
 };
+
+/** GET /alerts — the nightly watchlist scan, reshaped for filtering. */
+export type AlertSignal = {
+  id: string;
+  cn: string;
+  en: string;
+  group: string;
+  dir: "bull" | "bear";
+  /** Present on 箱体 signals: the numbers from the bracketed tag. */
+  detail: {
+    bot: number; top: number; position_pct: number;
+    touches_top: number; touches_bot: number;
+    quality: number; height_pct: number;
+  } | null;
+};
+
+export type AlertChips = {
+  setup_score: Num;
+  setup_label: string | null;
+  winner_rate: Num;
+  concentration: Num;
+  pct_from_peak: Num;
+  n_peaks: number | null;
+  peak_price: Num;
+  converged: boolean | null;
+};
+
+export type AlertStock = {
+  t: string; n: string;
+  bias: string;
+  price: Num; rsi: Num; adx: Num; macd: Num; volume: Num;
+  signal_count: number;
+  signals: AlertSignal[];
+  sectors: string[];
+  chips: AlertChips | null;
+  chip_shape: string | null;
+};
+
+export type AlertFeed = {
+  scan_date: string;
+  age_days: number | null;
+  stale: boolean;
+  stocks: AlertStock[];
+  facets: {
+    signals: { id: string; cn: string; group: string; dir: "bull" | "bear"; count: number }[];
+    sectors: { name: string; count: number }[];
+    bias: { id: string; count: number }[];
+    shapes: { name: string; count: number }[];
+  };
+  groups: string[];
+};

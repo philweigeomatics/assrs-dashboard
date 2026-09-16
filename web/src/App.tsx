@@ -5,6 +5,7 @@ import { AuthProvider, useAuth } from "./auth/AuthProvider";
 import { LoginPage } from "./auth/LoginPage";
 import { SetPasswordPage } from "./auth/SetPasswordPage";
 import { TechnicalAnalysis } from "./routes/TechnicalAnalysis";
+import { Alerts } from "./routes/Alerts";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
@@ -30,6 +31,14 @@ export function App() {
               element={
                 <RequireAuth>
                   <TechnicalAnalysis />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/alerts"
+              element={
+                <RequireAuth>
+                  <Alerts />
                 </RequireAuth>
               }
             />

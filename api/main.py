@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.middleware.gzip import GZipMiddleware  # noqa: E402
 
+import alerts_feed  # noqa: E402
 import pair_compare  # noqa: E402
 import sector_affinity  # noqa: E402
 import ta_payload  # noqa: E402
@@ -114,6 +115,10 @@ _stocks_cache = TTLCache(maxsize=1, ttl_s=6 * 3600)
 # 25-table read serves every ticker and every window until tomorrow.
 _sector_ret_cache = TTLCache(maxsize=1, ttl_s=6 * 3600)
 _sector_cache = TTLCache(maxsize=60, ttl_s=20 * 60)
+# The nightly snapshot does not change during the day, so this can be held
+# far longer than the live-analysis caches. Keyed per user: the feed is
+# that user's watchlist.
+_alerts_cache = TTLCache(maxsize=20, ttl_s=30 * 60)
 
 
 def _as_user(user: AppUser):
@@ -312,6 +317,46 @@ def whatif_ai(req: AiReq, ticker: str = TICKER, user: AppUser = Depends(current_
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:
         raise HTTPException(502, f"AI call failed: {exc}")
+
+
+@app.get("/alerts")
+def alerts(date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+           user: AppUser = Depends(current_user)):
+    """
+    今日提醒 — the nightly watchlist scan, reshaped into a filterable feed.
+
+    Reads only. Everything here was computed by scan_watchlists.py in GitHub
+    Actions at 20:00 Beijing; the whole point of that job is that this page
+    never runs an HMM. Cheap enough to serve per user without a long cache.
+    """
+    import datetime as _dt
+    import data_manager
+
+    def load():
+        with _as_user(user):
+            day = date or data_manager.get_latest_signal_snapshot_date()
+            if not day:
+                raise LookupError("还没有扫描快照 — 夜间任务尚未运行过")
+            rows = data_manager.get_cached_signals(day)
+        if rows is None or rows.empty:
+            raise LookupError(f"{day} 没有属于你的快照（自选股为空，或当天没有信号）")
+
+        try:
+            chips = data_manager.get_chip_scan(day, 1.0)
+        except Exception:
+            chips = None      # the feed is still worth showing without 筹码
+        members = _sector_ret_cache.get_or_compute(
+            "members", sector_affinity.sector_members)
+
+        age = (_dt.date.today() - _dt.date.fromisoformat(str(day)[:10])).days
+        return alerts_feed.build(rows, chips, members, str(day)[:10], age_days=age)
+
+    try:
+        return _alerts_cache.get_or_compute((user.id, date), load)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
 
 
 @app.get("/compare-stats/{ticker}")
