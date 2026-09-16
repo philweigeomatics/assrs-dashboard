@@ -7,6 +7,7 @@ import { useAuth } from "../auth/AuthProvider";
 import type { StockRef } from "../lib/types";
 import { StockPicker } from "../components/StockPicker";
 import { InfoHeader } from "../components/InfoHeader";
+import { ChipPanel } from "../components/ChipPanel";
 import { ChartStack } from "../components/chart/ChartStack";
 
 export function TechnicalAnalysis() {
@@ -49,7 +50,7 @@ export function TechnicalAnalysis() {
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-40 bg-canvas/90 backdrop-blur border-b border-line">
-        <div className="max-w-[1500px] mx-auto px-4 h-14 flex items-center gap-4">
+        <div className="max-w-[1800px] mx-auto px-3 h-14 flex items-center gap-4">
           <span className="font-semibold text-[15px] shrink-0">📈 个股分析</span>
           <StockPicker
             stocks={stocks.data ?? []}
@@ -68,7 +69,7 @@ export function TechnicalAnalysis() {
         </div>
       </header>
 
-      <main className="max-w-[1500px] mx-auto px-4 py-3 flex flex-col gap-3">
+      <main className="max-w-[1800px] mx-auto px-3 py-3 flex flex-col gap-3">
         {!ticker && (
           <div className="card p-10 text-center text-ink-mute">在上方输入股票代码或名称开始分析</div>
         )}
@@ -89,10 +90,20 @@ export function TechnicalAnalysis() {
         )}
 
         {analysis.data && (
-          <>
-            <InfoHeader data={analysis.data} />
-            <ChartStack data={analysis.data} />
-          </>
+          // Chart left, everything you read ALONGSIDE it right: identity and
+          // daily_basic, the signal summary, then 筹码分布 under them. The
+          // sidebar sticks while the chart stack scrolls, so the price and
+          // the cost distribution stay on screen next to whichever pane you
+          // are looking at. Below `lg` it stacks, chart first.
+          <div className="grid gap-3 items-start lg:grid-cols-[minmax(0,1fr)_340px]">
+            <div className="min-w-0">
+              <ChartStack data={analysis.data} />
+            </div>
+            <aside className="flex flex-col gap-3 lg:sticky lg:top-[3.75rem] lg:max-h-[calc(100vh-4.5rem)] lg:overflow-y-auto">
+              <InfoHeader data={analysis.data} />
+              <ChipPanel chips={analysis.data.chips} price={analysis.data.header.close ?? 0} />
+            </aside>
+          </div>
         )}
       </main>
     </div>

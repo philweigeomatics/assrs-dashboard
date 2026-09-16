@@ -76,6 +76,32 @@ export type SeriesKey =
   | "PE_TTM"
   | "MF_Daily" | "MF_Rolling";
 
+export type Chips = {
+  /** Price of each histogram bin, low → high. */
+  prices: number[];
+  /** Percent of the float held at that price. Same length as `prices`. */
+  weights: number[];
+  winner_rate: Num;
+  trapped_rate: Num;
+  weight_avg: Num;
+  concentration: Num;
+  cost_5pct: Num;
+  cost_15pct: Num;
+  cost_50pct: Num;
+  cost_85pct: Num;
+  cost_95pct: Num;
+  peak_price: Num;
+  n_peaks: number;
+  peaks: { price: Num; share: Num }[];
+  setup_score: Num;
+  setup_label: string | null;
+  converged: boolean;
+  seed_remaining: Num;
+  cum_turnover_pct: Num;
+  sessions: number;
+  decay: number;
+};
+
 export type Analysis = {
   ticker: string;
   name: string;
@@ -107,6 +133,7 @@ export type Analysis = {
     macd_uptrend: Segment[];
     macd_downtrend: Segment[];
   };
+  chips: Chips | null;
   has_moneyflow: boolean;
   initial_visible: number;
 };

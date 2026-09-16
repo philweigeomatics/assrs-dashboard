@@ -383,14 +383,86 @@ def build_boxes(boxes: list[dict], dates: list[str]) -> list[dict]:
     return out
 
 
+def build_chips(analysis_df: pd.DataFrame,
+                fundamentals_df: pd.DataFrame | None,
+                decay: float = 1.0) -> dict | None:
+    """
+    筹码分布 for the side panel, computed with chip_distribution.py — the same
+    module and the same inputs the Streamlit page uses (前复权 prices plus the
+    turnover rate that already came with the fundamentals, so no extra API
+    call).
+
+    The histogram is trimmed to the bins that actually hold chips: the grid
+    pads 3% past the traded range at both ends, and shipping those empty bins
+    would be a third of the array for nothing.
+    """
+    if fundamentals_df is None or fundamentals_df.empty:
+        return None
+    if "Turnover_Rate" not in fundamentals_df.columns:
+        return None
+    turn = fundamentals_df["Turnover_Rate"].reindex(analysis_df.index)
+    if turn.notna().sum() < 30:
+        return None
+
+    import chip_distribution as cdist
+    try:
+        m = cdist.analyse(analysis_df, turn, decay=decay)
+    except Exception as exc:
+        print(f"[ta_payload] chips failed: {exc}")
+        return None
+    if not m.get("ok"):
+        return None
+
+    grid, chips = m["grid"], m["chips"]
+    keep = chips > chips.max() * 0.002
+    idx = np.flatnonzero(keep)
+    lo, hi = (int(idx[0]), int(idx[-1]) + 1) if len(idx) else (0, len(grid))
+
+    return {
+        "prices": [_num(v, 3) for v in grid[lo:hi]],
+        # Percent of float at each price, so the client never divides.
+        "weights": [_num(v * 100, 4) for v in chips[lo:hi]],
+        "winner_rate": _num(m["winner_rate"] * 100, 1),
+        "trapped_rate": _num(m["trapped_rate"] * 100, 1),
+        "weight_avg": _num(m["weight_avg"], 2),
+        "concentration": _num(m["concentration"], 3),
+        "cost_5pct": _num(m["cost_5pct"], 2),
+        "cost_15pct": _num(m["cost_15pct"], 2),
+        "cost_50pct": _num(m["cost_50pct"], 2),
+        "cost_85pct": _num(m["cost_85pct"], 2),
+        "cost_95pct": _num(m["cost_95pct"], 2),
+        "peak_price": _num(m.get("peak_price"), 2),
+        "n_peaks": int(m.get("n_peaks", 0)),
+        "peaks": [{"price": _num(p["price"], 2), "share": _num(p["share"] * 100, 1)}
+                  for p in m.get("peaks", [])],
+        "setup_score": _num(m.get("setup_score"), 2),
+        "setup_label": m.get("setup_label"),
+        "converged": bool(m["converged"]),
+        "seed_remaining": _num(m["seed_remaining"] * 100, 1),
+        "cum_turnover_pct": _num(m["cum_turnover_pct"], 0),
+        "sessions": int(m["sessions"]),
+        "decay": float(decay),
+    }
+
+
 def build_payload(ticker: str) -> dict:
     """Fetch, analyse and package one stock for the frontend."""
     import data_manager
     import box_detection as bxd
+    import watchlist_scan
     from analysis_engine import run_single_stock_analysis
 
-    stock_df = data_manager.get_single_stock_data_live(ticker, lookback_years=3)
-    if stock_df is None or len(stock_df) < 60:
+    # Retried, and the two failure modes kept apart: ts.pro_bar returns None
+    # when the CALL fails (timeout, rate-limit hiccup) while a genuinely young
+    # stock returns a short frame. Folding them together told the user
+    # "not enough price history" for what was really a network blip — which is
+    # exactly what it said the first time this page hit a flaky fetch.
+    stock_df = watchlist_scan.fetch_frame(ticker)
+    if stock_df is None:
+        raise RuntimeError(
+            f"price data for {ticker} could not be fetched "
+            f"(after {watchlist_scan.FETCH_ATTEMPTS} attempts) — try again")
+    if len(stock_df) < 60:
         raise LookupError(f"not enough price history for {ticker}")
 
     analysis_df = run_single_stock_analysis(stock_df)
@@ -407,5 +479,6 @@ def build_payload(ticker: str) -> dict:
         "header": build_header(analysis_df, fundamentals_df),
         "signals": build_signals(analysis_df, boxes),
         "boxes": build_boxes(boxes, body["dates"]),
+        "chips": build_chips(analysis_df, fundamentals_df),
         **body,
     }

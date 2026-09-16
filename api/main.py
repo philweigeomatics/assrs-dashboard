@@ -169,3 +169,7 @@ def analysis(ticker: str = TICKER, user: AppUser = Depends(current_user)):
         return _analysis_cache.get_or_compute(ticker, lambda: ta_payload.build_payload(ticker))
     except LookupError as exc:
         raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        # Upstream data unavailable after retries — a 503 says "try again",
+        # which is true, where a 500 would read as a bug in this service.
+        raise HTTPException(503, str(exc))
