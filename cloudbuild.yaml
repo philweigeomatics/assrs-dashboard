@@ -1,0 +1,69 @@
+# Build the API image AND deploy it to Cloud Run.
+#
+# WHY THIS FILE EXISTS
+#
+# The trigger used to be a "Dockerfile" type trigger — you gave Cloud Build a
+# Dockerfile directory and name, and it generated the build for you. That kind
+# of trigger only ever runs `docker build` and `docker push`. It has no deploy
+# step, so every green build pushed a new image that nothing ever rolled out,
+# and Cloud Run went on serving the revision it was last told to serve. That is
+# why each change needed a manual `gcloud run deploy`.
+#
+# Point the trigger at this file instead (Configuration → Cloud Build
+# configuration file, location /cloudbuild.yaml) and the third step below does
+# the rollout.
+#
+# The build context is the repository root — the directory holding this file —
+# so the Dockerfile's COPY lines reach the shared analysis modules at the root.
+#
+# The deploy step names ONLY the image. Everything else on the service — the
+# four secrets, memory, CPU, concurrency, scaling, public access — is left
+# unspecified on purpose, because `gcloud run deploy` keeps the existing
+# service's settings for flags it is not given. Adding flags here would make
+# this file the source of truth for them and silently reset anything it forgot.
+
+substitutions:
+  _SERVICE: assrs-dashboard
+  _REGION: us-west1
+  # Same path the Dockerfile-type trigger used, so the image history is one
+  # continuous line rather than starting again somewhere else.
+  _IMAGE: gcr.io/$PROJECT_ID/github.com/philweigeomatics/assrs-dashboard
+
+steps:
+  # `latest` alongside the commit tag: the commit tag is what gets deployed and
+  # what you roll back to, `latest` is what you pull when you just want the
+  # current one.
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --tag=${_IMAGE}:$COMMIT_SHA
+      - --tag=${_IMAGE}:latest
+      - --file=Dockerfile
+      - .
+
+  # Pushed here rather than through the top-level `images:` field, because that
+  # field pushes AFTER every step has run — the deploy below would then be
+  # asked for a tag that does not exist yet.
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: [push, --all-tags, "${_IMAGE}"]
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --region=${_REGION}
+      - --image=${_IMAGE}:$COMMIT_SHA
+      - --platform=managed
+      - --quiet
+
+# The image installs numpy, scipy, scikit-learn and hmmlearn; a cold build with
+# no layer cache runs well past Cloud Build's 10-minute default.
+timeout: 1800s
+
+options:
+  logging: CLOUD_LOGGING_ONLY

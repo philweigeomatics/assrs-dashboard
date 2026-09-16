@@ -12,8 +12,9 @@
 # straight from the root so the Streamlit app and the API always run the same
 # analysis code.
 #
-# Cloud Build setting: Dockerfile = /Dockerfile.
-# Locally:             docker build -t assrs-api .
+# Cloud Build now goes through /cloudbuild.yaml, whose context is the directory
+# holding it — the root — so the same COPY lines work there and the build also
+# deploys. Locally: docker build -t assrs-api .
 
 FROM python:3.11-slim
 
