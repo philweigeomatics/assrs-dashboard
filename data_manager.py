@@ -1743,7 +1743,79 @@ def create_signals_tables():
             created_at TEXT
         )"""
         db.create_table_sqlite(schema2)
+
+        db.create_table_sqlite(CHIP_SCAN_SQLITE_SCHEMA)
     # else: Supabase tables already exist from migration script
+
+
+# ── 筹码结构 snapshot ────────────────────────────────────────────────────────
+# Per TICKER, not per user: a stock's chip structure does not depend on who is
+# watching it, so two users watching 600519 share one row. The page filters to
+# its own watchlist. Supabase schema: supabase/migrations/20260914_chip_scan.sql
+CHIP_SCAN_SQLITE_SCHEMA = """CREATE TABLE IF NOT EXISTS chip_scan (
+    scan_date TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    decay REAL NOT NULL,
+    name TEXT,
+    setup_score REAL,
+    setup_label TEXT,
+    price REAL,
+    peak_price REAL,
+    n_peaks INTEGER,
+    winner_rate REAL,
+    concentration REAL,
+    weight_avg REAL,
+    pct_from_peak REAL,
+    converged INTEGER,
+    created_at TEXT,
+    PRIMARY KEY (scan_date, ticker, decay)
+)"""
+
+
+def save_chip_scan(records, scan_date):
+    """Upsert the nightly chip rows for one trading session. For the job only."""
+    if not records:
+        return False
+    try:
+        now = datetime.now().isoformat()
+        rows = [{**r, "scan_date": scan_date, "created_at": now} for r in records]
+        db.insert_records('chip_scan', rows, upsert=True)
+        print(f"[data_manager] ✅ Saved {len(rows)} chip rows for {scan_date}")
+        return True
+    except Exception as e:
+        print(f"Error saving chip scan: {e}")
+        return False
+
+
+def get_latest_chip_scan_date(max_age_days=14):
+    """Most recent session with a chip snapshot (any ticker), or None."""
+    try:
+        df = db.read_table('chip_scan', columns='scan_date',
+                           order_by='-scan_date', limit=1)
+        if df is None or df.empty:
+            return None
+        latest = str(df.iloc[0]['scan_date'])
+        age = (datetime.now().date() - datetime.strptime(latest[:10], '%Y-%m-%d').date()).days
+        return latest if age <= max_age_days else None
+    except Exception as e:
+        print(f"Error finding latest chip snapshot: {e}")
+        return None
+
+
+def get_chip_scan(scan_date, decay, tickers=None):
+    """Chip rows for one session and decay, optionally limited to `tickers`."""
+    try:
+        df = db.read_table('chip_scan',
+                           filters={'scan_date': scan_date, 'decay': float(decay)},
+                           columns='*', limit=100000)
+    except Exception as e:
+        print(f"Error loading chip scan: {e}")
+        return None
+    if df is None or df.empty:
+        return df
+    if tickers is not None:
+        df = df[df['ticker'].astype(str).isin({str(t) for t in tickers})]
+    return df.reset_index(drop=True)
 
 def get_cached_signals(scan_date):
     """Get cached signals for a specific date. Returns DataFrame if found, None otherwise."""

@@ -52,13 +52,27 @@ def _init_worker():
 
 
 def _scan_one(ticker: str) -> dict:
+    """
+    Signals AND chip structure for one stock, from ONE price fetch. The chip
+    result rides along under `chips` so both scans share the retry pass.
+    """
     import warnings
     warnings.filterwarnings("ignore")
     import watchlist_scan
     t0 = time.perf_counter()
-    out = watchlist_scan.scan_ticker(ticker)
+    frame = watchlist_scan.fetch_frame(ticker)
+    out = watchlist_scan.scan_ticker(ticker, stock_df=frame)
+    if frame is None:
+        out["chips"] = {"ticker": ticker, "status": "error",
+                        "error": "price fetch failed"}
+    else:
+        out["chips"] = watchlist_scan.scan_chips(ticker, stock_df=frame)
     out["seconds"] = round(time.perf_counter() - t0, 1)
     return out
+
+
+def _chip_failed(r: dict) -> bool:
+    return r.get("chips", {}).get("status") == "error"
 
 
 def _run(tickers: list[str], workers: int, label: str) -> dict[str, dict]:
@@ -84,9 +98,12 @@ def _run(tickers: list[str], workers: int, label: str) -> dict[str, dict]:
 
 
 def _log(n, total, r, label):
+    c = r.get("chips", {})
     print(f"  {label}[{n:>3}/{total}] {r['ticker']} {r['status']:<8}"
+          f"chips {c.get('status', '-'):<8}"
           f"{r.get('seconds', 0):>6}s"
-          + (f"  {r.get('error', '')[:90]}" if r['status'] == 'error' else ""),
+          + (f"  {r.get('error', '')[:90]}" if r['status'] == 'error' else "")
+          + (f"  chips: {c.get('error', '')[:90]}" if c.get('status') == 'error' else ""),
           flush=True)
 
 
@@ -118,7 +135,8 @@ def main() -> int:
 
     # Second chance for anything that errored. Transient failures cluster in
     # time, so the retry waits and goes one at a time regardless of --workers.
-    failed = [t for t, r in results.items() if r["status"] == "error"]
+    failed = [t for t, r in results.items()
+              if r["status"] == "error" or _chip_failed(r)]
     if failed:
         print(f"\nretrying {len(failed)} failed ticker(s) after a pause…", flush=True)
         time.sleep(15)
@@ -127,8 +145,15 @@ def main() -> int:
 
     status = Counter(r["status"] for r in results.values())
     still_failed = sorted(t for t, r in results.items() if r["status"] == "error")
+    chip_status = Counter(r.get("chips", {}).get("status", "-") for r in results.values())
+    chips_failed = sorted(t for t, r in results.items() if _chip_failed(r))
+    chip_rows = [row for r in results.values()
+                 if r.get("chips", {}).get("status") == "ok"
+                 for row in r["chips"]["rows"]]
     print(f"\nscanned {len(results)} in {wall:.0f}s — " +
-          ", ".join(f"{k} {v}" for k, v in sorted(status.items())), flush=True)
+          ", ".join(f"{k} {v}" for k, v in sorted(status.items())) +
+          " · chips " + ", ".join(f"{k} {v}" for k, v in sorted(chip_status.items())),
+          flush=True)
 
     # Refuse to publish a snapshot built mostly from failures: a run where the
     # data source was down would otherwise overwrite yesterday's good cache
@@ -140,7 +165,13 @@ def main() -> int:
     if args.only:
         rows = [r["row"] for r in results.values() if r["status"] == "ok"]
         print(watchlist_scan.rank_rows(rows).to_string(index=False)[:4000])
-        return 1 if still_failed else 0
+        if chip_rows:
+            import pandas as pd
+            print("\n筹码结构 (decay 1.0):")
+            print(pd.DataFrame([c for c in chip_rows if c["decay"] == 1.0])
+                  .sort_values("setup_score", ascending=False)
+                  .drop(columns=["decay"]).to_string(index=False)[:4000])
+        return 1 if (still_failed or chips_failed) else 0
 
     # Keyed by the trading session the data belongs to. The most common
     # last-bar date, so one suspended ticker cannot drag the snapshot onto
@@ -170,14 +201,35 @@ def main() -> int:
 
     print(f"\n✅ wrote {wrote} snapshot(s) for session {scan_date}")
 
+    # Chip structure: one shared set of per-ticker rows, not per user. Written
+    # independently of the signal snapshots — a quiet market (no signal rows)
+    # still has a chip structure worth showing. The >50% guard above already
+    # stopped a run where the data source was down.
+    chips_ok = True
+    if chip_rows:
+        chips_ok = data_manager.save_chip_scan(chip_rows, scan_date)
+        n_tk = len({c["ticker"] for c in chip_rows})
+        print(f"{'✅' if chips_ok else '❌'} chip structure: {n_tk} tickers × "
+              f"{len(watchlist_scan.CHIP_DECAYS)} decays "
+              f"{'saved' if chips_ok else 'SAVE FAILED'} for session {scan_date}")
+    else:
+        print("⚠️ chip structure: no rows computed")
+
     # A partial snapshot is still better than a stale one, so it is written —
     # but the run exits non-zero so GitHub marks it failed and emails, rather
     # than a stock quietly dropping out of someone's alerts.
+    rc = 0
     if still_failed:
         print(f"⚠️ {len(still_failed)} ticker(s) failed even after retry: "
               f"{', '.join(still_failed)}")
-        return 1
-    return 0
+        rc = 1
+    if chips_failed:
+        print(f"⚠️ chip structure failed for {len(chips_failed)} ticker(s) after retry: "
+              f"{', '.join(chips_failed)}")
+        rc = 1
+    if not chips_ok:
+        rc = 1
+    return rc
 
 
 if __name__ == "__main__":

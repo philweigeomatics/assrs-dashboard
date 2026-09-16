@@ -126,7 +126,29 @@ def box_signal(analysis_df):
     return None, None, b
 
 
-def scan_ticker(ticker: str) -> dict:
+def fetch_frame(ticker: str):
+    """
+    Price history for one stock, retried. None means the CALL failed.
+
+    None and "too short" are different failures and must not share a status.
+    ts.pro_bar returns None when the call fails — a timeout, a rate-limit
+    hiccup — while a genuinely young stock returns a short frame. Folding None
+    into no_data made a transient network blip look like a legitimate "not
+    enough history", so a stock could vanish from a nightly snapshot with
+    nothing to show that anything went wrong.
+    """
+    import time
+    import data_manager
+    for attempt in range(FETCH_ATTEMPTS):
+        stock_df = data_manager.get_single_stock_data_live(
+            ticker, lookback_years=LOOKBACK_YEARS)
+        if stock_df is not None:
+            return stock_df
+        time.sleep(FETCH_BACKOFF_S * (attempt + 1))
+    return None
+
+
+def scan_ticker(ticker: str, stock_df=None) -> dict:
     """
     Scan one stock. Always returns a dict with a `status`:
 
@@ -138,25 +160,16 @@ def scan_ticker(ticker: str) -> dict:
     Returning the reason instead of None matters in the nightly job, where
     nobody is watching: "80 scanned, 12 rows" is ambiguous between a quiet
     market and a broken fetch unless the non-rows say which they are.
+
+    Pass `stock_df` to reuse a frame already fetched (the nightly job hands the
+    same frame to the chip scan); leave it None to fetch here.
     """
-    import time
     import data_manager
     from analysis_engine import run_single_stock_analysis
 
     try:
-        # None and "too short" are different failures and must not share a
-        # status. ts.pro_bar returns None when the CALL fails — a timeout, a
-        # rate-limit hiccup — while a genuinely young stock returns a short
-        # frame. Folding None into no_data made a transient network blip look
-        # like a legitimate "not enough history", so a stock could vanish from
-        # a nightly snapshot with nothing to show that anything went wrong.
-        stock_df = None
-        for attempt in range(FETCH_ATTEMPTS):
-            stock_df = data_manager.get_single_stock_data_live(
-                ticker, lookback_years=LOOKBACK_YEARS)
-            if stock_df is not None:
-                break
-            time.sleep(FETCH_BACKOFF_S * (attempt + 1))
+        if stock_df is None:
+            stock_df = fetch_frame(ticker)
         if stock_df is None:
             return {"ticker": ticker, "status": "error",
                     "error": f"fetch returned nothing after {FETCH_ATTEMPTS} attempts"}
@@ -207,6 +220,94 @@ def scan_ticker(ticker: str) -> dict:
                 'Volume':       float(latest.get('Volume', 0)),
             },
         }
+    except Exception as e:
+        return {"ticker": ticker, "status": "error", "error": str(e)[:300]}
+
+
+# ── 筹码结构 ─────────────────────────────────────────────────────────────────
+# Every decay the page's slider offers. The model is ~90ms per decay; the two
+# API calls behind it are the cost, and they are shared, so the nightly job
+# computes all three and the slider never has to recompute.
+CHIP_DECAYS = (0.8, 1.0, 1.2)
+CHIP_MIN_BARS = 120
+
+
+def _finite(x, nd=None):
+    """JSON (PostgREST) rejects NaN — store unknowns as NULL."""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return None
+    if x != x or x in (float("inf"), float("-inf")):
+        return None
+    return round(x, nd) if nd is not None else x
+
+
+def scan_chips(ticker: str, stock_df=None, decays=CHIP_DECAYS) -> dict:
+    """
+    Chip structure for one stock, one record per decay. Same status contract
+    as scan_ticker: 'ok' (records in `rows`), 'no_data', or 'error'.
+
+    Records use the chip_scan table's column names, so the nightly job writes
+    them as they are and the page renames for display.
+    """
+    import time
+    import data_manager
+    import chip_distribution as cdist
+
+    try:
+        if stock_df is None:
+            stock_df = fetch_frame(ticker)
+        if stock_df is None:
+            return {"ticker": ticker, "status": "error",
+                    "error": f"price fetch returned nothing after {FETCH_ATTEMPTS} attempts"}
+        if len(stock_df) < CHIP_MIN_BARS:
+            return {"ticker": ticker, "status": "no_data"}
+
+        start = stock_df.index.min().strftime("%Y%m%d")
+        end = stock_df.index.max().strftime("%Y%m%d")
+        # get_stock_fundamentals_live returns None for a failed call AND for an
+        # empty answer, so it cannot tell a blip from a stock with no
+        # daily_basic. Retry, then call it an error: a stock with 120+ bars
+        # that genuinely has no turnover rate is not a thing Tushare produces.
+        fund = None
+        for attempt in range(FETCH_ATTEMPTS):
+            fund = data_manager.get_stock_fundamentals_live(ticker, start, end)
+            if fund is not None:
+                break
+            time.sleep(FETCH_BACKOFF_S * (attempt + 1))
+        if fund is None or "Turnover_Rate" not in fund.columns:
+            return {"ticker": ticker, "status": "error",
+                    "error": "no turnover data (daily_basic)"}
+        turnover = fund["Turnover_Rate"].reindex(stock_df.index)
+
+        name = data_manager.get_stock_name_from_db(ticker) or ticker
+        data_date = str(stock_df.index[-1].date())
+        rows = []
+        for decay in decays:
+            m = cdist.analyse(stock_df, turnover, decay=decay)
+            if not m.get("ok"):
+                continue
+            px, peak = m.get("price"), m.get("peak_price")
+            rows.append({
+                "ticker": ticker,
+                "decay": float(decay),
+                "name": name,
+                "setup_score": _finite(m.get("setup_score"), 3),
+                "setup_label": m.get("setup_label"),
+                "price": _finite(px, 2),
+                "peak_price": _finite(peak, 2),
+                "n_peaks": int(m.get("n_peaks") or 0),
+                "winner_rate": _finite(m.get("winner_rate"), 4),
+                "concentration": _finite(m.get("concentration"), 4),
+                "weight_avg": _finite(m.get("weight_avg"), 2),
+                "pct_from_peak": (_finite((px / peak - 1) * 100, 1)
+                                  if px and peak else None),
+                "converged": bool(m.get("converged")),
+            })
+        if not rows:
+            return {"ticker": ticker, "status": "no_data", "data_date": data_date}
+        return {"ticker": ticker, "status": "ok", "data_date": data_date, "rows": rows}
     except Exception as e:
         return {"ticker": ticker, "status": "error", "error": str(e)[:300]}
 

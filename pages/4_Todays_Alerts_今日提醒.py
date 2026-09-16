@@ -14,7 +14,6 @@ import data_manager
 # Import from shared engine
 from analysis_engine import run_single_stock_analysis
 import box_detection as bxd
-import chip_distribution as cdist
 
 import auth_manager
 auth_manager.require_login()
@@ -186,6 +185,126 @@ if metadata:
 
 st.markdown("---")
 
+# ==================== 筹码结构扫描 ====================
+# Computed nightly by scan_watchlists.py in GitHub Actions and stored per
+# ticker in chip_scan — the page only reads it, same as the signal snapshot.
+# Kept out of daily_signals on purpose: that cache is a fixed 10-column
+# schema, and chip structure is a dozen numbers per stock.
+#
+# Defined up here and called through _stop() because the signal section below
+# st.stop()s on "no snapshot" and "no signals" — a quiet day still has a chip
+# structure, and it used to be unreachable on exactly those days.
+
+_CHIP_DISPLAY = {
+    "ticker": "Ticker", "name": "Name", "setup_score": "评分", "setup_label": "结构",
+    "price": "价格", "peak_price": "主峰", "n_peaks": "峰数", "winner_rate": "获利盘",
+    "concentration": "集中度", "weight_avg": "平均成本", "pct_from_peak": "距主峰%",
+    "converged": "收敛",
+}
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _chip_snapshot(day: str, decay: float, tickers: tuple):
+    return data_manager.get_chip_scan(day, decay, list(tickers))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _chip_live(tickers: tuple, day: str, decay: float):
+    """Manual fallback, e.g. for a stock added since last night's run."""
+    out, failed = [], []
+    for tk in tickers:
+        r = watchlist_scan.scan_chips(tk, decays=(decay,))
+        if r["status"] == "ok":
+            out.extend(r["rows"])
+        else:
+            failed.append(tk)
+    return pd.DataFrame(out), failed
+
+
+def render_chip_scan():
+    st.subheader("🧮 筹码结构扫描 · Chip Structure Scan")
+    st.caption(
+        "谁在什么价位持有这只股票。找的是 **低位单峰密集**：筹码集中在一个价位、"
+        "上方套牢盘轻、主峰在现价下方构成支撑。评分只描述结构，不是涨跌预测。"
+    )
+    if not MY_WATCHLIST:
+        st.caption("自选股为空。")
+        return
+
+    chip_date = data_manager.get_latest_chip_scan_date()
+    _cs1, _cs2, _cs3 = st.columns([1, 1, 2])
+    with _cs1:
+        decay = st.select_slider("衰减系数", options=list(watchlist_scan.CHIP_DECAYS),
+                                 value=1.0, key="chipscan_decay")
+    with _cs2:
+        go_live = st.button("🔄 实时重算筹码", type="secondary", key="chipscan_go")
+    with _cs3:
+        if chip_date:
+            st.caption(f"📦 夜间快照 {chip_date}（北京时间 20:00 由 GitHub Actions 计算）。"
+                       f"实时重算约 {len(MY_WATCHLIST)} 只 × ~2 秒。")
+        else:
+            st.caption("还没有夜间快照。实时重算约 "
+                       f"{len(MY_WATCHLIST)} 只 × ~2 秒。")
+
+    if go_live:
+        st.session_state["chipscan_live"] = True
+
+    failed, missing = [], []
+    if st.session_state.get("chipscan_live"):
+        with st.spinner("计算筹码分布…"):
+            cdf, failed = _chip_live(tuple(MY_WATCHLIST), today_str, decay)
+        source = "实时计算"
+    elif chip_date:
+        cdf = _chip_snapshot(chip_date, decay, tuple(MY_WATCHLIST))
+        source = f"快照 {chip_date}"
+        have = set() if cdf is None or cdf.empty else set(cdf["ticker"].astype(str))
+        missing = [t for t in MY_WATCHLIST if str(t) not in have]
+    else:
+        st.info("📭 还没有筹码快照。今晚的夜间扫描会生成；也可以点 **实时重算筹码**。")
+        return
+
+    if cdf is None or cdf.empty:
+        st.info("没有可计算的股票（需要换手率数据与至少 120 个交易日）。")
+        return
+
+    cdf = cdf[[c for c in _CHIP_DISPLAY if c in cdf.columns]].rename(columns=_CHIP_DISPLAY)
+    cdf["获利盘"] = (cdf["获利盘"] * 100).round(1)
+    cdf["收敛"] = cdf["收敛"].map(lambda v: "✓" if bool(v) else "⚠")
+    cdf = cdf.sort_values("评分", ascending=False)
+
+    st.caption(f"数据来源：{source}")
+    _unconv = int((cdf["收敛"] == "⚠").sum())
+    if _unconv:
+        st.caption(
+            f"⚠ {_unconv} 只标记为未收敛：换手率太低，三年历史不足以冲掉初始假设，"
+            f"它们的数字参考价值有限。")
+    st.dataframe(
+        cdf, use_container_width=True, hide_index=True,
+        column_config={
+            "评分": st.column_config.ProgressColumn(
+                "评分", min_value=0.0, max_value=1.0, format="%.2f"),
+            "获利盘": st.column_config.NumberColumn("获利盘 %", format="%.1f%%"),
+            "距主峰%": st.column_config.NumberColumn("距主峰 %", format="%+.1f%%"),
+        })
+    st.caption(
+        "**主峰** = 持有量最大的成本价位。**距主峰%** 为正表示现价在主峰上方"
+        "（主峰构成支撑），为负表示主峰在上方（是压力）。"
+        "**集中度** 越小筹码越集中。**峰数** >1 说明上方或下方还有另一批成本。")
+    if missing:
+        st.caption(f"快照中没有 {len(missing)} 只（今晚扫描后出现，或点实时重算）："
+                   f"{', '.join(missing[:12])}" + ("…" if len(missing) > 12 else ""))
+    if failed:
+        st.caption(f"跳过 {len(failed)} 只：{', '.join(failed[:12])}"
+                   + ("…" if len(failed) > 12 else ""))
+
+
+def _stop():
+    """st.stop(), but show the chip structure first — it does not need signals."""
+    st.markdown("---")
+    render_chip_scan()
+    st.stop()
+
+
 # ── Decide: use snapshot, explicit scan, or wait ─────────────────
 if cached_df is not None:
     df = cached_df
@@ -202,7 +321,7 @@ elif st.session_state.force_rescan:
 
     if df is None:
         st.error("❌ Scanning failed! ")
-        st.stop()
+        _stop()
 
     if not df.empty:
         # Keyed by the session the data belongs to, same as the nightly job,
@@ -216,16 +335,16 @@ elif st.session_state.force_rescan:
     else:
         st.success("✨ No signals detected in your watchlist today.")
         st.info("💡 Market may be consolidating, or no strong trends detected.")
-        st.stop()
+        _stop()
 else:
     st.info("📭 还没有快照。夜间扫描（北京时间 20:00）会自动生成；"
             "也可以点上方 **Force Rescan** 立即扫描——自选股多时可能被免费版限流。")
-    st.stop()
+    _stop()
 
 if df.empty:
     st.success("✨ No signals detected today. Market is quiet!")
     st.info("💡 This could mean:\n- All stocks are in neutral zones\n- No strong trends detected\n- Market is consolidating")
-    st.stop()
+    _stop()
 
 # Derive bull/bear counts from the ▲/▼ markers in the Signals string so the
 # breakdown survives a cache round-trip (the DB stores only the 10-col schema).
@@ -321,101 +440,7 @@ else:
 
 st.markdown("---")
 
-# ==================== 筹码结构扫描 ====================
-# Kept OUT of the main signal scan and its cache on purpose. That cache stores
-# a fixed 10-column schema, and chip structure is a dozen numbers per stock;
-# squeezing them into the Signals string the way the box alert does would be
-# unreadable. This has its own cache instead, and its own button, because it
-# costs an extra daily_basic call per stock (~0.8s) that nobody should pay for
-# on a page load they did not ask for.
-st.subheader("🧮 筹码结构扫描 · Chip Structure Scan")
-st.caption(
-    "谁在什么价位持有这只股票。找的是 **低位单峰密集**：筹码集中在一个价位、"
-    "上方套牢盘轻、主峰在现价下方构成支撑。评分只描述结构，不是涨跌预测。"
-)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _scan_chips(tickers: tuple, day: str, decay: float):
-    """
-    One row per stock. Cached on (watchlist, trading day, decay) — the maths is
-    ~90ms, the two API calls behind it are ~2s, so the cache exists to avoid
-    re-fetching, not to avoid computing.
-    """
-    out, failed = [], []
-    for tk in tickers:
-        try:
-            d = data_manager.get_single_stock_data_live(tk, lookback_years=3)
-            if d is None or len(d) < 120:
-                failed.append(tk)
-                continue
-            f = data_manager.get_stock_fundamentals_live(
-                tk, d.index.min().strftime("%Y%m%d"), d.index.max().strftime("%Y%m%d"))
-            if f is None or "Turnover_Rate" not in f.columns:
-                failed.append(tk)
-                continue
-            m = cdist.analyse(d, f["Turnover_Rate"].reindex(d.index), decay=decay)
-            if not m.get("ok"):
-                failed.append(tk)
-                continue
-            out.append({
-                "Ticker": tk,
-                "Name": data_manager.get_stock_name_from_db(tk) or tk,
-                "评分": m["setup_score"],
-                "结构": m["setup_label"],
-                "价格": round(m["price"], 2),
-                "主峰": round(m["peak_price"], 2),
-                "峰数": m["n_peaks"],
-                "获利盘": round(m["winner_rate"] * 100, 1),
-                "集中度": round(m["concentration"], 3),
-                "平均成本": round(m["weight_avg"], 2),
-                "距主峰%": round((m["price"] / m["peak_price"] - 1) * 100, 1),
-                "收敛": "✓" if m["converged"] else "⚠",
-            })
-        except Exception:
-            failed.append(tk)
-    return out, failed
-
-
-_cs1, _cs2, _cs3 = st.columns([1, 1, 2])
-with _cs1:
-    _scan_decay = st.select_slider("衰减系数", options=[0.8, 1.0, 1.2],
-                                   value=1.0, key="chipscan_decay")
-with _cs2:
-    _go_scan = st.button("🧮 扫描筹码结构", type="secondary", key="chipscan_go")
-with _cs3:
-    st.caption(f"约 {len(MY_WATCHLIST)} 只 × ~2 秒；结果缓存到当日收盘。")
-
-if _go_scan:
-    st.session_state["chipscan_on"] = True
-
-if st.session_state.get("chipscan_on"):
-    with st.spinner("计算筹码分布…"):
-        _rows, _failed = _scan_chips(tuple(MY_WATCHLIST), today_str, _scan_decay)
-    if not _rows:
-        st.info("没有可计算的股票（需要换手率数据与至少 120 个交易日）。")
-    else:
-        _cdf = pd.DataFrame(_rows).sort_values("评分", ascending=False)
-        _unconv = int((_cdf["收敛"] == "⚠").sum())
-        if _unconv:
-            st.caption(
-                f"⚠ {_unconv} 只标记为未收敛：换手率太低，三年历史不足以冲掉初始假设，"
-                f"它们的数字参考价值有限。")
-        st.dataframe(
-            _cdf, use_container_width=True, hide_index=True,
-            column_config={
-                "评分": st.column_config.ProgressColumn(
-                    "评分", min_value=0.0, max_value=1.0, format="%.2f"),
-                "获利盘": st.column_config.NumberColumn("获利盘 %", format="%.1f%%"),
-                "距主峰%": st.column_config.NumberColumn("距主峰 %", format="%+.1f%%"),
-            })
-        st.caption(
-            "**主峰** = 持有量最大的成本价位。**距主峰%** 为正表示现价在主峰上方"
-            "（主峰构成支撑），为负表示主峰在上方（是压力）。"
-            "**集中度** 越小筹码越集中。**峰数** >1 说明上方或下方还有另一批成本。")
-        if _failed:
-            st.caption(f"跳过 {len(_failed)} 只：{', '.join(_failed[:12])}"
-                       + ("…" if len(_failed) > 12 else ""))
+render_chip_scan()
 
 st.markdown("---")
 
