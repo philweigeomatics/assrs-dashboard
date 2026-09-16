@@ -216,3 +216,68 @@ export type SectorAnalysis = {
     sessions: number;
   };
 };
+
+/** GET /compare-stats/{ticker}?with=&window= — 量化对比. */
+export type Valuation = {
+  pe_start: Num; pe_end: Num;
+  pb_start: Num; pb_end: Num;
+  mv_yi: Num;
+  turnover_avg_pct: Num;
+  /** Change in the multiple, and in implied trailing EPS. These COMPOUND. */
+  rerating_pct: Num;
+  earnings_pct: Num;
+  priced_from: string;
+};
+
+export type StockProfile = {
+  label: string;
+  total_return_pct: Num;
+  cagr_pct: Num;
+  vol_annual_pct: Num;
+  sharpe: Num;
+  max_drawdown_pct: Num;
+  best_day_pct: Num;
+  worst_day_pct: Num;
+  positive_days_pct: Num;
+  bars: number;
+  beta?: Num;
+  alpha_annual_pct?: Num;
+  r2?: Num;
+  up_capture_pct?: Num;
+  down_capture_pct?: Num;
+  valuation: Valuation | null;
+};
+
+export type PairStats = {
+  window: string;
+  bars: number;
+  from: string;
+  to: string;
+  benchmark: { label: string; total_return_pct: Num } | null;
+  a: StockProfile;
+  b: StockProfile;
+  pair: {
+    correlation: Num;
+    beta_a_on_b: Num;
+    r2: Num;
+    return_gap_pct: Num;
+    tracking_error_pct: Num;
+    information_ratio: Num;
+    ratio: Num[];
+    dates: string[];
+    monthly: { month: string; rel_pct: Num }[];
+  };
+  attribution: {
+    market_return_pct: Num;
+    gap_pct: Num;
+    /** A's growth divided by B's. beta_factor × alpha_factor equals this. */
+    gap_ratio: Num;
+    beta_factor_pct: Num;
+    alpha_factor_pct: Num;
+    /** Zero by construction — kept as proof the split is exact. */
+    residual_pct: Num;
+    beta_a: Num; beta_b: Num;
+    alpha_a_pct: Num; alpha_b_pct: Num;
+    years: Num;
+  } | null;
+};

@@ -1,6 +1,6 @@
 import { devFakeToken, supabase } from "./supabase";
 import type {
-  Analysis, CompareResult, HistoryRef, SectorAnalysis, SimResult, StockRef, WhatIfAi,
+  Analysis, CompareResult, HistoryRef, PairStats, SectorAnalysis, SimResult, StockRef, WhatIfAi,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -58,6 +58,8 @@ export const api = {
       body: JSON.stringify(body),
     }),
   compare: (t: string, other: string) => call<CompareResult>(`/compare/${t}?with=${other}`),
+  compareStats: (t: string, other: string, window: string) =>
+    call<PairStats>(`/compare-stats/${t}?with=${other}&window=${window}`),
   sectors: (t: string, window: number) => call<SectorAnalysis>(`/sectors/${t}?window=${window}`),
   whatifAi: (t: string, body: Record<string, unknown>) =>
     call<WhatIfAi>(`/whatif-ai/${t}`, {

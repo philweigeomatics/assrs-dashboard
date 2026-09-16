@@ -14,6 +14,7 @@ import type { Drawing } from "../components/chart/drawings";
 import { ChartTools } from "../components/ChartTools";
 import { WhatIfPanel } from "../components/WhatIfPanel";
 import { SectorPanel } from "../components/SectorPanel";
+import { CompareStats } from "../components/CompareStats";
 
 export function TechnicalAnalysis() {
   const { dev } = useAuth();
@@ -149,6 +150,13 @@ export function TechnicalAnalysis() {
               <ChipPanel chips={analysis.data.chips} price={analysis.data.header.close ?? 0} />
             </aside>
           </div>
+        )}
+
+        {/* Only while a comparison is on screen: it is the answer to a
+            question you asked by picking a second stock, not a permanent
+            fixture of the page. */}
+        {analysis.data && compare && (
+          <CompareStats ticker={analysis.data.ticker} other={compare.ticker} />
         )}
 
         {/* Full width, below the chart: the correlation bars and the rotation

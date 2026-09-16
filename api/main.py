@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.middleware.gzip import GZipMiddleware  # noqa: E402
 
+import pair_compare  # noqa: E402
 import sector_affinity  # noqa: E402
 import ta_payload  # noqa: E402
 from api.auth import AppUser, current_user  # noqa: E402
@@ -146,6 +147,44 @@ def _frames(ticker: str):
             ticker, df.index.min().strftime("%Y%m%d"), df.index.max().strftime("%Y%m%d"))
         return adf, fund
     return _frames_cache.get_or_compute(ticker, load)
+
+
+_pricefund_cache = TTLCache(maxsize=40, ttl_s=20 * 60)
+_bench_cache = TTLCache(maxsize=1, ttl_s=6 * 3600)
+_pair_cache = TTLCache(maxsize=80, ttl_s=20 * 60)
+
+
+def _price_fund(ticker: str):
+    """
+    (close, fundamentals) for a stock, WITHOUT running the analysis.
+
+    The comparison stock needs prices and PE history, not indicators, and the
+    walk-forward HMM in the full path costs ~20s. Comparing against a stock
+    must not be slower than analysing one.
+    """
+    def load():
+        import data_manager
+        import watchlist_scan
+        df = watchlist_scan.fetch_frame(ticker)
+        if df is None:
+            raise RuntimeError(f"price data for {ticker} could not be fetched — try again")
+        if len(df) < 60:
+            raise LookupError(f"not enough price history for {ticker}")
+        fund = data_manager.get_stock_fundamentals_live(
+            ticker, df.index.min().strftime("%Y%m%d"), df.index.max().strftime("%Y%m%d"))
+        return df["Close"], fund
+    return _pricefund_cache.get_or_compute(ticker, load)
+
+
+def _benchmark():
+    """沪深300 closes — shared by every comparison, so fetched once."""
+    def load():
+        import data_manager
+        idx = data_manager.get_index_data_live("000300.SH", lookback_days=1200)
+        if idx is None or idx.empty:
+            raise RuntimeError("沪深300 指数数据暂时读取不到 — 请稍后重试")
+        return idx["Close"]
+    return _bench_cache.get_or_compute("csi300", load)
 
 
 class SimReq(BaseModel):
@@ -273,6 +312,46 @@ def whatif_ai(req: AiReq, ticker: str = TICKER, user: AppUser = Depends(current_
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:
         raise HTTPException(502, f"AI call failed: {exc}")
+
+
+@app.get("/compare-stats/{ticker}")
+def compare_stats(ticker: str = TICKER,
+                  with_: str = Query(..., alias="with", pattern=r"^\d{6}$"),
+                  window: str = Query(pair_compare.DEFAULT_WINDOW),
+                  user: AppUser = Depends(current_user)):
+    """
+    量化对比: return, risk, beta/alpha, valuation and the gap attribution.
+
+    Separate from /compare so that changing the statistics window does not
+    refetch and redraw the chart overlay, and vice versa.
+    """
+    if window not in pair_compare.WINDOWS:
+        raise HTTPException(422, f"window must be one of {sorted(pair_compare.WINDOWS)}")
+    if with_ == ticker:
+        raise HTTPException(422, "cannot compare a stock with itself")
+
+    import data_manager
+    try:
+        adf, a_fund = _frames(ticker)
+        b_close, b_fund = _price_fund(with_)
+        try:
+            bench = _benchmark()
+        except RuntimeError:
+            # Beta, alpha and capture need the market; everything else does
+            # not. Losing the index should cost those fields, not the panel.
+            bench = None
+        return _pair_cache.get_or_compute(
+            (ticker, with_, window),
+            lambda: pair_compare.compare(
+                adf["Close"], b_close, bench_close=bench,
+                a_fund=a_fund, b_fund=b_fund,
+                a_label=data_manager.get_stock_name_from_db(ticker) or ticker,
+                b_label=data_manager.get_stock_name_from_db(with_) or with_,
+                window=window))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
 
 
 @app.get("/sectors/{ticker}")
