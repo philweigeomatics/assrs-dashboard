@@ -22,12 +22,15 @@
 # service's settings for flags it is not given. Adding flags here would make
 # this file the source of truth for them and silently reset anything it forgot.
 
+# The image path is written out in full at every use rather than held in a
+# substitution. A substitution whose VALUE contains another substitution
+# (_IMAGE: gcr.io/$PROJECT_ID/…) only expands when dynamic substitutions are
+# on; when they are not, Docker receives a literal "$PROJECT_ID" in the tag and
+# fails on invalid reference format within seconds. Repeating the path is the
+# cheaper trade than depending on that setting.
 substitutions:
   _SERVICE: assrs-dashboard
   _REGION: us-west1
-  # Same path the Dockerfile-type trigger used, so the image history is one
-  # continuous line rather than starting again somewhere else.
-  _IMAGE: gcr.io/$PROJECT_ID/github.com/philweigeomatics/assrs-dashboard
 
 steps:
   # `latest` alongside the commit tag: the commit tag is what gets deployed and
@@ -37,8 +40,8 @@ steps:
     name: gcr.io/cloud-builders/docker
     args:
       - build
-      - --tag=${_IMAGE}:$COMMIT_SHA
-      - --tag=${_IMAGE}:latest
+      - --tag=gcr.io/$PROJECT_ID/github.com/philweigeomatics/assrs-dashboard:$COMMIT_SHA
+      - --tag=gcr.io/$PROJECT_ID/github.com/philweigeomatics/assrs-dashboard:latest
       - --file=Dockerfile
       - .
 
@@ -47,7 +50,10 @@ steps:
   # asked for a tag that does not exist yet.
   - id: push
     name: gcr.io/cloud-builders/docker
-    args: [push, --all-tags, "${_IMAGE}"]
+    args:
+      - push
+      - --all-tags
+      - gcr.io/$PROJECT_ID/github.com/philweigeomatics/assrs-dashboard
 
   - id: deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
@@ -57,7 +63,7 @@ steps:
       - deploy
       - ${_SERVICE}
       - --region=${_REGION}
-      - --image=${_IMAGE}:$COMMIT_SHA
+      - --image=gcr.io/$PROJECT_ID/github.com/philweigeomatics/assrs-dashboard:$COMMIT_SHA
       - --platform=managed
       - --quiet
 
