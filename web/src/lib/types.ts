@@ -176,3 +176,43 @@ export type WhatIfAi = {
     caveats?: string[];
   };
 };
+
+/** GET /sectors/{ticker}?window= — 板块相关性 + 板块轮动. */
+export type SectorRow = {
+  name: string;
+  color: string;
+  /** 沪深300, drawn apart from the sectors: it is the market, not a theme. */
+  benchmark: boolean;
+  /** The stock is a constituent of this sector index. */
+  member: boolean;
+  /** One of the five highest-affinity sectors — drawn in colour. */
+  top: boolean;
+  /** Correlation in the most recent window. */
+  r: Num;
+  /** Mean correlation across the window shown. */
+  mean_r: Num;
+  series: Num[];
+};
+
+export type SectorAnalysis = {
+  window: number;
+  dates: string[];
+  sectors: SectorRow[];
+  /** Leading sector per bar, run-length encoded. */
+  dominant: { from: number; to: number; sector: string }[];
+  summary: {
+    top: string;
+    top_r: Num;
+    top_is_member: boolean;
+    /** Heavy constituent tracking its own index — r near 1 is arithmetic. */
+    self_index: boolean;
+    trend: "strengthening" | "weakening" | "stable";
+    r5: Num;
+    r20: Num;
+    rotations: number;
+    verdict: "high" | "moderate" | "low";
+    leaders: { sector: string; days: number; pct: number }[];
+    n_leaders: number;
+    sessions: number;
+  };
+};

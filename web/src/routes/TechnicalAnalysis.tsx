@@ -13,6 +13,7 @@ import { usePersistentState } from "../lib/usePersistentState";
 import type { Drawing } from "../components/chart/drawings";
 import { ChartTools } from "../components/ChartTools";
 import { WhatIfPanel } from "../components/WhatIfPanel";
+import { SectorPanel } from "../components/SectorPanel";
 
 export function TechnicalAnalysis() {
   const { dev } = useAuth();
@@ -149,6 +150,11 @@ export function TechnicalAnalysis() {
             </aside>
           </div>
         )}
+
+        {/* Full width, below the chart: the correlation bars and the rotation
+            strip both read across a year, and squeezing them into the 340px
+            sidebar would make the strip unreadable. */}
+        {analysis.data && <SectorPanel ticker={analysis.data.ticker} />}
       </main>
     </div>
   );

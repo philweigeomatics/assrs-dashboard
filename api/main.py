@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.middleware.gzip import GZipMiddleware  # noqa: E402
 
+import sector_affinity  # noqa: E402
 import ta_payload  # noqa: E402
 from api.auth import AppUser, current_user  # noqa: E402
 
@@ -108,6 +109,10 @@ class TTLCache:
 
 _analysis_cache = TTLCache(maxsize=40, ttl_s=20 * 60)
 _stocks_cache = TTLCache(maxsize=1, ttl_s=6 * 3600)
+# The sector indices are rebuilt nightly and shared by every stock, so one
+# 25-table read serves every ticker and every window until tomorrow.
+_sector_ret_cache = TTLCache(maxsize=1, ttl_s=6 * 3600)
+_sector_cache = TTLCache(maxsize=60, ttl_s=20 * 60)
 
 
 def _as_user(user: AppUser):
@@ -268,6 +273,41 @@ def whatif_ai(req: AiReq, ticker: str = TICKER, user: AppUser = Depends(current_
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:
         raise HTTPException(502, f"AI call failed: {exc}")
+
+
+@app.get("/sectors/{ticker}")
+def sectors(ticker: str = TICKER,
+            window: int = Query(sector_affinity.DEFAULT_WINDOW,
+                                description="rolling window in trading days"),
+            user: AppUser = Depends(current_user)):
+    """
+    板块相关性 + 板块轮动 for one stock at one window length.
+
+    The sector returns are loaded once for the whole service; only the
+    correlation is per stock, so changing the window is fast.
+    """
+    if window not in sector_affinity.WINDOWS:
+        raise HTTPException(422, f"window must be one of {list(sector_affinity.WINDOWS)}")
+
+    def load_rets():
+        rets = sector_affinity.load_sector_returns()
+        if not rets:
+            # Same reasoning as /stocks: an empty read is a failure, and
+            # caching it would keep the panel broken long after the fix.
+            raise RuntimeError("板块指数（PPI_*）暂时读取不到 — 请稍后重试")
+        return rets, sector_affinity.sector_members()
+
+    try:
+        adf, _ = _frames(ticker)
+        rets, members = _sector_ret_cache.get_or_compute("all", load_rets)
+        return _sector_cache.get_or_compute(
+            (ticker, window),
+            lambda: sector_affinity.analyse(adf["Close"], rets, window,
+                                            ticker=ticker, members=members))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
 
 
 @app.get("/compare/{ticker}")
