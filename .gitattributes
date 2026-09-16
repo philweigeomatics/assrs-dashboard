@@ -2,7 +2,7 @@
 # machine's core.autocrlf. A CRLF Dockerfile passes a trailing \r into the
 # shell-form CMD — uvicorn then gets "65\r" as a number and the container
 # fails to start on Cloud Run.
-api/Dockerfile   text eol=lf
+Dockerfile       text eol=lf
 .dockerignore    text eol=lf
 *.sh             text eol=lf
 *.sql            text eol=lf

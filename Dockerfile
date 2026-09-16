@@ -1,11 +1,19 @@
 # ASSRS API container for Cloud Run.
 #
-# BUILD CONTEXT MUST BE THE REPOSITORY ROOT, not api/:
-#   docker build -f api/Dockerfile .
-# The API imports analysis_engine.py, data_manager.py, box_detection.py and
-# friends straight from the root, so the Streamlit app and the API always run
-# the same analysis code. In Cloud Build: Dockerfile = /api/Dockerfile,
-# context = / (repo root).
+# THIS FILE LIVES AT THE REPOSITORY ROOT ON PURPOSE.
+#
+# Cloud Run's "continuously deploy from a repository" flow builds with the
+# context set to the DIRECTORY CONTAINING THE DOCKERFILE — not the repo root,
+# whatever path you type. With this file under api/, `COPY requirements.txt`
+# silently picked up api/requirements.txt and the next line failed with
+# "stat api/requirements.txt: file does not exist". Keeping it at the root
+# makes the context the root, which is what the COPY lines below need: the API
+# imports analysis_engine.py, data_manager.py, box_detection.py and friends
+# straight from the root so the Streamlit app and the API always run the same
+# analysis code.
+#
+# Cloud Build setting: Dockerfile = /Dockerfile.
+# Locally:             docker build -t assrs-api .
 
 FROM python:3.11-slim
 
