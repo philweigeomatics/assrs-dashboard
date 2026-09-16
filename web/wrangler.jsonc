@@ -1,0 +1,21 @@
+{
+  // Cloudflare Workers static-assets config for the built SPA.
+  //
+  // `npx wrangler deploy` (the deploy command Cloudflare's Workers flow
+  // suggests) needs this file to know what to upload. There is no Worker
+  // script: `assets` alone serves the Vite build straight from Cloudflare's
+  // edge, which is all this site needs — every dynamic request goes to the
+  // Cloud Run API instead.
+  //
+  // "single-page-application" is load-bearing: the app routes /login and
+  // /set-password in the browser, and those paths have no file on disk. The
+  // default 404 handling would return "not found" for a password-reset link
+  // arriving from an email, and for any refresh of a sub-page.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "assrs-web",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}
