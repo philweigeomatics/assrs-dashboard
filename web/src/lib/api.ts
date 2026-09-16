@@ -1,5 +1,5 @@
 import { devFakeToken, supabase } from "./supabase";
-import type { Analysis, HistoryRef, StockRef } from "./types";
+import type { Analysis, CompareResult, HistoryRef, SimResult, StockRef, WhatIfAi } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
   .replace(/\/$/, "");
@@ -49,4 +49,17 @@ export const api = {
   history: () => call<HistoryRef[]>("/history"),
   addHistory: (t: string) => call<StockRef>(`/history/${t}`, { method: "POST" }),
   analysis: (t: string) => call<Analysis>(`/analysis/${t}`),
+  simulate: (t: string, body: { pct: number; volume: number; open?: number; high?: number; low?: number }) =>
+    call<SimResult>(`/simulate/${t}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  compare: (t: string, other: string) => call<CompareResult>(`/compare/${t}?with=${other}`),
+  whatifAi: (t: string, body: Record<string, unknown>) =>
+    call<WhatIfAi>(`/whatif-ai/${t}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 };

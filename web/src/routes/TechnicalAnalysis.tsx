@@ -1,14 +1,18 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../auth/AuthProvider";
-import type { StockRef } from "../lib/types";
+import type { CompareResult, SimResult, StockRef } from "../lib/types";
 import { StockPicker } from "../components/StockPicker";
 import { InfoHeader } from "../components/InfoHeader";
 import { ChipPanel } from "../components/ChipPanel";
-import { ChartStack } from "../components/chart/ChartStack";
+import { ChartStack, type Tool } from "../components/chart/ChartStack";
+import { usePersistentState } from "../lib/usePersistentState";
+import type { Drawing } from "../components/chart/drawings";
+import { ChartTools } from "../components/ChartTools";
+import { WhatIfPanel } from "../components/WhatIfPanel";
 
 export function TechnicalAnalysis() {
   const { dev } = useAuth();
@@ -24,6 +28,19 @@ export function TechnicalAnalysis() {
     enabled: Boolean(ticker),
     staleTime: 10 * 60_000,
     retry: (n, err) => !(err instanceof ApiError && err.status < 500) && n < 1,
+  });
+
+  const [ghost, setGhost] = useState<SimResult | null>(null);
+  const [compare, setCompare] = useState<CompareResult | null>(null);
+  const [compareMode, setCompareMode] = useState<"pct" | "price">("pct");
+  const [tool, setTool] = useState<Tool>("none");
+  const [resetSignal, setResetSignal] = useState(0);
+  const [drawings, setDrawings] = usePersistentState<Drawing[]>(
+    `assrs.draw.${ticker ?? "none"}`, []);
+
+  const compareM = useMutation({
+    mutationFn: (other: string) => api.compare(ticker!, other),
+    onSuccess: setCompare,
   });
 
   const record = useMutation({
@@ -45,6 +62,10 @@ export function TechnicalAnalysis() {
   function pick(s: StockRef) {
     setParams({ t: s.t });
     record.mutate(s.t);
+    // A ghost and a comparison belong to the stock they were made against.
+    setGhost(null);
+    setCompare(null);
+    setTool("none");
   }
 
   return (
@@ -96,11 +117,34 @@ export function TechnicalAnalysis() {
           // the cost distribution stay on screen next to whichever pane you
           // are looking at. Below `lg` it stacks, chart first.
           <div className="grid gap-3 items-start lg:grid-cols-[minmax(0,1fr)_340px]">
-            <div className="min-w-0">
-              <ChartStack data={analysis.data} />
+            <div className="min-w-0 flex flex-col gap-2">
+              <ChartTools
+                tool={tool}
+                setTool={setTool}
+                onReset={() => setResetSignal((n) => n + 1)}
+                drawingCount={drawings.length}
+                onClearDrawings={() => setDrawings([])}
+                stocks={stocks.data ?? []}
+                compare={compare}
+                compareMode={compareMode}
+                onCompare={(t) => (t ? compareM.mutate(t) : setCompare(null))}
+                onCompareMode={setCompareMode}
+              />
+              <ChartStack
+                data={analysis.data}
+                ghost={ghost}
+                compare={compare}
+                compareMode={compareMode}
+                tool={tool}
+                onToolDone={() => setTool("none")}
+                resetSignal={resetSignal}
+                drawings={drawings}
+                setDrawings={setDrawings}
+              />
             </div>
             <aside className="flex flex-col gap-3 lg:sticky lg:top-[3.75rem] lg:max-h-[calc(100vh-4.5rem)] lg:overflow-y-auto">
               <InfoHeader data={analysis.data} />
+              <WhatIfPanel data={analysis.data} ghost={ghost} onGhost={setGhost} />
               <ChipPanel chips={analysis.data.chips} price={analysis.data.header.close ?? 0} />
             </aside>
           </div>

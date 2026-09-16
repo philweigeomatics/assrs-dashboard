@@ -137,3 +137,42 @@ export type Analysis = {
   has_moneyflow: boolean;
   initial_visible: number;
 };
+
+/** POST /simulate/{ticker} — the hypothetical next bar and its indicators. */
+export type SimResult = {
+  date: string;
+  ohlcv: { o: Num; h: Num; l: Num; c: Num; v: Num };
+  ohl_supplied: boolean;
+  series: Partial<Record<SeriesKey, Num>>;
+  signals: Record<string, boolean | string>;
+  adx_pattern: string | null;
+  conditions_met: number;
+};
+
+/** GET /compare/{ticker}?with= — a second stock, in both scalings. */
+export type CompareResult = {
+  ticker: string;
+  name: string;
+  price: Num[];
+  rebased: Num[];
+  change_pct: Num;
+};
+
+/** POST /whatif-ai/{ticker} — 尾盘推演. */
+export type WhatIfAi = {
+  mode: "ghost" | "actual";
+  bar_date: string;
+  crossings: { what: string; dir: "up" | "down"; detail: string }[];
+  read: {
+    headline?: string;
+    bar_read?: string;
+    key_changes?: string[];
+    bull_case?: string;
+    bear_case?: string;
+    stance?: { call?: string; conviction?: string; why?: string; if_holding?: string; if_flat?: string };
+    levels?: { confirm?: string; invalidate?: string; note?: string };
+    next_session_plan?: string;
+    what_would_change_my_mind?: string[];
+    caveats?: string[];
+  };
+};

@@ -16,12 +16,15 @@ export function ResizablePane({
   onResize,
   hostRef,
   overlay,
+  layer = null,
 }: {
   height: number;
   minHeight: number;
   onResize: (h: number) => void;
   hostRef: Ref<HTMLDivElement>;
   overlay: ReactNode;
+  /** Pointer-capturing layer for the drawing tools; null when no tool is on. */
+  layer?: ReactNode;
 }) {
   const [live, setLive] = useState(height);
   const [dragging, setDragging] = useState(false);
@@ -64,6 +67,7 @@ export function ResizablePane({
   return (
     <div className="card relative overflow-hidden">
       <div ref={hostRef} style={{ height: live }} />
+      {layer}
       <div className="absolute inset-x-0 top-0 z-10 pointer-events-none">{overlay}</div>
       <div
         role="separator"

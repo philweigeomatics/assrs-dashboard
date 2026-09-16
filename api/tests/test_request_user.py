@@ -16,9 +16,15 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, ROOT)
 
 
+# supabase-py parses the URL at client construction, so the placeholder has to
+# look like a URL. Nothing is ever sent to it — these tests are offline.
+DUMMY = {"SUPABASE_URL": "https://offline.supabase.co", "SUPABASE_KEY": "test",
+         "TUSHARE_TOKEN": "test", "DEEPSEEK_API_KEY": "test"}
+
+
 def _am(monkeypatch):
-    for k in ("SUPABASE_URL", "SUPABASE_KEY", "TUSHARE_TOKEN", "DEEPSEEK_API_KEY"):
-        monkeypatch.setenv(k, os.environ.get(k, "test"))
+    for k, v in DUMMY.items():
+        monkeypatch.setenv(k, os.environ.get(k) or v)
     import auth_manager
     return auth_manager
 

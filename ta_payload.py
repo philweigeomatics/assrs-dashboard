@@ -445,8 +445,16 @@ def build_chips(analysis_df: pd.DataFrame,
     }
 
 
-def build_payload(ticker: str) -> dict:
-    """Fetch, analyse and package one stock for the frontend."""
+def build_payload(ticker: str, analysis_df: pd.DataFrame | None = None,
+                  fundamentals_df: pd.DataFrame | None = None) -> dict:
+    """
+    Fetch, analyse and package one stock for the frontend.
+
+    `analysis_df` / `fundamentals_df` let a caller that already holds the
+    frames skip the fetch and the HMM — the API keeps them cached so the
+    What-If simulator and the comparison overlay reuse this stock's analysis
+    instead of paying ~20s for it again.
+    """
     import data_manager
     import box_detection as bxd
     import watchlist_scan
@@ -457,18 +465,18 @@ def build_payload(ticker: str) -> dict:
     # stock returns a short frame. Folding them together told the user
     # "not enough price history" for what was really a network blip — which is
     # exactly what it said the first time this page hit a flaky fetch.
-    stock_df = watchlist_scan.fetch_frame(ticker)
-    if stock_df is None:
-        raise RuntimeError(
-            f"price data for {ticker} could not be fetched "
-            f"(after {watchlist_scan.FETCH_ATTEMPTS} attempts) — try again")
-    if len(stock_df) < 60:
-        raise LookupError(f"not enough price history for {ticker}")
-
-    analysis_df = run_single_stock_analysis(stock_df)
-    start = stock_df.index.min().strftime('%Y%m%d')
-    end = stock_df.index.max().strftime('%Y%m%d')
-    fundamentals_df = data_manager.get_stock_fundamentals_live(ticker, start, end)
+    if analysis_df is None:
+        stock_df = watchlist_scan.fetch_frame(ticker)
+        if stock_df is None:
+            raise RuntimeError(
+                f"price data for {ticker} could not be fetched "
+                f"(after {watchlist_scan.FETCH_ATTEMPTS} attempts) — try again")
+        if len(stock_df) < 60:
+            raise LookupError(f"not enough price history for {ticker}")
+        analysis_df = run_single_stock_analysis(stock_df)
+        fundamentals_df = data_manager.get_stock_fundamentals_live(
+            ticker, stock_df.index.min().strftime('%Y%m%d'),
+            stock_df.index.max().strftime('%Y%m%d'))
     moneyflow_df = load_moneyflow(ticker)
     boxes = bxd.detect_boxes(analysis_df)
 

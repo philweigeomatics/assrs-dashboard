@@ -30,10 +30,12 @@ if ROOT not in sys.path:
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-from fastapi import Depends, FastAPI, HTTPException, Path  # noqa: E402
+from fastapi import Depends, FastAPI, HTTPException, Path, Query  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.middleware.gzip import GZipMiddleware  # noqa: E402
 
+import ta_payload  # noqa: E402
 from api.auth import AppUser, current_user  # noqa: E402
 
 TICKER = Path(..., pattern=r"^\d{6}$", description="6-digit A-share code")
@@ -113,6 +115,49 @@ def _as_user(user: AppUser):
     return auth_manager.request_user(user.as_session_user())
 
 
+_frames_cache = TTLCache(maxsize=20, ttl_s=20 * 60)
+
+
+def _frames(ticker: str):
+    """
+    (analysis_df, fundamentals_df) for a ticker, cached.
+
+    The What-If simulator, the AI read and the comparison overlay all need the
+    analysed frame, and re-deriving it costs a 3-year fetch plus a walk-forward
+    HMM (~20s). Holding it for 20 minutes is what makes those features feel
+    interactive instead of each one restarting the analysis.
+    """
+    def load():
+        import data_manager
+        import watchlist_scan
+        from analysis_engine import run_single_stock_analysis
+        df = watchlist_scan.fetch_frame(ticker)
+        if df is None:
+            raise RuntimeError(f"price data for {ticker} could not be fetched — try again")
+        if len(df) < 60:
+            raise LookupError(f"not enough price history for {ticker}")
+        adf = run_single_stock_analysis(df)
+        fund = data_manager.get_stock_fundamentals_live(
+            ticker, df.index.min().strftime("%Y%m%d"), df.index.max().strftime("%Y%m%d"))
+        return adf, fund
+    return _frames_cache.get_or_compute(ticker, load)
+
+
+class SimReq(BaseModel):
+    """Tomorrow's hypothetical bar. Omit o/h/l and the engine estimates them."""
+    pct: float = Field(0.0, ge=-30, le=30, description="close change in %")
+    volume: float = Field(..., gt=0)
+    open: float | None = Field(None, gt=0)
+    high: float | None = Field(None, gt=0)
+    low: float | None = Field(None, gt=0)
+
+
+class AiReq(SimReq):
+    mode: str = Field("ghost", pattern="^(ghost|actual)$")
+    volume: float | None = Field(None, gt=0)
+    window: int = Field(20, ge=10, le=60)
+
+
 # ── routes ───────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
@@ -134,9 +179,20 @@ def stocks(user: AppUser = Depends(current_user)):
     import data_manager
 
     def load():
-        return [{"t": s["ticker"], "n": s["name"]} for s in data_manager.get_all_stock_basic()]
+        rows = [{"t": s["ticker"], "n": s["name"]} for s in data_manager.get_all_stock_basic()]
+        if not rows:
+            # get_all_stock_basic() swallows its errors and returns [], so a
+            # momentary database hiccup looks identical to "no stocks exist".
+            # Caching that for six hours leaves every search box silently
+            # empty with nothing to show why — which is exactly what happened.
+            # Raising keeps it OUT of the cache and tells the client to retry.
+            raise RuntimeError("stock list unavailable — try again")
+        return rows
 
-    return _stocks_cache.get_or_compute("all", load)
+    try:
+        return _stocks_cache.get_or_compute("all", load)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
 
 
 @app.get("/history")
@@ -166,10 +222,65 @@ def analysis(ticker: str = TICKER, user: AppUser = Depends(current_user)):
     """
     import ta_payload
     try:
-        return _analysis_cache.get_or_compute(ticker, lambda: ta_payload.build_payload(ticker))
+        adf, fund = _frames(ticker)
+        return _analysis_cache.get_or_compute(
+            ticker, lambda: ta_payload.build_payload(ticker, adf, fund))
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:
         # Upstream data unavailable after retries — a 503 says "try again",
         # which is true, where a 500 would read as a bug in this service.
+        raise HTTPException(503, str(exc))
+
+
+@app.post("/simulate/{ticker}")
+def simulate(req: SimReq, ticker: str = TICKER, user: AppUser = Depends(current_user)):
+    """
+    What every indicator would read if tomorrow printed this bar.
+
+    Cheap (no fetch, no HMM — the analysed frame is cached), so the frontend
+    can call it on every edit and redraw the ghost immediately.
+    """
+    from api import extras
+    adf, _ = _frames(ticker)
+    try:
+        return extras.simulate(adf, pct=req.pct, volume=req.volume,
+                               open_=req.open, high=req.high, low=req.low)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@app.post("/whatif-ai/{ticker}")
+def whatif_ai(req: AiReq, ticker: str = TICKER, user: AppUser = Depends(current_user)):
+    """
+    尾盘推演: the AI read of the ghost bar, or of the last real session when
+    no ghost is drawn. One DeepSeek call, 20-60s.
+    """
+    import data_manager
+    from api import extras
+    adf, _ = _frames(ticker)
+    name = data_manager.get_stock_name_from_db(ticker) or ticker
+    try:
+        return extras.whatif_ai(adf, ticker, name, mode=req.mode, pct=req.pct,
+                                volume=req.volume, open_=req.open, high=req.high,
+                                low=req.low, window=req.window)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(502, f"AI call failed: {exc}")
+
+
+@app.get("/compare/{ticker}")
+def compare(ticker: str = TICKER,
+            with_: str = Query(..., alias="with", pattern=r"^\d{6}$"),
+            user: AppUser = Depends(current_user)):
+    """A second stock aligned to this one's bars, in both scalings."""
+    from api import extras
+    adf, _ = _frames(ticker)
+    dates = [d.strftime("%Y-%m-%d") for d in ta_payload.chart_window(adf).index]
+    try:
+        return extras.compare(adf, with_, dates)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
         raise HTTPException(503, str(exc))

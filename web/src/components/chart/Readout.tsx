@@ -5,10 +5,20 @@
  * and 振幅 is (high − low) / previous close, matching the Streamlit hover.
  */
 
-import type { Analysis } from "../../lib/types";
+import type { Analysis, CompareResult, SimResult } from "../../lib/types";
 import { compact, moveClass } from "../../lib/format";
 
-export function Readout({ data, index }: { data: Analysis; index: number }) {
+export function Readout({
+  data,
+  index,
+  ghost = null,
+  compare = null,
+}: {
+  data: Analysis;
+  index: number;
+  ghost?: SimResult | null;
+  compare?: CompareResult | null;
+}) {
   const o = data.ohlcv.o[index];
   const h = data.ohlcv.h[index];
   const l = data.ohlcv.l[index];
@@ -36,6 +46,20 @@ export function Readout({ data, index }: { data: Analysis; index: number }) {
       <F k="涨跌" val={chg == null ? "—" : `${chg > 0 ? "+" : ""}${chg.toFixed(2)}%`} cls={moveClass(chg)} />
       <F k="振幅" val={amp == null ? "—" : `${amp.toFixed(2)}%`} />
       <F k="量" val={v == null ? "—" : compact(v)} />
+      {compare && (
+        <span className="flex items-baseline gap-1 shrink-0 text-[#7c3aed]">
+          <span className="text-[11px]">{compare.name}</span>
+          <span className="font-mono tnum text-[12.5px]">
+            {compare.price[index] == null ? "—" : compare.price[index]!.toFixed(2)}
+          </span>
+        </span>
+      )}
+      {ghost && ghost.ohlcv.c != null && (
+        <span className="flex items-baseline gap-1 shrink-0 text-brand-ink">
+          <span className="text-[11px]">👻 {ghost.date}</span>
+          <span className="font-mono tnum text-[12.5px]">{ghost.ohlcv.c.toFixed(2)}</span>
+        </span>
+      )}
     </div>
   );
 }
