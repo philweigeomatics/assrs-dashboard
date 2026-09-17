@@ -51,7 +51,7 @@ function analysis(over: Partial<Analysis> = {}, nulls: SeriesKey[] = []): Analys
     ticker: "US:TEST", name: "Test", market: "US", currency: "USD",
     currency_symbol: "$", up_is_red: false, benchmark_name: "S&P 500", sector: null,
     header: {
-      date: dates[N - 1], close: 10, prev_close: 9, change_pct: 1,
+      date: dates[N - 1]!, close: 10, prev_close: 9, change_pct: 1,
       total_mv_yi: null, circ_mv_yi: null, market_cap: 1e12,
       pe_ttm: null, pb: null, turnover_rate: null,
     },
