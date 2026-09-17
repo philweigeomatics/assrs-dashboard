@@ -37,11 +37,19 @@ export function Readout({
   );
 
   return (
-    <div className="float-ground w-fit max-w-[calc(100%-90px)] m-1.5 mb-0 px-2 py-1 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+    // `pointer-events-none` is load-bearing, exactly as in Legend: this panel
+    // floats over the top-left of the price chart, which is precisely where
+    // the cursor goes. Without it the readout swallows the mouse and the
+    // crosshair never moves — the numbers sit frozen on the last bar while
+    // you hover straight at them.
+    <div className="float-ground w-fit max-w-[calc(100%-90px)] m-1.5 mb-0 px-2 py-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 pointer-events-none">
       <span className="font-mono tnum text-[12.5px] font-semibold">{data.dates[index]}</span>
       <F k="开" val={o.toFixed(2)} />
-      <F k="高" val={h.toFixed(2)} cls="text-up" />
-      <F k="低" val={l.toFixed(2)} cls="text-down" />
+      {/* High is the "gain" colour and low the "loss" colour, which is red/green
+          in Shanghai and green/red in New York — the same inversion as the
+          candles, not two fixed classes. */}
+      <F k="高" val={h.toFixed(2)} cls={data.up_is_red ? "text-up" : "text-down"} />
+      <F k="低" val={l.toFixed(2)} cls={data.up_is_red ? "text-down" : "text-up"} />
       <F k="收" val={c.toFixed(2)} cls={`${moveClass(chg, data.up_is_red)} font-semibold`} />
       <F k="涨跌" val={chg == null ? "—" : `${chg > 0 ? "+" : ""}${chg.toFixed(2)}%`} cls={moveClass(chg, data.up_is_red)} />
       <F k="振幅" val={amp == null ? "—" : `${amp.toFixed(2)}%`} />

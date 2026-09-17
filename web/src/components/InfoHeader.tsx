@@ -8,7 +8,7 @@
  * header had wrong.
  */
 
-import type { Analysis } from "../lib/types";
+import type { Analysis, MarketCode } from "../lib/types";
 import { dash, fixed, money, moveClass, signed, yi } from "../lib/format";
 
 function Stat({ k, v }: { k: string; v: string }) {
@@ -36,6 +36,31 @@ function Chip({ label, value, tone, title }: { label: string; value: string; ton
       className={`inline-flex items-center gap-1 rounded-full px-2 py-[3px] text-[11.5px] leading-tight ${TONE[tone]}`}>
       <span className="opacity-70">{label}</span>
       <span className="font-semibold">{value}</span>
+    </span>
+  );
+}
+
+/**
+ * Which market, and — the part that actually matters — which way round the
+ * colours run.
+ *
+ * Switching between an A-share and a US chart flips the meaning of every
+ * candle on screen, and nothing else on the page says so. A green candle is
+ * a good day here and a bad day there; without this you have to remember
+ * which stock you are looking at to read the chart at all.
+ */
+function MarketBadge({ market, upIsRed }: { market: MarketCode; upIsRed: boolean }) {
+  const name = market === "CN" ? "A股" : market === "US" ? "美股" : "加股";
+  return (
+    <span
+      title={upIsRed
+        ? "中国市场惯例：红色代表上涨，绿色代表下跌"
+        : "北美市场惯例：绿色代表上涨，红色代表下跌（与A股相反）"}
+      className="ml-auto shrink-0 flex items-center gap-1 rounded-md bg-sunken px-1.5 py-0.5 text-[11px]"
+    >
+      <span className="text-ink-dim">{name}</span>
+      <span className={upIsRed ? "text-up" : "text-down"}>▲{upIsRed ? "红" : "绿"}</span>
+      <span className={upIsRed ? "text-down" : "text-up"}>▼{upIsRed ? "绿" : "红"}</span>
     </span>
   );
 }
@@ -76,6 +101,7 @@ export function InfoHeader({ data }: { data: Analysis }) {
       <div className="flex items-baseline gap-2">
         <span className="text-[17px] font-semibold truncate">{data.name}</span>
         <span className="font-mono tnum text-[12px] text-ink-mute">{data.ticker}</span>
+        <MarketBadge market={data.market} upIsRed={data.up_is_red} />
       </div>
 
       <div className="flex items-baseline gap-2">

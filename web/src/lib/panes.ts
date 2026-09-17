@@ -64,8 +64,19 @@ export type PaneSpec = {
   ribbon?: { i: number; color: string; state: string }[];
 };
 
+// Marker colours by MEANING, resolved per market: a bullish marker is red in
+// Shanghai and green in New York, the same inversion the candles follow.
 const RED = "#dc2626";
 const GREEN = "#16a34a";
+
+const bull = (d: Analysis) => (d.up_is_red ? RED : GREEN);
+const bear = (d: Analysis) => (d.up_is_red ? GREEN : RED);
+
+/** True when at least one bar of this series carries a value. */
+function hasData(d: Analysis, key: SeriesKey): boolean {
+  const v = d.series[key];
+  return Array.isArray(v) && v.some((x) => x != null && Number.isFinite(x));
+}
 
 const s = (d: Analysis, k: SeriesKey) => d.series[k];
 
@@ -88,13 +99,13 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
     markers: [
       { key: "m_acc", label: "吸筹", idx: d.markers.price.accumulation, position: "belowBar", shape: "circle", color: "#ca8a04" },
       { key: "m_sqz", label: "挤压", idx: d.markers.price.squeeze, position: "aboveBar", shape: "square", color: "#64748b", defaultHidden: true },
-      { key: "m_sqz_bull", label: "挤压突破", idx: d.markers.price.squeeze_bull, position: "belowBar", shape: "arrowUp", color: RED, text: "突破" },
-      { key: "m_sqz_bear", label: "挤压下破", idx: d.markers.price.squeeze_bear, position: "aboveBar", shape: "arrowDown", color: GREEN, text: "下破" },
+      { key: "m_sqz_bull", label: "挤压突破", idx: d.markers.price.squeeze_bull, position: "belowBar", shape: "arrowUp", color: bull(d), text: "突破" },
+      { key: "m_sqz_bear", label: "挤压下破", idx: d.markers.price.squeeze_bear, position: "aboveBar", shape: "arrowDown", color: bear(d), text: "下破" },
       { key: "m_dt_rev", label: "下跌反转", idx: d.markers.price.downtrend_reversal, position: "belowBar", shape: "arrowUp", color: "#b91c1c" },
       { key: "m_ut_rev", label: "上涨反转", idx: d.markers.price.uptrend_reversal, position: "aboveBar", shape: "arrowDown", color: "#15803d" },
       { key: "m_exit", label: "MACD离场", idx: d.markers.price.exit_macd, position: "aboveBar", shape: "arrowDown", color: "#ea580c" },
-      { key: "m_sbuy", label: "强买", idx: d.markers.price.screaming_buy, position: "belowBar", shape: "arrowUp", color: RED, text: "★买" },
-      { key: "m_ssell", label: "强卖", idx: d.markers.price.screaming_sell, position: "aboveBar", shape: "arrowDown", color: GREEN, text: "★卖" },
+      { key: "m_sbuy", label: "强买", idx: d.markers.price.screaming_buy, position: "belowBar", shape: "arrowUp", color: bull(d), text: "★买" },
+      { key: "m_ssell", label: "强卖", idx: d.markers.price.screaming_sell, position: "aboveBar", shape: "arrowDown", color: bear(d), text: "★卖" },
     ],
     guides: [],
     bands: d.bands.regime.map((r) => ({ segments: [r], color: r.color })),
@@ -123,9 +134,9 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
         { key: "MACD_Signal", label: "信号", values: s(d, "MACD_Signal"), color: "#f59e0b", decimals: 3 },
       ],
       markers: [
-        { key: "mm_trig", label: "触发", idx: d.markers.macd.trigger, position: "belowBar", shape: "arrowUp", color: RED, anchor: "MACD" },
-        { key: "mm_peak", label: "见顶", idx: d.markers.macd.peaking, position: "aboveBar", shape: "arrowDown", color: GREEN, anchor: "MACD" },
-        { key: "mm_bear", label: "死叉", idx: d.markers.macd.bearish_cross, position: "aboveBar", shape: "circle", color: GREEN, anchor: "MACD" },
+        { key: "mm_trig", label: "触发", idx: d.markers.macd.trigger, position: "belowBar", shape: "arrowUp", color: bull(d), anchor: "MACD" },
+        { key: "mm_peak", label: "见顶", idx: d.markers.macd.peaking, position: "aboveBar", shape: "arrowDown", color: bear(d), anchor: "MACD" },
+        { key: "mm_bear", label: "死叉", idx: d.markers.macd.bearish_cross, position: "aboveBar", shape: "circle", color: bear(d), anchor: "MACD" },
       ],
       guides: [{ value: 0 }],
       bands: [
@@ -141,8 +152,8 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
         { key: "RSI_P10", label: "P10", values: s(d, "RSI_P10"), color: "#2563eb", style: "dotted", decimals: 1 },
       ],
       markers: [
-        { key: "mr_bot", label: "RSI底", idx: d.markers.rsi.bottoming, position: "belowBar", shape: "arrowUp", color: RED, anchor: "RSI" },
-        { key: "mr_top", label: "RSI顶", idx: d.markers.rsi.peaking, position: "aboveBar", shape: "arrowDown", color: GREEN, anchor: "RSI" },
+        { key: "mr_bot", label: "RSI底", idx: d.markers.rsi.bottoming, position: "belowBar", shape: "arrowUp", color: bull(d), anchor: "RSI" },
+        { key: "mr_top", label: "RSI顶", idx: d.markers.rsi.peaking, position: "aboveBar", shape: "arrowDown", color: bear(d), anchor: "RSI" },
       ],
       guides: [{ value: 70, color: "#fca5a5" }, { value: 30, color: "#93c5fd" }],
       bands: [],
@@ -158,11 +169,11 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
         { key: "DI_Minus", label: "−DI", values: s(d, "DI_Minus"), color: "#22c55e", decimals: 1 },
       ],
       markers: [
-        { key: "ma_sbuy", label: "DI强买", idx: d.markers.adx.di_screaming_buy, position: "belowBar", shape: "arrowUp", color: RED, text: "★", anchor: "ADX" },
-        { key: "ma_ssell", label: "DI强卖", idx: d.markers.adx.di_screaming_sell, position: "aboveBar", shape: "arrowDown", color: GREEN, text: "★", anchor: "ADX" },
-        { key: "ma_bot", label: "筑底", idx: d.markers.adx.bottoming, position: "belowBar", shape: "circle", color: RED, anchor: "ADX" },
+        { key: "ma_sbuy", label: "DI强买", idx: d.markers.adx.di_screaming_buy, position: "belowBar", shape: "arrowUp", color: bull(d), text: "★", anchor: "ADX" },
+        { key: "ma_ssell", label: "DI强卖", idx: d.markers.adx.di_screaming_sell, position: "aboveBar", shape: "arrowDown", color: bear(d), text: "★", anchor: "ADX" },
+        { key: "ma_bot", label: "筑底", idx: d.markers.adx.bottoming, position: "belowBar", shape: "circle", color: bull(d), anchor: "ADX" },
         { key: "ma_rup", label: "转强", idx: d.markers.adx.reversing_up, position: "belowBar", shape: "arrowUp", color: "#f97316", anchor: "ADX" },
-        { key: "ma_peak", label: "见顶", idx: d.markers.adx.peaking, position: "aboveBar", shape: "circle", color: GREEN, anchor: "ADX" },
+        { key: "ma_peak", label: "见顶", idx: d.markers.adx.peaking, position: "aboveBar", shape: "circle", color: bear(d), anchor: "ADX" },
         { key: "ma_rdn", label: "转弱", idx: d.markers.adx.reversing_down, position: "aboveBar", shape: "arrowDown", color: "#22c55e", anchor: "ADX" },
       ],
       guides: [{ value: 25, color: "#e5e7eb" }],
@@ -176,18 +187,29 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
         { key: "Volume_Z", label: "量Z", values: s(d, "Volume_Z"), color: "#0ea5e9", decimals: 2 },
       ],
       markers: [
-        { key: "mz_os", label: "超卖≤−2.5", idx: d.markers.z.oversold, position: "belowBar", shape: "arrowUp", color: RED, anchor: "Price_Z" },
-        { key: "mz_ob", label: "超买≥+2", idx: d.markers.z.overbought, position: "aboveBar", shape: "arrowDown", color: GREEN, anchor: "Price_Z" },
+        { key: "mz_os", label: "超卖≤−2.5", idx: d.markers.z.oversold, position: "belowBar", shape: "arrowUp", color: bull(d), anchor: "Price_Z" },
+        { key: "mz_ob", label: "超买≥+2", idx: d.markers.z.overbought, position: "aboveBar", shape: "arrowDown", color: bear(d), anchor: "Price_Z" },
       ],
       guides: [{ value: 2, color: "#fca5a5" }, { value: 0 }, { value: -2.5, color: "#93c5fd" }],
       bands: [],
     },
-    {
+  ];
+
+  // A pane whose every point is whitespace has NO data range, and the panes
+  // sync their visible range to each other — so one empty pane drags all of
+  // them to a degenerate range, the chart opens on a single bar near the start
+  // of history and no amount of zooming or resetting escapes it. That is what
+  // the P/E pane did on US stocks, where PE_TTM is null for every bar.
+  //
+  // Gated on having data rather than on the market, so a Chinese stock with no
+  // PE history (a loss-maker) is covered by the same rule.
+  if (hasData(d, "PE_TTM")) {
+    subs.push({
       id: "pe", title: "P/E (TTM)", height: 80,
       lines: [{ key: "PE_TTM", label: "PE", values: s(d, "PE_TTM"), color: "#334155", decimals: 2 }],
       markers: [], guides: [], bands: [],
-    },
-  ];
+    });
+  }
 
   if (d.has_moneyflow) {
     subs.push({
