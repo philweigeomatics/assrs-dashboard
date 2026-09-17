@@ -1,7 +1,7 @@
 import { devFakeToken, supabase } from "./supabase";
 import type {
   AlertFeed, Analysis, BasketStats, CompareResult, HistoryRef, PairStats, SectorAnalysis,
-  SimResult, StockRef, WhatIfAi,
+  SimResult, StockRef, StrategyResult, WhatIfAi,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -64,6 +64,9 @@ export const api = {
   alerts: (date?: string) => call<AlertFeed>(`/alerts${date ? `?date=${date}` : ""}`),
   basket: (symbols: string[], window: string) =>
     call<BasketStats>(`/basket?symbols=${symbols.map(encodeURIComponent).join(",")}&window=${window}`),
+  strategy: (name: string) => call<StrategyResult>(`/strategies/${name}`),
+  strategyScan: (name: string) =>
+    call<StrategyResult>(`/strategies/${name}/scan`, { method: "POST" }),
   compareStats: (t: string, other: string, window: string) =>
     call<PairStats>(`/compare-stats/${t}?with=${other}&window=${window}`),
   sectors: (t: string, window: number) => call<SectorAnalysis>(`/sectors/${t}?window=${window}`),

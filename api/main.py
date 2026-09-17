@@ -101,6 +101,23 @@ class TTLCache:
         self._lock = threading.Lock()
         self._inflight: dict = {}
 
+    def peek(self, key):
+        """The value if it is present and unexpired, else None. Never computes."""
+        with self._lock:
+            hit = self._d.get(key)
+            if hit and time.time() - hit[0] < self.ttl:
+                self._d.move_to_end(key)
+                return hit[1]
+        return None
+
+    def put(self, key, value) -> None:
+        """Store a value computed elsewhere — a scan the caller already ran."""
+        with self._lock:
+            self._d[key] = (time.time(), value)
+            self._d.move_to_end(key)
+            while len(self._d) > self.maxsize:
+                self._d.popitem(last=False)
+
     def get_or_compute(self, key, fn):
         with self._lock:
             hit = self._d.get(key)
@@ -519,6 +536,56 @@ def basket(symbols: str = Query(..., description="comma-separated, 2-8, one mark
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:
         raise HTTPException(503, str(exc))
+
+
+_strategy_cache = TTLCache(maxsize=8, ttl_s=30 * 60)
+
+
+@app.get("/strategies/{name}")
+def strategy(name: str = Path(..., pattern="^(t-trading|mean-reversion)$"),
+             user: AppUser = Depends(current_user)):
+    """
+    The last result for one watchlist screen. Never scans — see the POST.
+
+    做T comes from the same t_trading_scans table the Streamlit page writes, so
+    a scan run in either app is visible in both. 反转 has no such table and is
+    held in memory, which is why it answers 404 until something has run.
+    """
+    from api import strategies_api as sa
+
+    if name == "t-trading":
+        with _as_user(user):
+            saved = sa.t_trading_saved(user.id)
+        if saved is None:
+            raise HTTPException(404, "还没有扫描过 — 点击“开始扫描”")
+        return saved
+
+    hit = _strategy_cache.peek(("mean-reversion", user.id))
+    if hit is None:
+        raise HTTPException(404, "还没有扫描过 — 点击“开始扫描”")
+    return hit
+
+
+@app.post("/strategies/{name}/scan")
+def strategy_scan(name: str = Path(..., pattern="^(t-trading|mean-reversion)$"),
+                  user: AppUser = Depends(current_user)):
+    """
+    Run a screen across the whole watchlist. Slow on purpose — two or three
+    Tushare calls per holding, serially, because bursts lose stocks and a
+    screen that quietly omits one of your positions is worse than a slow one.
+    """
+    from api import strategies_api as sa
+
+    with _as_user(user):
+        import data_manager
+        if not (data_manager.get_watchlist() or []):
+            raise HTTPException(404, "自选股为空 — 先在自选股页面添加股票")
+        out = (sa.t_trading_scan(user.id) if name == "t-trading"
+               else sa.mean_reversion_scan(user.id))
+
+    if name == "mean-reversion":
+        _strategy_cache.put(("mean-reversion", user.id), out)
+    return out
 
 
 @app.get("/sectors/{ticker}")

@@ -45,6 +45,7 @@ RUN pip install -r /tmp/requirements-root.txt -r /tmp/requirements-api.txt
 COPY *.py ./
 COPY api ./api
 COPY markets ./markets
+COPY strategies ./strategies
 
 # Cloud Run injects PORT; 8080 is its default.
 ENV PORT=8080

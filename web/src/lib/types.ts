@@ -381,3 +381,41 @@ export type BasketStats = {
   correlation: Num[][];
   verdicts: BasketVerdict[];
 };
+
+/** GET/POST /strategies/{name} — the watchlist screens. */
+export type StrategyRow = {
+  ticker: string;
+  name: string;
+  verdict?: string;
+  verdict_cn: string;
+  rank?: number;
+  why?: string;
+  /** 做T */
+  score?: Num;
+  range_pct?: Num;
+  turnover_pct?: Num;
+  meanrev_bias?: Num;
+  adx?: Num;
+  range_pos?: Num;
+  limit_event?: boolean;
+  parts?: Record<string, Num>;
+  /** 反转 */
+  rules?: Record<string, boolean | null>;
+  passed?: number;
+  z?: Num;
+  rsi?: Num;
+  down_days?: Num;
+  vol_exhausted?: boolean;
+  limit_down_streak?: number;
+  vs_sector_pp?: Num;
+  ret_5d_pct?: Num;
+};
+
+export type StrategyResult = {
+  scanned_at: string | null;
+  age_hours: Num;
+  stale: boolean;
+  count: number;
+  counts: Record<string, number>;
+  rows: StrategyRow[];
+};

@@ -7,6 +7,7 @@ import { SetPasswordPage } from "./auth/SetPasswordPage";
 import { TechnicalAnalysis } from "./routes/TechnicalAnalysis";
 import { Alerts } from "./routes/Alerts";
 import { Basket } from "./routes/Basket";
+import { Strategies } from "./routes/Strategies";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
@@ -48,6 +49,14 @@ export function App() {
               element={
                 <RequireAuth>
                   <Basket />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/strategies"
+              element={
+                <RequireAuth>
+                  <Strategies />
                 </RequireAuth>
               }
             />
