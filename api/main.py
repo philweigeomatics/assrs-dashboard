@@ -86,7 +86,7 @@ app.add_middleware(
     # allow those for this project only, never any *.pages.dev.
     allow_origin_regex=os.environ.get("ALLOWED_ORIGIN_REGEX") or None,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -539,6 +539,9 @@ def basket(symbols: str = Query(..., description="comma-separated, 2-8, one mark
 
 
 _strategy_cache = TTLCache(maxsize=8, ttl_s=30 * 60)
+# Cointegration over ten codes is 45 pairs of rolling OLS — seconds, not
+# milliseconds, and the same basket gets re-examined as you read it.
+_pairtrade_cache = TTLCache(maxsize=20, ttl_s=20 * 60)
 
 
 @app.get("/strategies/{name}")
@@ -586,6 +589,120 @@ def strategy_scan(name: str = Path(..., pattern="^(t-trading|mean-reversion)$"),
     if name == "mean-reversion":
         _strategy_cache.put(("mean-reversion", user.id), out)
     return out
+
+
+class PairReq(BaseModel):
+    """2-10 A-share codes. No defaults anywhere — the caller picks every one."""
+    symbols: list[str] = Field(..., min_length=2, max_length=10)
+    z_window: int = Field(60, ge=20, le=120)
+    ols_window: int = Field(252, ge=60, le=504)
+
+
+@app.post("/strategies/pair-trade")
+def pair_trade(req: PairReq, user: AppUser = Depends(current_user)):
+    """
+    配对交易: test every unique pair among the supplied codes.
+
+    A-shares only. The engine's whole reading of the signal is buy-only
+    because shorting A-shares is restricted, and the cointegration statistics
+    are computed on a walk-forward spread whose hedge ratio never saw the day
+    it is used on — neither of which transfers to another market without
+    rethinking it, so mixing markets is refused rather than approximated.
+    """
+    import pandas as pd
+    from strategies import pair_trade as pt
+
+    try:
+        codes = [markets.canonical(sym) for sym in req.symbols]
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+    codes = list(dict.fromkeys(codes))
+    if any(markets.split(c)[0] != "CN" for c in codes):
+        raise HTTPException(422, "配对交易目前仅支持 A 股")
+    if len(codes) < 2:
+        raise HTTPException(422, "至少需要两只不同的股票")
+
+    def load():
+        frames = {}
+        for code in codes:
+            df = markets.get("CN").fetch_ohlcv(code)
+            if df is None or df.empty:
+                raise RuntimeError(f"{code} 行情读取失败 — 请稍后重试")
+            frames[code] = df["Close"].rename(code)
+        prices = pd.concat(frames.values(), axis=1).dropna()
+
+        results, skipped = pt.rank_pairs(prices, req.z_window, req.ols_window)
+        out = []
+        for r in results:
+            signal, buy, reduce_ = pt.signal_for_pair(r)
+            trades = pt.detect_trades(r["z_series"], r["dates"], prices,
+                                      r["code_a"], r["code_b"])
+            closed = [t for t in trades if not t["open"]]
+            wins = [t for t in closed if (t["pnl_pct"] or 0) > 0]
+            out.append({
+                **{k: v for k, v in r.items()
+                   if k not in ("dates", "spread", "z_series", "beta_series")},
+                "name_a": _name(r["code_a"]), "name_b": _name(r["code_b"]),
+                "signal": signal, "signal_cn": pt.SIGNAL_CN[signal],
+                "buy": buy, "reduce": reduce_,
+                "dates": [d.strftime("%Y-%m-%d") for d in r["dates"]],
+                "spread": [round(float(v), 5) for v in r["spread"]],
+                "z_series": [None if v != v else round(float(v), 3) for v in r["z_series"]],
+                "trades": trades,
+                "closed": len(closed),
+                "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else None,
+                "avg_pnl_pct": (round(sum(t["pnl_pct"] or 0 for t in closed) / len(closed), 2)
+                                if closed else None),
+            })
+        return {
+            "from": str(prices.index.min().date()), "to": str(prices.index.max().date()),
+            "bars": len(prices), "z_window": req.z_window, "ols_window": req.ols_window,
+            "codes": [{"t": c, "n": _name(c)} for c in codes],
+            "pairs": out, "skipped": skipped,
+        }
+
+    try:
+        return _pairtrade_cache.get_or_compute(
+            (tuple(codes), req.z_window, req.ols_window), load)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.get("/watchlist")
+def watchlist(user: AppUser = Depends(current_user)):
+    import data_manager
+    with _as_user(user):
+        rows = data_manager.get_watchlist() or []
+    return [{"t": str(r.get("ticker")), "n": str(r.get("stock_name") or r.get("ticker"))}
+            for r in rows]
+
+
+@app.post("/watchlist/{ticker}")
+def watchlist_add(ticker: str = TICKER, user: AppUser = Depends(current_user)):
+    import data_manager
+    if markets.split(ticker)[0] != "CN":
+        # The watchlist feeds the nightly A-share scan and every screen built
+        # on it; a US symbol in there would be scanned by code that assumes
+        # Tushare, and fail nightly rather than visibly.
+        raise HTTPException(422, "自选股目前仅支持 A 股")
+    with _as_user(user):
+        ok, msg = data_manager.add_to_watchlist(ticker)
+    if not ok:
+        raise HTTPException(400, str(msg))
+    return {"t": ticker, "message": str(msg)}
+
+
+@app.delete("/watchlist/{ticker}")
+def watchlist_remove(ticker: str = TICKER, user: AppUser = Depends(current_user)):
+    import data_manager
+    with _as_user(user):
+        result = data_manager.remove_from_watchlist(ticker)
+    ok, msg = result if isinstance(result, tuple) else (bool(result), "")
+    if not ok:
+        raise HTTPException(400, str(msg) or "移除失败")
+    return {"t": ticker, "message": str(msg)}
 
 
 @app.get("/sectors/{ticker}")

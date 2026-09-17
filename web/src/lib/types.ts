@@ -419,3 +419,33 @@ export type StrategyResult = {
   counts: Record<string, number>;
   rows: StrategyRow[];
 };
+
+/** POST /strategies/pair-trade — 配对交易. */
+export type PairTrade = {
+  entry: string; exit: string;
+  entry_z: number; exit_z: number;
+  direction: "BUY_A" | "BUY_B";
+  open: boolean;
+  buy_code: string;
+  entry_price: Num; exit_price: Num; pnl_pct: Num;
+};
+
+export type PairResult = {
+  code_a: string; code_b: string; name_a: string; name_b: string;
+  eg_p: number; adf_p: number; hurst: number; corr: number;
+  half_life: number; beta_now: number; z_now: number; score: number;
+  coint_ok: boolean; adf_ok: boolean; hurst_ok: boolean; hl_ok: boolean;
+  signal: "BUY_A" | "BUY_B" | "WATCH" | "NEUTRAL";
+  signal_cn: string; buy: string; reduce: string;
+  dates: string[]; spread: number[]; z_series: Num[];
+  trades: PairTrade[];
+  closed: number; win_rate: Num; avg_pnl_pct: Num;
+};
+
+export type PairTradeResult = {
+  from: string; to: string; bars: number;
+  z_window: number; ols_window: number;
+  codes: StockRef[];
+  pairs: PairResult[];
+  skipped: { code_a: string; code_b: string; why: string }[];
+};

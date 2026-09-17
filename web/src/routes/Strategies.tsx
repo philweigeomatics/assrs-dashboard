@@ -17,9 +17,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api";
 import type { Num, StrategyResult, StrategyRow } from "../lib/types";
 import { NavBar } from "../components/NavBar";
+import { PairTrade } from "../components/PairTrade";
 import { fixed, signed } from "../lib/format";
 
-type TabId = "t-trading" | "mean-reversion";
+type TabId = "t-trading" | "mean-reversion" | "pair-trade";
 
 const TABS: { id: TabId; label: string; blurb: string }[] = [
   {
@@ -27,6 +28,12 @@ const TABS: { id: TabId; label: string; blurb: string }[] = [
     label: "⚡ 做T候选",
     blurb: "T+1 下做日内回转：卖掉手里的票再低位买回，仓位不变、差价落袋。"
       + "需要日内有波动、能进出、且收盘回到区间中部——单边趋势和封板都做不了。",
+  },
+  {
+    id: "pair-trade",
+    label: "🔗 配对交易",
+    blurb: "两只通常同涨同跌的票，在价差被拉开时买便宜的那条腿。"
+      + "对冲比率逐日滚动估计并前推一天，所以价差与历史交易都是样本外的。",
   },
   {
     id: "mean-reversion",
@@ -38,7 +45,6 @@ const TABS: { id: TabId; label: string; blurb: string }[] = [
 
 //: Not yet ported; named here so the tab bar tells the truth about what exists.
 const COMING = [
-  { label: "配对交易", why: "协整与价差 Z 分数，需要自己的价差图" },
   { label: "领先滞后", why: "跨股滞后相关，需要自己的滞后曲线图" },
 ];
 
@@ -69,13 +75,13 @@ export function Strategies() {
           </span>
         </nav>
 
-        <Screen key={tab} id={tab} />
+        {tab === "pair-trade" ? <PairTrade /> : <Screen key={tab} id={tab} />}
       </main>
     </div>
   );
 }
 
-function Screen({ id }: { id: TabId }) {
+function Screen({ id }: { id: "t-trading" | "mean-reversion" }) {
   const meta = TABS.find((t) => t.id === id)!;
   const qc = useQueryClient();
 
@@ -152,7 +158,7 @@ const VERDICT_LABEL: Record<string, string> = {
   not_now: "⚪ 暂不", skip: "⛔ 排除", no_data: "⚠️ 无数据",
 };
 
-function Counts({ d, id }: { d: StrategyResult; id: TabId }) {
+function Counts({ d, id }: { d: StrategyResult; id: "t-trading" | "mean-reversion" }) {
   const order = VERDICT_ORDER[id]!;
   const keys = Object.keys(d.counts).sort(
     (a, b) => (order.indexOf(a) + 99) % 99 - (order.indexOf(b) + 99) % 99);

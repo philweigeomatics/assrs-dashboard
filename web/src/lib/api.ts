@@ -1,7 +1,7 @@
 import { devFakeToken, supabase } from "./supabase";
 import type {
   AlertFeed, Analysis, BasketStats, CompareResult, HistoryRef, PairStats, SectorAnalysis,
-  SimResult, StockRef, StrategyResult, WhatIfAi,
+  PairTradeResult, SimResult, StockRef, StrategyResult, WhatIfAi,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -65,6 +65,17 @@ export const api = {
   basket: (symbols: string[], window: string) =>
     call<BasketStats>(`/basket?symbols=${symbols.map(encodeURIComponent).join(",")}&window=${window}`),
   strategy: (name: string) => call<StrategyResult>(`/strategies/${name}`),
+  pairTrade: (symbols: string[], zWindow: number, olsWindow: number) =>
+    call<PairTradeResult>("/strategies/pair-trade", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbols, z_window: zWindow, ols_window: olsWindow }),
+    }),
+  watchlist: () => call<StockRef[]>("/watchlist"),
+  watchlistAdd: (t: string) =>
+    call<{ t: string; message: string }>(`/watchlist/${t}`, { method: "POST" }),
+  watchlistRemove: (t: string) =>
+    call<{ t: string; message: string }>(`/watchlist/${t}`, { method: "DELETE" }),
   strategyScan: (name: string) =>
     call<StrategyResult>(`/strategies/${name}/scan`, { method: "POST" }),
   compareStats: (t: string, other: string, window: string) =>
