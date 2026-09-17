@@ -1,6 +1,6 @@
 /** Shapes returned by the FastAPI service (api/main.py, ta_payload.py). */
 
-export type StockRef = { t: string; n: string };
+export type StockRef = { t: string; n: string; ex?: string };
 export type HistoryRef = StockRef & { at?: string | null };
 
 export type Num = number | null;
@@ -12,6 +12,8 @@ export type Header = {
   change_pct: Num;
   total_mv_yi: Num;
   circ_mv_yi: Num;
+  /** Raw, in the instrument's own currency. Format by market, not by 亿. */
+  market_cap: Num;
   pe_ttm: Num;
   pb: Num;
   turnover_rate: Num;
@@ -102,9 +104,18 @@ export type Chips = {
   decay: number;
 };
 
+export type MarketCode = "CN" | "US" | "CA";
+
 export type Analysis = {
   ticker: string;
   name: string;
+  market: MarketCode;
+  currency: string;
+  currency_symbol: string;
+  /** Red means UP in Shanghai and DOWN in New York. Never assume. */
+  up_is_red: boolean;
+  benchmark_name: string;
+  sector: string | null;
   header: Header;
   signals: Signals;
   boxes: ChartBox[];

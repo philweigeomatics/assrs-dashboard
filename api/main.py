@@ -36,12 +36,39 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.middleware.gzip import GZipMiddleware  # noqa: E402
 
 import alerts_feed  # noqa: E402
+import markets  # noqa: E402
 import pair_compare  # noqa: E402
 import sector_affinity  # noqa: E402
 import ta_payload  # noqa: E402
 from api.auth import AppUser, current_user  # noqa: E402
 
-TICKER = Path(..., pattern=r"^\d{6}$", description="6-digit A-share code")
+# A bare six-digit code is an A-share, for every ticker already stored; other
+# markets carry a prefix (US:AAPL, CA:SHOP.TO). markets.split() is the one
+# place that mapping lives.
+#
+# Validated as a DEPENDENCY rather than a path pattern so that every route
+# receives the canonical form and none of them has to canonicalise again — and
+# so a symbol that is shaped like a ticker but belongs to no market is refused
+# here, before any fetch, cache lookup or HMM. "Not a symbol" is a malformed
+# request (422), not a missing stock (404).
+def _symbol(ticker: str = Path(..., pattern=markets.SYMBOL_RE.pattern,
+                               description="600519, US:AAPL or CA:SHOP.TO")) -> str:
+    try:
+        return markets.canonical(ticker)
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+
+
+def _other(with_: str = Query(..., alias="with",
+                              pattern=markets.SYMBOL_RE.pattern)) -> str:
+    try:
+        return markets.canonical(with_)
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+
+
+TICKER = Depends(_symbol)
+OTHER = Depends(_other)
 
 app = FastAPI(title="ASSRS API", version="0.1.0",
               docs_url="/docs", openapi_url="/openapi.json")
@@ -139,23 +166,22 @@ def _frames(ticker: str):
     interactive instead of each one restarting the analysis.
     """
     def load():
-        import data_manager
-        import watchlist_scan
         from analysis_engine import run_single_stock_analysis
-        df = watchlist_scan.fetch_frame(ticker)
+        market, code = markets.parse(ticker)
+        df = market.fetch_ohlcv(code)
         if df is None:
             raise RuntimeError(f"price data for {ticker} could not be fetched — try again")
         if len(df) < 60:
             raise LookupError(f"not enough price history for {ticker}")
-        adf = run_single_stock_analysis(df)
-        fund = data_manager.get_stock_fundamentals_live(
-            ticker, df.index.min().strftime("%Y%m%d"), df.index.max().strftime("%Y%m%d"))
+        adf = run_single_stock_analysis(df, regime_anchor=market.conv.regime_anchor)
+        fund = market.fetch_fundamentals(
+            code, df.index.min().strftime("%Y%m%d"), df.index.max().strftime("%Y%m%d"))
         return adf, fund
-    return _frames_cache.get_or_compute(ticker, load)
+    return _frames_cache.get_or_compute(markets.canonical(ticker), load)
 
 
 _pricefund_cache = TTLCache(maxsize=40, ttl_s=20 * 60)
-_bench_cache = TTLCache(maxsize=1, ttl_s=6 * 3600)
+_bench_cache = TTLCache(maxsize=4, ttl_s=6 * 3600)
 _pair_cache = TTLCache(maxsize=80, ttl_s=20 * 60)
 
 
@@ -168,28 +194,38 @@ def _price_fund(ticker: str):
     must not be slower than analysing one.
     """
     def load():
-        import data_manager
-        import watchlist_scan
-        df = watchlist_scan.fetch_frame(ticker)
+        market, code = markets.parse(ticker)
+        df = market.fetch_ohlcv(code)
         if df is None:
             raise RuntimeError(f"price data for {ticker} could not be fetched — try again")
         if len(df) < 60:
             raise LookupError(f"not enough price history for {ticker}")
-        fund = data_manager.get_stock_fundamentals_live(
-            ticker, df.index.min().strftime("%Y%m%d"), df.index.max().strftime("%Y%m%d"))
+        fund = market.fetch_fundamentals(
+            code, df.index.min().strftime("%Y%m%d"), df.index.max().strftime("%Y%m%d"))
         return df["Close"], fund
-    return _pricefund_cache.get_or_compute(ticker, load)
+    return _pricefund_cache.get_or_compute(markets.canonical(ticker), load)
 
 
-def _benchmark():
-    """沪深300 closes — shared by every comparison, so fetched once."""
+def _name(symbol: str) -> str:
+    market, code = markets.parse(symbol)
+    ref = market.resolve(code)
+    return (ref.name if ref else None) or symbol
+
+
+def _benchmark(market_code: str = "CN"):
+    """
+    The market's own index, cached — one fetch serves every comparison.
+
+    Beta against the wrong index is not a worse number, it is a meaningless
+    one, so this is keyed by market rather than defaulting to 沪深300.
+    """
     def load():
-        import data_manager
-        idx = data_manager.get_index_data_live("000300.SH", lookback_days=1200)
-        if idx is None or idx.empty:
-            raise RuntimeError("沪深300 指数数据暂时读取不到 — 请稍后重试")
-        return idx["Close"]
-    return _bench_cache.get_or_compute("csi300", load)
+        mk = markets.get(market_code)
+        series = mk.fetch_benchmark(years=4)
+        if series is None or series.empty:
+            raise RuntimeError(f"{mk.conv.benchmark_name} 指数数据暂时读取不到 — 请稍后重试")
+        return series
+    return _bench_cache.get_or_compute(market_code, load)
 
 
 class SimReq(BaseModel):
@@ -244,6 +280,25 @@ def stocks(user: AppUser = Depends(current_user)):
         raise HTTPException(503, str(exc))
 
 
+@app.get("/search")
+def search(q: str = Query(..., min_length=1, max_length=40),
+           market: str = Query("US", pattern="^(US|CA)$"),
+           user: AppUser = Depends(current_user)):
+    """
+    Instrument search for the North American markets.
+
+    A-shares are not served here: the frontend already holds all 5,600 of them
+    from /stocks and filters locally, with no request per keystroke. There is
+    no equivalent downloadable universe for US/CA listings, so those go to the
+    source — which is why this route exists at all.
+    """
+    try:
+        hits = markets.get(market).search(q.strip(), limit=8)
+    except Exception as exc:                                  # noqa: BLE001
+        raise HTTPException(503, f"搜索暂时不可用：{exc}"[:200])
+    return [{"t": f"{market}:{h.symbol}", "n": h.name, "ex": h.exchange} for h in hits]
+
+
 @app.get("/history")
 def history(user: AppUser = Depends(current_user)):
     import data_manager
@@ -256,8 +311,12 @@ def history(user: AppUser = Depends(current_user)):
 @app.post("/history/{ticker}")
 def add_history(ticker: str = TICKER, user: AppUser = Depends(current_user)):
     import data_manager
+    market, code = markets.parse(ticker)
+    # Resolved here rather than inside data_manager: only the market knows how
+    # to name a US ticker, and stock_basic never will.
+    ref = market.resolve(code) if market.conv.code != "CN" else None
     with _as_user(user):
-        name = data_manager.update_search_history(ticker)
+        name = data_manager.update_search_history(ticker, name=ref.name if ref else None)
     return {"t": ticker, "n": name or ticker}
 
 
@@ -305,10 +364,11 @@ def whatif_ai(req: AiReq, ticker: str = TICKER, user: AppUser = Depends(current_
     尾盘推演: the AI read of the ghost bar, or of the last real session when
     no ghost is drawn. One DeepSeek call, 20-60s.
     """
-    import data_manager
     from api import extras
     adf, _ = _frames(ticker)
-    name = data_manager.get_stock_name_from_db(ticker) or ticker
+    market, code = markets.parse(ticker)
+    ref = market.resolve(code)
+    name = (ref.name if ref else None) or ticker
     try:
         return extras.whatif_ai(adf, ticker, name, mode=req.mode, pct=req.pct,
                                 volume=req.volume, open_=req.open, high=req.high,
@@ -361,7 +421,7 @@ def alerts(date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
 
 @app.get("/compare-stats/{ticker}")
 def compare_stats(ticker: str = TICKER,
-                  with_: str = Query(..., alias="with", pattern=r"^\d{6}$"),
+                  with_: str = OTHER,
                   window: str = Query(pair_compare.DEFAULT_WINDOW),
                   user: AppUser = Depends(current_user)):
     """
@@ -375,12 +435,18 @@ def compare_stats(ticker: str = TICKER,
     if with_ == ticker:
         raise HTTPException(422, "cannot compare a stock with itself")
 
-    import data_manager
+    market_code = markets.split(ticker)[0]
+    if markets.split(with_)[0] != market_code:
+        # Beta and alpha are measured against ONE index, and the two stocks
+        # would be priced in different currencies. Neither is fixable without
+        # an FX series, and a number produced anyway would look authoritative.
+        raise HTTPException(422, "暂不支持跨市场对比 — 两只股票需在同一市场")
+
     try:
         adf, a_fund = _frames(ticker)
         b_close, b_fund = _price_fund(with_)
         try:
-            bench = _benchmark()
+            bench = _benchmark(market_code)
         except RuntimeError:
             # Beta, alpha and capture need the market; everything else does
             # not. Losing the index should cost those fields, not the panel.
@@ -390,8 +456,7 @@ def compare_stats(ticker: str = TICKER,
             lambda: pair_compare.compare(
                 adf["Close"], b_close, bench_close=bench,
                 a_fund=a_fund, b_fund=b_fund,
-                a_label=data_manager.get_stock_name_from_db(ticker) or ticker,
-                b_label=data_manager.get_stock_name_from_db(with_) or with_,
+                a_label=_name(ticker), b_label=_name(with_),
                 window=window))
     except LookupError as exc:
         raise HTTPException(404, str(exc))
@@ -412,6 +477,11 @@ def sectors(ticker: str = TICKER,
     """
     if window not in sector_affinity.WINDOWS:
         raise HTTPException(422, f"window must be one of {list(sector_affinity.WINDOWS)}")
+    if markets.split(ticker)[0] != "CN":
+        # The PPI_* sector indices are A-share only. US/CA sectors will come
+        # from sector ETFs; until then this says so rather than correlating
+        # a US stock against Chinese baskets, which would return numbers.
+        raise HTTPException(404, "该市场暂无板块指数数据")
 
     def load_rets():
         rets = sector_affinity.load_sector_returns()
@@ -436,12 +506,13 @@ def sectors(ticker: str = TICKER,
 
 @app.get("/compare/{ticker}")
 def compare(ticker: str = TICKER,
-            with_: str = Query(..., alias="with", pattern=r"^\d{6}$"),
+            with_: str = OTHER,
             user: AppUser = Depends(current_user)):
     """A second stock aligned to this one's bars, in both scalings."""
     from api import extras
     adf, _ = _frames(ticker)
-    dates = [d.strftime("%Y-%m-%d") for d in ta_payload.chart_window(adf).index]
+    anchor = markets.parse(ticker)[0].conv.regime_anchor
+    dates = [d.strftime("%Y-%m-%d") for d in ta_payload.chart_window(adf, anchor).index]
     try:
         return extras.compare(adf, with_, dates)
     except LookupError as exc:

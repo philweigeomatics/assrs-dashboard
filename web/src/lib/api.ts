@@ -49,6 +49,8 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const api = {
   me: () => call<{ app_user_id: number; username: string; email: string; role: string }>("/me"),
   stocks: () => call<StockRef[]>("/stocks"),
+  search: (q: string, market: "US" | "CA") =>
+    call<StockRef[]>(`/search?q=${encodeURIComponent(q)}&market=${market}`),
   history: () => call<HistoryRef[]>("/history"),
   addHistory: (t: string) => call<StockRef>(`/history/${t}`, { method: "POST" }),
   analysis: (t: string) => call<Analysis>(`/analysis/${t}`),

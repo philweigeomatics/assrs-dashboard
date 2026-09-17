@@ -77,16 +77,25 @@ def _col(df: pd.DataFrame, name: str, default=np.nan) -> pd.Series:
     return df[name] if name in df.columns else pd.Series(default, index=df.index)
 
 
-def chart_window(df: pd.DataFrame) -> pd.DataFrame:
+def chart_window(df: pd.DataFrame, regime_anchor=None) -> pd.DataFrame:
     """
     The exact slice the Streamlit chart draws: from the regime anchor when that
     leaves at least 60 bars, else the last INITIAL_VISIBLE_BARS.
+
+    The anchor is a display decision as much as a statistical one — an A-share
+    chart starts at the 924 pivot because the market before it was a different
+    market. A US stock has no such date, and passing markets.NO_REGIME_BREAK
+    keeps every bar: no session is earlier than Timestamp.min, so the anchored
+    slice is the whole frame.
+
+    Defaults to the A-share anchor, so existing callers are unchanged.
     """
     from analysis_engine import REGIME_ANCHOR
     if df is None or getattr(df, "empty", True):
         return df
+    anchor = REGIME_ANCHOR if regime_anchor is None else regime_anchor
     d = df.sort_index()
-    anchored = d[d.index >= pd.Timestamp(REGIME_ANCHOR)]
+    anchored = d[d.index >= pd.Timestamp(anchor)]
     if len(anchored) >= 60:
         return anchored
     return d.tail(INITIAL_VISIBLE_BARS)
@@ -156,13 +165,14 @@ def load_moneyflow(ticker: str, lookback_days: int = MF_LOOKBACK_DAYS):
 # ── the payload ──────────────────────────────────────────────────────────────
 def build_series(analysis_df: pd.DataFrame,
                  fundamentals_df: pd.DataFrame | None = None,
-                 moneyflow_df: pd.DataFrame | None = None) -> dict:
+                 moneyflow_df: pd.DataFrame | None = None,
+                 regime_anchor=None) -> dict:
     """
     Every chart array and marker for the windowed bars. Pure: takes frames,
     returns a dict. Split from build_payload so the parity test can feed it
     the exact frames it hands the Streamlit chart function.
     """
-    df = chart_window(analysis_df)
+    df = chart_window(analysis_df, regime_anchor)
     n = len(df)
 
     # Volume pane — OBV动能: net signed volume over N sessions / avg daily volume.
@@ -277,7 +287,19 @@ def build_series(analysis_df: pd.DataFrame,
     }
 
 
-def build_header(analysis_df: pd.DataFrame, fundamentals_df: pd.DataFrame | None) -> dict:
+def build_header(analysis_df: pd.DataFrame, fundamentals_df: pd.DataFrame | None,
+                 profile: dict | None = None) -> dict:
+    """
+    The strip above the chart.
+
+    `market_cap` is raw, in the instrument's own currency, so the frontend can
+    format it the way that market is read — 亿 for A-shares, B for North
+    America. `total_mv_yi` stays for the A-share path that already consumes it.
+
+    `profile` is the point-in-time snapshot a market supplies when it has no
+    daily fundamentals series (North America). It fills the same cells, and the
+    values are only ever right for the LAST bar — which is all the header shows.
+    """
     last = analysis_df.iloc[-1]
     prev_close = float(analysis_df['Close'].iloc[-2]) if len(analysis_df) > 1 else float(last['Close'])
     close = float(last['Close'])
@@ -286,17 +308,26 @@ def build_header(analysis_df: pd.DataFrame, fundamentals_df: pd.DataFrame | None
         "close": _num(close, 3),
         "prev_close": _num(prev_close, 3),
         "change_pct": _num((close / prev_close - 1) * 100 if prev_close else None, 2),
-        "total_mv_yi": None, "circ_mv_yi": None,
+        "total_mv_yi": None, "circ_mv_yi": None, "market_cap": None,
         "pe_ttm": None, "pb": None, "turnover_rate": None,
     }
     if fundamentals_df is not None and not fundamentals_df.empty:
         f = fundamentals_df.iloc[-1]
+        mv_yi = _num(f.get('Total_MV_Yi'), 1)
         out.update({
-            "total_mv_yi": _num(f.get('Total_MV_Yi'), 1),
+            "total_mv_yi": mv_yi,
             "circ_mv_yi": _num(f.get('Circ_MV_Yi'), 1),
+            # Total_MV_Yi is in 亿元; the raw figure is that times 1e8.
+            "market_cap": _num(mv_yi * 1e8, 0) if mv_yi is not None else None,
             "pe_ttm": _num(f.get('PE_TTM'), 2),
             "pb": _num(f.get('PB'), 2),
             "turnover_rate": _num(f.get('Turnover_Rate'), 2),
+        })
+    elif profile:
+        out.update({
+            "market_cap": _num(profile.get("market_cap"), 0),
+            "pe_ttm": _num(profile.get("pe_ttm"), 2),
+            "pb": _num(profile.get("pb"), 2),
         })
     return out
 
@@ -455,36 +486,53 @@ def build_payload(ticker: str, analysis_df: pd.DataFrame | None = None,
     What-If simulator and the comparison overlay reuse this stock's analysis
     instead of paying ~20s for it again.
     """
-    import data_manager
     import box_detection as bxd
-    import watchlist_scan
+    import markets
     from analysis_engine import run_single_stock_analysis
 
-    # Retried, and the two failure modes kept apart: ts.pro_bar returns None
-    # when the CALL fails (timeout, rate-limit hiccup) while a genuinely young
-    # stock returns a short frame. Folding them together told the user
-    # "not enough price history" for what was really a network blip — which is
-    # exactly what it said the first time this page hit a flaky fetch.
+    market, code = markets.parse(ticker)
+    conv = market.conv
+
+    # Retried, and the two failure modes kept apart: a fetch returns None when
+    # the CALL fails (timeout, rate-limit hiccup) while a genuinely young stock
+    # returns a short frame. Folding them together told the user "not enough
+    # price history" for what was really a network blip — which is exactly what
+    # it said the first time this page hit a flaky fetch.
     if analysis_df is None:
-        stock_df = watchlist_scan.fetch_frame(ticker)
+        stock_df = market.fetch_ohlcv(code)
         if stock_df is None:
             raise RuntimeError(
-                f"price data for {ticker} could not be fetched "
-                f"(after {watchlist_scan.FETCH_ATTEMPTS} attempts) — try again")
+                f"price data for {ticker} could not be fetched — try again")
         if len(stock_df) < 60:
             raise LookupError(f"not enough price history for {ticker}")
-        analysis_df = run_single_stock_analysis(stock_df)
-        fundamentals_df = data_manager.get_stock_fundamentals_live(
-            ticker, stock_df.index.min().strftime('%Y%m%d'),
+        analysis_df = run_single_stock_analysis(
+            stock_df, regime_anchor=conv.regime_anchor)
+        fundamentals_df = market.fetch_fundamentals(
+            code, stock_df.index.min().strftime('%Y%m%d'),
             stock_df.index.max().strftime('%Y%m%d'))
-    moneyflow_df = load_moneyflow(ticker)
+
+    # 主力净流入 is a Tushare series with no North American equivalent, and the
+    # profile snapshot is the reverse — so each market supplies what it has.
+    moneyflow_df = load_moneyflow(code) if conv.code == "CN" else None
+    profile = market.profile(code) if hasattr(market, "profile") else None
+    ref = market.resolve(code)
     boxes = bxd.detect_boxes(analysis_df)
 
-    body = build_series(analysis_df, fundamentals_df, moneyflow_df)
+    body = build_series(analysis_df, fundamentals_df, moneyflow_df,
+                        regime_anchor=conv.regime_anchor)
     return {
-        "ticker": ticker,
-        "name": data_manager.get_stock_name_from_db(ticker) or ticker,
-        "header": build_header(analysis_df, fundamentals_df),
+        "ticker": markets.canonical(ticker),
+        "name": (ref.name if ref else None) or ticker,
+        "market": conv.code,
+        "currency": conv.currency,
+        "currency_symbol": conv.currency_symbol,
+        # The frontend paints candles and percentages from this, NOT from a
+        # global constant: a green candle means the opposite thing in Shanghai
+        # and in New York.
+        "up_is_red": conv.up_is_red,
+        "benchmark_name": conv.benchmark_name,
+        "sector": (profile or {}).get("sector"),
+        "header": build_header(analysis_df, fundamentals_df, profile),
         "signals": build_signals(analysis_df, boxes),
         "boxes": build_boxes(boxes, body["dates"]),
         "chips": build_chips(analysis_df, fundamentals_df),

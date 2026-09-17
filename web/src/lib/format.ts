@@ -19,10 +19,38 @@ export function yi(v: Num | undefined): string {
   return `${v.toFixed(1)}亿`;
 }
 
-/** Chinese convention: up red, down green. */
-export function moveClass(v: Num | undefined): string {
+/**
+ * Colour for a move. `upIsRed` defaults to the A-share convention, so every
+ * existing call site keeps its behaviour; North American pages pass false.
+ *
+ * The CSS tokens are named for the DIRECTION (--color-up / --color-down), not
+ * the colour, so this swaps which token a rise gets rather than swapping the
+ * tokens themselves.
+ */
+export function moveClass(v: Num | undefined, upIsRed = true): string {
   if (v == null || !Number.isFinite(v) || v === 0) return "text-flat";
-  return v > 0 ? "text-up" : "text-down";
+  const rising = v > 0;
+  return rising === upIsRed ? "text-up" : "text-down";
+}
+
+/**
+ * A market capitalisation, written the way that market is read.
+ *
+ * 亿 and 万亿 for A-shares; B and T for North America. Rendering a US company
+ * as "48513亿" is not wrong so much as unreadable to anyone who trades it.
+ */
+export function money(v: Num | undefined, currency: string, symbol = ""): string {
+  if (v == null || !Number.isFinite(v)) return dash;
+  const a = Math.abs(v);
+  if (currency === "CNY") {
+    if (a >= 1e12) return `${(v / 1e12).toFixed(2)}万亿`;
+    if (a >= 1e10) return `${Math.round(v / 1e8).toLocaleString()}亿`;
+    return `${(v / 1e8).toFixed(1)}亿`;
+  }
+  if (a >= 1e12) return `${symbol}${(v / 1e12).toFixed(2)}T`;
+  if (a >= 1e9) return `${symbol}${(v / 1e9).toFixed(1)}B`;
+  if (a >= 1e6) return `${symbol}${(v / 1e6).toFixed(0)}M`;
+  return `${symbol}${Math.round(v).toLocaleString()}`;
 }
 
 /** 3450000 → 3.45M. Keeps every price scale the same width. */

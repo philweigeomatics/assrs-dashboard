@@ -160,10 +160,10 @@ def compare(main_df: pd.DataFrame, other: str, dates: list[str]) -> dict:
         is pure relative performance (TradingView's "same % scale").
       * `price`   — the comparison's own closes, for its own axis.
     """
-    import data_manager
-    import watchlist_scan
+    import markets
 
-    df = watchlist_scan.fetch_frame(other)
+    market, code = markets.parse(other)
+    df = market.fetch_ohlcv(code)
     if df is None:
         raise RuntimeError(f"price data for {other} could not be fetched — try again")
     if len(df) < 30:
@@ -175,9 +175,10 @@ def compare(main_df: pd.DataFrame, other: str, dates: list[str]) -> dict:
     base = float(main_df["Close"].reindex(idx, method="ffill").dropna().iloc[0])
     rebased = (aligned / first * base) if first else aligned
 
+    ref = market.resolve(code)
     return {
-        "ticker": other,
-        "name": data_manager.get_stock_name_from_db(other) or other,
+        "ticker": markets.canonical(other),
+        "name": (ref.name if ref else None) or other,
         "price": [_n(v, 3) for v in aligned.tolist()],
         "rebased": [_n(v, 3) for v in rebased.tolist()],
         # Total return over the window, for the legend.

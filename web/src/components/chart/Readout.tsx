@@ -42,8 +42,8 @@ export function Readout({
       <F k="开" val={o.toFixed(2)} />
       <F k="高" val={h.toFixed(2)} cls="text-up" />
       <F k="低" val={l.toFixed(2)} cls="text-down" />
-      <F k="收" val={c.toFixed(2)} cls={`${moveClass(chg)} font-semibold`} />
-      <F k="涨跌" val={chg == null ? "—" : `${chg > 0 ? "+" : ""}${chg.toFixed(2)}%`} cls={moveClass(chg)} />
+      <F k="收" val={c.toFixed(2)} cls={`${moveClass(chg, data.up_is_red)} font-semibold`} />
+      <F k="涨跌" val={chg == null ? "—" : `${chg > 0 ? "+" : ""}${chg.toFixed(2)}%`} cls={moveClass(chg, data.up_is_red)} />
       <F k="振幅" val={amp == null ? "—" : `${amp.toFixed(2)}%`} />
       <F k="量" val={v == null ? "—" : compact(v)} />
       {compare && (

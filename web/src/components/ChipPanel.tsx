@@ -18,12 +18,19 @@ const W = 312;
 const H = 250;
 const PAD_R = 46; // room for the price labels on the right
 
-export function ChipPanel({ chips, price }: { chips: Chips | null; price: number }) {
+export function ChipPanel({ chips, price, market = "CN" }: {
+  chips: Chips | null; price: number; market?: string;
+}) {
   if (!chips || chips.prices.length === 0) {
     return (
       <section className="card p-3">
         <h2 className="text-[14px] font-semibold mb-1">🧮 筹码分布</h2>
-        <p className="label">缺少换手率数据，无法计算。</p>
+        <p className="label leading-snug">
+          {market === "CN"
+            ? "缺少换手率数据，无法计算。"
+            : "该市场没有逐日换手率（流通股本历史），筹码分布无法计算。" +
+              "用当前股本倒推会把过去每一天都算错，所以这里留空而不是给一个看起来合理的数字。"}
+        </p>
       </section>
     );
   }

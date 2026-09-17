@@ -135,7 +135,8 @@ export function TechnicalAnalysis() {
             <aside className="flex flex-col gap-3 lg:sticky lg:top-[3.75rem] lg:max-h-[calc(100vh-4.5rem)] lg:overflow-y-auto">
               <InfoHeader data={analysis.data} />
               <WhatIfPanel data={analysis.data} ghost={ghost} onGhost={setGhost} />
-              <ChipPanel chips={analysis.data.chips} price={analysis.data.header.close ?? 0} />
+              <ChipPanel chips={analysis.data.chips} price={analysis.data.header.close ?? 0}
+                market={analysis.data.market} />
             </aside>
           </div>
         )}
@@ -149,8 +150,12 @@ export function TechnicalAnalysis() {
 
         {/* Full width, below the chart: the correlation bars and the rotation
             strip both read across a year, and squeezing them into the 340px
-            sidebar would make the strip unreadable. */}
-        {analysis.data && <SectorPanel ticker={analysis.data.ticker} />}
+            sidebar would make the strip unreadable.
+
+            A-shares only, because the PPI_* sector indices are. Rendering it
+            elsewhere would show an error with a retry button for something
+            that will never succeed. */}
+        {analysis.data?.market === "CN" && <SectorPanel ticker={analysis.data.ticker} />}
       </main>
     </div>
   );

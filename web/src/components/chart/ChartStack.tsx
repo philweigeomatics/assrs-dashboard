@@ -54,8 +54,25 @@ import { Readout } from "./Readout";
 import { ResizablePane } from "./ResizablePane";
 import { usePersistentState } from "../../lib/usePersistentState";
 
-const UP = "#ff3b30";
-const DOWN = "#34c759";
+// Named for the COLOUR, not the direction. Which one a rising bar gets depends
+// on the market: red is a gain in Shanghai and a loss in New York, so the
+// payload's up_is_red decides and nothing here assumes.
+const RED = "#ff3b30";
+const GREEN = "#34c759";
+
+type Palette = { up: string; down: string; upFill: string; downFill: string;
+                 upWick: string; downWick: string };
+
+function palette(upIsRed: boolean): Palette {
+  const [up, down] = upIsRed ? [RED, GREEN] : [GREEN, RED];
+  const soft = (hex: string, a: number) =>
+    hex === RED ? `rgba(255,59,48,${a})` : `rgba(52,199,89,${a})`;
+  return {
+    up, down,
+    upFill: soft(up, 0.35), downFill: soft(down, 0.35),
+    upWick: soft(up, 0.6), downWick: soft(down, 0.6),
+  };
+}
 const GRID = "#eef0f3";
 const AXIS = "#8a8a8e";
 const SCALE_WIDTH = 72;
@@ -101,7 +118,8 @@ function lineData(dates: string[], values: (number | null)[]) {
 }
 
 function histData(d: Analysis, spec: LineSpec) {
-  const [pos, neg] = spec.signColors ?? [UP, DOWN];
+  const pal = palette(d.up_is_red);
+  const [pos, neg] = spec.signColors ?? [pal.up, pal.down];
   return d.dates.map((t, i) => {
     const v = spec.values[i];
     if (v == null || !Number.isFinite(v)) return { time: t as Time };
@@ -192,9 +210,11 @@ export function ChartStack({
       let anchor: ISeriesApi<SeriesType, Time> | null = null;
 
       if (isMain) {
+        const pal = palette(data.up_is_red);
         const candles = chart.addSeries(CandlestickSeries, {
-          upColor: UP, downColor: DOWN, borderUpColor: UP, borderDownColor: DOWN,
-          wickUpColor: UP, wickDownColor: DOWN,
+          upColor: pal.up, downColor: pal.down,
+          borderUpColor: pal.up, borderDownColor: pal.down,
+          wickUpColor: pal.up, wickDownColor: pal.down,
           priceFormat: { type: "price", precision: 2, minMove: 0.01 },
         });
         candles.setData(data.dates.map((t, i) => ({
@@ -318,12 +338,16 @@ export function ChartStack({
     const gDate = ghost.date as Time;
     if (!lastDate) return;
 
+    // Hoisted: the ghost candle and the ghost volume bar live in different
+    // scopes below and must agree on which colour a rising bar gets.
+    const gpal = palette(data.up_is_red);
+
     const mainChart = h.charts.get("main");
     if (mainChart && ghost.ohlcv.c != null) {
       const gc = mainChart.addSeries(CandlestickSeries, {
-        upColor: "rgba(255,59,48,0.35)", downColor: "rgba(52,199,89,0.35)",
-        borderUpColor: UP, borderDownColor: DOWN,
-        wickUpColor: "rgba(255,59,48,0.6)", wickDownColor: "rgba(52,199,89,0.6)",
+        upColor: gpal.upFill, downColor: gpal.downFill,
+        borderUpColor: gpal.up, borderDownColor: gpal.down,
+        wickUpColor: gpal.upWick, wickDownColor: gpal.downWick,
         priceFormat: { type: "price", precision: 2, minMove: 0.01 },
         lastValueVisible: false, priceLineVisible: false,
       });
@@ -361,7 +385,8 @@ export function ChartStack({
           priceLineVisible: false, lastValueVisible: false,
         });
         const up = (ghost.ohlcv.c ?? 0) > (ghost.ohlcv.o ?? 0);
-        s.setData([{ time: gDate, value: ghost.ohlcv.v, color: up ? "rgba(239,68,68,0.35)" : "rgba(34,197,94,0.35)" }]);
+        s.setData([{ time: gDate, value: ghost.ohlcv.v,
+                     color: up ? gpal.upFill : gpal.downFill }]);
         gs.set("volume:__ghostvol", s);
       }
     }

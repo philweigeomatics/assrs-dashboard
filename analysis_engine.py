@@ -140,11 +140,16 @@ def _regime_quantile(series: pd.Series, base_window: int, anchor_pos: int,
     return out
 
 
-def _regime_anchor_pos(index) -> int:
-    """First index position on/after REGIME_ANCHOR (n if all pre-anchor,
-    0 if all post-anchor)."""
+def _regime_anchor_pos(index, anchor=None) -> int:
+    """First index position on/after the anchor (n if all pre-anchor,
+    0 if all post-anchor).
+
+    `anchor` defaults to REGIME_ANCHOR — the A-share 924 break. A market with
+    no structural break passes Timestamp.min, for which no bar is ever earlier
+    and this returns 0, so every percentile window sees the full history."""
     try:
-        return int((pd.DatetimeIndex(index) < REGIME_ANCHOR).sum())
+        anchor = REGIME_ANCHOR if anchor is None else pd.Timestamp(anchor)
+        return int((pd.DatetimeIndex(index) < anchor).sum())
     except Exception:
         return 0
 
@@ -229,12 +234,16 @@ def apply_adx_patterns(df: pd.DataFrame) -> pd.DataFrame:
 #  MAIN ANALYSIS ENGINE
 # ============================================================
 
-def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
+def run_single_stock_analysis(df: pd.DataFrame, regime_anchor=None) -> pd.DataFrame:
     """
     Compute all technical indicators and signals for one stock.
 
     Args:
         df: OHLCV DataFrame with columns: Open, High, Low, Close, Volume
+        regime_anchor: structural break the percentile baselines must not span.
+            Defaults to REGIME_ANCHOR (the A-share 924 pivot), so every existing
+            caller is unchanged. Markets without such a break pass
+            markets.NO_REGIME_BREAK, which excludes nothing.
 
     Returns:
         DataFrame with all indicator and signal columns appended.
@@ -483,7 +492,7 @@ def run_single_stock_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
     # First bar on/after the 924 structural regime anchor — statistical
     # percentile baselines below must not reach before it.
-    anchor_pos = _regime_anchor_pos(df_analysis.index)
+    anchor_pos = _regime_anchor_pos(df_analysis.index, regime_anchor)
 
     # ── Signal Column Initialisation ─────────────────────────
     df_analysis['Signal_Accumulation']  = False

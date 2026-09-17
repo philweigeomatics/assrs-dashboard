@@ -9,7 +9,7 @@
  */
 
 import type { Analysis } from "../lib/types";
-import { fixed, moveClass, signed, yi } from "../lib/format";
+import { dash, fixed, money, moveClass, signed, yi } from "../lib/format";
 
 function Stat({ k, v }: { k: string; v: string }) {
   return (
@@ -79,18 +79,19 @@ export function InfoHeader({ data }: { data: Analysis }) {
       </div>
 
       <div className="flex items-baseline gap-2">
-        <span className={`font-mono tnum text-[26px] font-semibold ${moveClass(h.change_pct)}`}>
+        <span className={`font-mono tnum text-[26px] font-semibold ${moveClass(h.change_pct, data.up_is_red)}`}>
           {fixed(h.close)}
         </span>
-        <span className={`font-mono tnum text-[13px] ${moveClass(h.change_pct)}`}>
+        <span className={`font-mono tnum text-[13px] ${moveClass(h.change_pct, data.up_is_red)}`}>
           {signed(h.change_pct, 2, "%")}
         </span>
         <span className="label ml-auto">{h.date}</span>
       </div>
 
       <div className="border-t border-line pt-1">
-        <Stat k="总市值" v={yi(h.total_mv_yi)} />
-        <Stat k="流通市值" v={yi(h.circ_mv_yi)} />
+        <Stat k="总市值" v={money(h.market_cap, data.currency, data.currency_symbol)} />
+        <Stat k="流通市值"
+          v={h.circ_mv_yi != null ? yi(h.circ_mv_yi) : dash} />
         <Stat k="PE (TTM)" v={fixed(h.pe_ttm)} />
         <Stat k="PB" v={fixed(h.pb)} />
         <Stat k="换手率" v={h.turnover_rate == null ? "—" : `${fixed(h.turnover_rate)}%`} />

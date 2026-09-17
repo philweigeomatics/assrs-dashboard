@@ -1,19 +1,30 @@
 /**
- * One box for both jobs: pick from history, or search everything.
+ * One box for three jobs: pick from history, filter A-shares, search abroad.
  *
- * Focus it empty and your recent stocks are listed immediately. Type a code
- * or a name and the same list becomes search results, with stocks you have
- * looked at before marked ⟲ and ranked first within their match tier. The
- * full stock list lives in the browser (see /stocks), so filtering happens
- * per keystroke without a request.
+ * Focus it empty and your recent stocks are listed immediately. Type a code or
+ * a name and the same list becomes search results, with stocks you have looked
+ * at before marked ⟲ and ranked first within their match tier.
+ *
+ * A-shares filter locally: all 5,600 live in the browser (see /stocks), so
+ * every keystroke is free. There is no equivalent list to download for US and
+ * Canadian listings, so those are fetched — debounced, and only once the query
+ * looks like a real search rather than a half-typed code. The two sets are
+ * shown in one list because you do not want to pick a market before you can
+ * type a name.
  *
  * Keyboard: ↑/↓ move, Enter picks, Esc closes. A 6-digit code + Enter picks
  * that code even before the list has loaded.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { suggest } from "../lib/search";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "../lib/api";
+import { suggest, type Suggestion } from "../lib/search";
 import type { HistoryRef, StockRef } from "../lib/types";
+
+/** Below this, a query is still being typed and every keystroke is a request. */
+const MIN_REMOTE_CHARS = 2;
+const REMOTE_DEBOUNCE_MS = 300;
 
 export function StockPicker({
   stocks,
@@ -32,7 +43,41 @@ export function StockPicker({
   const box = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
 
-  const items = useMemo(() => suggest(query, stocks, history, 12), [query, stocks, history]);
+  const local = useMemo(() => suggest(query, stocks, history, 12), [query, stocks, history]);
+
+  // Debounced so holding a key down does not fire a request per character.
+  const [remoteQ, setRemoteQ] = useState("");
+  useEffect(() => {
+    const q = query.trim();
+    const id = window.setTimeout(
+      () => setRemoteQ(q.length >= MIN_REMOTE_CHARS ? q : ""), REMOTE_DEBOUNCE_MS);
+    return () => window.clearTimeout(id);
+  }, [query]);
+
+  const abroad = useQuery({
+    queryKey: ["search", remoteQ],
+    queryFn: async () => {
+      const [us, ca] = await Promise.all([
+        api.search(remoteQ, "US").catch(() => []),
+        api.search(remoteQ, "CA").catch(() => []),
+      ]);
+      return [...us, ...ca];
+    },
+    enabled: remoteQ.length >= MIN_REMOTE_CHARS,
+    staleTime: 5 * 60_000,
+  });
+
+  const items = useMemo<Suggestion[]>(() => {
+    const seen = new Set(local.map((s) => s.t));
+    const extra: Suggestion[] = (abroad.data ?? [])
+      .filter((s) => !seen.has(s.t))
+      .map((s) => ({ ...s, fromHistory: false }));
+    // A-shares first: they are the ones that filter instantly and the ones
+    // most searches are for. Foreign hits append rather than interleave, so
+    // the list never reshuffles under the cursor when the request lands.
+    return [...local, ...extra].slice(0, 16);
+  }, [local, abroad.data]);
+
   useEffect(() => setActive(0), [query]);
 
   useEffect(() => {
@@ -69,7 +114,9 @@ export function StockPicker({
     }
   }
 
-  const heading = query.trim() ? `匹配 ${items.length} 只` : "最近搜索";
+  const heading = query.trim()
+    ? `匹配 ${items.length} 只${abroad.isFetching ? " · 正在搜索美股/加股…" : ""}`
+    : "最近搜索";
 
   return (
     <div ref={box} className="relative w-full max-w-md">
@@ -102,7 +149,9 @@ export function StockPicker({
           <div className="px-3 pb-1 label">{heading}</div>
           {items.length === 0 && (
             <div className="px-3 py-2 text-ink-mute text-[13px]">
-              {query.trim() ? "没有匹配的股票" : "还没有搜索记录——输入代码或名称开始"}
+              {query.trim()
+                ? (abroad.isFetching ? "正在搜索…" : "没有匹配的股票")
+                : "还没有搜索记录——输入代码或名称开始"}
             </div>
           )}
           {items.map((s, i) => (
@@ -118,8 +167,9 @@ export function StockPicker({
                 i === active ? "bg-elevated" : ""
               }`}
             >
-              <span className="font-mono tnum text-[13px] text-ink-dim w-[58px] shrink-0">{s.t}</span>
+              <span className="font-mono tnum text-[13px] text-ink-dim w-[84px] shrink-0 truncate">{s.t}</span>
               <span className="flex-1 truncate text-[14px]">{s.n}</span>
+              {s.ex && <span className="text-[11px] text-ink-mute shrink-0">{s.ex}</span>}
               {s.fromHistory && <span className="text-[12px] text-ink-mute" title="搜索过">⟲</span>}
             </button>
           ))}

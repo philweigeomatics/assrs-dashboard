@@ -120,7 +120,7 @@ export function WhatIfPanel({
           {sim.isPending ? "计算中…" : ghost ? "更新幻影" : "画出幻影"}
         </button>
         <span className="text-[11.5px] text-ink-mute">
-          昨收 {fixed(close0)} → <span className={moveClass(pct)}>{fixed(target)}</span>
+          昨收 {fixed(close0)} → <span className={moveClass(pct, data.up_is_red)}>{fixed(target)}</span>
         </span>
       </div>
 

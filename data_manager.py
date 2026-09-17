@@ -204,15 +204,21 @@ def create_history_table():
         )"""
         db.create_table_sqlite(schema)
 
-def update_search_history(ticker):
-    """Updates search history table with company name, keeps only last 10."""
+def update_search_history(ticker, name=None):
+    """
+    Updates search history table with company name, keeps only last 10.
+
+    `name` short-circuits the lookup. Non-A-share symbols (US:AAPL) are not in
+    stock_basic and never will be, so without it every US search would miss the
+    DB and then spend a Tushare stock_company call to also fail.
+    """
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     user_id   = auth_manager.get_current_user_id()
     print(f"[data_manager] 🔍 Updating search history for {ticker}...")
     
     create_history_table()
 
-    company_name = get_stock_name_from_db(ticker)
+    company_name = name or get_stock_name_from_db(ticker)
     if company_name is not None:
         print(f"[data_manager] 📦 Found in stock_basic DB: {company_name}")
     else:
