@@ -1,7 +1,7 @@
 import { devFakeToken, supabase } from "./supabase";
 import type {
   AlertFeed, Analysis, BasketStats, CompareResult, HistoryRef, PairStats, SectorAnalysis,
-  PairTradeResult, SimResult, StockRef, StrategyResult, WhatIfAi,
+  EquityBrief, PairTradeResult, SimResult, StockRef, StrategyResult, WhatIfAi,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -71,6 +71,20 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ symbols, z_window: zWindow, ols_window: olsWindow }),
     }),
+  equity: (t: string) => call<EquityBrief>(`/equity/${t}`),
+  equityGenerate: (t: string, section: string, force = false) =>
+    call<{ section: string }>(`/equity/${t}/generate/${section}?force=${force}`, { method: "POST" }),
+  equitySavePeers: (t: string, competitors: { ticker: string; name: string; why: string }[]) =>
+    call<{ saved: number }>(`/equity/${t}/peers`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ competitors }),
+    }),
+  equitySaveSector: (t: string, sector: string, tickers: string[]) =>
+    call<{ sector: string; added: number; created: boolean }>(`/equity/${t}/sector`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sector, tickers }),
+    }),
+  sectorNames: () => call<string[]>("/sectors"),
   watchlist: () => call<StockRef[]>("/watchlist"),
   watchlistAdd: (t: string) =>
     call<{ t: string; message: string }>(`/watchlist/${t}`, { method: "POST" }),

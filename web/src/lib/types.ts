@@ -449,3 +449,50 @@ export type PairTradeResult = {
   pairs: PairResult[];
   skipped: { code_a: string; code_b: string; why: string }[];
 };
+
+/** GET /equity/{ticker} — 个股研报. */
+export type EquityPeriod = {
+  period: string;
+  revenue?: Num; operate_profit?: Num; net_profit?: Num;
+  roe?: Num; roa?: Num; gross_margin?: Num; net_margin?: Num;
+  debt_to_assets?: Num; current_ratio?: Num;
+  revenue_yoy?: Num; profit_yoy?: Num; eps_yoy?: Num; ocf_to_revenue?: Num;
+};
+
+export type SegmentItem = {
+  item: string; sales: Num; profit: Num; cost: Num;
+  share_pct: Num; margin_pct: Num;
+};
+
+export type PeerRow = {
+  ticker: string; name: string; is_target: boolean; why: string;
+  pe_ttm: Num; pb: Num; mv_yi: Num; roe: Num;
+  gross_margin: Num; net_margin: Num;
+  revenue_yoy: Num; profit_yoy: Num; debt_to_assets: Num;
+  period: string | null;
+  ranks: Record<string, number>;
+};
+
+export type EquityBrief = {
+  ticker: string; name: string; industry: string;
+  fundamentals: { periods: EquityPeriod[] };
+  filings: {
+    forecast: Record<string, string | number | null>[];
+    express: Record<string, string | number | null>[];
+  };
+  segments: {
+    product: { period: string | null; items: SegmentItem[]; periods: string[] };
+    region: { period: string | null; items: SegmentItem[]; periods: string[] };
+  };
+  supply_chain: { nodes?: { id?: string; label?: string; kind?: string }[];
+                  edges?: { source?: string; target?: string; label?: string }[] } | null;
+  ai: {
+    overview: Record<string, unknown> | null;
+    porters: Record<string, unknown> | null;
+    pestel: Record<string, unknown> | null;
+    competitors: { competitors?: { ticker: string; name: string; why: string }[] } | null;
+  };
+  generated_at: Record<string, string | null>;
+  missing: string[];
+  peers: { rows: PeerRow[]; n: number } | null;
+};

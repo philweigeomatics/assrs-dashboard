@@ -542,6 +542,10 @@ _strategy_cache = TTLCache(maxsize=8, ttl_s=30 * 60)
 # Cointegration over ten codes is 45 pairs of rolling OLS — seconds, not
 # milliseconds, and the same basket gets re-examined as you read it.
 _pairtrade_cache = TTLCache(maxsize=20, ttl_s=20 * 60)
+# The data half is a handful of Tushare calls; the AI half is cached in
+# the database and survives a restart, so this only has to stop the page
+# re-fetching statements while you read it.
+_equity_cache = TTLCache(maxsize=30, ttl_s=20 * 60)
 
 
 @app.get("/strategies/{name}")
@@ -703,6 +707,149 @@ def watchlist_remove(ticker: str = TICKER, user: AppUser = Depends(current_user)
     if not ok:
         raise HTTPException(400, str(msg) or "移除失败")
     return {"t": ticker, "message": str(msg)}
+
+
+def _require_admin(user: AppUser) -> None:
+    """
+    Admin gate, enforced on the SERVER.
+
+    The frontend also hides these controls, but that is a convenience — hiding
+    a button does not stop a request. Peer sets and sector membership feed the
+    nightly job and every user's screens, so they are checked here.
+    """
+    if (user.role or "").lower() != "admin":
+        raise HTTPException(403, "仅管理员可执行此操作")
+
+
+def _industry_of(ticker: str) -> str:
+    import data_manager
+    try:
+        ts = data_manager.get_tushare_ticker(ticker)
+        df = data_manager.db.read_table("stock_basic", filters={"ts_code": ts},
+                                        columns="industry", limit=1)
+        if df is not None and not df.empty:
+            return str(df.iloc[0]["industry"] or "")
+    except Exception:
+        pass
+    return ""
+
+
+@app.get("/equity/{ticker}")
+def equity_brief(ticker: str = TICKER, user: AppUser = Depends(current_user)):
+    """
+    The Equity Brief for one stock: the data half immediately, plus whichever
+    AI sections are already cached. Never generates — see the POST.
+    """
+    from api import equity_api
+
+    if markets.split(ticker)[0] != "CN":
+        raise HTTPException(404, "个股研报目前仅支持 A 股")
+    try:
+        return _equity_cache.get_or_compute(
+            ticker,
+            lambda: equity_api.build(ticker, _name(ticker), _industry_of(ticker)))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.post("/equity/{ticker}/generate/{section}")
+def equity_generate(ticker: str = TICKER,
+                    section: str = Path(..., pattern="^(overview|porters|pestel|competitors)$"),
+                    force: bool = Query(False),
+                    user: AppUser = Depends(current_user)):
+    """
+    Generate one AI section. One DeepSeek call, 20-60s, cached afterwards.
+
+    Per section rather than all at once: each is a separate cost, and asking
+    for Porter's should not also bill PESTEL.
+    """
+    from api import equity_api
+
+    if markets.split(ticker)[0] != "CN":
+        raise HTTPException(404, "个股研报目前仅支持 A 股")
+    try:
+        out = equity_api.generate(ticker, _name(ticker), _industry_of(ticker),
+                                  section, force)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except Exception as exc:                                    # noqa: BLE001
+        raise HTTPException(502, f"AI 生成失败：{exc}"[:200])
+
+    _equity_cache._d.pop(ticker, None)       # the brief now has a new section
+    return {"section": section, **out}
+
+
+class PeersReq(BaseModel):
+    competitors: list[dict] = Field(..., max_length=20)
+
+
+@app.post("/equity/{ticker}/peers")
+def equity_save_peers(req: PeersReq, ticker: str = TICKER,
+                      user: AppUser = Depends(current_user)):
+    """Admin: replace the curated peer set for this stock."""
+    import equity_brief as eb
+    _require_admin(user)
+
+    cleaned = []
+    for p in req.competitors:
+        t = str(p.get("ticker", "")).strip().zfill(6)
+        if not (len(t) == 6 and t.isdigit() and t != ticker):
+            continue
+        cleaned.append({"ticker": t,
+                        "name": str(p.get("name") or "").strip(),
+                        "why": str(p.get("why") or "").strip()})
+    eb.ensure_equity_brief_cache_table()
+    eb.save_competitors_curated(ticker, cleaned)
+    _equity_cache._d.pop(ticker, None)
+    return {"saved": len(cleaned)}
+
+
+class SectorReq(BaseModel):
+    sector: str = Field(..., min_length=1, max_length=40)
+    tickers: list[str] = Field(..., min_length=1, max_length=40)
+
+
+@app.post("/equity/{ticker}/sector")
+def equity_save_sector(req: SectorReq, ticker: str = TICKER,
+                       user: AppUser = Depends(current_user)):
+    """
+    Admin: file this stock and its peers into a sector.
+
+    Creates the sector when it does not exist. Sector membership drives the
+    PPI_* indices and the 板块相关性 panel, so this is how a peer group you
+    curated here becomes something the rest of the app can measure against.
+    """
+    import data_manager
+    _require_admin(user)
+
+    codes = []
+    for t in dict.fromkeys(req.tickers):
+        t = str(t).strip()
+        if len(t) == 6 and t.isdigit():
+            codes.append(t)
+    if not codes:
+        raise HTTPException(422, "没有有效的股票代码")
+
+    existing = set(data_manager.get_sector_stock_map() or {})
+    if req.sector not in existing:
+        data_manager.add_new_sector(req.sector, codes)
+    else:
+        for t in codes:
+            data_manager.add_stock_to_sector(req.sector, t)
+    return {"sector": req.sector, "added": len(codes),
+            "created": req.sector not in existing}
+
+
+@app.get("/sectors")
+def sector_list(user: AppUser = Depends(current_user)):
+    """Sector names, for the admin picker."""
+    import data_manager
+    try:
+        return sorted(data_manager.get_sector_stock_map() or {})
+    except Exception as exc:                                    # noqa: BLE001
+        raise HTTPException(503, f"板块列表读取失败：{exc}"[:160])
 
 
 @app.get("/sectors/{ticker}")
