@@ -501,3 +501,46 @@ export type EquityBrief = {
   missing: string[];
   peers: { rows: PeerRow[]; n: number } | null;
 };
+
+/** GET/POST /alerts/notes — 明日预判. */
+export type NoteClaim = {
+  kind: string;
+  label?: string;
+  value?: number;
+  value2?: number;
+  lookback?: number;
+  /** Filled in at resolution. null = nothing could decide it. */
+  hit?: boolean | null;
+  actual?: string;
+  /** How often this claim would have been true anyway, in percent. */
+  baseline?: number | null;
+};
+
+export type AlertNote = {
+  id: number;
+  ticker: string;
+  scan_date: string;
+  note: string;
+  predictions: NoteClaim[];
+  created_at: string;
+  resolved_date: string | null;
+  outcome: {
+    bar: { date: string; open: number; high: number; low: number;
+           close: number; volume: number; prev_close: number | null };
+    claims: NoteClaim[];
+    hits: number;
+    decided: number;
+    score_pct: Num;
+    resolved?: string;
+  } | null;
+};
+
+export type NoteScorecard = {
+  rows: { kind: string; label: string; n: number; hits: number;
+          rate_pct: number; baseline_pct: Num; edge_pp: Num }[];
+  total: number;
+  hits: number;
+  rate_pct: Num;
+  /** Below this many resolved claims the rates are noise. */
+  meaningful_at: number;
+};

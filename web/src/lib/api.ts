@@ -1,7 +1,8 @@
 import { devFakeToken, supabase } from "./supabase";
 import type {
   AlertFeed, Analysis, BasketStats, CompareResult, HistoryRef, PairStats, SectorAnalysis,
-  EquityBrief, PairTradeResult, SimResult, StockRef, StrategyResult, WhatIfAi,
+  AlertNote, EquityBrief, NoteScorecard, PairTradeResult, SimResult, StockRef,
+  StrategyResult, WhatIfAi,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -71,6 +72,20 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ symbols, z_window: zWindow, ols_window: olsWindow }),
     }),
+  notes: (ticker?: string) =>
+    call<{ notes: AlertNote[]; scorecard: NoteScorecard }>(
+      `/alerts/notes${ticker ? `?ticker=${ticker}` : ""}`),
+  noteCreate: (body: {
+    ticker: string; scan_date: string; note: string; predictions: unknown[];
+  }) => call<AlertNote>("/alerts/notes", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }),
+  notesResolve: () =>
+    call<{ resolved: number; pending: number; notes: AlertNote[]; scorecard: NoteScorecard }>(
+      "/alerts/notes/resolve", { method: "POST" }),
+  noteDelete: (id: number) =>
+    call<{ deleted: number }>(`/alerts/notes/${id}`, { method: "DELETE" }),
   equity: (t: string) => call<EquityBrief>(`/equity/${t}`),
   equityGenerate: (t: string, section: string, force = false) =>
     call<{ section: string }>(`/equity/${t}/generate/${section}?force=${force}`, { method: "POST" }),

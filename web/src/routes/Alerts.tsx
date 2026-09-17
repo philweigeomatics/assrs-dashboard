@@ -33,6 +33,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import type { AlertFeed, AlertSignal, AlertStock } from "../lib/types";
 import { NavBar } from "../components/NavBar";
+import { AlertNotes } from "../components/AlertNotes";
 import { fixed, moveClass, signed } from "../lib/format";
 
 export function Alerts() {
@@ -89,7 +90,7 @@ export function Alerts() {
             <List stocks={stocks} total={q.data.stocks.length}
               picked={current?.t ?? null} onPick={setPicked} />
 
-            <Detail stock={current} />
+            <Detail stock={current} scanDate={q.data.scan_date} />
           </div>
         )}
       </main>
@@ -248,7 +249,7 @@ function List({ stocks, total, picked, onPick }: {
   );
 }
 
-function Detail({ stock }: { stock: AlertStock | null }) {
+function Detail({ stock, scanDate }: { stock: AlertStock | null; scanDate: string }) {
   if (!stock) {
     return <div className="card p-6 text-center label">选择一只股票查看今天的全部提醒</div>;
   }
@@ -277,6 +278,8 @@ function Detail({ stock }: { stock: AlertStock | null }) {
         <span className="label">今日信号 · {stock.signals.length} 项</span>
         {stock.signals.map((s, i) => <SignalCard key={i} s={s} price={stock.price ?? 0} />)}
       </div>
+
+      <AlertNotes ticker={stock.t} name={stock.n} scanDate={scanDate} />
 
       {c && (
         <div className="border-t border-line pt-2 flex flex-col gap-1">

@@ -734,6 +734,89 @@ def _industry_of(ticker: str) -> str:
     return ""
 
 
+class NoteReq(BaseModel):
+    """A call on the next session, made before it happens."""
+    ticker: str = Field(..., pattern=r"^\d{6}$")
+    scan_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    note: str = Field("", max_length=2000)
+    predictions: list[dict] = Field(default_factory=list, max_length=8)
+
+
+@app.get("/alerts/notes")
+def notes_list(ticker: str | None = Query(None, pattern=r"^\d{6}$"),
+               user: AppUser = Depends(current_user)):
+    """Every note, newest session first, with a scorecard over the resolved ones."""
+    import alert_notes
+
+    with _as_user(user):
+        notes = alert_notes.list_notes(user.id, ticker)
+    return {"notes": notes, "scorecard": alert_notes.scorecard(notes)}
+
+
+@app.post("/alerts/notes")
+def notes_create(req: NoteReq, user: AppUser = Depends(current_user)):
+    """
+    Write a call. The claims are validated NOW, not at resolution time — a
+    prediction nothing could ever settle is refused while you can still fix it.
+    """
+    import alert_notes
+
+    try:
+        with _as_user(user):
+            return alert_notes.create(user.id, req.ticker, req.scan_date,
+                                      req.note, req.predictions)
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+    except Exception as exc:                                    # noqa: BLE001
+        # Supabase is migrated by hand in this project, so a missing table is
+        # a setup step rather than a bug — say which step.
+        if "alert_notes" in str(exc):
+            raise HTTPException(
+                503, "alert_notes 表尚未创建 — 请在 Supabase SQL 编辑器运行 "
+                     "supabase/migrations/20260917_alert_notes.sql")
+        raise HTTPException(503, f"保存失败：{exc}"[:200])
+
+
+@app.post("/alerts/notes/resolve")
+def notes_resolve(user: AppUser = Depends(current_user)):
+    """
+    Mark every pending note that now has a later session.
+
+    Deliberately idempotent and safe to call on page load: a note with no newer
+    bar is left alone, so a weekend simply resolves nothing.
+    """
+    import alert_notes
+
+    with _as_user(user):
+        notes = alert_notes.list_notes(user.id)
+        pending = [n for n in notes if not n.get("outcome")]
+
+        resolved = 0
+        frames: dict = {}
+        for n in pending:
+            t = n["ticker"]
+            if t not in frames:
+                frames[t] = markets.get("CN").fetch_ohlcv(t)
+            out = alert_notes.resolve_note(n, frames[t])
+            if out is None:
+                continue
+            alert_notes.save_resolution(n["id"], out)
+            resolved += 1
+
+        notes = alert_notes.list_notes(user.id)
+
+    return {"resolved": resolved, "pending": len(pending) - resolved,
+            "notes": notes, "scorecard": alert_notes.scorecard(notes)}
+
+
+@app.delete("/alerts/notes/{note_id}")
+def notes_delete(note_id: int, user: AppUser = Depends(current_user)):
+    import alert_notes
+    with _as_user(user):
+        alert_notes.delete(user.id, note_id)
+    return {"deleted": note_id}
+
+
 @app.get("/equity/{ticker}")
 def equity_brief(ticker: str = TICKER, user: AppUser = Depends(current_user)):
     """
