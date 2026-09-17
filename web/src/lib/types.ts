@@ -484,8 +484,13 @@ export type EquityBrief = {
     product: { period: string | null; items: SegmentItem[]; periods: string[] };
     region: { period: string | null; items: SegmentItem[]; periods: string[] };
   };
-  supply_chain: { nodes?: { id?: string; label?: string; kind?: string }[];
-                  edges?: { source?: string; target?: string; label?: string }[] } | null;
+  /** products → macro sectors. Not nodes/edges. */
+  supply_chain: {
+    company_name?: string;
+    products?: string[];
+    macro_sectors?: string[];
+    links?: { source: string; target: string }[];
+  } | null;
   ai: {
     overview: Record<string, unknown> | null;
     porters: Record<string, unknown> | null;

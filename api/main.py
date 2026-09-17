@@ -756,7 +756,7 @@ def equity_brief(ticker: str = TICKER, user: AppUser = Depends(current_user)):
 
 @app.post("/equity/{ticker}/generate/{section}")
 def equity_generate(ticker: str = TICKER,
-                    section: str = Path(..., pattern="^(overview|porters|pestel|competitors)$"),
+                    section: str = Path(..., pattern="^(overview|porters|pestel|competitors|supply-chain)$"),
                     force: bool = Query(False),
                     user: AppUser = Depends(current_user)):
     """
@@ -770,8 +770,11 @@ def equity_generate(ticker: str = TICKER,
     if markets.split(ticker)[0] != "CN":
         raise HTTPException(404, "个股研报目前仅支持 A 股")
     try:
-        out = equity_api.generate(ticker, _name(ticker), _industry_of(ticker),
-                                  section, force)
+        if section == "supply-chain":
+            out = {"payload": equity_api.generate_supply_chain(ticker, _name(ticker))}
+        else:
+            out = equity_api.generate(ticker, _name(ticker), _industry_of(ticker),
+                                      section, force)
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except Exception as exc:                                    # noqa: BLE001

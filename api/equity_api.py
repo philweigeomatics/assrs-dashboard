@@ -280,23 +280,59 @@ def generate(ticker: str, name: str, industry: str, section: str,
     if section == "pestel":
         return eb.get_pestel(ticker, name, industry, force)
     if section == "competitors":
-        chain = _supply_chain(ticker)
-        products = [n.get("label") for n in (chain.get("nodes") or [])
-                    if n.get("kind") in ("product", "core")][:8]
+        # The products feed the peer prompt so it finds substitutable
+        # competitors rather than same-industry-different-product companies.
+        products = (_supply_chain(ticker).get("products") or [])[:8]
         return eb.get_competitors(ticker, name, industry, force,
-                                  core_products=[p for p in products if p])
+                                  core_products=products)
     raise LookupError(f"未知的分析模块：{section}")
 
 
 def _supply_chain(ticker: str) -> dict:
+    """
+    The saved graph, in the shape it is actually stored in.
+
+    {ticker, company_name, products, macro_sectors, links} — NOT nodes/edges.
+    Reading it as nodes/edges reports "not generated yet" for all 122 graphs
+    that exist, which is exactly what it did.
+    """
     import data_manager
     try:
         graph = data_manager.get_supply_chain_graph(ticker)
     except Exception:
         return {}
-    if not graph:
+    if not isinstance(graph, dict):
         return {}
-    return graph if isinstance(graph, dict) else {}
+
+    products = [str(p) for p in (graph.get("products") or []) if p]
+    sectors = [str(s) for s in (graph.get("macro_sectors") or []) if s]
+    known = set(products) | set(sectors)
+    # A link naming something that is not in either list cannot be drawn, and
+    # the model occasionally invents one.
+    links = [{"source": str(l.get("source")), "target": str(l.get("target"))}
+             for l in (graph.get("links") or [])
+             if str(l.get("source")) in known and str(l.get("target")) in known]
+
+    return {
+        "company_name": str(graph.get("company_name") or ""),
+        "products": products,
+        "macro_sectors": sectors,
+        "links": links,
+    }
+
+
+def generate_supply_chain(ticker: str, name: str) -> dict:
+    """Generate and persist the graph. One DeepSeek call."""
+    import data_manager
+    import supply_chain
+
+    graph = supply_chain.generate_supply_chain_graph(ticker, name)
+    if not isinstance(graph, dict) or not graph.get("products"):
+        raise RuntimeError("模型未返回可用的供应链图")
+    graph.setdefault("ticker", ticker)
+    data_manager.upsert_supply_chain_graph(
+        ticker, graph.get("company_name") or name, graph)
+    return graph
 
 
 def build(ticker: str, name: str, industry: str) -> dict:

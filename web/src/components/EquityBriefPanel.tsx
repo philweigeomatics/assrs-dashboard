@@ -21,6 +21,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import type { EquityBrief, Num, PeerRow, SegmentItem } from "../lib/types";
 import { fixed, money, signed } from "../lib/format";
+import { SupplyChainWindow } from "./SupplyChainWindow";
 
 const AI_LABEL: Record<string, string> = {
   overview: "公司概览", porters: "波特五力", pestel: "PESTEL", competitors: "同业名单",
@@ -386,42 +387,46 @@ function Filings({ d }: { d: EquityBrief }) {
 }
 
 function SupplyChain({ d }: { d: EquityBrief }) {
-  const nodes = d.supply_chain?.nodes ?? [];
-  const edges = d.supply_chain?.edges ?? [];
-  if (!nodes.length) {
+  const [open, setOpen] = useState(false);
+  const g = d.supply_chain;
+  const products = g?.products ?? [];
+  const sectors = g?.macro_sectors ?? [];
+
+  if (!products.length) {
     return (
-      <p className="label">
-        🔗 供应链：尚未生成。目前在 Streamlit 的个股研报页生成后会自动出现在这里。
-      </p>
+      <div className="flex items-center gap-3">
+        <span className="text-[13px] font-semibold">🔗 供应链</span>
+        <span className="label">尚未生成</span>
+        <GenerateButton ticker={d.ticker} section="supply-chain" label="生成供应链图" />
+      </div>
     );
   }
-  const group = (kind: string) => nodes.filter((n) => (n.kind ?? "") === kind);
-  const bands: [string, string][] = [
-    ["upstream", "上游"], ["core", "本公司"], ["product", "产品"], ["downstream", "下游"],
-  ];
+
   return (
-    <div className="flex flex-col gap-1.5">
-      <div className="text-[13px] font-semibold">🔗 供应链</div>
-      <div className="grid gap-2 md:grid-cols-4">
-        {bands.map(([kind, label]) => (
-          <div key={kind} className="rounded-lg bg-sunken p-2">
-            <div className="label mb-1">{label}</div>
-            <div className="flex flex-wrap gap-1">
-              {group(kind).length === 0 && <span className="text-[11.5px] text-ink-mute">—</span>}
-              {group(kind).map((n, i) => (
-                <span key={`${n.id ?? n.label}-${i}`}
-                  className="rounded-md bg-panel border border-line px-1.5 py-0.5 text-[11.5px]">
-                  {n.label ?? n.id}
-                </span>
-              ))}
-            </div>
-          </div>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <span className="text-[13px] font-semibold">🔗 供应链</span>
+      <span className="label">
+        {products.length} 个产品 → {sectors.length} 个下游行业 · {g?.links?.length ?? 0} 条供货关系
+      </span>
+      <span className="flex flex-wrap gap-1">
+        {products.slice(0, 4).map((p) => (
+          <span key={p} className="rounded-md bg-sunken px-1.5 py-0.5 text-[11.5px]">
+            {p.split(" / ")[1] || p}
+          </span>
         ))}
-      </div>
-      <span className="label">{nodes.length} 个节点 · {edges.length} 条关系</span>
+        {products.length > 4 && <span className="label">+{products.length - 4}</span>}
+      </span>
+      <button onClick={() => setOpen(true)}
+        className="ml-auto h-7 px-2.5 rounded-md border border-cyan text-cyan text-[12.5px]">
+        打开供应链图 ↗
+      </button>
+      {open && g && (
+        <SupplyChainWindow ticker={d.ticker} graph={g} onClose={() => setOpen(false)} />
+      )}
     </div>
   );
 }
+
 
 function GenerateButton({ ticker, section, force = false, label }: {
   ticker: string; section: string; force?: boolean; label?: string;
