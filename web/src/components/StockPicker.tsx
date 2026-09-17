@@ -16,15 +16,9 @@
  * that code even before the list has loaded.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../lib/api";
-import { suggest, type Suggestion } from "../lib/search";
+import { useEffect, useRef, useState } from "react";
+import { useSymbolSearch } from "../lib/useSymbolSearch";
 import type { HistoryRef, StockRef } from "../lib/types";
-
-/** Below this, a query is still being typed and every keystroke is a request. */
-const MIN_REMOTE_CHARS = 2;
-const REMOTE_DEBOUNCE_MS = 300;
 
 export function StockPicker({
   stocks,
@@ -43,40 +37,7 @@ export function StockPicker({
   const box = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
 
-  const local = useMemo(() => suggest(query, stocks, history, 12), [query, stocks, history]);
-
-  // Debounced so holding a key down does not fire a request per character.
-  const [remoteQ, setRemoteQ] = useState("");
-  useEffect(() => {
-    const q = query.trim();
-    const id = window.setTimeout(
-      () => setRemoteQ(q.length >= MIN_REMOTE_CHARS ? q : ""), REMOTE_DEBOUNCE_MS);
-    return () => window.clearTimeout(id);
-  }, [query]);
-
-  const abroad = useQuery({
-    queryKey: ["search", remoteQ],
-    queryFn: async () => {
-      const [us, ca] = await Promise.all([
-        api.search(remoteQ, "US").catch(() => []),
-        api.search(remoteQ, "CA").catch(() => []),
-      ]);
-      return [...us, ...ca];
-    },
-    enabled: remoteQ.length >= MIN_REMOTE_CHARS,
-    staleTime: 5 * 60_000,
-  });
-
-  const items = useMemo<Suggestion[]>(() => {
-    const seen = new Set(local.map((s) => s.t));
-    const extra: Suggestion[] = (abroad.data ?? [])
-      .filter((s) => !seen.has(s.t))
-      .map((s) => ({ ...s, fromHistory: false }));
-    // A-shares first: they are the ones that filter instantly and the ones
-    // most searches are for. Foreign hits append rather than interleave, so
-    // the list never reshuffles under the cursor when the request lands.
-    return [...local, ...extra].slice(0, 16);
-  }, [local, abroad.data]);
+  const { items, searching } = useSymbolSearch({ query, stocks, history });
 
   useEffect(() => setActive(0), [query]);
 
@@ -115,7 +76,7 @@ export function StockPicker({
   }
 
   const heading = query.trim()
-    ? `匹配 ${items.length} 只${abroad.isFetching ? " · 正在搜索美股/加股…" : ""}`
+    ? `匹配 ${items.length} 只${searching ? " · 正在搜索美股/加股…" : ""}`
     : "最近搜索";
 
   return (
@@ -150,7 +111,7 @@ export function StockPicker({
           {items.length === 0 && (
             <div className="px-3 py-2 text-ink-mute text-[13px]">
               {query.trim()
-                ? (abroad.isFetching ? "正在搜索…" : "没有匹配的股票")
+                ? (searching ? "正在搜索…" : "没有匹配的股票")
                 : "还没有搜索记录——输入代码或名称开始"}
             </div>
           )}

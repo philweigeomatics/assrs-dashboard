@@ -261,6 +261,7 @@ export type StockProfile = {
 
 export type PairStats = {
   window: string;
+  market: MarketCode | null;
   bars: number;
   from: string;
   to: string;
@@ -342,4 +343,41 @@ export type AlertFeed = {
     shapes: { name: string; count: number }[];
   };
   groups: string[];
+};
+
+/** GET /basket?symbols=&window= — 多股对比. */
+export type BasketStock = StockProfile & {
+  symbol: string;
+  /** Mean correlation to the OTHER members, never to itself. */
+  corr_to_peers: Num;
+  /** Growth relative to the equal-weight basket: 1.2 = 20% ahead of it. */
+  vs_basket: Num;
+  rank_return: number;
+  rank_alpha?: number;
+};
+
+export type BasketVerdict = {
+  symbol: string | null;
+  kind: "warn" | "weak" | "ok" | "mixed";
+  text: string;
+};
+
+export type BasketStats = {
+  window: string;
+  market: MarketCode | null;
+  bars: number;
+  from: string;
+  to: string;
+  benchmark: { label: string; total_return_pct: Num } | null;
+  basket: {
+    total_return_pct: Num;
+    avg_correlation: Num;
+    /** False when "they move together" is not true of this group. */
+    cohesive: boolean;
+    spread_pct: Num;
+  };
+  stocks: BasketStock[];
+  symbols: string[];
+  correlation: Num[][];
+  verdicts: BasketVerdict[];
 };

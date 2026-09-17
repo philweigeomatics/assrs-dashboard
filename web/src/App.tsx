@@ -6,6 +6,7 @@ import { LoginPage } from "./auth/LoginPage";
 import { SetPasswordPage } from "./auth/SetPasswordPage";
 import { TechnicalAnalysis } from "./routes/TechnicalAnalysis";
 import { Alerts } from "./routes/Alerts";
+import { Basket } from "./routes/Basket";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
@@ -39,6 +40,14 @@ export function App() {
               element={
                 <RequireAuth>
                   <Alerts />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/basket"
+              element={
+                <RequireAuth>
+                  <Basket />
                 </RequireAuth>
               }
             />

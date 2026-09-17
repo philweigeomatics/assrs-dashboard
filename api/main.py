@@ -457,7 +457,64 @@ def compare_stats(ticker: str = TICKER,
                 adf["Close"], b_close, bench_close=bench,
                 a_fund=a_fund, b_fund=b_fund,
                 a_label=_name(ticker), b_label=_name(with_),
+                benchmark_label=markets.get(market_code).conv.benchmark_name,
+                market=market_code,
                 window=window))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+_basket_cache = TTLCache(maxsize=40, ttl_s=20 * 60)
+
+
+@app.get("/basket")
+def basket(symbols: str = Query(..., description="comma-separated, 2-8, one market"),
+           window: str = Query(pair_compare.DEFAULT_WINDOW),
+           user: AppUser = Depends(current_user)):
+    """
+    多股对比: rank a basket on return, risk, beta and alpha, and say whether
+    "sell the one moving least" is actually supported for it.
+
+    No chart — this is the question you ask about a group, where overlaying
+    six lines answers nothing.
+    """
+    if window not in pair_compare.WINDOWS:
+        raise HTTPException(422, f"window must be one of {sorted(pair_compare.WINDOWS)}")
+
+    try:
+        wanted = [markets.canonical(s) for s in symbols.split(",") if s.strip()]
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+
+    seen = list(dict.fromkeys(wanted))          # de-duplicated, order kept
+    if not 2 <= len(seen) <= pair_compare.MAX_BASKET:
+        raise HTTPException(422, f"需要 2–{pair_compare.MAX_BASKET} 只股票")
+
+    codes = {markets.split(s)[0] for s in seen}
+    if len(codes) > 1:
+        # Same reason /compare-stats refuses it: one beta needs one index, and
+        # two currencies cannot share a ranking.
+        raise HTTPException(422, "暂不支持跨市场对比 — 所有股票需在同一市场")
+    market_code = codes.pop()
+
+    def load():
+        closes, labels = {}, {}
+        for sym in seen:
+            closes[sym] = _price_fund(sym)[0]
+            labels[sym] = _name(sym)
+        try:
+            bench = _benchmark(market_code)
+        except RuntimeError:
+            bench = None
+        return pair_compare.basket(
+            closes, bench_close=bench, labels=labels,
+            benchmark_label=markets.get(market_code).conv.benchmark_name,
+            market=market_code, window=window)
+
+    try:
+        return _basket_cache.get_or_compute((tuple(seen), window), load)
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:

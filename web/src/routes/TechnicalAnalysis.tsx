@@ -115,6 +115,7 @@ export function TechnicalAnalysis() {
                 drawingCount={drawings.length}
                 onClearDrawings={() => setDrawings([])}
                 stocks={stocks.data ?? []}
+                market={analysis.data.market}
                 compare={compare}
                 compareMode={compareMode}
                 onCompare={(t) => (t ? compareM.mutate(t) : setCompare(null))}

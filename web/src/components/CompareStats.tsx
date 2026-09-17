@@ -74,6 +74,7 @@ export function CompareStats({ ticker, other }: { ticker: string; other: string 
 }
 
 function Body({ d }: { d: PairStats }) {
+  const bench = d.benchmark?.label ?? "基准指数";
   return (
     <>
       <Attribution d={d} />
@@ -85,7 +86,7 @@ function Body({ d }: { d: PairStats }) {
         </div>
       </div>
       <p className="label leading-snug">
-        β/α 对 沪深300 回归（对数收益），无风险利率取 0。α 为年化。
+        β/α 对 {bench} 回归（对数收益），无风险利率取 0。α 为年化。
         相关性、跟踪误差、信息比率为两只股票之间。历史统计，非预测。
       </p>
     </>
@@ -101,7 +102,7 @@ function Attribution({ d }: { d: PairStats }) {
       <div className="rounded-lg bg-sunken px-3 py-2 text-[12.5px]">
         <b>{a.label}</b> {signed(a.total_return_pct, 1, "%")} vs{" "}
         <b>{b.label}</b> {signed(b.total_return_pct, 1, "%")}
-        <span className="text-ink-mute"> — 缺少沪深300数据，无法拆分 β / α。</span>
+        <span className="text-ink-mute"> — 缺少基准指数数据，无法拆分 β / α。</span>
       </div>
     );
   }
@@ -120,7 +121,8 @@ function Attribution({ d }: { d: PairStats }) {
         <b className="text-up">{lead}</b> 领先 <b>{lag}</b>{" "}
         <b className="font-mono tnum">{ratio.toFixed(2)}×</b>
         <span className="text-ink-mute">
-          （{signed(at.gap_pct, 0, "pp")}；同期沪深300 {signed(at.market_return_pct, 1, "%")}）
+          （{signed(at.gap_pct, 0, "pp")}；同期{d.benchmark?.label ?? "基准"}{" "}
+          {signed(at.market_return_pct, 1, "%")}）
         </span>
       </p>
 
@@ -160,7 +162,7 @@ const ROWS: { k: keyof StockProfile; label: string; nd?: number; suffix?: string
   { k: "vol_annual_pct", label: "年化波动", nd: 1, suffix: "%", hint: "越高越颠簸" },
   { k: "sharpe", label: "夏普比率", nd: 2, hint: "每承担一单位波动换来的收益" },
   { k: "max_drawdown_pct", label: "最大回撤", nd: 1, suffix: "%" },
-  { k: "beta", label: "β（对沪深300）", nd: 2, hint: "市场每涨1%，它涨多少" },
+  { k: "beta", label: "β（对基准）", nd: 2, hint: "市场每涨1%，它涨多少" },
   { k: "alpha_annual_pct", label: "α 年化", nd: 1, suffix: "%", hint: "市场解释不了的部分" },
   { k: "r2", label: "R²", nd: 2, hint: "涨跌被大盘解释的比例" },
   { k: "up_capture_pct", label: "上涨捕获", nd: 0, suffix: "%", hint: "大盘涨时它吃到多少" },
@@ -252,7 +254,9 @@ function Valuations({ d }: { d: PairStats }) {
         if (!v) {
           return (
             <p key={s.label} className="text-[11.5px] text-ink-mute">
-              {s.label}：PE 缺失或为负（亏损），无法拆解。
+              {s.label}：{d.market === "CN"
+                ? "PE 缺失或为负（亏损），无法拆解。"
+                : "该市场暂无逐日 PE 历史，无法拆解估值与盈利。"}
             </p>
           );
         }

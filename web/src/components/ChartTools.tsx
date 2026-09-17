@@ -8,8 +8,8 @@
 
 import { useState } from "react";
 import type { Tool } from "./chart/ChartStack";
-import type { CompareResult, StockRef } from "../lib/types";
-import { suggest } from "../lib/search";
+import type { CompareResult, MarketCode, StockRef } from "../lib/types";
+import { useSymbolSearch } from "../lib/useSymbolSearch";
 
 const BTN = "h-7 px-2 rounded-md text-[12.5px] border transition-colors";
 const OFF = "border-line bg-panel hover:bg-elevated";
@@ -17,7 +17,7 @@ const ON = "border-cyan bg-cyan text-white";
 
 export function ChartTools({
   tool, setTool, onReset, drawingCount, onClearDrawings,
-  stocks, compare, compareMode, onCompare, onCompareMode,
+  stocks, market, compare, compareMode, onCompare, onCompareMode,
 }: {
   tool: Tool;
   setTool: (t: Tool) => void;
@@ -25,6 +25,8 @@ export function ChartTools({
   drawingCount: number;
   onClearDrawings: () => void;
   stocks: StockRef[];
+  /** Scopes the search: a comparison only means anything within one market. */
+  market: MarketCode;
   compare: CompareResult | null;
   compareMode: "pct" | "price";
   onCompare: (t: string | null) => void;
@@ -32,7 +34,12 @@ export function ChartTools({
 }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
-  const hits = q.trim() ? suggest(q, stocks, [], 6) : [];
+  // Same market only. β and α are measured against ONE index and the two
+  // stocks would be priced in two currencies, so a cross-market pick could
+  // only ever come back rejected — better not to offer it.
+  const { items: hits, searching } = useSymbolSearch({
+    query: q, stocks, markets: [market], limit: 6,
+  });
 
   const T = ({ id, label, title }: { id: Tool; label: string; title: string }) => (
     <button title={title} onClick={() => setTool(tool === id ? "none" : id)}
@@ -74,22 +81,28 @@ export function ChartTools({
         ) : (
           <div className="relative">
             <input
-              value={q} placeholder="对比另一只股票…"
+              value={q}
+              placeholder={market === "CN" ? "对比另一只A股…"
+                : market === "US" ? "对比另一只美股…" : "对比另一只加股…"}
               onChange={(e) => { setQ(e.target.value); setOpen(true); }}
               onFocus={() => setOpen(true)}
               onBlur={() => window.setTimeout(() => setOpen(false), 150)}
               className="h-7 w-44 px-2 rounded-md bg-sunken text-[12.5px] outline-none focus:ring-2 focus:ring-cyan/40"
             />
-            {open && hits.length > 0 && (
-              <div className="card absolute right-0 mt-1 z-30 w-56 py-1">
+            {open && (hits.length > 0 || searching) && (
+              <div className="card absolute right-0 mt-1 z-30 w-64 py-1">
                 {hits.map((s) => (
                   <button key={s.t} onMouseDown={(e) => e.preventDefault()}
                     onClick={() => { onCompare(s.t); setQ(""); setOpen(false); }}
-                    className="w-full flex gap-2 px-2 py-1 text-left hover:bg-elevated">
-                    <span className="font-mono tnum text-[12px] text-ink-dim">{s.t}</span>
+                    className="w-full flex items-baseline gap-2 px-2 py-1 text-left hover:bg-elevated">
+                    <span className="font-mono tnum text-[12px] text-ink-dim shrink-0">{s.t}</span>
                     <span className="text-[12.5px] truncate">{s.n}</span>
+                    {s.ex && <span className="text-[10.5px] text-ink-mute shrink-0 ml-auto">{s.ex}</span>}
                   </button>
                 ))}
+                {searching && hits.length === 0 && (
+                  <div className="px-2 py-1 label">正在搜索…</div>
+                )}
               </div>
             )}
           </div>

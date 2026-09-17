@@ -1,5 +1,6 @@
 """
-pair_compare.py — the quantitative case for why one stock beat another.
+pair_compare.py — the quantitative case for why one stock beat another,
+and for whether a basket of them is really one trade.
 
 The chart overlay shows THAT 长飞光纤 outran 中天科技. It cannot say why, and
 "why" has only a few possible answers, each of which means something different
@@ -26,9 +27,10 @@ Conventions, stated because every number here depends on them:
   * Risk-free rate is ZERO. A-share cash yields little, the window is short,
     and a fudged rate would move Sharpe without making it more true. Sharpe
     here is therefore return-over-volatility, not excess-over-cash.
-  * Beta, alpha and R² are measured against 沪深300 unless stated otherwise;
-    the pair statistics (correlation, tracking error, information ratio) are
-    measured between the two stocks.
+  * Beta, alpha and R² are measured against the MARKET'S OWN index — 沪深300,
+    the S&P 500 or the S&P/TSX Composite — which the caller passes in and
+    which is echoed back in the payload. The pair statistics (correlation,
+    tracking error, information ratio) are measured between the two stocks.
   * Regressions run on LOG returns, which is what makes the attribution exact
     (see _logrets). Volatility, Sharpe and the capture ratios run on simple
     returns, because those describe moves you actually lived through.
@@ -242,6 +244,7 @@ def compare(a_close: pd.Series, b_close: pd.Series, *,
             a_fund: pd.DataFrame | None = None,
             b_fund: pd.DataFrame | None = None,
             a_label: str = "A", b_label: str = "B",
+            benchmark_label: str = "基准", market: str | None = None,
             window: str = DEFAULT_WINDOW) -> dict:
     """
     The full quantitative comparison of two stocks over one window.
@@ -282,8 +285,13 @@ def compare(a_close: pd.Series, b_close: pd.Series, *,
         "bars": len(frame),
         "from": str(frame.index[0].date()),
         "to": str(frame.index[-1].date()),
+        "market": market,
+        # Named by the caller. Hardcoding 沪深300 here labelled a US pair's
+        # beta as measured against the Chinese index while it was actually
+        # regressed on the S&P 500 — the number was right and the sentence
+        # describing it was false, which is the worse of the two failures.
         "benchmark": {
-            "label": "沪深300",
+            "label": benchmark_label,
             "total_return_pct": _f(float(m.iloc[-1] / m.iloc[0] - 1) * 100),
         } if m is not None else None,
         "a": {"label": a_label, **_profile(a, m), "valuation": _valuation(a_fund, a)},
@@ -362,3 +370,189 @@ def _attribution(a: pd.Series, b: pd.Series, m: pd.Series | None) -> dict | None
         "alpha_b_pct": _f(_annualise_alpha(alpha_b)),
         "years": _f(n / TRADING_DAYS, 2),
     }
+
+
+# ── baskets ──────────────────────────────────────────────────────────────────
+#: More than this and the table stops being readable, and the fetches stop
+#: being cheap.
+MAX_BASKET = 8
+
+#: Below this average pairwise correlation, "they move together" is not true
+#: and the whole ranking is comparing unrelated things.
+COHESIVE_R = 0.5
+
+
+def basket(closes: dict, *,
+           bench_close: pd.Series | None = None,
+           labels: dict | None = None,
+           benchmark_label: str = "基准", market: str | None = None,
+           window: str = DEFAULT_WINDOW) -> dict:
+    """
+    Rank several stocks against each other and against their own average.
+
+    This exists for one specific strategy: several names move together, all are
+    trending up, so sell the ones moving least and concentrate into the leader.
+    That is sound reasoning, but only when two things are true, and the numbers
+    for both are computed here rather than assumed:
+
+      * They really do move together. If the laggard's correlation to the rest
+        is low, it is not a slower version of the same trade, it is a different
+        trade, and swapping it for the leader raises concentration without
+        buying the same exposure.
+      * The laggard is genuinely weaker, not merely lower-beta. A stock with
+        beta 0.6 in a basket averaging 1.4 SHOULD rise less; selling it for
+        lagging is selling it for being what it is. Alpha controls for that, so
+        both ranks are reported and the verdict names which one it fails.
+
+    Every series is cut to the days ALL of them traded, so no stock is ranked
+    over a stretch its peers slept through.
+    """
+    if window not in WINDOWS:
+        raise LookupError(f"window must be one of {sorted(WINDOWS)}")
+    symbols = list(closes)
+    if len(symbols) < 2:
+        raise LookupError("至少需要两只股票")
+    if len(symbols) > MAX_BASKET:
+        raise LookupError(f"最多 {MAX_BASKET} 只股票")
+
+    frame = pd.concat([closes[s].rename(s) for s in symbols], axis=1).dropna()
+    if bench_close is not None:
+        frame = pd.concat([frame, bench_close.rename("__m")], axis=1).dropna()
+
+    bars = WINDOWS[window]
+    if bars:
+        frame = frame.tail(bars + 1)
+    if len(frame) < MIN_BARS:
+        raise LookupError(
+            f"只有 {len(frame)} 个共同交易日，不足以计算（至少需要 {MIN_BARS} 个）")
+
+    m = frame["__m"] if "__m" in frame.columns else None
+    prices = frame[symbols]
+    rets = prices.pct_change().dropna()
+
+    # The basket itself: equal-weight, rebalanced daily. This is the benchmark
+    # each member is actually being judged against.
+    basket_ret = rets.mean(axis=1)
+    basket_total = float(np.prod(1 + basket_ret.values) - 1) * 100
+
+    corr = rets.corr()
+    rows = []
+    for s in symbols:
+        prof = _profile(prices[s], m)
+        others = [o for o in symbols if o != s]
+        # Correlation to the REST of the basket, not to a basket containing
+        # itself: a stock is always correlated with a group it belongs to, and
+        # the smaller the group the more that flatters it.
+        peer = float(corr.loc[s, others].mean()) if others else float("nan")
+        total = prof["total_return_pct"] or 0.0
+        rows.append({
+            "symbol": s,
+            "label": (labels or {}).get(s, s),
+            **prof,
+            "corr_to_peers": _f(peer, 3),
+            # A ratio, not a difference: "0.6x the basket" survives compounding
+            # in a way that "40 points behind" does not.
+            "vs_basket": _f((1 + total / 100) / (1 + basket_total / 100), 3),
+        })
+
+    by_return = sorted(rows, key=lambda r: -(r["total_return_pct"] or -1e9))
+    has_alpha = all(r.get("alpha_annual_pct") is not None for r in rows)
+    by_alpha = (sorted(rows, key=lambda r: -(r["alpha_annual_pct"] or -1e9))
+                if has_alpha else [])
+    for i, r in enumerate(by_return):
+        r["rank_return"] = i + 1
+    for i, r in enumerate(by_alpha):
+        r["rank_alpha"] = i + 1
+
+    n = len(symbols)
+    pairs = [float(corr.iloc[i, j]) for i in range(n) for j in range(i + 1, n)]
+    avg_corr = float(np.mean(pairs)) if pairs else float("nan")
+
+    return {
+        "window": window,
+        "market": market,
+        "bars": len(frame),
+        "from": str(frame.index[0].date()),
+        "to": str(frame.index[-1].date()),
+        "benchmark": {
+            "label": benchmark_label,
+            "total_return_pct": _f(float(m.iloc[-1] / m.iloc[0] - 1) * 100),
+        } if m is not None else None,
+        "basket": {
+            "total_return_pct": _f(basket_total),
+            "avg_correlation": _f(avg_corr, 3),
+            "cohesive": bool(not math.isnan(avg_corr) and avg_corr >= COHESIVE_R),
+            "spread_pct": _f((by_return[0]["total_return_pct"] or 0)
+                             - (by_return[-1]["total_return_pct"] or 0)),
+        },
+        "stocks": by_return,
+        "symbols": symbols,
+        "correlation": [[_f(float(corr.iloc[i, j]), 3) for j in range(n)] for i in range(n)],
+        "verdicts": _verdicts(by_return, by_alpha, avg_corr),
+    }
+
+
+def _verdicts(by_return: list, by_alpha: list, avg_corr: float) -> list:
+    """
+    What the ranking actually supports, about the laggard.
+
+    Deliberately conservative. The only case that endorses "sell the one moving
+    least" is the one where it trails on BOTH raw return and alpha while really
+    moving with the group. Everything else is a reason not to, and says which.
+    """
+    out = []
+    if len(by_return) < 2:
+        return out
+    leader, laggard = by_return[0], by_return[-1]
+
+    if math.isnan(avg_corr) or avg_corr < COHESIVE_R:
+        out.append({
+            "symbol": None, "kind": "warn",
+            "text": f"这些股票的平均相关性只有 {avg_corr:.2f}，并没有在一起动。"
+                    f"排名依然成立，但“换掉涨得少的那只”依赖同涨同跌这个前提，"
+                    f"在这里并不成立。",
+        })
+
+    peer = laggard.get("corr_to_peers")
+    if peer is not None and peer < 0.4:
+        out.append({
+            "symbol": laggard["symbol"], "kind": "warn",
+            "text": f"{laggard['label']} 与其余标的的相关性只有 {peer:.2f}，"
+                    f"它不是同一笔交易的慢速版本，而是另一笔交易。"
+                    f"换成领先者会提高集中度，却换不到同样的暴露。",
+        })
+        return out
+
+    if not by_alpha:
+        return out
+
+    alpha_last = by_alpha[-1]["symbol"] == laggard["symbol"]
+    betas = [r.get("beta") for r in by_return if r.get("beta") is not None]
+    lag_beta, lead_beta = laggard.get("beta"), leader.get("beta")
+    low_beta = (lag_beta is not None and betas
+                and lag_beta < float(np.mean(betas)) * 0.75)
+
+    if alpha_last:
+        out.append({
+            "symbol": laggard["symbol"], "kind": "weak",
+            "text": f"{laggard['label']} 在涨幅和 α 上都排最后"
+                    f"（年化 α {laggard.get('alpha_annual_pct')}%，"
+                    f"领先者 {leader.get('alpha_annual_pct')}%）——"
+                    f"它是真的更弱，不只是波动小。",
+        })
+    elif low_beta:
+        out.append({
+            "symbol": laggard["symbol"], "kind": "ok",
+            "text": f"{laggard['label']} 涨得少，但 β 只有 {lag_beta}"
+                    f"（领先者 {lead_beta}），α 排第 {laggard.get('rank_alpha')}。"
+                    f"它本来就该涨得少——按涨幅把它换掉，"
+                    f"等于卖掉低波动的仓位去买高波动的仓位。",
+        })
+    else:
+        out.append({
+            "symbol": laggard["symbol"], "kind": "mixed",
+            "text": f"{laggard['label']} 涨幅最低，但 α 排第 "
+                    f"{laggard.get('rank_alpha')}，并非全面落后。"
+                    f"差距更可能来自某一段时间的错位，而不是持续更弱。",
+        })
+    return out

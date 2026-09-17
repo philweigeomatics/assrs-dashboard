@@ -14,6 +14,7 @@ import { useAuth } from "../auth/AuthProvider";
 const PAGES = [
   { to: "/", label: "📈 个股分析" },
   { to: "/alerts", label: "🔔 今日提醒" },
+  { to: "/basket", label: "🧺 多股对比" },
 ];
 
 export function NavBar({ children }: { children?: ReactNode }) {
