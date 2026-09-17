@@ -35,9 +35,16 @@ COPY requirements.txt /tmp/requirements-root.txt
 COPY api/requirements.txt /tmp/requirements-api.txt
 RUN pip install -r /tmp/requirements-root.txt -r /tmp/requirements-api.txt
 
-# Root-level Python modules (the shared analysis code) and the API package.
+# Root-level Python modules (the shared analysis code) and the packages.
+#
+# `COPY *.py` takes FILES ONLY — a package directory needs its own COPY line or
+# it is silently absent from the image, uvicorn cannot import the app, nothing
+# binds to $PORT, and Cloud Run reports it as "failed to start and listen on
+# the port" with no mention of the import. Every top-level package below must
+# have a line here; api/tests/test_dockerfile.py fails the build if one does not.
 COPY *.py ./
 COPY api ./api
+COPY markets ./markets
 
 # Cloud Run injects PORT; 8080 is its default.
 ENV PORT=8080
