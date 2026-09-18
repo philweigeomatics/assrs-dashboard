@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
 import { LoginPage } from "./auth/LoginPage";
 import { SetPasswordPage } from "./auth/SetPasswordPage";
+import { Dashboard } from "./routes/Dashboard";
 import { TechnicalAnalysis } from "./routes/TechnicalAnalysis";
 import { Alerts } from "./routes/Alerts";
 import { Basket } from "./routes/Basket";
@@ -33,6 +34,14 @@ export function App() {
               element={
                 <RequireAuth>
                   <TechnicalAnalysis />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/market"
+              element={
+                <RequireAuth>
+                  <Dashboard />
                 </RequireAuth>
               }
             />

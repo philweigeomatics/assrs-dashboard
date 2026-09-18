@@ -993,3 +993,116 @@ def compare(ticker: str = TICKER,
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:
         raise HTTPException(503, str(exc))
+
+
+# ── 市场看板 ─────────────────────────────────────────────────────────────────
+# Six panels, six caches, all read-only and all shared by every user — none of
+# this is per-account, so one instance computes each at most once per TTL.
+#
+# The TTLs follow how often the underlying number can actually change: the
+# heatmap moves with the tape, 两融 is published once a day after the close,
+# 龙虎榜 once an evening, and breadth / rotation come from the nightly rebuild.
+_heatmap_cache = TTLCache(maxsize=1, ttl_s=30 * 60)
+_breadth_cache = TTLCache(maxsize=4, ttl_s=6 * 3600)
+_leverage_cache = TTLCache(maxsize=1, ttl_s=30 * 60)
+_toplist_cache = TTLCache(maxsize=1, ttl_s=4 * 3600)
+_wyckoff_cache = TTLCache(maxsize=4, ttl_s=60 * 60)
+_rotation_cache = TTLCache(maxsize=4, ttl_s=6 * 3600)
+
+#: Indices the Wyckoff panel will run on. An allow-list rather than a free
+#: parameter: the phases are only meaningful on a broad index, and an open
+#: parameter is an open Tushare call with someone else's quota.
+WYCKOFF_INDICES = {
+    "000300.SH": "沪深300",
+    "000905.SH": "中证500",
+    "399006.SZ": "创业板指",
+    "000001.SH": "上证指数",
+}
+
+
+def _market_panel(cache, key, build):
+    """Shared error contract for the dashboard panels."""
+    try:
+        return cache.get_or_compute(key, build)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    except Exception as exc:                                    # noqa: BLE001
+        raise HTTPException(503, f"{type(exc).__name__}: {exc}"[:200])
+
+
+@app.get("/market/heatmap")
+def market_heatmap(user: AppUser = Depends(current_user)):
+    """Sector → stock tree, sized by 流通市值 and coloured by today's move."""
+    from api import dashboard_api
+    return _market_panel(_heatmap_cache, "all", dashboard_api.heatmap)
+
+
+@app.get("/market/breadth")
+def market_breadth(days: int = Query(60, ge=10, le=250),
+                   user: AppUser = Depends(current_user)):
+    """
+    The market_breadth table, by session.
+
+    Not a member count despite the name — each cell is the sector index's own
+    distance from its MA20, mapped from ±5% onto 0–1 and clipped. The client
+    says so; see sector_rotation.load_trend for the full story.
+    """
+    from api import dashboard_api
+    return _market_panel(_breadth_cache, days, lambda: dashboard_api.breadth(days))
+
+
+@app.get("/market/leverage")
+def market_leverage(user: AppUser = Depends(current_user)):
+    """两融余额 and US margin debt."""
+    from api import dashboard_api
+    return _market_panel(_leverage_cache, "all", dashboard_api.leverage)
+
+
+@app.get("/market/toplist")
+def market_toplist(user: AppUser = Depends(current_user)):
+    """龙虎榜 — the most recent session's abnormal-trading list."""
+    from api import dashboard_api
+    return _market_panel(_toplist_cache, "all", dashboard_api.top_list)
+
+
+@app.get("/market/wyckoff")
+def market_wyckoff(index: str = Query("000300.SH"),
+                   user: AppUser = Depends(current_user)):
+    """Statistical Wyckoff phase for a broad index, with what each phase paid."""
+    if index not in WYCKOFF_INDICES:
+        raise HTTPException(422, f"index must be one of {sorted(WYCKOFF_INDICES)}")
+
+    def build():
+        import data_manager
+        import wyckoff
+        # Four years: the chart shows 180 bars, but the forward-return table
+        # needs every phase to appear enough times to be worth printing.
+        df = data_manager.get_index_data_live(index, lookback_days=1500, freq="daily")
+        if df is None or df.empty:
+            raise RuntimeError(f"{WYCKOFF_INDICES[index]} 指数数据暂时读取不到 — 请稍后重试")
+        return wyckoff.analyse(df, name=WYCKOFF_INDICES[index])
+
+    return _market_panel(_wyckoff_cache, index, build)
+
+
+@app.get("/market/rotation")
+def market_rotation(freq: str = Query("w", pattern="^(w|d)$"),
+                    user: AppUser = Depends(current_user)):
+    """
+    The relative-rotation map: which sector money is leaving, which it is entering.
+
+    Replaces the pairwise-correlation panel, which could report that rotation
+    was happening but never which direction — see sector_rotation's docstring.
+    """
+    def build():
+        import sector_rotation
+        closes, bench, label = sector_rotation.load_sector_closes()
+        if not closes:
+            raise RuntimeError("板块指数（PPI_*）暂时读取不到 — 请稍后重试")
+        return sector_rotation.analyse(closes, bench, freq=freq,
+                                       benchmark_label=label,
+                                       trend=sector_rotation.load_trend())
+
+    return _market_panel(_rotation_cache, freq, build)

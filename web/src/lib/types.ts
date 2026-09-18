@@ -544,3 +544,129 @@ export type NoteScorecard = {
   /** Below this many resolved claims the rates are noise. */
   meaningful_at: number;
 };
+
+// ── 市场看板 ────────────────────────────────────────────────────────────────
+
+export type HeatStock = { t: string; n: string; mcap: number; pct: number };
+export type HeatSector = { name: string; mcap: number; pct: number; stocks: HeatStock[] };
+export type Heatmap = {
+  trade_date: string;
+  mcap: number;
+  pct: number;
+  /** False when the move fetch failed — every box grey for a reason. */
+  has_moves: boolean;
+  sectors: HeatSector[];
+};
+
+/**
+ * The market_breadth table. NOT a member count, whatever the name says: each
+ * cell is the sector index's own distance from its MA20, mapped from ±5% onto
+ * 0–1 and clipped. See sector_rotation.load_trend.
+ */
+export type Breadth = {
+  dates: string[];
+  sectors: { name: string; latest: Num; values: Num[] }[];
+  /** Sectors currently above their own 20-day mean. */
+  hot: number;
+  total: number;
+};
+
+export type Leverage = {
+  market: string;
+  label: string;
+  ok: boolean;
+  unit: string;
+  freq: string;
+  latest: Num;
+  prev: Num;
+  asof: string | null;
+  note: string | null;
+  error: string | null;
+  series: { period: string; value: Num }[];
+  detail: { period: string; rzye?: Num; rqye?: Num;
+            rzmre?: Num; rzche?: Num; net_fin?: Num }[];
+};
+
+export type TopList = {
+  trade_date: string;
+  rows: { t: string; n: string; close: Num; pct: Num;
+          net: Num; net_rate: Num; reason: string }[];
+};
+
+export type WyckoffPhase = "accumulation" | "markup" | "distribution" | "markdown" | "transition";
+
+export type Wyckoff = {
+  name: string;
+  phase: WyckoffPhase;
+  phases: Record<string, { label: string; en: string; color: string; means: string }>;
+  asof: string;
+  since: string;
+  days_in_phase: number;
+  position_pct: number;
+  volume_z: Num;
+  volatility: number;
+  vol_baseline: number;
+  lookback: number;
+  /** Bars a new phase must hold before it is reported. */
+  confirm: number;
+  dates: string[];
+  bars: { o: number; h: number; l: number; c: number }[];
+  channel: { high: number[]; low: number[] };
+  spans: { from: number; to: number; phase: WyckoffPhase }[];
+  edge: {
+    horizon: number;
+    baseline_pct: number;
+    meaningful_at: number;
+    overlapping: boolean;
+    rows: { phase: WyckoffPhase; n: number; mean_pct: Num;
+            edge_pp: Num; win_pct: Num; thin: boolean }[];
+  };
+};
+
+export type Quadrant = "improving" | "leading" | "weakening" | "lagging";
+export type RotationTrend = { now_pct: number; delta_pp: number };
+export type RotationPoint = { date: string; ratio: number; mom: number };
+
+export type RotationSector = {
+  name: string;
+  ratio: number;
+  mom: number;
+  quadrant: Quadrant;
+  /** Sitting on the crossing point — the label is a coin flip. */
+  neutral: boolean;
+  distance: number;
+  /** Compass bearing of the last leg, clockwise from north. */
+  heading: Num;
+  tail: RotationPoint[];
+  /** Absolute trend: where the sector index sits against its own MA20. */
+  trend: RotationTrend | null;
+};
+
+export type RotationCall = {
+  name: string;
+  ratio: number;
+  mom: number;
+  heading: Num;
+  trend: RotationTrend | null;
+  /** Whether the absolute trend moved the way the relative signal claims. */
+  rising: boolean | null;
+};
+
+export type Rotation = {
+  freq: "w" | "d";
+  benchmark: string;
+  asof: string;
+  bars: number;
+  dates: string[];
+  params: { rs_window: number; mom_window: number; tail: number; horizon: number };
+  quadrants: Record<Quadrant, { label: string; en: string; color: string; means: string }>;
+  sectors: RotationSector[];
+  calls: { into: RotationCall[]; outof: RotationCall[];
+           leading: string[]; lagging: string[] };
+  edge: {
+    horizon: number;
+    baseline_pct: number;
+    rows: { quadrant: Quadrant; n: number; mean_pct: Num;
+            edge_pp: Num; win_pct: Num }[];
+  };
+};

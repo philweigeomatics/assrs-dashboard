@@ -3,6 +3,7 @@ import type {
   AlertFeed, Analysis, BasketStats, CompareResult, HistoryRef, PairStats, SectorAnalysis,
   AlertNote, EquityBrief, NoteScorecard, PairTradeResult, SimResult, StockRef,
   StrategyResult, WhatIfAi,
+  Breadth, Heatmap, Leverage, Rotation, TopList, Wyckoff,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -110,6 +111,12 @@ export const api = {
   compareStats: (t: string, other: string, window: string) =>
     call<PairStats>(`/compare-stats/${t}?with=${other}&window=${window}`),
   sectors: (t: string, window: number) => call<SectorAnalysis>(`/sectors/${t}?window=${window}`),
+  heatmap: () => call<Heatmap>("/market/heatmap"),
+  breadth: (days = 60) => call<Breadth>(`/market/breadth?days=${days}`),
+  leverage: () => call<Leverage[]>("/market/leverage"),
+  topList: () => call<TopList>("/market/toplist"),
+  wyckoff: (index: string) => call<Wyckoff>(`/market/wyckoff?index=${index}`),
+  rotation: (freq: "w" | "d") => call<Rotation>(`/market/rotation?freq=${freq}`),
   whatifAi: (t: string, body: Record<string, unknown>) =>
     call<WhatIfAi>(`/whatif-ai/${t}`, {
       method: "POST",
