@@ -670,3 +670,115 @@ export type Rotation = {
             edge_pp: Num; win_pct: Num }[];
   };
 };
+
+// ── MyQuestrade ─────────────────────────────────────────────────────────────
+
+export type QtStatus = {
+  connected: boolean;
+  api_server?: string | null;
+  connected_at?: string | null;
+  access_expires_at?: string | null;
+  /** Why the last refresh failed, if it did. Shown verbatim. */
+  reason?: string | null;
+  accounts?: QtAccountRef[];
+};
+
+export type QtAccountRef = {
+  id: string; type: string; label: string;
+  status: string; primary: boolean; client_type: string;
+};
+
+export type QtAccount = QtAccountRef & {
+  positions: number;
+  market_value_base: number;
+  cash_base: number;
+  per_currency: { currency: string; cash: number;
+                  market_value: Num; total_equity: Num }[];
+};
+
+export type QtLot = {
+  id: string; label: string; type: string;
+  quantity: number;
+  /** Per account, because ACB is per account — and a TFSA has none for tax. */
+  avg_cost: Num;
+  market_value: Num;
+  market_value_base: Num;
+  open_pnl: Num;
+};
+
+export type QtHolding = {
+  symbol: string; name: string; kind: string; currency: string; exchange: string;
+  /** Yahoo's spelling, or null when it could not be mapped. */
+  yahoo: string | null;
+  quantity: number;
+  avg_cost: Num;
+  price: Num;
+  market_value: number;
+  market_value_base: number;
+  cost: number;
+  open_pnl: number;
+  open_pnl_pct: Num;
+  weight_pct: Num;
+  /** Held in more than one account. */
+  split: boolean;
+  accounts: QtLot[];
+};
+
+export type QtBook = {
+  as_of: string;
+  base: string;
+  delayed: boolean;
+  fx: { rates: Record<string, number>; source: string };
+  accounts: QtAccount[];
+  holdings: QtHolding[];
+  totals: {
+    market_value: number; cash: number; equity: number; cost: number;
+    open_pnl: number; open_pnl_pct: Num; positions: number; accounts: number;
+  };
+  mix: { currency: { name: string; value: number; pct: Num }[];
+         kind: { name: string; value: number; pct: Num }[] };
+  warnings: string[];
+};
+
+export type QtStats = {
+  ann_return_pct: number;
+  ann_vol_pct: number;
+  downside_vol_pct: Num;
+  sharpe: Num;
+  sortino: Num;
+  max_drawdown_pct: number;
+  beta: Num;
+  alpha_pct: Num;
+  r2: Num;
+  tracking_error_pct: Num;
+  info_ratio: Num;
+  var95_pct: number;
+  worst_day_pct: number;
+  up_capture_pct: Num;
+  down_capture_pct: Num;
+};
+
+export type QtRisk = QtStats & {
+  base: string;
+  as_of: string;
+  benchmark: string;
+  benchmark_name: string;
+  benchmark_stats: QtStats;
+  sessions: number;
+  from: string;
+  to: string;
+  /** Share of the book these statistics actually speak for. */
+  covered_pct: number;
+  /** Says out loud that this is today's weights replayed, not a track record. */
+  basis: string;
+  holdings: {
+    symbol: string; name: string; weight_pct: number; ann_vol_pct: number;
+    beta: Num; corr_bench: number; risk_pct: Num; ann_return_pct: number;
+  }[];
+  concentration: {
+    positions: number; effective_n: Num; hhi: number;
+    top1_pct: number; top5_pct: number;
+  };
+  totals: QtBook["totals"];
+  warnings: string[];
+};

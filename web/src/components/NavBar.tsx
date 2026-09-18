@@ -17,6 +17,7 @@ const PAGES = [
   { to: "/alerts", label: "🔔 今日提醒" },
   { to: "/basket", label: "🧺 多股对比" },
   { to: "/strategies", label: "⚡ 策略" },
+  { to: "/questrade", label: "🏦 MyQuestrade" },
 ];
 
 export function NavBar({ children }: { children?: ReactNode }) {

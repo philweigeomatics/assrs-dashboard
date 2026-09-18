@@ -1106,3 +1106,142 @@ def market_rotation(freq: str = Query("w", pattern="^(w|d)$"),
                                        trend=sector_rotation.load_trend())
 
     return _market_panel(_rotation_cache, freq, build)
+
+
+# ── MyQuestrade ──────────────────────────────────────────────────────────────
+# Per-user and never shared: the cache key is the app_user_id, because these
+# are somebody's actual holdings.
+#
+# Positions move with the tape, so the book is held only a few minutes; the
+# risk report is built from three years of daily history and changes far more
+# slowly than that, so it is held for half an hour.
+_qt_book_cache = TTLCache(maxsize=8, ttl_s=3 * 60)
+_qt_risk_cache = TTLCache(maxsize=16, ttl_s=30 * 60)
+
+
+class QuestradeConnectReq(BaseModel):
+    """
+    The manual refresh token from apphub.questrade.com.
+
+    It goes straight to Questrade to be exchanged and is never echoed back,
+    never logged, and never sent to any client — see api/questrade_api.py and
+    the migration for where the rotated replacement lives.
+    """
+    refresh_token: str = Field(..., min_length=8, max_length=512)
+
+
+def _questrade(exc: Exception):
+    """
+    Questrade's failures, mapped onto statuses the frontend can act on.
+
+    409 rather than 401 for a broken token chain, deliberately: the client
+    signs the user out of Supabase on a 401, and "your brokerage link expired"
+    must not log you out of the app.
+    """
+    import questrade as qtm
+    if isinstance(exc, qtm.NeedsReconnect):
+        raise HTTPException(409, str(exc))
+    if isinstance(exc, qtm.RateLimited):
+        raise HTTPException(429, str(exc))
+    if isinstance(exc, LookupError):
+        raise HTTPException(404, str(exc))
+    if isinstance(exc, qtm.QuestradeError):
+        raise HTTPException(502, str(exc))
+    raise HTTPException(503, f"{type(exc).__name__}: {exc}"[:200])
+
+
+@app.get("/questrade/status")
+def questrade_status(user: AppUser = Depends(current_user)):
+    """Whether this user has a live connection. Never any part of the token."""
+    from api import questrade_api
+    try:
+        return questrade_api.client(user.id).status()
+    except Exception as exc:                                    # noqa: BLE001
+        _questrade(exc)
+
+
+@app.post("/questrade/connect")
+def questrade_connect(req: QuestradeConnectReq, user: AppUser = Depends(current_user)):
+    """
+    Adopt a manually generated refresh token.
+
+    Exchanged immediately. A token that does not work has to fail here, while
+    the user is still looking at the box they pasted it into.
+    """
+    from api import questrade_api
+    try:
+        client = questrade_api.client(user.id)
+        client.connect(req.refresh_token)
+        accounts = client.accounts()
+    except Exception as exc:                                    # noqa: BLE001
+        _questrade(exc)
+    _forget_questrade(user.id)
+    return {**client.status(), "accounts": accounts}
+
+
+def _forget_questrade(user_id: int) -> None:
+    """
+    Drop this user's cached book and risk report.
+
+    The TTL caches have no delete, so a None is stored instead — every read
+    site treats a falsy value as a miss. Called on connect AND on disconnect:
+    reconnecting to a different Questrade login must not show the previous
+    one's positions for the next three minutes.
+    """
+    for base in ("CAD", "USD"):
+        _qt_book_cache.put(("book", user_id, base), None)
+        for bench in ("^GSPC", "^IXIC", "^GSPTSE"):
+            _qt_risk_cache.put(("risk", user_id, bench, base), None)
+
+
+@app.delete("/questrade/connect")
+def questrade_disconnect(user: AppUser = Depends(current_user)):
+    from api import questrade_api
+    questrade_api.client(user.id).disconnect()
+    _forget_questrade(user.id)
+    return {"connected": False}
+
+
+@app.get("/questrade/portfolio")
+def questrade_portfolio(base: str = Query("CAD", pattern="^(CAD|USD)$"),
+                        user: AppUser = Depends(current_user)):
+    """Every account consolidated into one book, in `base` currency."""
+    from api import questrade_api
+    key = ("book", user.id, base)
+    cached = _qt_book_cache.peek(key)
+    if cached:
+        return cached
+    try:
+        book = questrade_api.snapshot(user.id, base=base)
+    except Exception as exc:                                    # noqa: BLE001
+        _questrade(exc)
+    _qt_book_cache.put(key, book)
+    return book
+
+
+@app.get("/questrade/risk")
+def questrade_risk(benchmark: str = Query("^GSPC"),
+                   base: str = Query("CAD", pattern="^(CAD|USD)$"),
+                   user: AppUser = Depends(current_user)):
+    """Today's holdings replayed against an index — both in `base` currency."""
+    import portfolio
+    from api import questrade_api
+    if benchmark not in portfolio.BENCHMARKS:
+        raise HTTPException(422, f"benchmark must be one of {sorted(portfolio.BENCHMARKS)}")
+
+    key = ("risk", user.id, benchmark, base)
+    cached = _qt_risk_cache.peek(key)
+    if cached:
+        return cached
+    try:
+        report = questrade_api.risk_report(user.id, benchmark=benchmark, base=base)
+    except Exception as exc:                                    # noqa: BLE001
+        _questrade(exc)
+    _qt_risk_cache.put(key, report)
+    return report
+
+
+@app.get("/questrade/benchmarks")
+def questrade_benchmarks(user: AppUser = Depends(current_user)):
+    import portfolio
+    return [{"id": k, "name": v} for k, v in portfolio.BENCHMARKS.items()]

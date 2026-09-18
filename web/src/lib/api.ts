@@ -4,6 +4,7 @@ import type {
   AlertNote, EquityBrief, NoteScorecard, PairTradeResult, SimResult, StockRef,
   StrategyResult, WhatIfAi,
   Breadth, Heatmap, Leverage, Rotation, TopList, Wyckoff,
+  QtBook, QtRisk, QtStatus,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -111,6 +112,17 @@ export const api = {
   compareStats: (t: string, other: string, window: string) =>
     call<PairStats>(`/compare-stats/${t}?with=${other}&window=${window}`),
   sectors: (t: string, window: number) => call<SectorAnalysis>(`/sectors/${t}?window=${window}`),
+  qtStatus: () => call<QtStatus>("/questrade/status"),
+  // The token is POSTed and never returned, logged or stored client-side.
+  qtConnect: (refresh_token: string) =>
+    call<QtStatus>("/questrade/connect", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token }),
+    }),
+  qtDisconnect: () => call<{ connected: false }>("/questrade/connect", { method: "DELETE" }),
+  qtBook: (base: "CAD" | "USD") => call<QtBook>(`/questrade/portfolio?base=${base}`),
+  qtRisk: (benchmark: string, base: "CAD" | "USD") =>
+    call<QtRisk>(`/questrade/risk?benchmark=${encodeURIComponent(benchmark)}&base=${base}`),
   heatmap: () => call<Heatmap>("/market/heatmap"),
   breadth: (days = 60) => call<Breadth>(`/market/breadth?days=${days}`),
   leverage: () => call<Leverage[]>("/market/leverage"),
