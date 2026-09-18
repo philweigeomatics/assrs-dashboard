@@ -31,6 +31,19 @@ function cash(v: number | null | undefined, ccy: string, nd = 2): string {
     minimumFractionDigits: nd, maximumFractionDigits: nd })}`;
 }
 
+/**
+ * Stocks and funds are listed apart because they are different decisions. An
+ * ETF's weight is an asset-allocation choice; a single name's weight is a
+ * view. Reading them off one ranked list invites comparing the two as though
+ * a 12% position in VFV and a 12% position in one chip maker meant the same
+ * thing about conviction.
+ */
+const SECTIONS: { group: string; title: string }[] = [
+  { group: "stock", title: "股票" },
+  { group: "etf", title: "ETF / 基金" },
+  { group: "other", title: "其他" },
+];
+
 export function Holdings({ book }: { book: QtBook }) {
   const [open, setOpen] = useState<Set<string>>(new Set());
   const toggle = (s: string) =>
@@ -39,6 +52,11 @@ export function Holdings({ book }: { book: QtBook }) {
       next.has(s) ? next.delete(s) : next.add(s);
       return next;
     });
+
+  const total = book.totals.market_value || 1;
+  const sections = SECTIONS
+    .map((s) => ({ ...s, rows: book.holdings.filter((h) => h.group === s.group) }))
+    .filter((s) => s.rows.length > 0);
 
   return (
     <div className="overflow-auto rounded-lg border border-line">
@@ -57,12 +75,30 @@ export function Holdings({ book }: { book: QtBook }) {
             <Th right>权重</Th>
           </tr>
         </thead>
-        <tbody>
-          {book.holdings.map((h) => (
-            <Row key={h.symbol} h={h} base={book.base}
-              open={open.has(h.symbol)} onToggle={() => toggle(h.symbol)} />
-          ))}
-        </tbody>
+        {sections.map((s) => {
+          const value = s.rows.reduce((a, h) => a + h.market_value_base, 0);
+          return (
+            <tbody key={s.group}>
+              <tr className="bg-sunken">
+                <td colSpan={7} className="px-2 py-1 text-[11.5px] font-semibold">
+                  {s.title}
+                  <span className="text-ink-mute font-normal"> · {s.rows.length} 只</span>
+                </td>
+                <td className="px-2 py-1 text-right tnum text-[11.5px] font-semibold">
+                  {cash(value, book.base, 0)}
+                </td>
+                <td />
+                <td className="px-2 py-1 text-right tnum text-[11.5px]">
+                  {fixed(value / total * 100, 1)}%
+                </td>
+              </tr>
+              {s.rows.map((h) => (
+                <Row key={h.symbol} h={h} base={book.base}
+                  open={open.has(h.symbol)} onToggle={() => toggle(h.symbol)} />
+              ))}
+            </tbody>
+          );
+        })}
       </table>
     </div>
   );

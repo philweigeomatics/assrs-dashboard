@@ -219,23 +219,39 @@ def _rates(balances: dict[str, dict], base: str) -> tuple[dict, str]:
     return {base.upper(): 1.0}, "不可用"
 
 
+#: Which sleeve of the book a report covers. "仅股票" matters: a book that is
+#: 60% index funds has a beta near 1 whatever its stocks do, and the stock
+#: sleeve's own risk is invisible inside the whole-book number.
+SCOPES = {"all": "全部持仓", "stock": "仅股票", "etf": "仅 ETF"}
+
+
 # ── the risk report ──────────────────────────────────────────────────────────
 def risk_report(app_user_id: int, benchmark: str = "^GSPC",
-                base: str = "CAD") -> dict:
-    """Today's book, replayed against an index — both in the base currency."""
+                base: str = "CAD", scope: str = "all") -> dict:
+    """
+    Today's book, replayed against an index — both in the base currency.
+
+    `scope` narrows it to the stock sleeve or the ETF sleeve. That is not a
+    cosmetic filter: a book that is 60% index funds has a beta near 1 whatever
+    the stocks are doing, and "what is my stock picking actually costing me in
+    volatility" is a question the whole-book number cannot answer.
+    """
     if benchmark not in pf.BENCHMARKS:
         raise LookupError(f"未知的基准：{benchmark}")
+    if scope not in SCOPES:
+        raise LookupError(f"未知的范围：{scope}")
 
     book = snapshot(app_user_id, base=base)
+    chosen = [h for h in book["holdings"]
+              if h["yahoo"] and h["market_value_base"]
+              and (scope == "all" or h["group"] == scope)]
+    if not chosen:
+        raise LookupError(f"{SCOPES[scope]}中没有可取得行情的持仓")
+
     weights, currencies = {}, {}
-    for h in book["holdings"]:
-        if not h["yahoo"] or not h["market_value_base"]:
-            continue
+    for h in chosen:
         weights[h["yahoo"]] = weights.get(h["yahoo"], 0.0) + h["market_value_base"]
         currencies[h["yahoo"]] = h["currency"]
-    if not weights:
-        raise LookupError("没有任何持仓能取得行情，无法计算风险指标")
-
     total = sum(weights.values())
     weights = {k: v / total for k, v in weights.items()}
     currencies[benchmark] = BENCHMARK_CCY.get(benchmark, base)
@@ -243,9 +259,14 @@ def risk_report(app_user_id: int, benchmark: str = "^GSPC",
     prices = _history(list(weights) + [benchmark], currencies, base)
     report = pf.risk(weights, prices, benchmark)
     report["base"] = base
+    report["scope"] = scope
+    report["scope_label"] = SCOPES[scope]
     report["as_of"] = book["as_of"]
     report["totals"] = book["totals"]
-    # Names carried through so the table does not read as a list of tickers.
+    # What share of the WHOLE book this sleeve is, which is the context the
+    # covered_pct inside the sleeve cannot give.
+    whole = sum(h["market_value_base"] for h in book["holdings"]) or 1.0
+    report["sleeve_pct"] = round(total / whole * 100, 1)
     labels = {h["yahoo"]: h["name"] for h in book["holdings"] if h["yahoo"]}
     for row in report["holdings"]:
         row["name"] = labels.get(row["symbol"], row["symbol"])
@@ -288,3 +309,115 @@ def _history(symbols: list[str], currencies: dict[str, str], base: str) -> pd.Da
             series = series * close[pair].reindex(series.index).ffill()
         out[symbol] = series
     return out.dropna(how="all")
+
+
+# ── industry exposure ────────────────────────────────────────────────────────
+_sector_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _sector_lookup(yahoo: str, group: str) -> dict:
+    """
+    {sector, industry} for a stock; {weights} for an ETF. Cached for a day.
+
+    Two different Yahoo calls, because they are two different questions. A
+    stock has one sector. An ETF has eleven, published as `sector_weightings`,
+    and that is what makes look-through possible — without it a book that is
+    half VFV reports half its exposure as "ETF", which is not a sector and not
+    an answer.
+    """
+    hit = _sector_cache.get(yahoo)
+    if hit and time.time() - hit[0] < KIND_TTL_S:
+        return hit[1]
+
+    out: dict = {}
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker(yahoo)
+        if group == "etf":
+            weights = getattr(ticker.funds_data, "sector_weightings", None)
+            out = {"weights": dict(weights)} if weights else {}
+        else:
+            info = ticker.info or {}
+            out = {"sector": info.get("sector"), "industry": info.get("industry")}
+    except Exception:                                              # noqa: BLE001
+        out = {}
+    _sector_cache[yahoo] = (time.time(), out)
+    return out
+
+
+def exposure_report(app_user_id: int, base: str = "CAD") -> dict:
+    """Sector exposure with ETFs looked through, plus a stocks-only industry cut."""
+    import exposure
+
+    book = snapshot(app_user_id, base=base)
+    lookups = {}
+    for h in book["holdings"]:
+        if h["yahoo"]:
+            lookups[h["symbol"]] = _sector_lookup(h["yahoo"], h["group"])
+
+    report = exposure.analyse(book["holdings"], lookups)
+    report["base"] = base
+    report["as_of"] = book["as_of"]
+    names = {h["symbol"]: h["name"] for h in book["holdings"]}
+    for row in report["rows"]:
+        row["holdings"] = [{"symbol": s, "name": names.get(s, s)} for s in row["holdings"]]
+    return report
+
+
+# ── allocation ───────────────────────────────────────────────────────────────
+def _panel(app_user_id: int, base: str, scope: str):
+    """(book, selected holdings, return panel, current weights) for one scope."""
+    import portfolio as pf
+
+    if scope not in SCOPES:
+        raise LookupError(f"未知的范围：{scope}")
+    book = snapshot(app_user_id, base=base)
+    chosen = [h for h in book["holdings"]
+              if h["yahoo"] and h["market_value_base"]
+              and (scope == "all" or h["group"] == scope)]
+    if len(chosen) < 2:
+        raise LookupError(f"{SCOPES[scope]}中可计价的标的少于两只，无法做配置分析")
+
+    weights, currencies = {}, {}
+    for h in chosen:
+        weights[h["yahoo"]] = weights.get(h["yahoo"], 0.0) + h["market_value_base"]
+        currencies[h["yahoo"]] = h["currency"]
+    total = sum(weights.values())
+    weights = {k: v / total for k, v in weights.items()}
+
+    # The benchmark rides along purely to define the trading calendar; the
+    # optimiser never sees it.
+    bench = "^GSPC"
+    currencies[bench] = BENCHMARK_CCY[bench]
+    prices = _history(list(weights) + [bench], currencies, base)
+    rets, dropped = pf.returns(prices, list(weights), bench)
+    return book, chosen, rets.drop(columns=[bench]), weights, dropped
+
+
+def optimise_report(app_user_id: int, *, base: str = "CAD", scope: str = "all",
+                    method: str = "min_var", cap: float = 0.25) -> dict:
+    """A target allocation, and whether it has ever been worth switching to."""
+    import optimise as opt
+    import pandas as pd
+
+    book, chosen, rets, weights, dropped = _panel(app_user_id, base, scope)
+    names = {h["yahoo"]: h["name"] for h in chosen if h["yahoo"]}
+    current = pd.Series({c: weights.get(c, 0.0) for c in rets.columns}, dtype=float)
+
+    report = opt.suggest(rets, current, method, cap=cap, names=names)
+    try:
+        report["walk_forward"] = opt.walk_forward(
+            rets, current, ["min_var", "risk_parity", "equal", "max_sharpe"], cap=cap)
+    except LookupError as exc:
+        # The evidence is the point, so its absence is reported, not hidden.
+        report["walk_forward"] = None
+        report["walk_forward_error"] = str(exc)
+
+    report.update({
+        "base": base, "scope": scope, "scope_label": SCOPES[scope],
+        "as_of": book["as_of"], "sessions": int(len(rets)),
+        "from": str(rets.index[0].date()), "to": str(rets.index[-1].date()),
+        "methods": [{"id": k, **v} for k, v in opt.METHODS.items()],
+        "excluded": [{"symbol": k, "reason": v} for k, v in sorted(dropped.items())],
+    })
+    return report

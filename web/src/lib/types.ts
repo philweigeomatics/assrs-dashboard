@@ -710,6 +710,8 @@ export type QtHolding = {
   symbol: string; name: string; kind: string; currency: string; exchange: string;
   /** Yahoo's spelling, or null when it could not be mapped. */
   yahoo: string | null;
+  /** "stock" | "etf" | "other" — what the client filters and groups on. */
+  group: string;
   quantity: number;
   avg_cost: Num;
   price: Num;
@@ -734,6 +736,8 @@ export type QtBook = {
   totals: {
     market_value: number; cash: number; equity: number; cost: number;
     open_pnl: number; open_pnl_pct: Num; positions: number; accounts: number;
+    /** Residual rows too small to show, dropped but counted. */
+    dust: number;
   };
   mix: { currency: { name: string; value: number; pct: Num }[];
          kind: { name: string; value: number; pct: Num }[] };
@@ -761,6 +765,12 @@ export type QtStats = {
 export type QtRisk = QtStats & {
   base: string;
   as_of: string;
+  scope: QtScope;
+  scope_label: string;
+  /** This sleeve's share of the whole book — context covered_pct cannot give. */
+  sleeve_pct: number;
+  /** Holdings left out of the statistics, and why. */
+  excluded: { symbol: string; reason: string }[];
   benchmark: string;
   benchmark_name: string;
   benchmark_stats: QtStats;
@@ -781,4 +791,58 @@ export type QtRisk = QtStats & {
   };
   totals: QtBook["totals"];
   warnings: string[];
+};
+
+export type QtScope = "all" | "stock" | "etf";
+
+export type QtExposure = {
+  base: string;
+  as_of: string;
+  total: number;
+  rows: {
+    sector: string; label: string; value: number; pct: number;
+    from_stocks_pct: number; from_etfs_pct: number;
+    holdings: { symbol: string; name: string }[];
+  }[];
+  /** Stocks only — an ETF publishes sector weights, never industry weights. */
+  industries: { name: string; value: number; pct: Num }[];
+  industry_basis: number;
+  split: { stock_pct: number; etf_pct: number };
+  unknown_pct: number;
+  concentration: {
+    sectors: number; top_sector: string | null;
+    top_pct: Num; top3_pct: number;
+  };
+};
+
+export type QtAllocStats = {
+  ann_return_pct: number; ann_vol_pct: number;
+  sharpe: Num; max_drawdown_pct: number;
+};
+
+export type QtOptimise = {
+  base: string; scope: QtScope; scope_label: string; as_of: string;
+  method: string; label: string; means: string;
+  /** True for max-Sharpe: it needs return forecasts and overfits. */
+  overfit_risk: boolean;
+  cap_pct: number; min_weight_pct: number;
+  sessions: number; from: string; to: string;
+  basis: string;
+  turnover_pct: number;
+  current: QtAllocStats;
+  target: QtAllocStats;
+  rows: {
+    symbol: string; name: string;
+    current_pct: number; target_pct: number; delta_pct: number; risk_pct: number;
+  }[];
+  methods: { id: string; label: string; en: string;
+             needs_returns: boolean; means: string }[];
+  excluded: { symbol: string; reason: string }[];
+  walk_forward: {
+    train: { from: string; to: string; sessions: number };
+    test: { from: string; to: string; sessions: number };
+    rows: { method: string; label: string;
+            in_sample: QtAllocStats; out_of_sample: QtAllocStats }[];
+  } | null;
+  walk_forward_error?: string;
 };

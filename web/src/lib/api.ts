@@ -4,7 +4,7 @@ import type {
   AlertNote, EquityBrief, NoteScorecard, PairTradeResult, SimResult, StockRef,
   StrategyResult, WhatIfAi,
   Breadth, Heatmap, Leverage, Rotation, TopList, Wyckoff,
-  QtBook, QtRisk, QtStatus,
+  QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -121,8 +121,13 @@ export const api = {
     }),
   qtDisconnect: () => call<{ connected: false }>("/questrade/connect", { method: "DELETE" }),
   qtBook: (base: "CAD" | "USD") => call<QtBook>(`/questrade/portfolio?base=${base}`),
-  qtRisk: (benchmark: string, base: "CAD" | "USD") =>
-    call<QtRisk>(`/questrade/risk?benchmark=${encodeURIComponent(benchmark)}&base=${base}`),
+  qtRisk: (benchmark: string, base: "CAD" | "USD", scope: QtScope) =>
+    call<QtRisk>(
+      `/questrade/risk?benchmark=${encodeURIComponent(benchmark)}&base=${base}&scope=${scope}`),
+  qtExposure: (base: "CAD" | "USD") => call<QtExposure>(`/questrade/exposure?base=${base}`),
+  qtOptimise: (base: "CAD" | "USD", scope: QtScope, method: string, cap: number) =>
+    call<QtOptimise>(
+      `/questrade/optimise?base=${base}&scope=${scope}&method=${method}&cap=${cap}`),
   heatmap: () => call<Heatmap>("/market/heatmap"),
   breadth: (days = 60) => call<Breadth>(`/market/breadth?days=${days}`),
   leverage: () => call<Leverage[]>("/market/leverage"),

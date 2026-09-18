@@ -159,9 +159,12 @@ def test_a_us_holding_is_converted_not_counted_as_canadian():
 
 def test_a_missing_exchange_rate_is_a_warning_not_a_one_to_one():
     res = book(rates={})            # no USD rate at all
+    # Still listed — it converts to zero, and deleting it as "dust" would hide
+    # the very holding the warning is about.
     apple = holding(res, "AAPL")
 
     assert apple["market_value_base"] == 0
+    assert apple["market_value"] == pytest.approx(3000.0)
     assert any("AAPL" in w and "USD" in w for w in res["warnings"])
     # The CAD side is unaffected and still totals correctly.
     assert res["totals"]["market_value"] == pytest.approx(50 * 140)
@@ -203,6 +206,44 @@ def test_a_position_closed_today_is_not_a_holding():
     res = book(positions={"A1": [pos("AAPL", 0, 200.0, 150.0)], "A2": [], "A3": []})
     assert res["holdings"] == []
     assert res["totals"]["positions"] == 0
+
+
+def test_a_residual_position_is_dropped_but_still_counted():
+    """
+    Questrade keeps rows for fractional residue worth a fraction of a cent.
+    They cannot be sold and cannot move the book, but a row that vanishes
+    without trace is worse than one that is merely small.
+    """
+    res = book(positions={
+        "A1": [pos("AAPL", 10, 200.0, 150.0), pos("VFV.TO", 0.00002, 140.0, 100.0)],
+        "A2": [], "A3": [],
+    })
+    assert [h["symbol"] for h in res["holdings"]] == ["AAPL"]
+    assert res["totals"]["dust"] == 1
+    assert res["totals"]["positions"] == 1
+
+
+def test_dust_is_judged_in_the_positions_own_currency():
+    """Converted value is zero when a rate is missing; that is not dust."""
+    res = book(rates={}, positions={"A1": [pos("AAPL", 10, 200.0, 150.0)],
+                                    "A2": [], "A3": []})
+    assert [h["symbol"] for h in res["holdings"]] == ["AAPL"]
+    assert res["totals"]["dust"] == 0
+
+
+def test_every_holding_carries_a_machine_readable_group():
+    """The Chinese label is for reading; the client filters on this."""
+    res = book()
+    assert {h["symbol"]: h["group"] for h in res["holdings"]} == {
+        "AAPL": "stock", "VFV.TO": "etf"}
+
+
+@pytest.mark.parametrize("kind, want", [
+    ("股票", "stock"), ("ETF", "etf"), ("基金", "etf"),
+    ("期权", "other"), ("债券", "other"),
+])
+def test_groups_cover_every_kind(kind, want):
+    assert pf.group_of(kind) == want
 
 
 def test_the_mix_splits_by_currency_and_by_instrument_kind():
@@ -329,9 +370,99 @@ def test_it_reports_how_much_of_the_book_it_could_actually_price():
         pf.risk({"SAME": 1.0}, prices(), BENCH)["ann_vol_pct"], abs=0.01)
 
 
-def test_too_little_overlapping_history_is_refused():
-    with pytest.raises(LookupError, match="交易日"):
+def test_a_holding_with_too_little_history_of_its_own_is_dropped():
+    with pytest.raises(LookupError, match="足够的历史行情"):
         pf.risk({"SAME": 1.0}, prices(n=60), BENCH)
+
+
+def test_a_late_listing_is_dropped_rather_than_halving_everyone_elses_window():
+    """
+    A holding with 200 sessions of its own passes on its own merits, but the
+    SHARED window can only start where it does. Measuring nine names over
+    three years beats measuring ten over eight months.
+    """
+    px = prices(n=600)
+    px["LATE"] = px["OTHER"]
+    px.loc[px.index[:-200], "LATE"] = float("nan")
+
+    alone = pf.risk({"LATE": 1.0}, px, BENCH)
+    assert alone["sessions"] < 220              # on its own it is measurable
+
+    both = pf.risk({"SAME": 0.7, "LATE": 0.3}, px, BENCH)
+    assert both["sessions"] > 500               # …but not at everyone's expense
+    assert both["excluded"] == [{"symbol": "LATE", "reason": "上市时间过短"}]
+
+
+# ── the failure that produced "0 trading days available" ─────────────────────
+def test_one_unpriceable_holding_does_not_delete_the_whole_report():
+    """
+    The first live portfolio held a name Yahoo has no data for. An all-NaN
+    column plus dropna(how="any") returns zero rows, and the panel reported
+    "可用历史仅 0 个交易日" for a book with three years of history in it.
+    """
+    px = prices()
+    px["DEAD"] = float("nan")
+
+    r = pf.risk({"SAME": 0.6, "OTHER": 0.3, "DEAD": 0.1}, px, BENCH)
+    assert r["sessions"] > 500
+    assert [e["symbol"] for e in r["excluded"]] == ["DEAD"]
+    assert r["excluded"][0]["reason"] == "行情缺失"
+    assert r["covered_pct"] == pytest.approx(90.0, abs=0.1)
+
+
+def test_a_recent_listing_does_not_truncate_everyone_elses_history():
+    """
+    One holding that IPO'd last month would otherwise cut the whole report to
+    a month. It is dropped and named instead.
+    """
+    px = prices()
+    px["NEW"] = px["OTHER"]
+    px.loc[px.index[:-30], "NEW"] = float("nan")
+
+    r = pf.risk({"SAME": 0.8, "NEW": 0.2}, px, BENCH)
+    assert r["sessions"] > 500
+    assert r["excluded"] == [{"symbol": "NEW", "reason": "上市时间过短"}]
+
+
+def test_no_data_and_too_little_data_are_told_apart():
+    """
+    One is usually a wrong ticker mapping, the other is a real holding that
+    has not existed for long. Different problems, different fixes.
+    """
+    px = prices()
+    px["DEAD"] = float("nan")
+    px["NEW"] = px["OTHER"]
+    px.loc[px.index[:-30], "NEW"] = float("nan")
+
+    r = pf.risk({"SAME": 0.8, "DEAD": 0.1, "NEW": 0.1}, px, BENCH)
+    assert {e["symbol"]: e["reason"] for e in r["excluded"]} == {
+        "DEAD": "行情缺失", "NEW": "上市时间过短"}
+
+
+def test_holidays_are_filled_rather_than_thrown_away():
+    """
+    TSX and NYSE do not share a calendar. Dropping every date one of them was
+    shut discards real sessions for the OTHER market, which did trade.
+
+    Pinned against the no-gap case rather than a loose floor: ten missing days
+    out of six hundred slips under any threshold loose enough to be safe.
+    """
+    clean = prices()
+    holed = prices()
+    holed.loc[holed.index[100:110], "OTHER"] = float("nan")
+
+    a = pf.risk({"SAME": 0.5, "OTHER": 0.5}, clean, BENCH)
+    b = pf.risk({"SAME": 0.5, "OTHER": 0.5}, holed, BENCH)
+
+    assert b["sessions"] == a["sessions"]
+    assert b["excluded"] == []
+
+
+def test_nothing_measurable_at_all_names_what_was_missing():
+    px = prices()
+    px["DEAD"] = float("nan")
+    with pytest.raises(LookupError, match="DEAD"):
+        pf.risk({"DEAD": 1.0}, px, BENCH)
 
 
 def test_a_missing_benchmark_is_refused_by_name():

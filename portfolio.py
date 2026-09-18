@@ -68,6 +68,27 @@ BENCHMARKS = {
 #: Below this many overlapping sessions the statistics are not worth printing.
 MIN_SESSIONS = 120
 
+#: A late listing shortens the window for every other holding, because the
+#: shared history can only start where the newest one does. Anything that would
+#: cut the window below this fraction of what is available is dropped instead —
+#: better to measure nine holdings over three years, and say the tenth was left
+#: out, than to measure all ten over four months.
+KEEP_FRACTION = 0.5
+
+#: Positions worth less than this are not shown. Questrade keeps rows for
+#: fractional residue and for names worth a fraction of a cent; they cannot be
+#: sold, cannot move the book, and push real holdings off the screen.
+#:
+#: Measured in the position's OWN currency, not the converted one. A holding
+#: whose currency has no exchange rate converts to zero, and testing the
+#: converted number would delete exactly the rows that most need explaining.
+DUST = 0.01
+
+#: Chinese labels are for reading; these are for filtering and grouping, and
+#: they must not drift apart — hence one map rather than string comparisons
+#: against display text scattered through the client.
+GROUPS = {"ETF": "etf", "基金": "etf", "股票": "stock"}
+
 
 # ── symbols ──────────────────────────────────────────────────────────────────
 def to_yahoo(symbol: str, exchange: str = "") -> str | None:
@@ -98,6 +119,11 @@ def to_yahoo(symbol: str, exchange: str = "") -> str | None:
     if s.endswith(".VN"):
         return s[:-3] + ".V"
     return s
+
+
+def group_of(kind: str) -> str:
+    """"股票" → "stock", "ETF" → "etf", anything else → "other"."""
+    return GROUPS.get(kind, "other")
 
 
 def kind_of(quote_type: str | None, security_type: str | None) -> str:
@@ -179,10 +205,12 @@ def consolidate(accounts: list[dict], positions: dict[str, list[dict]],
             if mv_base is not None:
                 acc_mv += mv_base
 
+            kind = str(m.get("kind") or "其他")
             h = by_symbol.setdefault(symbol, {
                 "symbol": symbol,
                 "name": str(m.get("name") or symbol),
-                "kind": str(m.get("kind") or "其他"),
+                "kind": kind,
+                "group": group_of(kind),
                 "currency": ccy,
                 "exchange": str(m.get("exchange") or ""),
                 "yahoo": m.get("yahoo"),
@@ -217,7 +245,11 @@ def consolidate(accounts: list[dict], positions: dict[str, list[dict]],
             **_balances(balances.get(aid) or {}, base, to_base),
         })
 
-    holdings = list(by_symbol.values())
+    # Dust is dropped, not hidden: the count survives in the totals so a row
+    # that vanished can still be accounted for.
+    everything = list(by_symbol.values())
+    holdings = [h for h in everything if abs(h["market_value"]) >= DUST]
+    dust = len(everything) - len(holdings)
     total_mv = sum(h["market_value_base"] for h in holdings)
     for h in holdings:
         h["avg_cost"] = (h["cost"] / h["quantity"]) if h["quantity"] else None
@@ -251,6 +283,7 @@ def consolidate(accounts: list[dict], positions: dict[str, list[dict]],
             "open_pnl_pct": round(pnl / cost * 100, 2) if cost else None,
             "positions": len(holdings),
             "accounts": len(account_rows),
+            "dust": dust,
         },
         "mix": _mix(holdings, total_mv),
         "warnings": warnings,
@@ -309,30 +342,97 @@ def implied_fx(balances: list[dict], base: str, quote: str) -> float | None:
 
 
 # ── risk ─────────────────────────────────────────────────────────────────────
+def returns(prices: pd.DataFrame, names: list[str], benchmark: str, *,
+            window: int = 3 * TRADING_DAYS,
+            min_sessions: int = MIN_SESSIONS) -> tuple[pd.DataFrame, dict]:
+    """
+    An aligned daily-return panel, and what had to be left out to get one.
+
+    A plain `dropna(how="any")` over a real book returns an empty frame, and
+    this is not a rare edge case — it happened on the first live portfolio.
+    Two causes, both of which destroy every row:
+
+      * one ticker Yahoo has no data for. An all-NaN column and `how="any"`
+        wipes the frame; the report then says "0 trading days available",
+        which is true and completely unhelpful.
+      * a recent listing. Its first bar truncates every other holding's
+        history down to match.
+
+    So: drop columns with too little data outright, then drop the newest
+    listings one at a time until the shared window is long enough. Everything
+    dropped comes back in the second return value, with the reason, because a
+    portfolio statistic computed over an unstated subset is worse than none.
+
+    Holidays are forward-filled rather than dropped. TSX and NYSE do not share
+    a calendar, and discarding every date one of them was shut throws away
+    real sessions for the other; a filled day contributes a zero return, which
+    on ~10 days in 750 is immaterial.
+    """
+    px = prices[[c for c in names + [benchmark] if c in prices.columns]].tail(window)
+    if benchmark not in px.columns:
+        raise LookupError(f"缺少基准 {benchmark} 的行情")
+    # The benchmark's own sessions define the calendar.
+    px = px.loc[px[benchmark].notna()]
+
+    # Two different failures, kept apart because the fix differs: a symbol with
+    # no data at all is usually a bad ticker mapping, while a short one is a
+    # real holding that simply has not existed for long.
+    kept, dropped = [], {}
+    for c in names:
+        have = int(px[c].notna().sum()) if c in px.columns else 0
+        if have == 0:
+            dropped[c] = "行情缺失"
+        elif have < min_sessions:
+            dropped[c] = "上市时间过短"
+        else:
+            kept.append(c)
+
+    # Then the late listings that pass on their own but would truncate the
+    # rest. Newest first, until the shared window is worth having.
+    floor = max(min_sessions, int(len(px) * KEEP_FRACTION))
+    while len(kept) > 1:
+        starts = {c: px[c].first_valid_index() for c in kept}
+        newest = max(starts, key=lambda c: starts[c])
+        if len(px.loc[starts[newest]:]) >= floor:
+            break
+        dropped[newest] = "上市时间过短"
+        kept.remove(newest)
+
+    if not kept:
+        raise LookupError("没有任何持仓有足够的历史行情，无法计算风险指标"
+                          + (f"（缺失：{'、'.join(sorted(dropped))}）" if dropped else ""))
+
+    start = max(px[c].first_valid_index() for c in kept)
+    # fill_method=None, explicitly: pandas still pads inside pct_change by
+    # default, which quietly did this ffill for us and is deprecated. Relying
+    # on it would mean the alignment silently changes on a pandas upgrade.
+    rets = (px.loc[start:, kept + [benchmark]].ffill()
+            .pct_change(fill_method=None).dropna(how="any"))
+    if len(rets) < min_sessions:
+        raise LookupError(f"可用历史仅 {len(rets)} 个交易日，少于 {min_sessions} 天，"
+                          "统计量不可靠")
+    return rets, dropped
+
+
 def risk(weights: dict[str, float], prices: pd.DataFrame, benchmark: str, *,
          window: int = 3 * TRADING_DAYS, rf_annual: float = 0.0) -> dict:
     """
     What the CURRENT book looks like against an index.
 
-    `weights` are fractions summing to ~1 over the symbols that could be
-    priced; `prices` is an adjusted, base-currency close panel including the
-    benchmark column. Raises LookupError when there is not enough overlap —
-    a beta from forty sessions is a number, not an estimate.
+    `weights` are fractions over the symbols that could be priced; `prices` is
+    an adjusted, base-currency close panel including the benchmark column.
+    Holdings that cannot be measured are reported, not fatal — see returns().
     """
-    if benchmark not in prices.columns:
-        raise LookupError(f"缺少基准 {benchmark} 的行情")
-    names = [s for s in weights if s in prices.columns and s != benchmark]
+    names = [s for s in weights if s != benchmark]
     if not names:
         raise LookupError("没有任何持仓可以取得行情，无法计算风险指标")
 
-    px = prices[names + [benchmark]].dropna(how="all").tail(window)
-    rets = px.ffill().pct_change().dropna(how="any")
-    if len(rets) < MIN_SESSIONS:
-        raise LookupError(f"可用历史仅 {len(rets)} 个交易日，少于 {MIN_SESSIONS} 天，"
-                          "统计量不可靠")
+    rets, dropped = returns(prices, names, benchmark, window=window)
+    kept = [c for c in rets.columns if c != benchmark]
 
-    w = pd.Series({n: weights[n] for n in names}, dtype=float)
+    w = pd.Series({n: weights[n] for n in kept}, dtype=float)
     w = w / w.sum()
+    names = kept
     port = (rets[names] * w).sum(axis=1)
     bench = rets[benchmark]
 
@@ -349,6 +449,7 @@ def risk(weights: dict[str, float], prices: pd.DataFrame, benchmark: str, *,
         # measurement and a claim.
         "covered_pct": round(sum(weights[n] for n in names)
                              / (sum(weights.values()) or 1) * 100, 1),
+        "excluded": [{"symbol": k, "reason": v} for k, v in sorted(dropped.items())],
         "benchmark_stats": _series_stats(bench, bench, rf_annual, is_benchmark=True),
         "holdings": _holding_risk(rets[names], port, bench, w),
         "concentration": _concentration(w),

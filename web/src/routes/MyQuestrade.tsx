@@ -19,11 +19,13 @@
 import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api";
-import type { QtBook } from "../lib/types";
+import type { QtBook, QtScope } from "../lib/types";
 import { NavBar } from "../components/NavBar";
 import { ConnectCard } from "../components/questrade/ConnectCard";
 import { Holdings } from "../components/questrade/Holdings";
 import { RiskPanel } from "../components/questrade/RiskPanel";
+import { ExposurePanel } from "../components/questrade/ExposurePanel";
+import { OptimisePanel } from "../components/questrade/OptimisePanel";
 import { usePersistentState } from "../lib/usePersistentState";
 import { fixed, signed } from "../lib/format";
 
@@ -49,6 +51,9 @@ export function MyQuestrade() {
 
   const [base, setBase] = usePersistentState<"CAD" | "USD">("assrs.qt.base", "CAD");
   const [benchmark, setBenchmark] = usePersistentState<string>("assrs.qt.bench", "^GSPC");
+  const [scope, setScope] = usePersistentState<QtScope>("assrs.qt.scope", "all");
+  const [method, setMethod] = usePersistentState<string>("assrs.qt.method", "min_var");
+  const [cap, setCap] = usePersistentState<number>("assrs.qt.cap", 0.25);
 
   const status = useQuery({ queryKey: ["qt", "status"], queryFn: api.qtStatus,
     staleTime: 60_000, retry: false });
@@ -59,8 +64,19 @@ export function MyQuestrade() {
     enabled: connected, staleTime: 2 * 60_000, retry: false,
   });
   const risk = useQuery({
-    queryKey: ["qt", "risk", benchmark, base],
-    queryFn: () => api.qtRisk(benchmark, base),
+    queryKey: ["qt", "risk", benchmark, base, scope],
+    queryFn: () => api.qtRisk(benchmark, base, scope),
+    enabled: connected, staleTime: 20 * 60_000, retry: false,
+  });
+  // Its own query: a first call reads a profile per holding from Yahoo, which
+  // is slow enough that the rest of the page must not wait behind it.
+  const exposure = useQuery({
+    queryKey: ["qt", "exposure", base], queryFn: () => api.qtExposure(base),
+    enabled: connected, staleTime: 6 * 3600_000, retry: false,
+  });
+  const alloc = useQuery({
+    queryKey: ["qt", "opt", base, scope, method, cap],
+    queryFn: () => api.qtOptimise(base, scope, method, cap),
     enabled: connected, staleTime: 20 * 60_000, retry: false,
   });
 
@@ -115,7 +131,9 @@ export function MyQuestrade() {
                       </button>
                     ))}
                   </div>
-                  <button onClick={() => { book.refetch(); risk.refetch(); }}
+                  <button onClick={() => {
+                    book.refetch(); risk.refetch(); exposure.refetch(); alloc.refetch();
+                  }}
                     className="h-7 px-2.5 rounded-lg bg-sunken text-[12.5px] text-ink-dim">
                     ↻ 刷新
                   </button>
@@ -149,7 +167,33 @@ export function MyQuestrade() {
               <Body q={risk}>
                 {risk.data && (
                   <RiskPanel risk={risk.data} benchmarks={BENCHMARKS}
-                    benchmark={benchmark} onBenchmark={setBenchmark} />
+                    benchmark={benchmark} onBenchmark={setBenchmark}
+                    scope={scope} onScope={setScope} />
+                )}
+              </Body>
+            </section>
+
+            <section className="card p-3 flex flex-col gap-2">
+              <h2 className="text-[14.5px] font-semibold">🏭 行业暴露</h2>
+              <p className="label">
+                ETF 已穿透到其成分行业 —— 否则一个半仓指数基金的组合只会告诉你
+                「50% 是 ETF」，而那既不是行业，也不是答案。
+              </p>
+              <Body q={exposure}>
+                {exposure.data && <ExposurePanel data={exposure.data} />}
+              </Body>
+            </section>
+
+            <section className="card p-3 flex flex-col gap-2">
+              <h2 className="text-[14.5px] font-semibold">⚖️ 配置优化</h2>
+              <p className="label">
+                在<b>你已经选好的标的</b>之间重新分配权重，不引入新标的。
+                顶部的「仅股票 / 仅 ETF」同时作用于这里。
+              </p>
+              <Body q={alloc}>
+                {alloc.data && (
+                  <OptimisePanel data={alloc.data} method={method} onMethod={setMethod}
+                    cap={cap} onCap={setCap} />
                 )}
               </Body>
             </section>
@@ -188,7 +232,9 @@ function Overview({ book, base }: { book: QtBook; base: "CAD" | "USD" }) {
         <Big label="总权益" value={money(t.equity, base)}
           hint="持仓市值 + 现金，全部账户合计。" />
         <Big label="持仓市值" value={money(t.market_value, base)}
-          hint={`${t.positions} 只，分布在 ${t.accounts} 个账户。`} />
+          hint={`${t.positions} 只，分布在 ${t.accounts} 个账户。`
+            + (t.dust ? ` 另有 ${t.dust} 笔零碎持仓（不足 0.01）未显示。` : "")}
+          sub={t.dust ? `${t.positions} 只 · ${t.dust} 笔零碎已隐藏` : `${t.positions} 只`} />
         <Big label="现金" value={money(t.cash, base)} hint="各账户各币种现金换算合计。" />
         <Big label="浮动盈亏" value={money(t.open_pnl, base)} cls={pnlTone}
           hint="持仓市值 − 持仓成本。已实现盈亏不在其中。"

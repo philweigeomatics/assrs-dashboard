@@ -1116,7 +1116,11 @@ def market_rotation(freq: str = Query("w", pattern="^(w|d)$"),
 # risk report is built from three years of daily history and changes far more
 # slowly than that, so it is held for half an hour.
 _qt_book_cache = TTLCache(maxsize=8, ttl_s=3 * 60)
-_qt_risk_cache = TTLCache(maxsize=16, ttl_s=30 * 60)
+_qt_risk_cache = TTLCache(maxsize=24, ttl_s=30 * 60)
+# Exposure costs a Yahoo profile read per holding, so it is held longest —
+# a company does not change sector between page loads.
+_qt_exposure_cache = TTLCache(maxsize=8, ttl_s=6 * 3600)
+_qt_opt_cache = TTLCache(maxsize=32, ttl_s=30 * 60)
 
 
 class QuestradeConnectReq(BaseModel):
@@ -1190,8 +1194,10 @@ def _forget_questrade(user_id: int) -> None:
     """
     for base in ("CAD", "USD"):
         _qt_book_cache.put(("book", user_id, base), None)
-        for bench in ("^GSPC", "^IXIC", "^GSPTSE"):
-            _qt_risk_cache.put(("risk", user_id, bench, base), None)
+        _qt_exposure_cache.put(("exposure", user_id, base), None)
+        for scope in ("all", "stock", "etf"):
+            for bench in ("^GSPC", "^IXIC", "^GSPTSE"):
+                _qt_risk_cache.put(("risk", user_id, bench, base, scope), None)
 
 
 @app.delete("/questrade/connect")
@@ -1222,6 +1228,7 @@ def questrade_portfolio(base: str = Query("CAD", pattern="^(CAD|USD)$"),
 @app.get("/questrade/risk")
 def questrade_risk(benchmark: str = Query("^GSPC"),
                    base: str = Query("CAD", pattern="^(CAD|USD)$"),
+                   scope: str = Query("all", pattern="^(all|stock|etf)$"),
                    user: AppUser = Depends(current_user)):
     """Today's holdings replayed against an index — both in `base` currency."""
     import portfolio
@@ -1229,15 +1236,64 @@ def questrade_risk(benchmark: str = Query("^GSPC"),
     if benchmark not in portfolio.BENCHMARKS:
         raise HTTPException(422, f"benchmark must be one of {sorted(portfolio.BENCHMARKS)}")
 
-    key = ("risk", user.id, benchmark, base)
+    key = ("risk", user.id, benchmark, base, scope)
     cached = _qt_risk_cache.peek(key)
     if cached:
         return cached
     try:
-        report = questrade_api.risk_report(user.id, benchmark=benchmark, base=base)
+        report = questrade_api.risk_report(user.id, benchmark=benchmark,
+                                          base=base, scope=scope)
     except Exception as exc:                                    # noqa: BLE001
         _questrade(exc)
     _qt_risk_cache.put(key, report)
+    return report
+
+
+@app.get("/questrade/exposure")
+def questrade_exposure(base: str = Query("CAD", pattern="^(CAD|USD)$"),
+                       user: AppUser = Depends(current_user)):
+    """
+    Sector exposure with the ETFs looked through.
+
+    Slow on a first call — it reads a profile per holding from Yahoo — and
+    then cached, which is why it is its own route rather than part of the
+    portfolio payload.
+    """
+    from api import questrade_api
+    key = ("exposure", user.id, base)
+    cached = _qt_exposure_cache.peek(key)
+    if cached:
+        return cached
+    try:
+        report = questrade_api.exposure_report(user.id, base=base)
+    except Exception as exc:                                    # noqa: BLE001
+        _questrade(exc)
+    _qt_exposure_cache.put(key, report)
+    return report
+
+
+@app.get("/questrade/optimise")
+def questrade_optimise(base: str = Query("CAD", pattern="^(CAD|USD)$"),
+                       scope: str = Query("all", pattern="^(all|stock|etf)$"),
+                       method: str = Query("min_var"),
+                       cap: float = Query(0.25, ge=0.05, le=1.0),
+                       user: AppUser = Depends(current_user)):
+    """A target allocation over the current holdings, with an out-of-sample check."""
+    import optimise
+    from api import questrade_api
+    if method not in optimise.METHODS:
+        raise HTTPException(422, f"method must be one of {sorted(optimise.METHODS)}")
+
+    key = ("opt", user.id, base, scope, method, round(cap, 3))
+    cached = _qt_opt_cache.peek(key)
+    if cached:
+        return cached
+    try:
+        report = questrade_api.optimise_report(user.id, base=base, scope=scope,
+                                               method=method, cap=cap)
+    except Exception as exc:                                    # noqa: BLE001
+        _questrade(exc)
+    _qt_opt_cache.put(key, report)
     return report
 
 

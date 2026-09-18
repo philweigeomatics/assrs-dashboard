@@ -18,7 +18,7 @@
  * exchange rate, and no label on it would make that number mean anything.
  */
 
-import type { QtRisk, Num } from "../../lib/types";
+import type { QtRisk, QtScope, Num } from "../../lib/types";
 import { fixed, signed } from "../../lib/format";
 
 const NA = false;   // North America: green up, red down
@@ -29,9 +29,17 @@ function tone(v: Num, goodIsHigh = true): string {
   return good === NA ? "text-up" : "text-down";
 }
 
-export function RiskPanel({ risk, benchmarks, benchmark, onBenchmark }: {
+const SCOPES: { id: QtScope; label: string }[] = [
+  { id: "all", label: "全部" },
+  { id: "stock", label: "仅股票" },
+  { id: "etf", label: "仅 ETF" },
+];
+
+export function RiskPanel({ risk, benchmarks, benchmark, onBenchmark,
+                            scope, onScope }: {
   risk: QtRisk; benchmarks: { id: string; name: string }[];
   benchmark: string; onBenchmark: (b: string) => void;
+  scope: QtScope; onScope: (s: QtScope) => void;
 }) {
   const p = risk;
   const b = risk.benchmark_stats;
@@ -42,7 +50,18 @@ export function RiskPanel({ risk, benchmarks, benchmark, onBenchmark }: {
         <span className="label">
           {p.from} → {p.to} · {p.sessions} 个交易日 · 全部以 {p.base} 计价
         </span>
-        <div className="ml-auto flex rounded-lg bg-sunken p-0.5">
+        <div className="ml-auto flex items-center gap-2">
+          <div className="flex rounded-lg bg-sunken p-0.5"
+            title="ETF 会把组合的 beta 拉向 1。想看自己选股带来的风险，就只看股票那一段。">
+            {SCOPES.map((o) => (
+              <button key={o.id} onClick={() => onScope(o.id)}
+                className={`px-2 h-7 rounded-md text-[12.5px] font-medium ${
+                  scope === o.id ? "bg-panel text-ink shadow-sm" : "text-ink-mute"}`}>
+                {o.label}
+              </button>
+            ))}
+          </div>
+        <div className="flex rounded-lg bg-sunken p-0.5">
           {benchmarks.map((o) => (
             <button key={o.id} onClick={() => onBenchmark(o.id)}
               className={`px-2.5 h-7 rounded-md text-[12.5px] font-medium transition-colors ${
@@ -51,16 +70,26 @@ export function RiskPanel({ risk, benchmarks, benchmark, onBenchmark }: {
             </button>
           ))}
         </div>
+        </div>
       </div>
 
       <p className="text-[12px] text-brand-ink leading-snug rounded-lg bg-sunken px-2.5 py-2">
         ⚠ {p.basis}。用当前持仓的权重回放三年历史，回答的是「我现在这个组合过去会怎样」，
         不是账户的真实业绩（那需要成交记录）。
+        {p.scope !== "all" && (
+          <b> 当前只看{p.scope_label}，占整个组合的 {fixed(p.sleeve_pct, 1)}%。</b>
+        )}
         {p.covered_pct < 99.5 && (
           <b> 另外，只有 {fixed(p.covered_pct, 1)}% 的市值能取得行情，
             以下所有指标只代表这一部分。</b>
         )}
       </p>
+
+      {p.excluded?.length > 0 && (
+        <p className="text-[11.5px] text-ink-mute leading-snug">
+          未纳入统计：{p.excluded.map((e) => `${e.symbol}（${e.reason}）`).join("、")}
+        </p>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr] gap-3">
         <div className="flex flex-col gap-2">
