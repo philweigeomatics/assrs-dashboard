@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
 import { LoginPage } from "./auth/LoginPage";
@@ -11,6 +11,7 @@ import { TechnicalAnalysis } from "./routes/TechnicalAnalysis";
 import { Alerts } from "./routes/Alerts";
 import { Basket } from "./routes/Basket";
 import { Strategies } from "./routes/Strategies";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
@@ -18,9 +19,17 @@ const queryClient = new QueryClient({
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { ready, session, dev } = useAuth();
+  const { pathname } = useLocation();
   if (!ready) return <div className="p-10 text-center label">加载中…</div>;
   if (!session && !dev) return <Navigate to="/login" replace />;
-  return <>{children}</>;
+  // Inside the router, so a page that throws costs you that page and not the
+  // navigation you need to leave it. Keyed on the path so walking away from a
+  // broken route clears the error rather than carrying it to the next one.
+  return (
+    <ErrorBoundary key={pathname} label={pathname}>
+      {children}
+    </ErrorBoundary>
+  );
 }
 
 export function App() {

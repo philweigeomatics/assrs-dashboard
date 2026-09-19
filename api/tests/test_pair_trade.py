@@ -364,6 +364,58 @@ def test_a_gate_moving_moves_the_verdict_with_it(attr, value, field, expect):
         setattr(pt, attr, keep)
 
 
+def _fallback_gates() -> dict:
+    """The copy of GATES the page falls back to, parsed out of its source."""
+    import json
+    import pathlib
+    import re
+
+    src = (pathlib.Path(ROOT) / "web" / "src" / "lib" / "indicators.ts"
+           ).read_text(encoding="utf-8")
+    block = re.search(r"export const DEFAULT_GATES: PairGates = \{(.*?)\n\};",
+                      src, re.S)
+    assert block, "DEFAULT_GATES not found in indicators.ts — was it renamed?"
+    return {k: json.loads(v)
+            for k, v in re.findall(r"(\w+):\s*([0-9.]+),", block.group(1))}
+
+
+def test_the_page_falls_back_to_the_real_thresholds():
+    """
+    When the deployed API is older than the deployed page it sends no gates,
+    and reading a threshold off `undefined` throws during render — React
+    unmounts the tree and the page goes white. So the page carries a copy.
+
+    A fallback is only tolerable while it is correct, and neither language can
+    see the other, so the equality is asserted from here. Compared as numbers:
+    2 and 2.0 are the same threshold.
+    """
+    fallback, real = _fallback_gates(), pt.GATES
+
+    assert set(fallback) == set(real), (
+        f"the page is missing {set(real) - set(fallback)}; "
+        f"the engine does not define {set(fallback) - set(real)}")
+    for key in real:
+        assert float(fallback[key]) == float(real[key]), (
+            f"{key}: the page says {fallback[key]}, the engine says {real[key]}")
+
+
+def test_that_check_would_notice_a_drifting_threshold():
+    """The guard is a regex over another language's source — worth proving
+    it can actually fail."""
+    fallback = _fallback_gates()
+    assert float(fallback["hurst_max"]) == float(pt.HURST_MAX)
+
+    keep = pt.HURST_MAX
+    try:
+        pt.HURST_MAX = 0.99
+        pt.GATES["hurst_max"] = 0.99
+        with pytest.raises(AssertionError, match="hurst_max"):
+            test_the_page_falls_back_to_the_real_thresholds()
+    finally:
+        pt.HURST_MAX = keep
+        pt.GATES["hurst_max"] = keep
+
+
 # ── ranking a set ────────────────────────────────────────────────────────────
 def test_every_unique_pair_is_tested_once():
     prices = cointegrated()

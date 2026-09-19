@@ -35,8 +35,35 @@ export type Indicator = {
 
 const nd = (v: number, d = 2) => v.toFixed(d);
 
+/**
+ * Used only when the response has no `gates` — i.e. the deployed API is
+ * older than this page, which happens for a few minutes whenever the
+ * frontend rolls out before the API does.
+ *
+ * Reading a field off `undefined` is a TypeError, and a TypeError during
+ * render unmounts the tree: the whole page goes white because the help text
+ * could not name a threshold. Slightly stale numbers are the better failure.
+ *
+ * test_pair_trade.py keeps these equal to pair_trade.GATES, so they cannot
+ * quietly drift into being wrong for the normal case.
+ */
+export const DEFAULT_GATES: PairGates = {
+  coint_p: 0.1,
+  adf_p: 0.1,
+  hurst_max: 0.45,
+  hl_min: 5,
+  hl_max: 30,
+  entry_z: 2,
+  watch_z: 1.5,
+  good_score: 7,
+  max_score: 11,
+  z_window: 60,
+  ols_window: 252,
+};
+
 /** The pair table's columns, in the order the table shows them. */
-export function pairIndicators(g: PairGates): Indicator[] {
+export function pairIndicators(gates?: PairGates): Indicator[] {
+  const g = gates ?? DEFAULT_GATES;
   return [
     {
       label: "评分",

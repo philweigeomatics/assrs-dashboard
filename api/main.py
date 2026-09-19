@@ -1618,3 +1618,23 @@ def strategies_discover(req: DiscoverReq, force: bool = Query(False),
     discover_cache.save(user.id, key, out)
     out["cached"] = False
     return out
+
+
+# ── route order ──────────────────────────────────────────────────────────────
+# Starlette matches in declaration order, so `/strategies/{name}` declared
+# above `/strategies/discover` swallows the literal: the request never reaches
+# the discover handler, it reaches the parameterised one and fails its pattern
+# with a 422 about `name`. That is what a page load on 配对交易 was hitting.
+#
+# Fixing it by moving one function is fixing one instance. A literal path can
+# only ever match itself, so promoting every literal above every parameterised
+# route is correct in general and removes the whole class — and the partition
+# is stable, so nothing else changes relative order.
+def _literal_routes_first(application) -> None:
+    routes = application.router.routes
+    literal = [r for r in routes if "{" not in getattr(r, "path", "")]
+    templated = [r for r in routes if "{" in getattr(r, "path", "")]
+    routes[:] = literal + templated
+
+
+_literal_routes_first(app)

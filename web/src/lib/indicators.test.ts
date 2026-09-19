@@ -12,7 +12,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { DISCOVER_INDICATORS, pairIndicators } from "./indicators";
+import { DEFAULT_GATES, DISCOVER_INDICATORS, pairIndicators } from "./indicators";
 import type { PairGates } from "./types";
 // The components' own source, so a tooltip lookup that no longer resolves is
 // caught here rather than rendering as a blank tooltip nobody notices.
@@ -63,6 +63,28 @@ describe("nothing is explained with an empty string", () => {
       }
       expect(i.caveat ?? "x").not.toBe("");
     });
+});
+
+describe("an API older than this page must not take the page down", () => {
+  it("renders the guide when the response carries no gates at all", () => {
+    // What actually happened: the frontend rolled out a few minutes before
+    // the API, the response had no `gates`, and reading `.max_score` off
+    // undefined threw during render — React unmounts the tree, white screen.
+    expect(() => pairIndicators(undefined)).not.toThrow();
+    expect(pairIndicators(undefined)).toHaveLength(pairIndicators(GATES).length);
+  });
+
+  it("falls back to real thresholds rather than blanks", () => {
+    const text = pairIndicators(undefined).map((i) => i.pass ?? "").join(" ");
+    expect(text).toContain("0.10");
+    expect(text).toContain("0.45");
+    expect(text).toContain("5–30 天");
+  });
+
+  it("prefers what the API says whenever it says anything", () => {
+    const g = pairIndicators({ ...DEFAULT_GATES, hurst_max: 0.33 });
+    expect(g.find((i) => i.label === "Hurst")!.pass).toContain("0.33");
+  });
 });
 
 describe("thresholds come from the engine, not from the prose", () => {
