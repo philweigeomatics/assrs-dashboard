@@ -1520,13 +1520,9 @@ class DiscoverReq(BaseModel):
     within_sector: bool = False
 
 
-# Eighty tickers is eighty Tushare calls before any statistics run, so this is
-# a button and its result is held while the table is read.
-_discover_cache = TTLCache(maxsize=8, ttl_s=60 * 60)
-
-
 @app.post("/strategies/discover")
-def strategies_discover(req: DiscoverReq, user: AppUser = Depends(current_user)):
+def strategies_discover(req: DiscoverReq, force: bool = Query(False),
+                        user: AppUser = Depends(current_user)):
     """
     Find the pairs in your watchlist instead of guessing which to test.
 
@@ -1536,6 +1532,11 @@ def strategies_discover(req: DiscoverReq, user: AppUser = Depends(current_user))
     then CONFIRM on the second half, which played no part in choosing the
     pair. The funnel counts come back with the rows, because four survivors
     mean nothing without the 3,160 they came from.
+
+    Cached against everything that can change the answer — the watchlist, the
+    parameters, and the date of the newest published bar — and against nothing
+    else, so it survives a tab switch and a container restart but not a new
+    close. `force` re-runs regardless.
     """
     from api import lead_lag_api
 
@@ -1546,14 +1547,28 @@ def strategies_discover(req: DiscoverReq, user: AppUser = Depends(current_user))
     if not codes:
         raise HTTPException(404, "自选股为空 — 先在自选股页面添加股票")
 
-    key = (user.id, req.kind, req.lookback_days, round(req.min_corr, 2),
-           req.within_sector, len(codes))
+    import discover_cache
+    import market_clock
+
+    params = {"lookback_days": req.lookback_days, "min_corr": req.min_corr,
+              "within_sector": req.within_sector}
+    key = discover_cache.key_of(req.kind, params, codes, market_clock.latest_session())
+
+    if not force:
+        hit = discover_cache.load(user.id, key)
+        if hit:
+            return hit
+
     try:
-        return _discover_cache.get_or_compute(
-            key, lambda: lead_lag_api.discover(
-                codes, req.kind, lookback_days=req.lookback_days,
-                min_corr=req.min_corr, within_sector=req.within_sector))
+        out = lead_lag_api.discover(
+            codes, req.kind, lookback_days=req.lookback_days,
+            min_corr=req.min_corr, within_sector=req.within_sector)
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:
         raise HTTPException(503, str(exc))
+
+    out["session"] = key["session"]
+    discover_cache.save(user.id, key, out)
+    out["cached"] = False
+    return out

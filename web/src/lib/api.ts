@@ -117,9 +117,10 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  // `force` re-runs the two-minute search instead of serving the stored one.
   discover: (body: { kind: "pair-trade" | "lead-lag"; lookback_days: number;
-                     min_corr: number; within_sector: boolean }) =>
-    call<DiscoverResult>("/strategies/discover", {
+                     min_corr: number; within_sector: boolean }, force = false) =>
+    call<DiscoverResult>(`/strategies/discover?force=${force}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),

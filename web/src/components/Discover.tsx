@@ -17,10 +17,20 @@
  * part in choosing it. Rows that fail that confirmation are still listed,
  * dimmed — "we looked, and this was the closest thing" is worth seeing, and
  * hiding it would make the screen look far more productive than it is.
+ *
+ * A finished search must survive leaving the tab. It is two minutes and
+ * eighty Tushare calls, so it is held in the query cache rather than in
+ * component state, under a key made of the parameters — switching away and
+ * back re-reads it instead of re-running it, and changing a parameter is a
+ * different key and therefore correctly a different (empty) result.
+ *
+ * The server keeps it too, across restarts, keyed on the watchlist and the
+ * newest published session — see discover_cache. So the first load after a
+ * cold start is also instant, and a new close is the thing that expires it.
  */
 
 import { Link } from "react-router-dom";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api";
 import type { DiscoverResult, DiscoverRow } from "../lib/types";
 import { usePersistentState } from "../lib/usePersistentState";
@@ -35,10 +45,33 @@ export function Discover({ kind, onUse }: {
   const [within, setWithin] = usePersistentState<boolean>("assrs.disc.sector", false);
   const [days, setDays] = usePersistentState<number>("assrs.disc.days", 504);
 
-  const run = useMutation({
-    mutationFn: () => api.discover({ kind, lookback_days: days,
-                                     min_corr: minCorr, within_sector: within }),
+  const qc = useQueryClient();
+  // Keyed on the parameters, so the answer that comes back is unambiguously
+  // the answer to what is on screen. `enabled: false` because a two-minute
+  // search must never start on its own — but the cached data for this key is
+  // still returned on mount, which is what makes it survive a tab switch.
+  const key = ["discover", kind, days, minCorr, within] as const;
+  const result = useQuery({
+    queryKey: key,
+    queryFn: () => api.discover({ kind, lookback_days: days,
+                                  min_corr: minCorr, within_sector: within }),
+    enabled: false,
+    gcTime: 24 * 3600_000,
+    staleTime: Infinity,
+    retry: false,
   });
+
+  // Re-running is a separate action from reading, because it costs two
+  // minutes; `force` tells the server to ignore what it has stored.
+  const rerun = useMutation({
+    mutationFn: () => api.discover({ kind, lookback_days: days,
+                                     min_corr: minCorr, within_sector: within }, true),
+    onSuccess: (data) => qc.setQueryData(key, data),
+  });
+
+  const busy = result.isFetching || rerun.isPending;
+  const data = result.data;
+  const error = (rerun.error ?? result.error) as ApiError | null;
 
   return (
     <section className="card p-3 flex flex-col gap-2.5">
@@ -73,16 +106,24 @@ export function Discover({ kind, onUse }: {
             className="accent-[var(--color-cyan)]" />
           仅同板块
         </label>
-        <button onClick={() => run.mutate()} disabled={run.isPending}
+        <button onClick={() => (data ? rerun.mutate() : result.refetch())}
+          disabled={busy}
           className="h-8 px-4 rounded-lg bg-cyan text-white text-[13px] font-semibold disabled:opacity-60">
-          {run.isPending ? "搜索中…（数十只股票要逐只取行情）" : "开始搜索"}
+          {busy ? "搜索中…（数十只股票要逐只取行情）"
+            : data ? "重新搜索" : "开始搜索"}
         </button>
+        {data?.cached && (
+          <span className="label"
+            title={`这次结果基于 ${data.session} 收盘后的数据。只要没有新的交易日，`
+              + `并且自选股、相关性下限、回看天数都没变，结论就不会变。`}>
+            已缓存 · 基于 {data.session} 收盘
+            {data.generated_at ? ` · 生成于 ${data.generated_at.slice(0, 16).replace("T", " ")}` : ""}
+          </span>
+        )}
       </div>
 
-      {run.isError && (
-        <p className="text-[12.5px] text-up">{(run.error as ApiError).message}</p>
-      )}
-      {run.data && <Found data={run.data} onUse={onUse} />}
+      {error && <p className="text-[12.5px] text-up">{error.message}</p>}
+      {data && <Found data={data} onUse={onUse} />}
     </section>
   );
 }

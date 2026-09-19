@@ -920,6 +920,11 @@ export type DiscoverRow = {
 
 export type DiscoverResult = {
   kind: "pair-trade" | "lead-lag";
+  /** Served from storage rather than re-run. */
+  cached?: boolean;
+  generated_at?: string | null;
+  /** The published session this search was built on. */
+  session?: string | null;
   requested: number;
   within_sector: boolean;
   lookback_days: number;
