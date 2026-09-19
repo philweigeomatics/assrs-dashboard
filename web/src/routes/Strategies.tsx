@@ -18,9 +18,10 @@ import { api, ApiError } from "../lib/api";
 import type { Num, StrategyResult, StrategyRow } from "../lib/types";
 import { NavBar } from "../components/NavBar";
 import { PairTrade } from "../components/PairTrade";
+import { LeadLag } from "../components/LeadLag";
 import { fixed, signed } from "../lib/format";
 
-type TabId = "t-trading" | "mean-reversion" | "pair-trade";
+type TabId = "t-trading" | "mean-reversion" | "pair-trade" | "lead-lag";
 
 const TABS: { id: TabId; label: string; blurb: string }[] = [
   {
@@ -36,6 +37,13 @@ const TABS: { id: TabId; label: string; blurb: string }[] = [
       + "对冲比率逐日滚动估计并前推一天，所以价差与历史交易都是样本外的。",
   },
   {
+    id: "lead-lag",
+    label: "🕰️ 领先滞后",
+    blurb: "哪只票先动、哪只跟着动，以及这个时间差能不能拿来交易。"
+      + "格兰杰检验给方向，滞后相关给形状，协整与半衰期决定价差会不会收敛——"
+      + "三个问题分开看，因为一对股票常常过得了第一关、过不了第三关。",
+  },
+  {
     id: "mean-reversion",
     label: "🔄 反转候选",
     blurb: "被情绪砸下去、而不是被消息砸下去的票。价格异常下挫、连跌、缩量、"
@@ -43,10 +51,9 @@ const TABS: { id: TabId; label: string; blurb: string }[] = [
   },
 ];
 
-//: Not yet ported; named here so the tab bar tells the truth about what exists.
-const COMING = [
-  { label: "领先滞后", why: "跨股滞后相关，需要自己的滞后曲线图" },
-];
+//: Nothing left to port. Kept as the place to name anything that is not yet
+//: here, so the tab bar goes on telling the truth about what exists.
+const COMING: { label: string; why: string }[] = [];
 
 export function Strategies() {
   useEffect(() => { document.title = "ASSRS · 策略"; }, []);
@@ -75,7 +82,9 @@ export function Strategies() {
           </span>
         </nav>
 
-        {tab === "pair-trade" ? <PairTrade /> : <Screen key={tab} id={tab} />}
+        {tab === "pair-trade" ? <PairTrade />
+          : tab === "lead-lag" ? <LeadLag />
+            : <Screen key={tab} id={tab} />}
       </main>
     </div>
   );

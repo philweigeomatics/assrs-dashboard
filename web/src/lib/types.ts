@@ -863,3 +863,39 @@ export type ChainGraphPayload = {
   macro_sectors?: string[];
   links?: { source: string; target: string }[];
 };
+
+export type LeadLagRow = {
+  ticker: string; name: string; n_obs: number;
+  beta: Num;
+  relationship: string;
+  signal: string;
+  peak_corr: Num; peak_lag: number;
+  p_t_leads_s: Num; lag_t_leads_s: number;
+  p_s_leads_t: Num; lag_s_leads_t: number;
+  /** Benjamini-Hochberg adjusted. The raw p is not the finding. */
+  q_t_leads_s: Num; q_s_leads_t: Num; q_best: Num;
+  survives_fdr: boolean;
+  cointegrated: boolean;
+  half_life: Num;
+  /** One correlation per lag, aligned with `lags` / `lag_labels`. */
+  xcorr: Num[];
+};
+
+export type LeadLagResult = {
+  ticker: string; name: string;
+  lookback_days: number; max_lag: number;
+  sessions: number; from: string; to: string;
+  lags: number[];
+  lag_labels: string[];
+  rows: LeadLagRow[];
+  tests: {
+    n: number; alpha: number; q: number;
+    /** How many passed the raw threshold… */
+    raw_hits: number;
+    /** …against how many to expect from noise alone. */
+    expected_false: number;
+    survivors: number;
+    method: string;
+  };
+  missing: { ticker: string; name: string }[];
+};

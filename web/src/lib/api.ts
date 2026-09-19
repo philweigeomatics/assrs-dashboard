@@ -5,7 +5,7 @@ import type {
   StrategyResult, WhatIfAi,
   Breadth, Heatmap, Leverage, Rotation, TopList, Wyckoff,
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
-  ChainGraphPayload, WatchRef,
+  ChainGraphPayload, WatchRef, LeadLagResult,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -111,6 +111,12 @@ export const api = {
     call<{ t: string; message: string }>(`/watchlist/${t}`, { method: "POST" }),
   watchlistRemove: (t: string) =>
     call<{ t: string; message: string }>(`/watchlist/${t}`, { method: "DELETE" }),
+  leadLag: (body: { ticker: string; peers: string[];
+                    lookback_days: number; max_lag: number }) =>
+    call<LeadLagResult>("/strategies/lead-lag", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   strategyScan: (name: string) =>
     call<StrategyResult>(`/strategies/${name}/scan`, { method: "POST" }),
   compareStats: (t: string, other: string, window: string) =>

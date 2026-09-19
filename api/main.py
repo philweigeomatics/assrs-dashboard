@@ -1461,3 +1461,52 @@ def questrade_keepalive(x_keepalive_secret: str = Header(default="")):
         return questrade_api.keepalive()
     except Exception as exc:                                    # noqa: BLE001
         _questrade(exc)
+
+
+class LeadLagReq(BaseModel):
+    """
+    One A-share plus the peers to test it against. No discovery step: which
+    stocks are worth testing is a judgement, and an AI guessing at it produces
+    a peer list nobody can defend and twice as many tests to correct for.
+    """
+    ticker: str = Field(..., pattern=r"^\d{6}$")
+    peers: list[str] = Field(..., min_length=1, max_length=15)
+    lookback_days: int = Field(180, ge=90, le=504)
+    max_lag: int = Field(5, ge=1, le=10)
+
+
+# Granger in both directions for every peer, plus a cointegration test each —
+# seconds, and the same set gets re-read while the table is on screen.
+_leadlag_cache = TTLCache(maxsize=20, ttl_s=20 * 60)
+
+
+@app.post("/strategies/lead-lag")
+def lead_lag(req: LeadLagReq, user: AppUser = Depends(current_user)):
+    """
+    领先滞后: which of these stocks lead this one, and is the lead tradeable.
+
+    Three different questions per pair — Granger for direction,
+    cross-correlation for shape, cointegration plus OU half-life for whether
+    a gap actually closes. A pair can pass the first and fail the last, and
+    that combination is the common one.
+
+    Every p-value in the run is corrected together (Benjamini-Hochberg),
+    because twenty tests at a 5% threshold produce one pass from noise on
+    average — so the raw count of "significant" pairs is not the finding.
+    """
+    from api import lead_lag_api
+
+    bad = [t for t in [req.ticker, *req.peers] if not re.fullmatch(r"\d{6}", t)]
+    if bad:
+        raise HTTPException(422, f"领先滞后目前仅支持 A 股：{', '.join(bad[:4])}")
+
+    key = (req.ticker, tuple(sorted(set(req.peers))), req.lookback_days, req.max_lag)
+    try:
+        return _leadlag_cache.get_or_compute(
+            key, lambda: lead_lag_api.analyse(
+                req.ticker, req.peers, lookback_days=req.lookback_days,
+                max_lag=req.max_lag))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
