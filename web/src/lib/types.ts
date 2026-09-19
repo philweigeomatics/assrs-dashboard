@@ -899,3 +899,41 @@ export type LeadLagResult = {
   };
   missing: { ticker: string; name: string }[];
 };
+
+export type DiscoverRow = {
+  a: string; b: string;
+  name_a: string; name_b: string;
+  sector_a: string; sector_b: string;
+  corr: number;
+  /** In-sample, on the first half. */
+  p_train: Num;
+  /** Out-of-sample, on the half that played no part in choosing the pair. */
+  p_test: Num;
+  q: Num;
+  survives: boolean;
+  n_test: number;
+  /** lead-lag only */
+  leads?: "a" | "b"; lag?: number; same_direction?: boolean;
+  /** pair-trade only */
+  beta?: Num; half_life?: Num; tradeable?: boolean;
+};
+
+export type DiscoverResult = {
+  kind: "pair-trade" | "lead-lag";
+  requested: number;
+  within_sector: boolean;
+  lookback_days: number;
+  sessions: number;
+  train: { from: string; to: string; sessions: number };
+  test: { from: string; to: string; sessions: number };
+  /** The whole point: four survivors mean nothing without the 3,160 tested. */
+  funnel: {
+    pairs_possible: number; pairs_correlated: number; shortlisted: number;
+    min_corr: number; universe: number; screened: number; retested: number;
+    /** Cleared the holdout on the RAW threshold — the counterpart to
+     *  expected_by_chance, which is also uncorrected. */
+    retest_hits: number;
+    expected_by_chance: number; survivors: number; alpha: number;
+  };
+  rows: DiscoverRow[];
+};

@@ -230,3 +230,62 @@ def _bh(pvals: list[float]) -> list[float]:
         prev = min(prev, pvals[idx] * n / rank)
         q[idx] = min(prev, 1.0)
     return q
+
+
+# ── discovery ────────────────────────────────────────────────────────────────
+#: Two years, so each half of the split is a year. Cointegration over six
+#: months is a coin toss dressed as a test.
+DISCOVER_DAYS = 504
+
+
+def sector_of() -> dict:
+    """{ticker: sector} from the sector map, first membership wins."""
+    import data_manager
+    out = {}
+    try:
+        for sector, members in (data_manager.get_sector_stock_map() or {}).items():
+            for m in members or []:
+                out.setdefault(str(m).split(".")[0], sector)
+    except Exception:                                              # noqa: BLE001
+        return {}
+    return out
+
+
+def discover(tickers: list[str], kind: str = "pair-trade", *,
+             lookback_days: int = DISCOVER_DAYS, min_corr: float | None = None,
+             within_sector: bool = False) -> dict:
+    """
+    Search a whole list for pairs, instead of being told which to test.
+
+    The search is a funnel with an out-of-sample confirmation at the end —
+    see pair_scan for why that shape and not a straight sweep. This function
+    only fetches, names and annotates; the statistics and the honesty are
+    over there.
+    """
+    import lead_lag_stats as lls
+    import pair_scan
+
+    codes = sorted({t for t in tickers if t and t.isdigit() and len(t) == 6})
+    if len(codes) < 2:
+        raise LookupError("至少需要两只 A 股才能配对搜索")
+
+    _, prices = lls.fetch_qfq_returns(codes, lookback_days=lookback_days)
+    if prices.empty:
+        raise RuntimeError("行情暂时读取不到 — 请稍后重试")
+
+    groups = sector_of() if within_sector else None
+    out = pair_scan.scan(prices, kind,
+                         min_corr=pair_scan.MIN_CORR if min_corr is None else min_corr,
+                         within=groups)
+
+    names = _names(sorted({c for r in out["rows"] for c in (r["a"], r["b"])}))
+    sectors = groups if groups is not None else sector_of()
+    for row in out["rows"]:
+        row["name_a"] = names.get(row["a"], row["a"])
+        row["name_b"] = names.get(row["b"], row["b"])
+        row["sector_a"] = sectors.get(row["a"], "")
+        row["sector_b"] = sectors.get(row["b"], "")
+    out["requested"] = len(codes)
+    out["within_sector"] = bool(within_sector)
+    out["lookback_days"] = lookback_days
+    return out

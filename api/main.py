@@ -1510,3 +1510,50 @@ def lead_lag(req: LeadLagReq, user: AppUser = Depends(current_user)):
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:
         raise HTTPException(503, str(exc))
+
+
+class DiscoverReq(BaseModel):
+    """Search the watchlist for pairs, rather than being told which to test."""
+    kind: str = Field("pair-trade", pattern="^(pair-trade|lead-lag)$")
+    lookback_days: int = Field(504, ge=252, le=1000)
+    min_corr: float = Field(0.45, ge=0.0, le=0.95)
+    within_sector: bool = False
+
+
+# Eighty tickers is eighty Tushare calls before any statistics run, so this is
+# a button and its result is held while the table is read.
+_discover_cache = TTLCache(maxsize=8, ttl_s=60 * 60)
+
+
+@app.post("/strategies/discover")
+def strategies_discover(req: DiscoverReq, user: AppUser = Depends(current_user)):
+    """
+    Find the pairs in your watchlist instead of guessing which to test.
+
+    Eighty stocks make 3,160 pairs; lead-lag tests each in both directions, so
+    6,320 tests, of which a 5% threshold passes ~316 from noise alone. So the
+    search is a funnel — correlate, screen on the first half of the history,
+    then CONFIRM on the second half, which played no part in choosing the
+    pair. The funnel counts come back with the rows, because four survivors
+    mean nothing without the 3,160 they came from.
+    """
+    from api import lead_lag_api
+
+    with _as_user(user):
+        import data_manager
+        rows = data_manager.get_watchlist() or []
+    codes = [str(r.get("ticker") or "") for r in rows]
+    if not codes:
+        raise HTTPException(404, "自选股为空 — 先在自选股页面添加股票")
+
+    key = (user.id, req.kind, req.lookback_days, round(req.min_corr, 2),
+           req.within_sector, len(codes))
+    try:
+        return _discover_cache.get_or_compute(
+            key, lambda: lead_lag_api.discover(
+                codes, req.kind, lookback_days=req.lookback_days,
+                min_corr=req.min_corr, within_sector=req.within_sector))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))

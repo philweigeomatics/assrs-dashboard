@@ -19,6 +19,7 @@ import { api } from "../lib/api";
 import type { PairResult, PairTradeResult, StockRef } from "../lib/types";
 import { useSymbolSearch } from "../lib/useSymbolSearch";
 import { usePersistentState } from "../lib/usePersistentState";
+import { Discover } from "./Discover";
 import { fixed, signed } from "../lib/format";
 
 const MAX = 10;
@@ -120,10 +121,18 @@ export function PairTrade() {
           <div className="label">滚动回归 + 协整检验，组合越多越慢</div>
         </div>
       )}
+      {/* Which two of eighty stocks are cointegrated is not something anyone
+          knows in advance, so the search sits alongside the manual picker and
+          loads its findings into it. */}
+      <Discover kind="pair-trade" onUse={(a, b, [na, nb]) => {
+        setPicked([{ t: a, n: na }, { t: b, n: nb }]);
+        globalThis.scrollTo({ top: 0, behavior: "smooth" });
+      }} />
+
       {run.data && <Results d={run.data} />}
       {!run.data && !run.isPending && picked.length < 2 && (
         <div className="card p-10 text-center label">
-          选择至少两只 A 股 — 同板块、同产业链的标的最容易形成可交易的价差
+          自己选两只，或用下方的「从自选股中搜索」把配对找出来
         </div>
       )}
     </>

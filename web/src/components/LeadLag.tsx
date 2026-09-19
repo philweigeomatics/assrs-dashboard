@@ -22,9 +22,11 @@
  * dimmed rather than hidden: seeing that eleven of twelve failed is the
  * finding.
  *
- * The peer set is picked by hand. There is no discovery step, because which
- * stocks are worth testing is a judgement, and a model guessing at it produces
- * a list nobody can defend plus twice as many tests to correct for.
+ * The peer set can be picked by hand, or found: 从自选股中搜索 below sweeps the
+ * whole watchlist. That sweep is NOT the same screen run wider — searching
+ * 3,160 pairs at a 5% threshold returns hundreds of "relationships" from
+ * noise — so it screens on one half of the history and confirms on the other.
+ * See Discover, and pair_scan.py for why that shape.
  */
 
 import { useState } from "react";
@@ -34,6 +36,7 @@ import { api, ApiError } from "../lib/api";
 import type { LeadLagResult, LeadLagRow, Num, StockRef } from "../lib/types";
 import { useSymbolSearch } from "../lib/useSymbolSearch";
 import { usePersistentState } from "../lib/usePersistentState";
+import { Discover } from "./Discover";
 import { fixed } from "../lib/format";
 
 const MAX_PEERS = 15;
@@ -104,6 +107,14 @@ export function LeadLag() {
           <p className="text-[12.5px] text-up">{(run.error as ApiError).message}</p>
         )}
       </section>
+
+      {/* Finding the pairs matters more than testing the ones you guessed,
+          so the search sits above the manual picker and can load into it. */}
+      <Discover kind="lead-lag" onUse={(a, b, [na, nb]) => {
+        setSubject({ t: a, n: na });
+        setPeers([{ t: b, n: nb }]);
+        globalThis.scrollTo({ top: 0, behavior: "smooth" });
+      }} />
 
       {run.data && <Results data={run.data} />}
     </>

@@ -5,7 +5,7 @@ import type {
   StrategyResult, WhatIfAi,
   Breadth, Heatmap, Leverage, Rotation, TopList, Wyckoff,
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
-  ChainGraphPayload, WatchRef, LeadLagResult,
+  ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -114,6 +114,12 @@ export const api = {
   leadLag: (body: { ticker: string; peers: string[];
                     lookback_days: number; max_lag: number }) =>
     call<LeadLagResult>("/strategies/lead-lag", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  discover: (body: { kind: "pair-trade" | "lead-lag"; lookback_days: number;
+                     min_corr: number; within_sector: boolean }) =>
+    call<DiscoverResult>("/strategies/discover", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
