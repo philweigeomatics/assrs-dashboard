@@ -104,7 +104,7 @@ export function InfoHeader({ data }: { data: Analysis }) {
         <span className="font-mono tnum text-[12px] text-ink-mute">{data.ticker}</span>
         <MarketBadge market={data.market} upIsRed={data.up_is_red} />
       </div>
-      <WatchlistButton ticker={data.ticker} market={data.market} />
+      <WatchlistButton ticker={data.ticker} />
 
       <div className="flex items-baseline gap-2">
         <span className={`font-mono tnum text-[26px] font-semibold ${moveClass(h.change_pct, data.up_is_red)}`}>

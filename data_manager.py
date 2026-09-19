@@ -2055,8 +2055,33 @@ def create_watchlist_table():
         return True
 
 
+def _is_foreign(symbol) -> bool:
+    """True for a symbol carrying a market prefix — anything but an A-share."""
+    return ":" in str(symbol)
+
+
+def _foreign_name(symbol):
+    """Company name from the symbol's own market adapter, or None."""
+    try:
+        import markets
+        market, code = markets.parse(symbol)
+        ref = market.resolve(code)
+        return ref.name if ref else None
+    except Exception as exc:                                    # noqa: BLE001
+        print(f"[watchlist] name lookup failed for {symbol}: {exc}")
+        return None
+
+
 def add_to_watchlist(ticker, stock_name=None):
-    """Add a stock to the current user's watchlist. Validates ticker exists."""
+    """
+    Add a stock to the current user's watchlist. Validates the ticker exists.
+
+    Accepts any market's symbol in the canonical form markets.canonical()
+    produces: a bare six-digit code is an A-share, "US:AAPL" and "CA:SHOP.TO"
+    are not. No schema change was needed for that, which is the whole point of
+    that convention — every row already stored stays exactly as it was, and
+    only the name lookup has to branch.
+    """
     user_id = auth_manager.get_current_user_id()
     if user_id is None:
         return False, "❌ Not logged in"
@@ -2076,11 +2101,16 @@ def add_to_watchlist(ticker, stock_name=None):
             if current_count >= WATCHLIST_MAX_STOCKS:
                 return False, f"⚠️ Watchlist limit reached ({WATCHLIST_MAX_STOCKS} stocks max). Remove some stocks first."
 
-        # Get stock name — also validates ticker exists
+        # Get stock name — also validates the ticker exists. A prefixed symbol
+        # cannot be looked up in stock_basic (which is A-shares only), so it
+        # goes to its own market's adapter instead.
         if not stock_name:
-            stock_name = get_stock_name_from_db(ticker)
-            if not stock_name:
-                stock_name = get_company_name_from_api(ticker)
+            if _is_foreign(ticker):
+                stock_name = _foreign_name(ticker)
+            else:
+                stock_name = get_stock_name_from_db(ticker)
+                if not stock_name:
+                    stock_name = get_company_name_from_api(ticker)
             if not stock_name:
                 return False, f"❌ Stock {ticker} not found. Please verify the ticker code."
 

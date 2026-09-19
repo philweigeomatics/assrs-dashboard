@@ -14,6 +14,7 @@ import { useAuth } from "../auth/AuthProvider";
 const PAGES = [
   { to: "/market", label: "🗺️ 市场看板" },
   { to: "/", label: "📈 个股分析" },
+  { to: "/watchlist", label: "⭐ 自选股" },
   { to: "/alerts", label: "🔔 今日提醒" },
   { to: "/basket", label: "🧺 多股对比" },
   { to: "/strategies", label: "⚡ 策略" },

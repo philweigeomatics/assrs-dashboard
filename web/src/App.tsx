@@ -6,6 +6,7 @@ import { LoginPage } from "./auth/LoginPage";
 import { SetPasswordPage } from "./auth/SetPasswordPage";
 import { Dashboard } from "./routes/Dashboard";
 import { MyQuestrade } from "./routes/MyQuestrade";
+import { Watchlist } from "./routes/Watchlist";
 import { TechnicalAnalysis } from "./routes/TechnicalAnalysis";
 import { Alerts } from "./routes/Alerts";
 import { Basket } from "./routes/Basket";
@@ -51,6 +52,14 @@ export function App() {
               element={
                 <RequireAuth>
                   <MyQuestrade />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/watchlist"
+              element={
+                <RequireAuth>
+                  <Watchlist />
                 </RequireAuth>
               }
             />

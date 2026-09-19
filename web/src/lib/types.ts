@@ -846,3 +846,16 @@ export type QtOptimise = {
   } | null;
   walk_forward_error?: string;
 };
+
+/** A watchlist row. `market` is "CN" | "US" | "CA", or "??" for an unparseable one. */
+export type WatchRef = StockRef & { market: string; at?: string | null };
+
+export type ChainGraphPayload = {
+  ticker: string;
+  /** False until somebody has generated it — the normal state of a new stock. */
+  generated: boolean;
+  company_name?: string;
+  products?: string[];
+  macro_sectors?: string[];
+  links?: { source: string; target: string }[];
+};

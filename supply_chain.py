@@ -15,14 +15,22 @@ reader might assume:
 
 where every source names a product and every target names a sector, both
 matched by their exact string.
+
+The prompt is per market. The schema is identical everywhere — the graph a
+chart draws must not change shape by exchange — but the sourcing instruction
+cannot be: telling a model to verify a US company against cninfo.com.cn is
+telling it to consult a database that does not contain the company, and what
+comes back is invention rather than recall. So the last rule is swapped for
+the filings that actually exist in that market, and everything above it stays
+byte-identical.
 """
 
 from __future__ import annotations
 
 import ai_client
 
-_SYSTEM_PROMPT = """\
-You are an elite quantitative supply chain analyst specialising in Chinese A-Shares.
+_PROMPT = """\
+You are an elite quantitative supply chain analyst specialising in {speciality}.
 Your task is to map the core physical products and the downstream macroeconomic sectors \
 for a given stock.
 
@@ -60,27 +68,71 @@ least one link. Do not list a sector unless it is linked to at least one product
 link. Prefer to map every product; only omit a product if it has absolutely no clear \
 downstream sector connection.
 3. Base the mapping on the company's ACTUAL downstream customers — if a sector appears \
-in the company's annual report segment revenue breakdown, investor Q&A on cninfo.com.cn, \
-or industry association reports, include it. If not verified, exclude it.
-4. For A-share companies, consult: annual report segment revenue breakdown, investor \
-Q&A on cninfo.com.cn, or industry association reports as your primary source of truth.
+in the company's segment revenue breakdown or its regulatory filings, include it. \
+If not verified, exclude it.
+4. {sources}
 """
 
+#: What to consult, per market. Every value still carries English and Chinese,
+#: because the app is read in Chinese whatever the listing is.
+_MARKETS = {
+    "CN": {
+        "speciality": "Chinese A-Shares",
+        "label": "Chinese A-share",
+        "sources": ("For A-share companies, consult: annual report segment revenue "
+                    "breakdown, investor Q&A on cninfo.com.cn, or industry "
+                    "association reports as your primary source of truth."),
+    },
+    "US": {
+        "speciality": "US-listed equities",
+        "label": "US-listed",
+        "sources": ("For US-listed companies, consult: the segment disclosures in "
+                    "the 10-K and 10-Q, the customer-concentration note, and "
+                    "investor-day materials as your primary source of truth. "
+                    "Do NOT cite Chinese regulatory sources for a US filer."),
+    },
+    "CA": {
+        "speciality": "Canadian-listed equities (TSX / TSXV)",
+        "label": "Canadian-listed",
+        "sources": ("For Canadian-listed companies, consult: the Annual "
+                    "Information Form and MD&A filed on SEDAR+, the segmented "
+                    "information note in the financial statements, and investor "
+                    "presentations as your primary source of truth. "
+                    "Do NOT cite Chinese regulatory sources for a Canadian filer."),
+    },
+}
 
-def generate_supply_chain_graph(ticker: str, company_name: str) -> dict:
+
+def _prompt(market: str) -> tuple[str, str]:
+    """
+    (system prompt, market label) for one market, defaulting to A-shares.
+
+    Substituted with str.replace, not str.format: the prompt embeds a JSON
+    schema, so every brace in it would have to be doubled to survive format(),
+    which makes the schema unreadable and one missed brace silently breaks the
+    whole prompt.
+    """
+    spec = _MARKETS.get(market, _MARKETS["CN"])
+    return (_PROMPT.replace("{speciality}", spec["speciality"])
+                   .replace("{sources}", spec["sources"]), spec["label"])
+
+
+def generate_supply_chain_graph(ticker: str, company_name: str,
+                                market: str = "CN") -> dict:
     """
     Call DeepSeek to produce a supply chain knowledge graph for *ticker*.
 
-    Returns the parsed graph dict.
-    Raises RuntimeError with a user-friendly message on any failure.
+    `market` is the two-letter code from markets.split(). Returns the parsed
+    graph dict; raises RuntimeError with a user-friendly message on failure.
     """
+    system, label = _prompt(market)
     user_msg = (
-        f"Generate the supply chain knowledge graph for this Chinese A-share company:\n"
+        f"Generate the supply chain knowledge graph for this {label} company:\n"
         f"Ticker: {ticker}\n"
         f"Company Name: {company_name}"
     )
     return ai_client.call_json(
-        _SYSTEM_PROMPT, user_msg,
+        system, user_msg,
         # This is recall + formatting (products, sectors, links from what the
         # model already knows about the company), not multi-step reasoning, so
         # reasoning_effort="low" is appropriate and directly reduces how much

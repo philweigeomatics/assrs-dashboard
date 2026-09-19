@@ -674,23 +674,55 @@ def pair_trade(req: PairReq, user: AppUser = Depends(current_user)):
         raise HTTPException(503, str(exc))
 
 
+#: Which markets each watchlist tab covers. One table holds them all — the
+#: canonical symbol already says which market a row belongs to — so this is
+#: only about what a request asked to see.
+WATCHLIST_MARKETS = {"CN": ("CN",), "NA": ("US", "CA")}
+
+
 @app.get("/watchlist")
-def watchlist(user: AppUser = Depends(current_user)):
+def watchlist(market: str | None = Query(None, pattern="^(CN|NA)$"),
+              user: AppUser = Depends(current_user)):
+    """
+    The user's watchlist, optionally for one market group.
+
+    No `market` returns everything, which is what the nightly jobs and any
+    older client expect. The page asks for one group at a time, because
+    A-shares and North America are two different lists to a person even though
+    they are one table to the database.
+    """
     import data_manager
+    want = WATCHLIST_MARKETS.get(market or "")
     with _as_user(user):
         rows = data_manager.get_watchlist() or []
-    return [{"t": str(r.get("ticker")), "n": str(r.get("stock_name") or r.get("ticker"))}
-            for r in rows]
+
+    out = []
+    for r in rows:
+        symbol = str(r.get("ticker") or "")
+        try:
+            code = markets.split(symbol)[0]
+        except LookupError:
+            # A row nothing can parse still belongs to the user; show it under
+            # its own market group so it can be deleted rather than being
+            # invisible and unfixable.
+            code = "??"
+        if want and code not in want:
+            continue
+        out.append({"t": symbol, "n": str(r.get("stock_name") or symbol),
+                    "market": code, "at": r.get("added_date")})
+    return out
 
 
 @app.post("/watchlist/{ticker}")
 def watchlist_add(ticker: str = TICKER, user: AppUser = Depends(current_user)):
+    """
+    Add a symbol from any supported market.
+
+    A-shares still feed the nightly Tushare scan; US and Canadian symbols are
+    picked up by the separate North American run, which is why scan_watchlists
+    takes a --market and each job only takes its own.
+    """
     import data_manager
-    if markets.split(ticker)[0] != "CN":
-        # The watchlist feeds the nightly A-share scan and every screen built
-        # on it; a US symbol in there would be scanned by code that assumes
-        # Tushare, and fail nightly rather than visibly.
-        raise HTTPException(422, "自选股目前仅支持 A 股")
     with _as_user(user):
         ok, msg = data_manager.add_to_watchlist(ticker)
     if not ok:
@@ -850,11 +882,16 @@ def equity_generate(ticker: str = TICKER,
     """
     from api import equity_api
 
-    if markets.split(ticker)[0] != "CN":
+    market = markets.split(ticker)[0]
+    if section != "supply-chain" and market != "CN":
+        # The rest of the brief is built from Tushare fundamentals; the supply
+        # chain is not — it is a model call about the company, and works
+        # wherever the company is listed, with a market-appropriate prompt.
         raise HTTPException(404, "个股研报目前仅支持 A 股")
     try:
         if section == "supply-chain":
-            out = {"payload": equity_api.generate_supply_chain(ticker, _name(ticker))}
+            out = {"payload": equity_api.generate_supply_chain(
+                ticker, _name(ticker), market)}
         else:
             out = equity_api.generate(ticker, _name(ticker), _industry_of(ticker),
                                       section, force)
@@ -1301,3 +1338,22 @@ def questrade_optimise(base: str = Query("CAD", pattern="^(CAD|USD)$"),
 def questrade_benchmarks(user: AppUser = Depends(current_user)):
     import portfolio
     return [{"id": k, "name": v} for k, v in portfolio.BENCHMARKS.items()]
+
+
+@app.get("/supply-chain/{ticker}")
+def supply_chain_graph(ticker: str = TICKER, user: AppUser = Depends(current_user)):
+    """
+    The saved supply-chain graph for any market, without the equity brief.
+
+    Separate from /equity/{ticker} because that route is A-share only — it is
+    built on Tushare fundamentals — while a supply-chain graph is a model's
+    account of what a company makes and who buys it, which is answerable for a
+    US or Canadian listing just as well. The watchlist reads this one.
+
+    An absent graph is {} with generated=false, not a 404: "nobody has
+    generated this yet" is the normal state of a stock you just added, and a
+    404 would have the client render it as an error.
+    """
+    from api import equity_api
+    graph = equity_api._supply_chain(ticker)
+    return {"ticker": ticker, "generated": bool(graph.get("products")), **graph}

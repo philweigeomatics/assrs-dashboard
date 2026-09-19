@@ -19,8 +19,10 @@ import data_manager  # noqa: F401  (available to callers for convenience)
 # The prompt and the generator live in supply_chain.py so that code with no
 # Streamlit runtime — the API container — can call them. Re-exported here so
 # every existing caller of supply_chain_ui.generate_supply_chain_graph keeps
-# working unchanged.
-from supply_chain import _SYSTEM_PROMPT, generate_supply_chain_graph  # noqa: F401,E402
+# working unchanged. The prompt itself is no longer a single constant: it is
+# built per market, because the filings a model should consult for a US filer
+# are not the ones it should consult for an A-share.
+from supply_chain import generate_supply_chain_graph  # noqa: F401,E402
 
 
 # ── D3.js Force-Directed Graph ────────────────────────────────────────────────

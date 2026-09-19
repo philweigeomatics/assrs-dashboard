@@ -321,12 +321,17 @@ def _supply_chain(ticker: str) -> dict:
     }
 
 
-def generate_supply_chain(ticker: str, name: str) -> dict:
-    """Generate and persist the graph. One DeepSeek call."""
+def generate_supply_chain(ticker: str, name: str, market: str = "CN") -> dict:
+    """
+    Generate and persist the graph. One DeepSeek call.
+
+    Stored under the canonical symbol, so "US:AAPL" and a bare "600519" share
+    one table without a schema change — the same convention the watchlist uses.
+    """
     import data_manager
     import supply_chain
 
-    graph = supply_chain.generate_supply_chain_graph(ticker, name)
+    graph = supply_chain.generate_supply_chain_graph(ticker, name, market)
     if not isinstance(graph, dict) or not graph.get("products"):
         raise RuntimeError("模型未返回可用的供应链图")
     graph.setdefault("ticker", ticker)

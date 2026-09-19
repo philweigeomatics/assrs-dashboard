@@ -5,6 +5,7 @@ import type {
   StrategyResult, WhatIfAi,
   Breadth, Heatmap, Leverage, Rotation, TopList, Wyckoff,
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
+  ChainGraphPayload, WatchRef,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -102,7 +103,10 @@ export const api = {
       body: JSON.stringify({ sector, tickers }),
     }),
   sectorNames: () => call<string[]>("/sectors"),
-  watchlist: () => call<StockRef[]>("/watchlist"),
+  watchlist: (market?: "CN" | "NA") =>
+    call<WatchRef[]>(`/watchlist${market ? `?market=${market}` : ""}`),
+  supplyChain: (t: string) =>
+    call<ChainGraphPayload>(`/supply-chain/${encodeURIComponent(t)}`),
   watchlistAdd: (t: string) =>
     call<{ t: string; message: string }>(`/watchlist/${t}`, { method: "POST" }),
   watchlistRemove: (t: string) =>

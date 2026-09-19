@@ -162,7 +162,13 @@ function Regenerate({ ticker }: { ticker: string }) {
   const qc = useQueryClient();
   const run = useMutation({
     mutationFn: () => api.equityGenerate(ticker, "supply-chain", true),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["equity", ticker] }),
+    // Two pages open this window off two different queries — the equity brief
+    // and the watchlist. Invalidating only one leaves the other showing the
+    // graph it just replaced.
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["equity", ticker] });
+      qc.invalidateQueries({ queryKey: ["chain", ticker] });
+    },
   });
   return (
     <span className="flex items-center gap-2">

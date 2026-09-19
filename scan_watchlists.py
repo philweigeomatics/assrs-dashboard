@@ -97,6 +97,18 @@ def _run(tickers: list[str], workers: int, label: str) -> dict[str, dict]:
     return results
 
 
+def _in_market(symbol: str, want: str) -> bool:
+    """Whether a watchlist symbol belongs to the market this run is for."""
+    if want == "ALL":
+        return True
+    import markets
+    try:
+        code = markets.split(symbol)[0]
+    except LookupError:
+        return False              # unparseable: not this run's problem either
+    return code == "CN" if want == "CN" else code in ("US", "CA")
+
+
 def _log(n, total, r, label):
     c = r.get("chips", {})
     print(f"  {label}[{n:>3}/{total}] {r['ticker']} {r['status']:<8}"
@@ -111,6 +123,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--only", nargs="*", help="scan just these tickers (no DB write)")
+    ap.add_argument("--market", default="CN", choices=["CN", "NA", "ALL"],
+                    help="CN = A-shares (Tushare, 20:00 Beijing); "
+                         "NA = US/Canada (Yahoo, after the 16:00 ET close)")
     args = ap.parse_args()
 
     _init_worker()
@@ -126,6 +141,18 @@ def main() -> int:
         return 0
 
     tickers = sorted({t for ts in watchlists.values() for t in ts})
+    # One table holds every market's watchlist, but the two markets close
+    # nine hours apart and come from different data sources, so each run takes
+    # only its own. Without this the A-share job at 20:00 Beijing would fetch
+    # US symbols from Tushare and log an error a night, per symbol, forever.
+    before = len(tickers)
+    tickers = [t for t in tickers if _in_market(t, args.market)]
+    if before != len(tickers):
+        print(f"{before - len(tickers)} ticker(s) belong to another market "
+              f"— skipped (--market {args.market})", flush=True)
+    if not tickers:
+        print(f"No {args.market} tickers to scan.")
+        return 0
     total_refs = sum(len(v) for v in watchlists.values())
     print(f"{len(watchlists)} user(s) · {total_refs} watchlist entries · "
           f"{len(tickers)} distinct tickers · workers={args.workers}", flush=True)
