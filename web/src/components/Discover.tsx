@@ -103,7 +103,13 @@ function Found({ data, onUse }: {
           <Arrow />
           <Step n={f.pairs_possible} label="组配对" />
           <Arrow />
-          <Step n={f.shortlisted} label={`相关性 ≥ ${fixed(f.min_corr, 2)}`} />
+          {/* When the cap bites, say so. "250 shortlisted" reads as "250
+              qualified" and hides that 900 did and 650 were dropped by a
+              ceiling rather than by the threshold. */}
+          <Step n={f.shortlisted} strong={false}
+            label={f.pairs_correlated > f.shortlisted
+              ? `已测（相关性 ≥ ${fixed(f.min_corr, 2)} 的共 ${f.pairs_correlated} 组，取最相关的前 ${f.shortlisted}）`
+              : `相关性 ≥ ${fixed(f.min_corr, 2)}`} />
           <Arrow />
           <Step n={f.screened} label="前半程显著" />
           <Arrow />
@@ -119,6 +125,13 @@ function Found({ data, onUse }: {
           <b className={f.survivors ? "text-up" : ""}> {f.survivors} </b>组。
           {f.survivors === 0 && " 这一轮没有可用的配对，这本身就是答案。"}
         </p>
+        {f.pairs_correlated > f.shortlisted && (
+          <p className="text-[11.5px] text-brand-ink leading-snug">
+            ⚠ 相关性 ≥ {fixed(f.min_corr, 2)} 的有 {f.pairs_correlated} 组，
+            但每轮最多只检验最相关的 {f.shortlisted} 组 —— 此时<b>调低</b>阈值不会有任何变化，
+            只有<b>调高</b>才会真正改变被检验的集合。
+          </p>
+        )}
       </div>
 
       {data.rows.length === 0 ? (
