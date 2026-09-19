@@ -26,6 +26,7 @@ measured in CAD, is beta plus an exchange rate.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pandas as pd
@@ -44,7 +45,14 @@ HISTORY_YEARS = 3
 #: before anything is regressed against it.
 BENCHMARK_CCY = {"^GSPC": "USD", "^IXIC": "USD", "^GSPTSE": "CAD"}
 
+#: How long a fetched book is reused. Positions move with the tape, so this is
+#: short — but it must be longer than one page load, because the page fires
+#: five queries at once and every one of them needs the book.
+BOOK_TTL_S = 150
+
 _kind_cache: dict[str, tuple[float, dict]] = {}
+_book_cache: dict[tuple, tuple[float, dict]] = {}
+_book_lock = threading.Lock()
 
 
 class SupabaseStore(qt.TokenStore):
@@ -111,7 +119,39 @@ def client(app_user_id: int) -> qt.Questrade:
 
 # ── the portfolio ────────────────────────────────────────────────────────────
 def snapshot(app_user_id: int, base: str = "CAD") -> dict:
-    """Every account, consolidated into one book."""
+    """
+    Every account, consolidated into one book — fetched at most once per
+    BOOK_TTL_S per user.
+
+    The caching is here rather than only in the route because the route is not
+    the only caller: the risk, exposure and allocation reports each need the
+    book, and the page asks for all of them at once. Without this, opening
+    MyQuestrade made four independent passes over every account, four sets of
+    Questrade calls, and four chances to be the request that finds the access
+    token stale and tries to refresh it. Refreshing is the one operation that
+    can permanently break the connection if two of them race, so doing it
+    once instead of four times is not only about speed.
+    """
+    key = (int(app_user_id), base)
+    with _book_lock:
+        hit = _book_cache.get(key)
+        if hit and time.time() - hit[0] < BOOK_TTL_S:
+            return hit[1]
+
+    book = _fetch_snapshot(app_user_id, base)
+    with _book_lock:
+        _book_cache[key] = (time.time(), book)
+    return book
+
+
+def forget(app_user_id: int) -> None:
+    """Drop this user's cached book — on connect, disconnect, or a manual refresh."""
+    with _book_lock:
+        for key in [k for k in _book_cache if k[0] == int(app_user_id)]:
+            _book_cache.pop(key, None)
+
+
+def _fetch_snapshot(app_user_id: int, base: str) -> dict:
     c = client(app_user_id)
     accounts = c.accounts()
     if not accounts:
@@ -421,3 +461,56 @@ def optimise_report(app_user_id: int, *, base: str = "CAD", scope: str = "all",
         "excluded": [{"symbol": k, "reason": v} for k, v in sorted(dropped.items())],
     })
     return report
+
+
+# ── keeping the chain alive ──────────────────────────────────────────────────
+#: Questrade's refresh token is valid for THREE DAYS from the moment it is
+#: issued, and every exchange issues a new one good for another three. (The
+#: manual token from the App Hub is separate: it lasts seven days from
+#: generation, but only until it is used once.)
+#:
+#: So the chain survives indefinitely while somebody keeps refreshing it — and
+#: dies quietly if nobody does. A connection that only refreshes when the page
+#: is opened therefore breaks after a long weekend, which looks exactly like
+#: "the token expires every few days" and is indistinguishable, from the
+#: outside, from a bug.
+REFRESH_TTL_DAYS = 3
+
+
+def keepalive() -> dict:
+    """
+    Refresh every connected user's token, so no chain lapses from disuse.
+
+    Called on a schedule. Deliberately served by the API rather than by a job
+    that talks to Questrade itself: the refresh token is single-use, and two
+    processes exchanging the same one leaves one of them holding a dead token
+    with no way to get another. Inside the API the per-user lock in
+    questrade.py already serialises it against live page traffic.
+
+    Returns a per-user result rather than raising, because one broken
+    connection must not stop the others being refreshed.
+    """
+    from db_manager import db
+
+    try:
+        rows = db.read_table(SupabaseStore.TABLE, columns="app_user_id")
+    except Exception as exc:                                       # noqa: BLE001
+        raise qt.QuestradeError(_missing_table(exc))
+    if rows is None or rows.empty:
+        return {"checked": 0, "refreshed": 0, "results": []}
+
+    results = []
+    for uid in sorted({int(v) for v in rows["app_user_id"].tolist()}):
+        try:
+            # _tokens() exchanges whenever the ACCESS token is stale, which on
+            # a daily ping it always is — and an exchange is what mints the
+            # next refresh token. Nothing else needs to happen.
+            client(uid)._tokens()
+            results.append({"user": uid, "ok": True})
+            forget(uid)
+        except Exception as exc:                                   # noqa: BLE001
+            results.append({"user": uid, "ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"[:200]})
+    return {"checked": len(results),
+            "refreshed": sum(1 for r in results if r["ok"]),
+            "results": results}

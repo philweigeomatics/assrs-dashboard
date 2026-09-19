@@ -1,0 +1,51 @@
+name: Keep the Questrade token chain alive
+
+# Questrade's refresh token is valid for THREE DAYS and is single-use: every
+# exchange mints the next one. A connection that only refreshes when somebody
+# opens the page therefore dies over a long weekend, and the user has to go
+# back to the App Hub and generate a new token by hand.
+#
+# So: ping the API daily. The API does the exchange, NOT this job — the token
+# is single-use, and two processes exchanging the same one leaves one of them
+# holding a dead token with no way to get another. Inside the API the per-user
+# lock already serialises the refresh against live page traffic.
+
+on:
+  schedule:
+    # 09:00 UTC daily — well clear of both the 12:00 UTC A-share pipeline and
+    # the North American close, so a slow refresh cannot delay either.
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refresh every connected Questrade token
+        env:
+          API_URL: ${{ secrets.API_URL }}
+          KEEPALIVE_SECRET: ${{ secrets.QUESTRADE_KEEPALIVE_SECRET }}
+        run: |
+          if [ -z "$API_URL" ] || [ -z "$KEEPALIVE_SECRET" ]; then
+            echo "::error::API_URL or QUESTRADE_KEEPALIVE_SECRET is not set in repo secrets"
+            exit 1
+          fi
+          code=$(curl -s -o response.json -w "%{http_code}" -X POST \
+            -H "X-Keepalive-Secret: $KEEPALIVE_SECRET" \
+            --max-time 120 "$API_URL/questrade/keepalive")
+          echo "HTTP $code"
+          cat response.json
+          echo
+          # A 503 means the secret is not configured on the service; a 403
+          # means it does not match. Both are setup faults worth failing on.
+          [ "$code" = "200" ] || exit 1
+          python -c "
+          import json, sys
+          d = json.load(open('response.json'))
+          bad = [r for r in d.get('results', []) if not r.get('ok')]
+          print(f\"checked {d['checked']}, refreshed {d['refreshed']}\")
+          for r in bad:
+              print(f\"::warning::user {r['user']}: {r.get('error')}\")
+          # Not a failure: one broken connection is the user's to reconnect,
+          # and failing the job every day afterwards would only add noise.
+          "

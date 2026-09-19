@@ -30,7 +30,7 @@ if ROOT not in sys.path:
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-from fastapi import Depends, FastAPI, HTTPException, Path, Query  # noqa: E402
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.middleware.gzip import GZipMiddleware  # noqa: E402
@@ -89,6 +89,45 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+#: Anything that looks like a credential, scrubbed before an error message is
+#: sent anywhere. The Questrade token is the one that matters: it is posted in
+#: a form body, so it is not in any URL, but a library that echoes its input
+#: into an exception would put it in a response without this.
+#
+#: The optional scheme word matters: "Authorization: Bearer eyJhbG…" otherwise
+#: matches with "Bearer" as the value, redacts THAT, and leaves the token.
+_SECRETISH = re.compile(
+    r"""(?ix) (token|secret|key|password|authorization)   # the label
+        ["'\s:=]+ (?: (?:bearer|basic|token)\s+ )?       # optional scheme
+        ["']? ([A-Za-z0-9._\-]{6,})                       # the value""")
+
+
+@app.exception_handler(Exception)
+async def unhandled(request, exc: Exception):
+    """
+    Turn an unhandled exception into something diagnosable.
+
+    Every route already maps its own failures onto a status with a message.
+    Anything reaching here escaped that, and the default response is a bare
+    500 with an empty body — which tells the user nothing, tells the client
+    nothing to display, and leaves the only record in a log they have to go
+    and find. Reporting the exception type and message costs nothing and is
+    the difference between "it always returns 500" and a fix.
+
+    The traceback still goes to stdout for Cloud Run; only the summary line
+    goes to the client, with anything credential-shaped scrubbed out.
+    """
+    import traceback
+    from fastapi.responses import JSONResponse
+
+    traceback.print_exception(type(exc), exc, exc.__traceback__)
+    detail = _SECRETISH.sub(r"\1=<redacted>", f"{type(exc).__name__}: {exc}")[:300]
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"服务器内部错误 —— {detail}",
+                 "path": str(request.url.path)})
 
 
 # ── small TTL caches ─────────────────────────────────────────────────────────
@@ -1229,6 +1268,8 @@ def _forget_questrade(user_id: int) -> None:
     reconnecting to a different Questrade login must not show the previous
     one's positions for the next three minutes.
     """
+    from api import questrade_api
+    questrade_api.forget(user_id)
     for base in ("CAD", "USD"):
         _qt_book_cache.put(("book", user_id, base), None)
         _qt_exposure_cache.put(("exposure", user_id, base), None)
@@ -1357,3 +1398,32 @@ def supply_chain_graph(ticker: str = TICKER, user: AppUser = Depends(current_use
     from api import equity_api
     graph = equity_api._supply_chain(ticker)
     return {"ticker": ticker, "generated": bool(graph.get("products")), **graph}
+
+
+@app.post("/questrade/keepalive")
+def questrade_keepalive(x_keepalive_secret: str = Header(default="")):
+    """
+    Refresh every connected Questrade token. For a scheduler, not a browser.
+
+    A Questrade refresh token lives three days and is single-use; each exchange
+    mints the next one. Refreshing only when somebody opens the page means the
+    chain dies over any long absence — which is indistinguishable from a bug
+    and is why this exists.
+
+    Guarded by a shared secret rather than a user login, because the caller is
+    a cron job with no user. If QUESTRADE_KEEPALIVE_SECRET is unset the route
+    refuses outright: an unconfigured secret must not mean an open endpoint.
+    """
+    import hmac
+    from api import questrade_api
+
+    want = os.environ.get("QUESTRADE_KEEPALIVE_SECRET", "")
+    if not want:
+        raise HTTPException(503, "QUESTRADE_KEEPALIVE_SECRET 未配置，保活接口已禁用")
+    if not hmac.compare_digest(x_keepalive_secret, want):
+        raise HTTPException(403, "forbidden")
+
+    try:
+        return questrade_api.keepalive()
+    except Exception as exc:                                    # noqa: BLE001
+        _questrade(exc)
