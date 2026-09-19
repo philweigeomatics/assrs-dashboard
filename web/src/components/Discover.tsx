@@ -36,6 +36,20 @@ import { api, ApiError } from "../lib/api";
 import type { DiscoverResult, DiscoverRow } from "../lib/types";
 import { usePersistentState } from "../lib/usePersistentState";
 import { fixed } from "../lib/format";
+import { Glossary, Hint } from "./Glossary";
+import { DISCOVER_INDICATORS } from "../lib/indicators";
+
+const tip = (label: string) =>
+  DISCOVER_INDICATORS.find((i) => i.label === label)?.short ?? "";
+
+/** A right-aligned column header carrying its own explanation. */
+function DHead({ label, tip: t }: { label: string; tip: string }) {
+  return (
+    <th className="text-right font-medium px-2 py-1.5 whitespace-nowrap">
+      <Hint tip={t}>{label}</Hint>
+    </th>
+  );
+}
 
 export function Discover({ kind, onUse }: {
   kind: "pair-trade" | "lead-lag";
@@ -186,18 +200,16 @@ function Found({ data, onUse }: {
               <tr className="border-b border-line text-ink-mute">
                 <th className="text-left font-medium px-2 py-1.5">A</th>
                 <th className="text-left font-medium px-2 py-1.5">B</th>
-                <th className="text-right font-medium px-2 py-1.5">相关</th>
-                <th className="text-right font-medium px-2 py-1.5"
-                  title="前半程（挑选用）">p 前</th>
-                <th className="text-right font-medium px-2 py-1.5"
-                  title="后半程，没参与挑选">p 后</th>
-                <th className="text-right font-medium px-2 py-1.5"
-                  title="后半程经多重检验校正后的 q 值">q</th>
+                <DHead label="相关" tip={tip("相关（粗筛）")} />
+                <DHead label="p 前" tip={tip("p 前")} />
+                <DHead label="p 后" tip={tip("p 后")} />
+                <DHead label="q" tip={tip("q")} />
                 {lead
                   ? <>
                       <th className="text-left font-medium px-2 py-1.5">方向</th>
-                      <th className="text-center font-medium px-2 py-1.5"
-                        title="两半是否对谁领先的判断一致">一致</th>
+                      <th className="text-center font-medium px-2 py-1.5">
+                        <Hint tip={tip("一致")}>一致</Hint>
+                      </th>
                     </>
                   : <>
                       <th className="text-right font-medium px-2 py-1.5">β</th>
@@ -215,6 +227,11 @@ function Found({ data, onUse }: {
           </table>
         </div>
       )}
+
+      <Glossary title="这几栏怎么读" items={DISCOVER_INDICATORS}
+        note={"这张表的逻辑就是「用一半数据挑、用另一半验」。p 前是挑选用的，"
+          + "所以它必然好看；p 后没参与挑选；q 再把「测了几千组，总有几十组碰巧显著」"
+          + "这件事算进去。要下结论只看 q 那一栏。"} />
     </div>
   );
 }

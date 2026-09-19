@@ -454,9 +454,23 @@ export type PairResult = {
   closed: number; win_rate: Num; avg_pnl_pct: Num;
 };
 
+/**
+ * The thresholds the engine actually applied, shipped from the module that
+ * applies them (pair_trade.GATES) so the on-screen help cannot drift from
+ * the rules it describes.
+ */
+export type PairGates = {
+  coint_p: number; adf_p: number;
+  hurst_max: number; hl_min: number; hl_max: number;
+  entry_z: number; watch_z: number;
+  good_score: number; max_score: number;
+  z_window: number; ols_window: number;
+};
+
 export type PairTradeResult = {
   from: string; to: string; bars: number;
   z_window: number; ols_window: number;
+  gates: PairGates;
   codes: StockRef[];
   pairs: PairResult[];
   skipped: { code_a: string; code_b: string;

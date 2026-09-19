@@ -57,6 +57,30 @@ WATCH_Z = 1.5
 #: Scores above this are worth looking at; the maximum possible is about 11.
 GOOD_SCORE = 7.0
 
+# ── the four gates, as numbers rather than literals in an expression ────────
+# Named because the screen explains them to the reader, and an explanation
+# that repeats a threshold written somewhere else is one edit away from being
+# a lie. GATES is what the API ships, so the help text is generated from the
+# same values the tests are run against.
+COINT_P = 0.10          # Engle-Granger p below this: a long-run relationship
+ADF_P = 0.10            # ADF p below this: the spread itself comes back
+HURST_MAX = 0.45        # below this the spread mean-reverts; 0.5 is a coin
+HL_MIN, HL_MAX = 5, 30  # days: faster is untradeable, slower ties up capital
+
+GATES = {
+    "coint_p": COINT_P,
+    "adf_p": ADF_P,
+    "hurst_max": HURST_MAX,
+    "hl_min": HL_MIN,
+    "hl_max": HL_MAX,
+    "entry_z": ENTRY_Z,
+    "watch_z": WATCH_Z,
+    "good_score": GOOD_SCORE,
+    "z_window": Z_WINDOW,
+    "ols_window": OLS_WINDOW,
+    "max_score": 11,
+}
+
 MAX_LEGS = 10
 
 
@@ -149,10 +173,10 @@ def analyse_pair(code_a: str, code_b: str, log_prices: pd.DataFrame,
     # Composite, max ≈ 11. Correlation is clamped to [0, 1] so an
     # anti-correlated pair contributes nothing rather than a negative.
     score = (
-        (3 if eg_p < 0.10 else 1 if eg_p < 0.20 else 0)
-        + (2 if adf_p < 0.10 else 1 if adf_p < 0.15 else 0)
-        + (2 if h < 0.45 else 1 if h < 0.50 else 0)
-        + (1 if 5 <= hl <= 30 else 0)
+        (3 if eg_p < COINT_P else 1 if eg_p < 0.20 else 0)
+        + (2 if adf_p < ADF_P else 1 if adf_p < 0.15 else 0)
+        + (2 if h < HURST_MAX else 1 if h < 0.50 else 0)
+        + (1 if HL_MIN <= hl <= HL_MAX else 0)
         + (2 if abs(z_now) >= ENTRY_Z else 1 if abs(z_now) >= WATCH_Z else 0)
         + max(0.0, min(corr, 1.0))
     )
@@ -163,8 +187,8 @@ def analyse_pair(code_a: str, code_b: str, log_prices: pd.DataFrame,
         "hurst": round(h, 3), "corr": round(corr, 3),
         "half_life": round(hl, 1), "beta_now": round(float(clean_beta[-1]), 3),
         "z_now": round(z_now, 2), "score": round(score, 2),
-        "coint_ok": bool(eg_p < 0.10), "adf_ok": bool(adf_p < 0.10),
-        "hurst_ok": bool(h < 0.45), "hl_ok": bool(5 <= hl <= 30),
+        "coint_ok": bool(eg_p < COINT_P), "adf_ok": bool(adf_p < ADF_P),
+        "hurst_ok": bool(h < HURST_MAX), "hl_ok": bool(HL_MIN <= hl <= HL_MAX),
         "dates": spread.index,
         "spread": arr,
         # The two legs themselves, on exactly the spread's dates. The z-score

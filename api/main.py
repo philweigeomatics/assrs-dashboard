@@ -745,6 +745,10 @@ def pair_trade(req: PairReq, user: AppUser = Depends(current_user)):
             "from": str(prices.index.min().date()), "to": str(prices.index.max().date()),
             "bars": len(prices), "z_window": req.z_window, "ols_window": req.ols_window,
             "codes": [{"t": c, "n": _name(c)} for c in codes],
+            # The thresholds the screen explains to the reader, straight from
+            # the module that applies them — so the help text cannot drift
+            # away from the gates it describes.
+            "gates": pt.GATES,
             "pairs": out,
             "skipped": [{**s, "name_a": _name(s["code_a"]),
                          "name_b": _name(s["code_b"])} for s in skipped],

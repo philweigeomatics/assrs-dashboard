@@ -21,6 +21,8 @@ import { useSymbolSearch } from "../lib/useSymbolSearch";
 import { usePersistentState } from "../lib/usePersistentState";
 import { Discover } from "./Discover";
 import { PairDetail } from "./PairDetail";
+import { Glossary, Hint } from "./Glossary";
+import { pairIndicators } from "../lib/indicators";
 import { fixed, signed } from "../lib/format";
 
 const MAX = 10;
@@ -142,6 +144,9 @@ export function PairTrade() {
 
 function Results({ d }: { d: PairTradeResult }) {
   const [openPair, setOpenPair] = useState<string | null>(null);
+  const guide = pairIndicators(d.gates);
+  const tip = (label: string) =>
+    guide.find((i) => i.label === label)?.short ?? "";
   return (
     <>
       <section className="card p-3 overflow-x-auto">
@@ -155,15 +160,15 @@ function Results({ d }: { d: PairTradeResult }) {
           <thead>
             <tr className="text-ink-mute">
               <th className="text-left font-normal pb-1 pr-3">组合</th>
-              <th className="text-right font-normal pb-1 px-2">评分</th>
+              <Head tip={tip("评分")} label="评分" />
               <th className="text-left font-normal pb-1 px-2">信号</th>
-              <th className="text-right font-normal pb-1 px-2" title="Engle-Granger 协整检验 p 值，< 0.10 通过">协整 p</th>
-              <th className="text-right font-normal pb-1 px-2" title="价差平稳性 ADF p 值，< 0.10 通过">ADF p</th>
-              <th className="text-right font-normal pb-1 px-2" title="< 0.45 为均值回归；此估计量在短样本上偏高">Hurst</th>
-              <th className="text-right font-normal pb-1 px-2" title="价差回到一半所需天数，5–30 天最可交易">半衰期</th>
-              <th className="text-right font-normal pb-1 px-2">相关性</th>
-              <th className="text-right font-normal pb-1 px-2" title="当前价差偏离，|Z| ≥ 2 触发">Z</th>
-              <th className="text-right font-normal pb-1 px-2" title="样本外历史交易的胜率与平均盈亏">历史</th>
+              <Head tip={tip("协整 p")} label="协整 p" />
+              <Head tip={tip("ADF p")} label="ADF p" />
+              <Head tip={tip("Hurst")} label="Hurst" />
+              <Head tip={tip("半衰期")} label="半衰期" />
+              <Head tip={tip("相关性")} label="相关性" />
+              <Head tip={tip("Z")} label="Z" />
+              <Head tip={tip("历史")} label="历史" />
               <th />
             </tr>
           </thead>
@@ -222,7 +227,24 @@ function Results({ d }: { d: PairTradeResult }) {
       {d.pairs.filter((p) => `${p.code_a}/${p.code_b}` === openPair).map((p) => (
         <PairDetail key={`${p.code_a}/${p.code_b}`} p={p} />
       ))}
+
+      <Glossary title="指标怎么读" items={guide}
+        note={"四道关卡各问一个不同的问题，所以要一起看：协整问「两者有没有长期关系」，"
+          + "ADF 问「价差会不会回来」，Hurst 问「它是回归型还是趋势型」，"
+          + "半衰期问「回来要多久」。只通过其中几项的组合不是「差一点」，"
+          + "而是在某个具体的地方不成立 —— 哪一项没过，就是哪一项没过。"
+          + "另外，A 股不能做空，减持另一条腿不是空头，所以这里没有配对交易本该有的对冲："
+          + "价差收敛了，买入的那条腿仍然可能是亏的。"} />
     </>
+  );
+}
+
+/** A right-aligned column header carrying its own explanation. */
+function Head({ label, tip }: { label: string; tip: string }) {
+  return (
+    <th className="text-right font-normal pb-1 px-2 whitespace-nowrap">
+      <Hint tip={tip}>{label}</Hint>
+    </th>
   );
 }
 

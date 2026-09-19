@@ -314,6 +314,56 @@ def test_an_unpriceable_trade_still_produces_a_row():
     assert t["pnl_pct"] is not None      # we held AAA, and AAA is readable
 
 
+# ── the thresholds the screen explains ───────────────────────────────────────
+def test_the_published_gates_are_the_ones_actually_applied():
+    """
+    The help text on the page is generated from GATES. If GATES said 0.10
+    while the code compared against 0.05, the screen would confidently
+    explain a rule that is not the rule.
+    """
+    prices = cointegrated()
+    out = _analyse(prices)
+    g = pt.GATES
+
+    assert out["coint_ok"] == (out["eg_p"] < g["coint_p"])
+    assert out["adf_ok"] == (out["adf_p"] < g["adf_p"])
+    assert out["hurst_ok"] == (out["hurst"] < g["hurst_max"])
+    assert out["hl_ok"] == (g["hl_min"] <= out["half_life"] <= g["hl_max"])
+
+
+def test_every_gate_a_row_displays_has_a_published_threshold():
+    """A column with a pass/fail colour the reader cannot look up is worse
+    than no colour."""
+    out = _analyse(cointegrated())
+    shown = {k for k in out if k.endswith("_ok")}
+    assert shown == {"coint_ok", "adf_ok", "hurst_ok", "hl_ok"}
+    for need in ("coint_p", "adf_p", "hurst_max", "hl_min", "hl_max",
+                 "entry_z", "watch_z", "good_score", "z_window", "ols_window"):
+        assert need in pt.GATES, need
+
+
+@pytest.mark.parametrize("attr, value, field, expect", [
+    ("COINT_P", 0.0, "coint_ok", False), ("COINT_P", 1.0, "coint_ok", True),
+    ("ADF_P", 0.0, "adf_ok", False), ("ADF_P", 1.0, "adf_ok", True),
+    ("HURST_MAX", 0.0, "hurst_ok", False), ("HURST_MAX", 9.0, "hurst_ok", True),
+    ("HL_MIN", 999.0, "hl_ok", False),
+])
+def test_a_gate_moving_moves_the_verdict_with_it(attr, value, field, expect):
+    """
+    Binding each constant into the comparison is the whole point: move the
+    threshold and the flag has to follow. Set to an impossible value rather
+    than a plausible one, so the test does not depend on where any fixture's
+    p value happens to land.
+    """
+    prices = cointegrated()
+    keep = getattr(pt, attr)
+    try:
+        setattr(pt, attr, value)
+        assert _analyse(prices)[field] is expect
+    finally:
+        setattr(pt, attr, keep)
+
+
 # ── ranking a set ────────────────────────────────────────────────────────────
 def test_every_unique_pair_is_tested_once():
     prices = cointegrated()
