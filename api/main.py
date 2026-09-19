@@ -1520,6 +1520,43 @@ class DiscoverReq(BaseModel):
     within_sector: bool = False
 
 
+def _discover_key(user: AppUser, kind: str, lookback_days: int,
+                  min_corr: float, within_sector: bool):
+    """(watchlist codes, cache key) for one search. Shared by the GET and POST."""
+    import discover_cache
+    import market_clock
+
+    with _as_user(user):
+        import data_manager
+        rows = data_manager.get_watchlist() or []
+    codes = [str(r.get("ticker") or "") for r in rows]
+    params = {"lookback_days": lookback_days, "min_corr": min_corr,
+              "within_sector": within_sector}
+    return codes, discover_cache.key_of(kind, params, codes,
+                                        market_clock.latest_session())
+
+
+@app.get("/strategies/discover")
+def strategies_discover_stored(kind: str = Query("pair-trade",
+                                                 pattern="^(pair-trade|lead-lag)$"),
+                               lookback_days: int = Query(504, ge=252, le=1000),
+                               min_corr: float = Query(0.45, ge=0.0, le=0.95),
+                               within_sector: bool = Query(False),
+                               user: AppUser = Depends(current_user)):
+    """
+    The stored result for this exact search, or null. NEVER computes.
+
+    This is what makes a finished search survive a reload rather than only a
+    tab switch: the page asks on mount, and either gets two minutes of work
+    back instantly or learns there is nothing and shows the button. Separate
+    from the POST precisely so that opening the page can never start a
+    two-minute job by accident.
+    """
+    import discover_cache
+    _, key = _discover_key(user, kind, lookback_days, min_corr, within_sector)
+    return discover_cache.load(user.id, key)
+
+
 @app.post("/strategies/discover")
 def strategies_discover(req: DiscoverReq, force: bool = Query(False),
                         user: AppUser = Depends(current_user)):
@@ -1540,19 +1577,12 @@ def strategies_discover(req: DiscoverReq, force: bool = Query(False),
     """
     from api import lead_lag_api
 
-    with _as_user(user):
-        import data_manager
-        rows = data_manager.get_watchlist() or []
-    codes = [str(r.get("ticker") or "") for r in rows]
+    import discover_cache
+
+    codes, key = _discover_key(user, req.kind, req.lookback_days,
+                               req.min_corr, req.within_sector)
     if not codes:
         raise HTTPException(404, "自选股为空 — 先在自选股页面添加股票")
-
-    import discover_cache
-    import market_clock
-
-    params = {"lookback_days": req.lookback_days, "min_corr": req.min_corr,
-              "within_sector": req.within_sector}
-    key = discover_cache.key_of(req.kind, params, codes, market_clock.latest_session())
 
     if not force:
         hit = discover_cache.load(user.id, key)

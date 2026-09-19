@@ -117,6 +117,14 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  // The stored result for this exact search, or null. Never computes — this
+  // is what a page load asks, so that opening the tab can never start a
+  // two-minute job.
+  discoverStored: (q: { kind: "pair-trade" | "lead-lag"; lookback_days: number;
+                        min_corr: number; within_sector: boolean }) =>
+    call<DiscoverResult | null>(
+      `/strategies/discover?kind=${q.kind}&lookback_days=${q.lookback_days}`
+      + `&min_corr=${q.min_corr}&within_sector=${q.within_sector}`),
   // `force` re-runs the two-minute search instead of serving the stored one.
   discover: (body: { kind: "pair-trade" | "lead-lag"; lookback_days: number;
                      min_corr: number; within_sector: boolean }, force = false) =>

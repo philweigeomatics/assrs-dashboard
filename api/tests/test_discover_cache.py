@@ -272,3 +272,49 @@ def test_the_reference_is_an_index_not_a_stock(monkeypatch):
 
     assert calls == [mc.REFERENCE_INDEX]
     assert mc.REFERENCE_INDEX.endswith(".SH")
+
+
+# ── reading is separate from running ─────────────────────────────────────────
+def test_the_read_route_and_the_run_route_are_different_methods():
+    """
+    A page load must never be able to start a two-minute job, and a finished
+    search must never need a click to come back. One GET that only reads, one
+    POST that only runs.
+    """
+    from api.main import app
+
+    methods = {tuple(sorted(r.methods)) for r in app.routes
+               if getattr(r, "path", "") == "/strategies/discover"}
+    assert methods == {("GET",), ("POST",)}
+
+
+def test_the_read_route_reads_and_never_runs(monkeypatch):
+    from api import main as api_main
+
+    db = FakeDB()
+    stored = key(session="2026-09-18")
+    dc.save(1, stored, RESULT, db=db)
+
+    dm = types.ModuleType("data_manager")
+    dm.db = db
+    monkeypatch.setitem(sys.modules, "data_manager", dm)
+    monkeypatch.setattr(api_main, "_discover_key", lambda *a, **kw: (WATCH, stored))
+    monkeypatch.setitem(sys.modules, "api.lead_lag_api", types.SimpleNamespace(
+        discover=lambda *a, **kw: pytest.fail("the GET must not run the search")))
+
+    got = api_main.strategies_discover_stored(user=types.SimpleNamespace(id=1))
+    assert got is not None and got["cached"] is True
+    assert got["rows"] == RESULT["rows"]
+
+
+def test_the_read_route_returns_null_when_there_is_nothing_stored(monkeypatch):
+    """Null, not an error — "nothing yet" is the normal first state."""
+    from api import main as api_main
+
+    dm = types.ModuleType("data_manager")
+    dm.db = FakeDB()
+    monkeypatch.setitem(sys.modules, "data_manager", dm)
+    monkeypatch.setattr(api_main, "_discover_key",
+                        lambda *a, **kw: (WATCH, key(session="2026-09-18")))
+
+    assert api_main.strategies_discover_stored(user=types.SimpleNamespace(id=1)) is None
