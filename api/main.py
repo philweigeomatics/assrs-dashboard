@@ -716,16 +716,26 @@ def pair_trade(req: PairReq, user: AppUser = Depends(current_user)):
                                       r["code_a"], r["code_b"])
             closed = [t for t in trades if not t["open"]]
             wins = [t for t in closed if (t["pnl_pct"] or 0) > 0]
+            # A code is not a stock to anyone reading this. Every row, marker
+            # and sentence downstream names the company, so the name travels
+            # with the code everywhere the pair is referred to.
+            names = {r["code_a"]: _name(r["code_a"]), r["code_b"]: _name(r["code_b"])}
             out.append({
                 **{k: v for k, v in r.items()
-                   if k not in ("dates", "spread", "z_series", "beta_series")},
-                "name_a": _name(r["code_a"]), "name_b": _name(r["code_b"]),
+                   if k not in ("dates", "spread", "px_a", "px_b",
+                                "z_series", "beta_series")},
+                "name_a": names[r["code_a"]], "name_b": names[r["code_b"]],
                 "signal": signal, "signal_cn": pt.SIGNAL_CN[signal],
                 "buy": buy, "reduce": reduce_,
+                "buy_name": names[buy], "reduce_name": names[reduce_],
                 "dates": [d.strftime("%Y-%m-%d") for d in r["dates"]],
-                "spread": [round(float(v), 5) for v in r["spread"]],
+                # The two legs rather than the raw spread: the spread was
+                # never drawn (the z-score is what the chart shows), and
+                # these are what answer "what were they both doing?".
+                "px_a": [round(float(v), 3) for v in r["px_a"]],
+                "px_b": [round(float(v), 3) for v in r["px_b"]],
                 "z_series": [None if v != v else round(float(v), 3) for v in r["z_series"]],
-                "trades": trades,
+                "trades": [{**t, "buy_name": names[t["buy_code"]]} for t in trades],
                 "closed": len(closed),
                 "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else None,
                 "avg_pnl_pct": (round(sum(t["pnl_pct"] or 0 for t in closed) / len(closed), 2)
@@ -735,7 +745,9 @@ def pair_trade(req: PairReq, user: AppUser = Depends(current_user)):
             "from": str(prices.index.min().date()), "to": str(prices.index.max().date()),
             "bars": len(prices), "z_window": req.z_window, "ols_window": req.ols_window,
             "codes": [{"t": c, "n": _name(c)} for c in codes],
-            "pairs": out, "skipped": skipped,
+            "pairs": out,
+            "skipped": [{**s, "name_a": _name(s["code_a"]),
+                         "name_b": _name(s["code_b"])} for s in skipped],
         }
 
     try:

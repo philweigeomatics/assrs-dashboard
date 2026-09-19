@@ -167,6 +167,14 @@ def analyse_pair(code_a: str, code_b: str, log_prices: pd.DataFrame,
         "hurst_ok": bool(h < 0.45), "hl_ok": bool(5 <= hl <= 30),
         "dates": spread.index,
         "spread": arr,
+        # The two legs themselves, on exactly the spread's dates. The z-score
+        # says the pair diverged; it cannot say whether both rose with one
+        # rising faster, or whether one of them fell — which is a different
+        # trade with the same z. Re-exponentiated from the logs we already
+        # have rather than re-read, so they are the same closes by
+        # construction.
+        "px_a": np.exp(clean_ya),
+        "px_b": np.exp(clean_xb),
         "z_series": z,
         "beta_series": clean_beta,
     }
@@ -185,8 +193,46 @@ def signal_for_pair(result: dict) -> tuple[str, str, str]:
     if z >= ENTRY_Z:
         return "BUY_B", b, a
     if abs(z) >= WATCH_Z:
-        return "WATCH", a, b
+        # Which way it is leaning is the whole content of a watch. "接近信号"
+        # with no leg named tells the reader to go and work out the sign of z
+        # themselves, so the same rule as above decides it.
+        return ("WATCH", a, b) if z < 0 else ("WATCH", b, a)
     return "NEUTRAL", a, b
+
+
+#: A leg that moved less than this over a whole trade did not really move.
+#: Half a percent over one to six weeks is noise, and calling it "上涨" makes
+#: a one-sided move read as two legs rising together.
+FLAT_PCT = 0.5
+
+#: How the two legs got back together. Every one of these is the same
+#: convergence on the z-chart and a completely different thing to have held.
+PATTERNS = ("BOTH_UP", "BOTH_DOWN", "A_UP_B_DOWN", "B_UP_A_DOWN", "FLAT")
+
+
+def leg_pattern(a_ret, b_ret, flat: float = FLAT_PCT) -> str | None:
+    """
+    Which of PATTERNS describes a trade window, from the two legs' returns (%).
+
+    The dead zone matters: without it a leg that ended 0.05% up turns
+    "A rose 9%, B went nowhere" into "both rose", which is the exact
+    confusion this is here to remove. None when either leg is unpriceable —
+    an unknown is not a FLAT.
+    """
+    if a_ret is None or b_ret is None or a_ret != a_ret or b_ret != b_ret:
+        return None
+
+    def state(r):
+        return "UP" if r > flat else "DOWN" if r < -flat else "FLAT"
+
+    sa, sb = state(a_ret), state(b_ret)
+    if sa == sb == "FLAT":
+        return "FLAT"
+    if "DOWN" not in (sa, sb):
+        return "BOTH_UP"
+    if "UP" not in (sa, sb):
+        return "BOTH_DOWN"
+    return "A_UP_B_DOWN" if sa == "UP" else "B_UP_A_DOWN"
 
 
 def detect_trades(z: np.ndarray, dates, prices: pd.DataFrame,
@@ -227,16 +273,30 @@ def detect_trades(z: np.ndarray, dates, prices: pd.DataFrame,
 
 def make_trade(entry_date, exit_date, entry_z, exit_z, direction, is_open,
                prices: pd.DataFrame, code_a: str, code_b: str) -> dict:
-    """P&L on the BOUGHT leg only — the leg an A-share account can hold."""
+    """
+    P&L on the BOUGHT leg only — the leg an A-share account can hold.
+
+    Both legs' returns over the window come back alongside it. They are not
+    P&L (we hold one leg), they are the explanation: the same +4% on the
+    bought leg means something different depending on whether the other leg
+    rose 1%, fell 3%, or did nothing.
+    """
     buy_code = code_a if direction == "BUY_A" else code_b
-    try:
-        ei = prices.index.get_indexer([entry_date], method="nearest")[0]
-        xi = prices.index.get_indexer([exit_date], method="nearest")[0]
-        entry_price = float(prices[buy_code].iloc[ei])
-        exit_price = float(prices[buy_code].iloc[xi])
-        pnl = (exit_price / entry_price - 1) * 100.0
-    except Exception:
-        entry_price = exit_price = pnl = float("nan")
+
+    def leg(code):
+        try:
+            ei = prices.index.get_indexer([entry_date], method="nearest")[0]
+            xi = prices.index.get_indexer([exit_date], method="nearest")[0]
+            p0, p1 = float(prices[code].iloc[ei]), float(prices[code].iloc[xi])
+            return p0, p1, (p1 / p0 - 1) * 100.0
+        except Exception:                                           # noqa: BLE001
+            return float("nan"), float("nan"), float("nan")
+
+    a0, a1, a_ret = leg(code_a)
+    b0, b1, b_ret = leg(code_b)
+    # By construction rather than by a second lookup: the bought leg's return
+    # IS the P&L, so the table and the explanation can never disagree.
+    entry_price, exit_price, pnl = (a0, a1, a_ret) if buy_code == code_a else (b0, b1, b_ret)
 
     def _r(v, nd):
         return None if (v is None or v != v) else round(v, nd)
@@ -252,6 +312,9 @@ def make_trade(entry_date, exit_date, entry_z, exit_z, direction, is_open,
         "entry_price": _r(entry_price, 3),
         "exit_price": _r(exit_price, 3),
         "pnl_pct": _r(pnl, 2),
+        "a_ret_pct": _r(a_ret, 2),
+        "b_ret_pct": _r(b_ret, 2),
+        "pattern": leg_pattern(_r(a_ret, 2), _r(b_ret, 2)),
     }
 
 

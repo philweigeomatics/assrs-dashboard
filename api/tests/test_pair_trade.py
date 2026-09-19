@@ -162,6 +162,7 @@ def test_a_random_walk_never_looks_tradeable():
     (-2.5, "BUY_A", "AAA"),
     (2.5, "BUY_B", "BBB"),
     (-1.7, "WATCH", "AAA"),
+    (1.7, "WATCH", "BBB"),          # a watch that leans the other way
     (0.3, "NEUTRAL", "AAA"),
 ])
 def test_the_signal_always_names_a_leg_to_buy(z, signal, buys):
@@ -170,6 +171,16 @@ def test_the_signal_always_names_a_leg_to_buy(z, signal, buys):
     sig, buy, reduce_ = pt.signal_for_pair(out)
     assert (sig, buy) == (signal, buys)
     assert reduce_ != buy
+
+
+def test_a_watch_names_the_leg_it_is_leaning_towards():
+    """
+    Which way it is leaning is the entire content of a watch. Returning the
+    pair in declaration order tells the reader to go and work out the sign of
+    z for themselves.
+    """
+    assert pt.signal_for_pair({"z_now": -1.7, "code_a": "X", "code_b": "Y"})[1] == "X"
+    assert pt.signal_for_pair({"z_now": 1.7, "code_a": "X", "code_b": "Y"})[1] == "Y"
 
 
 def test_a_stretched_spread_buys_the_cheap_leg():
@@ -208,6 +219,99 @@ def test_pnl_is_measured_on_the_bought_leg():
     t = trades[0]
     expected = (t["exit_price"] / t["entry_price"] - 1) * 100
     assert t["pnl_pct"] == pytest.approx(expected, abs=0.02)
+
+
+# ── what the two legs were doing ─────────────────────────────────────────────
+def test_both_legs_come_back_on_the_spread_s_own_dates():
+    """
+    The chart draws the legs under the z-score against a shared x-axis. One
+    row of misalignment and a trade marker sits over the wrong day.
+    """
+    prices = cointegrated()
+    out = _analyse(prices)
+
+    assert len(out["px_a"]) == len(out["px_b"]) == len(out["dates"])
+    # The same closes, not a second read of them.
+    assert np.allclose(out["px_a"], prices["AAA"].loc[out["dates"]].values)
+    assert np.allclose(out["px_b"], prices["BBB"].loc[out["dates"]].values)
+
+
+def test_a_trade_says_what_each_leg_did_not_only_the_one_we_held():
+    prices = cointegrated()
+    out = _analyse(prices)
+    trades = [t for t in pt.detect_trades(out["z_series"], out["dates"], prices,
+                                          "AAA", "BBB") if not t["open"]]
+    assert trades
+
+    for t in trades:
+        lo = prices.index.get_indexer([pd.Timestamp(t["entry"])], method="nearest")[0]
+        hi = prices.index.get_indexer([pd.Timestamp(t["exit"])], method="nearest")[0]
+        for code, field in (("AAA", "a_ret_pct"), ("BBB", "b_ret_pct")):
+            expected = (prices[code].iloc[hi] / prices[code].iloc[lo] - 1) * 100
+            assert t[field] == pytest.approx(expected, abs=0.02)
+        assert t["pattern"] in pt.PATTERNS
+
+
+def test_the_bought_leg_s_return_is_the_pnl_not_a_second_opinion():
+    """
+    Two lookups for the same number can disagree — on a suspension, a
+    nearest-date match, any reindex. Then the table says +4% and the
+    explanation beside it says +3.7% for the same leg.
+    """
+    prices = cointegrated()
+    out = _analyse(prices)
+    for t in pt.detect_trades(out["z_series"], out["dates"], prices, "AAA", "BBB"):
+        mine = t["a_ret_pct"] if t["buy_code"] == "AAA" else t["b_ret_pct"]
+        assert t["pnl_pct"] == mine
+
+
+@pytest.mark.parametrize("a, b, pattern", [
+    (8.0, 3.0, "BOTH_UP"),          # both rose — the bought leg simply rose more
+    (-2.0, -9.0, "BOTH_DOWN"),      # both fell — it converged by falling less
+    (6.0, -4.0, "A_UP_B_DOWN"),     # the textbook picture, and the rarest
+    (-4.0, 6.0, "B_UP_A_DOWN"),
+    (0.2, -0.1, "FLAT"),            # neither leg moved; the z did
+    (9.0, 0.05, "BOTH_UP"),         # B is flat, but nothing fell
+    (0.05, -9.0, "BOTH_DOWN"),      # and the same on the way down
+    (-9.0, 0.05, "BOTH_DOWN"),
+])
+def test_the_same_convergence_is_four_different_things(a, b, pattern):
+    """
+    Every one of these is a spread closing back to zero, and the z-chart
+    draws them identically. They are not the same trade to have held.
+    """
+    assert pt.leg_pattern(a, b) == pattern
+
+
+def test_a_leg_that_barely_moved_is_not_called_a_rise():
+    """
+    Without a dead zone, "A rose 9%, B went nowhere" reads as "both rose",
+    which is the exact confusion this is here to remove.
+    """
+    assert pt.leg_pattern(9.0, 0.05) == "BOTH_UP"
+    assert pt.leg_pattern(9.0, 0.05, flat=0.0) == "BOTH_UP"
+    assert pt.leg_pattern(0.05, 0.02) == "FLAT"
+    # With no dead zone at all, the same numbers become a divergence.
+    assert pt.leg_pattern(0.05, -0.02, flat=0.0) == "A_UP_B_DOWN"
+
+
+def test_an_unpriceable_leg_is_unknown_rather_than_flat():
+    """nan is "we could not read it", which is not the claim "it did not move"."""
+    assert pt.leg_pattern(float("nan"), 3.0) is None
+    assert pt.leg_pattern(3.0, None) is None
+
+
+def test_an_unpriceable_trade_still_produces_a_row():
+    """A gap in one leg must not take the whole trade list down with it."""
+    prices = cointegrated()
+    broken = prices.copy()
+    broken["BBB"] = np.nan
+    t = pt.make_trade(prices.index[300], prices.index[310], -2.1, 0.1,
+                      "BUY_A", False, broken, "AAA", "BBB")
+
+    assert t["a_ret_pct"] is not None and t["b_ret_pct"] is None
+    assert t["pattern"] is None
+    assert t["pnl_pct"] is not None      # we held AAA, and AAA is readable
 
 
 # ── ranking a set ────────────────────────────────────────────────────────────

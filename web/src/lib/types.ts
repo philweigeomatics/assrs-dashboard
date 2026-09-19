@@ -425,13 +425,19 @@ export type StrategyResult = {
 };
 
 /** POST /strategies/pair-trade — 配对交易. */
+/** How the two legs actually came back together — see pair_trade.leg_pattern. */
+export type LegPattern = "BOTH_UP" | "BOTH_DOWN" | "A_UP_B_DOWN" | "B_UP_A_DOWN" | "FLAT";
+
 export type PairTrade = {
   entry: string; exit: string;
   entry_z: number; exit_z: number;
   direction: "BUY_A" | "BUY_B";
   open: boolean;
-  buy_code: string;
+  buy_code: string; buy_name: string;
   entry_price: Num; exit_price: Num; pnl_pct: Num;
+  /** Each leg over the window. pnl_pct is whichever of these we bought. */
+  a_ret_pct: Num; b_ret_pct: Num;
+  pattern: LegPattern | null;
 };
 
 export type PairResult = {
@@ -441,7 +447,9 @@ export type PairResult = {
   coint_ok: boolean; adf_ok: boolean; hurst_ok: boolean; hl_ok: boolean;
   signal: "BUY_A" | "BUY_B" | "WATCH" | "NEUTRAL";
   signal_cn: string; buy: string; reduce: string;
-  dates: string[]; spread: number[]; z_series: Num[];
+  buy_name: string; reduce_name: string;
+  /** Shared x-axis: dates, the z-score, and both legs' closes are aligned. */
+  dates: string[]; z_series: Num[]; px_a: number[]; px_b: number[];
   trades: PairTrade[];
   closed: number; win_rate: Num; avg_pnl_pct: Num;
 };
@@ -451,7 +459,8 @@ export type PairTradeResult = {
   z_window: number; ols_window: number;
   codes: StockRef[];
   pairs: PairResult[];
-  skipped: { code_a: string; code_b: string; why: string }[];
+  skipped: { code_a: string; code_b: string;
+             name_a: string; name_b: string; why: string }[];
 };
 
 /** GET /equity/{ticker} — 个股研报. */

@@ -16,10 +16,11 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import type { PairResult, PairTradeResult, StockRef } from "../lib/types";
+import type { PairTradeResult, StockRef } from "../lib/types";
 import { useSymbolSearch } from "../lib/useSymbolSearch";
 import { usePersistentState } from "../lib/usePersistentState";
 import { Discover } from "./Discover";
+import { PairDetail } from "./PairDetail";
 import { fixed, signed } from "../lib/format";
 
 const MAX = 10;
@@ -178,8 +179,14 @@ function Results({ d }: { d: PairTradeResult }) {
                     <Link to={`/?t=${p.code_b}`} className="hover:text-cyan">{p.name_b}</Link>
                   </td>
                   <td className="py-1 px-2 text-right font-mono tnum font-semibold">{fixed(p.score, 2)}</td>
-                  <td className={`py-1 px-2 whitespace-nowrap ${live ? "text-up font-medium" : "text-ink-mute"}`}>
-                    {live ? `买 ${p.buy === p.code_a ? p.name_a : p.name_b}` : p.signal_cn}
+                  <td className={`py-1 px-2 whitespace-nowrap ${
+                    live ? "text-up font-medium" : "text-ink-mute"}`}
+                    title={p.signal === "NEUTRAL"
+                      ? `${p.name_a} 与 ${p.name_b} 的价差没有拉开，没有可做的事`
+                      : `${live ? "" : "接近信号："}买入 ${p.buy_name} · 减持 ${p.reduce_name}`
+                        + `（当前 Z ${signed(p.z_now, 2)}，±2 触发）`}>
+                    {p.signal === "NEUTRAL" ? "无信号"
+                      : `${live ? "买" : "接近 · 买"} ${p.buy_name}`}
                   </td>
                   <Stat v={p.eg_p} nd={3} ok={p.coint_ok} />
                   <Stat v={p.adf_p} nd={3} ok={p.adf_ok} />
@@ -196,7 +203,7 @@ function Results({ d }: { d: PairTradeResult }) {
                   <td className="py-1 pl-2 text-right">
                     <button onClick={() => setOpenPair(openPair === key ? null : key)}
                       className="text-[12px] text-cyan whitespace-nowrap">
-                      {openPair === key ? "收起" : "价差图"}
+                      {openPair === key ? "收起" : "展开"}
                     </button>
                   </td>
                 </tr>
@@ -206,13 +213,14 @@ function Results({ d }: { d: PairTradeResult }) {
         </table>
         {d.skipped.length > 0 && (
           <p className="label mt-2">
-            {d.skipped.length} 个组合无法检验：{d.skipped.map((s) => `${s.code_a}/${s.code_b}`).join("、")}
+            {d.skipped.length} 个组合无法检验：
+            {d.skipped.map((s) => `${s.name_a}/${s.name_b}`).join("、")}
           </p>
         )}
       </section>
 
       {d.pairs.filter((p) => `${p.code_a}/${p.code_b}` === openPair).map((p) => (
-        <Detail key={`${p.code_a}/${p.code_b}`} p={p} />
+        <PairDetail key={`${p.code_a}/${p.code_b}`} p={p} />
       ))}
     </>
   );
@@ -223,105 +231,5 @@ function Stat({ v, nd, ok }: { v: number | null; nd: number; ok: boolean }) {
     <td className={`py-1 px-2 text-right font-mono tnum ${ok ? "text-up" : "text-ink-dim"}`}>
       {v == null ? "—" : fixed(v, nd)}
     </td>
-  );
-}
-
-const VW = 900;
-const VH = 150;
-
-function Detail({ p }: { p: PairResult }) {
-  const n = p.dates.length;
-  const zs = p.z_series;
-  const x = (i: number) => (n < 2 ? 0 : (i / (n - 1)) * VW);
-  // ±3.2σ keeps the ±2 entry lines well inside the frame.
-  const y = (z: number) => VH / 2 - (Math.max(-3.2, Math.min(3.2, z)) / 3.2) * (VH / 2 - 6);
-
-  let path = "";
-  let pen = false;
-  zs.forEach((v, i) => {
-    if (v == null) { pen = false; return; }
-    path += `${pen ? "L" : "M"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`;
-    pen = true;
-  });
-
-  const closed = p.trades.filter((t) => !t.open);
-  return (
-    <section className="card p-3 flex flex-col gap-2">
-      <div className="flex flex-wrap items-baseline gap-x-3">
-        <span className="text-[13px] font-semibold">{p.name_a} / {p.name_b}</span>
-        <span className="label">
-          价差 Z 分数（样本外）· 对冲比率 β {fixed(p.beta_now, 3)} · 半衰期{" "}
-          {p.half_life >= 999 ? "不收敛" : `${fixed(p.half_life, 1)} 天`}
-        </span>
-      </div>
-
-      <svg viewBox={`0 0 ${VW} ${VH}`} preserveAspectRatio="none"
-        className="w-full h-[150px] block" role="img"
-        aria-label={`${p.name_a} 与 ${p.name_b} 的价差 Z 分数`}>
-        {[2, -2].map((v) => (
-          <line key={v} x1={0} x2={VW} y1={y(v)} y2={y(v)} stroke="var(--color-up)"
-            strokeDasharray="5 4" strokeWidth={1} opacity={0.5} vectorEffect="non-scaling-stroke" />
-        ))}
-        <line x1={0} x2={VW} y1={y(0)} y2={y(0)} stroke="var(--color-line-bright)"
-          vectorEffect="non-scaling-stroke" />
-        {/* Entry markers, so the trade list and the curve agree visually. */}
-        {p.trades.map((t, i) => {
-          const at = p.dates.indexOf(t.entry);
-          if (at < 0) return null;
-          return <circle key={i} cx={x(at)} cy={y(t.entry_z)} r={3}
-            fill={t.direction === "BUY_A" ? "var(--color-cyan)" : "#7c3aed"} />;
-        })}
-        <path d={path} fill="none" stroke="var(--color-ink-dim)" strokeWidth={1.5}
-          vectorEffect="non-scaling-stroke" />
-      </svg>
-      <div className="flex justify-between label">
-        <span>{p.dates[0]}</span>
-        <span>±2σ 为入场线，回到 0 为出场</span>
-        <span>{p.dates[n - 1]}</span>
-      </div>
-
-      {p.trades.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-[12px] border-collapse">
-            <thead>
-              <tr className="text-ink-mute">
-                <th className="text-left font-normal pb-1 pr-3">入场</th>
-                <th className="text-left font-normal pb-1 pr-3">出场</th>
-                <th className="text-left font-normal pb-1 pr-3">买入</th>
-                <th className="text-right font-normal pb-1 px-2">Z 入→出</th>
-                <th className="text-right font-normal pb-1 px-2">买入价</th>
-                <th className="text-right font-normal pb-1 px-2">卖出价</th>
-                <th className="text-right font-normal pb-1 pl-2">盈亏</th>
-              </tr>
-            </thead>
-            <tbody>
-              {[...p.trades].reverse().map((t, i) => (
-                <tr key={i} className="border-t border-line">
-                  <td className="py-1 pr-3 font-mono tnum">{t.entry}</td>
-                  <td className="py-1 pr-3 font-mono tnum">
-                    {t.open ? <span className="text-brand-ink">持有中</span> : t.exit}
-                  </td>
-                  <td className="py-1 pr-3">{t.buy_code}</td>
-                  <td className="py-1 px-2 text-right font-mono tnum text-ink-dim">
-                    {signed(t.entry_z, 2)} → {signed(t.exit_z, 2)}
-                  </td>
-                  <td className="py-1 px-2 text-right font-mono tnum text-ink-dim">{fixed(t.entry_price)}</td>
-                  <td className="py-1 px-2 text-right font-mono tnum text-ink-dim">{fixed(t.exit_price)}</td>
-                  <td className={`py-1 pl-2 text-right font-mono tnum ${
-                    (t.pnl_pct ?? 0) > 0 ? "text-up" : (t.pnl_pct ?? 0) < 0 ? "text-down" : ""}`}>
-                    {signed(t.pnl_pct, 2, "%")}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      <p className="label leading-snug">
-        盈亏只算买入的那条腿——A 股无法做空，减持另一条腿是仓位调整而非空头。
-        已平仓 {closed.length} 笔{closed.length > 0 && `，胜率 ${fixed(p.win_rate, 0)}%`}。
-        历史统计，非预测。
-      </p>
-    </section>
   );
 }

@@ -235,7 +235,10 @@ function Row({ r, lead, onUse }: {
   r: DiscoverRow; lead: boolean;
   onUse?: (a: string, b: string, names: [string, string]) => void;
 }) {
-  const leader = r.leads === "a" ? r.a : r.b;
+  // The name, not the code — "600584 领先 2 天" makes the reader go and look
+  // up which stock that is, on the one line that is the whole finding.
+  const leader = r.leads === "a" ? r.name_a : r.name_b;
+  const leadCode = r.leads === "a" ? r.a : r.b;
   return (
     <tr className={`border-b border-line/60 hover:bg-sunken ${
       r.survives ? "" : "opacity-45"}`}>
@@ -254,8 +257,10 @@ function Row({ r, lead, onUse }: {
         r.survives ? "text-up" : ""}`}>{fixed(r.q, 3)}</td>
       {lead
         ? <>
-            <td className="px-2 py-1 whitespace-nowrap">
-              <span className="font-mono">{leader}</span> 领先 {r.lag} 天
+            <td className="px-2 py-1 whitespace-nowrap"
+              title={`${leader}（${leadCode}）的走势领先另一只 ${r.lag} 个交易日`}>
+              {leader} <span className="font-mono text-ink-mute">{leadCode}</span>
+              {" "}领先 {r.lag} 天
             </td>
             <td className="px-2 py-1 text-center"
               title={r.same_direction
