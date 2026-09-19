@@ -23,7 +23,10 @@ import numpy as np
 import pandas as pd
 import pytz
 
-import data_manager
+# data_manager is imported inside the one function that needs it: importing it
+# at module level pulls in db_config, which raises unless Supabase credentials
+# are present — and that made this module impossible to import in a test, or
+# in any process that only wants the statistics.
 
 try:
     from statsmodels.tsa.stattools import grangercausalitytests, coint
@@ -36,6 +39,29 @@ except ImportError:
 
 # ── Data Fetching ─────────────────────────────────────────────────────────────
 
+#: Trading days per calendar day on the Shanghai/Shenzhen exchanges — roughly
+#: 243 sessions a year. Used to turn a wanted number of SESSIONS into a
+#: calendar window to ask Tushare for.
+SESSIONS_PER_CALENDAR_DAY = 243 / 365
+
+#: Slack on top, for the holiday clusters that break the average: Spring
+#: Festival alone can take ten consecutive sessions out.
+CALENDAR_SLACK_DAYS = 40
+
+
+def calendar_span(lookback_days: int) -> int:
+    """
+    Calendar days to request in order to come back with `lookback_days` sessions.
+
+    The old code added a flat 90 calendar days, which is not a conversion — it
+    is an offset, and it under-delivers by more the further back you ask. 252
+    sessions came back as 232, which is below the 240 the pair scan needs, so
+    the screen reported that NO stock had enough history while every stock in
+    the watchlist had years of it. 504 came back as 399, 756 as 566.
+    """
+    return int(lookback_days / SESSIONS_PER_CALENDAR_DAY) + CALENDAR_SLACK_DAYS
+
+
 def fetch_qfq_returns(tickers: list, lookback_days: int = 180):
     """
     Fetch qfq-adjusted daily returns for all tickers in one pass.
@@ -45,13 +71,13 @@ def fetch_qfq_returns(tickers: list, lookback_days: int = 180):
       - returns_df: same shape but daily pct returns (first row dropped)
     Tickers with no data are silently omitted.
     """
+    import data_manager
     if not tickers or not data_manager.init_tushare():
         return pd.DataFrame(), pd.DataFrame()
 
     bj = datetime.now(pytz.timezone("Asia/Shanghai"))
     end_date   = bj.strftime("%Y%m%d")
-    # fetch extra calendar days to guarantee enough trading days
-    start_date = (bj - timedelta(days=lookback_days + 90)).strftime("%Y%m%d")
+    start_date = (bj - timedelta(days=calendar_span(lookback_days))).strftime("%Y%m%d")
 
     prices = {}
     for t in tickers:
