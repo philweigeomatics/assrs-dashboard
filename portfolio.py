@@ -104,6 +104,15 @@ def to_yahoo(symbol: str, exchange: str = "") -> str | None:
         return None
     ex = (exchange or "").strip().upper()
 
+    # Questrade appends the symbolId to a security that has been delisted or
+    # reorganised — "FAF.TO.39323178". Seen in a live account. With a listing
+    # exchange the suffix rules below would have stripped it anyway, but a
+    # defunct security often has no exchange left, and the raw string then
+    # goes to Yahoo verbatim and 404s.
+    parts = s.split(".")
+    if len(parts) > 2 and parts[-1].isdigit():
+        s = ".".join(parts[:-1])
+
     if ex in US_EXCHANGES or (not ex and "." not in s):
         # Class shares: Questrade writes BRK.B, Yahoo writes BRK-B.
         head, _, tail = s.partition(".")

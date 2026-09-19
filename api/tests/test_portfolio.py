@@ -46,6 +46,23 @@ def test_questrade_tickers_map_to_yahoo_spelling(symbol, exchange, want):
     assert pf.to_yahoo(symbol, exchange) == want
 
 
+@pytest.mark.parametrize("symbol, exchange, want", [
+    ("FAF.TO.39323178", "", "FAF.TO"),        # no exchange left — the live case
+    ("FAF.TO.39323178", "TSX", "FAF.TO"),
+    ("ABC.VN.123456", "", "ABC.V"),
+    ("BRK.B", "NYSE", "BRK-B"),               # NOT a reorg id: two parts only
+    ("ENB.TO", "TSX", "ENB.TO"),
+])
+def test_a_reorganised_symbol_loses_its_appended_id(symbol, exchange, want):
+    """
+    Questrade appends the symbolId to a delisted or reorganised security.
+    Found in a live account: "FAF.TO.39323178" went to Yahoo verbatim and
+    404'd, because a defunct security usually has no listing exchange left
+    for the suffix rules to work from.
+    """
+    assert pf.to_yahoo(symbol, exchange) == want
+
+
 def test_something_unmappable_returns_nothing_rather_than_a_guess():
     """
     A wrong mapping prices one holding off another company's chart and never
