@@ -77,12 +77,16 @@ export function WhatIfPanel({
     onSuccess: (r) => onGhost(r),
   });
 
+  // A read of the LAST REAL BAR is cached against that bar and comes back
+  // instantly; the hypothetical one always costs a call, because its inputs
+  // are a slider and the same scenario is almost never asked for twice.
+  // `force` is the regenerate button, and only applies to the real-bar read.
   const aiCall = useMutation({
-    mutationFn: () =>
+    mutationFn: (force: boolean = false) =>
       api.whatifAi(data.ticker, ghost
         ? { mode: "ghost", pct, volume: Math.max(volume, 1), open,
             high: Math.max(high, open, target), low: Math.min(low, open, target) }
-        : { mode: "actual" }),
+        : { mode: "actual" }, force),
     onSuccess: setAi,
   });
 
@@ -145,7 +149,7 @@ export function WhatIfPanel({
       )}
 
       <div className="border-t border-line pt-2">
-        <button onClick={() => aiCall.mutate()} disabled={aiCall.isPending}
+        <button onClick={() => aiCall.mutate(false)} disabled={aiCall.isPending}
           className="w-full h-8 rounded-lg bg-violet text-white text-[13px] font-semibold disabled:opacity-60">
           {aiCall.isPending ? "推演中…（20–60 秒）" : "🤖 尾盘推演"}
         </button>
@@ -157,7 +161,8 @@ export function WhatIfPanel({
         )}
       </div>
 
-      {ai && <AiRead ai={ai} />}
+      {ai && <AiRead ai={ai} busy={aiCall.isPending}
+          onRegenerate={() => aiCall.mutate(true)} />}
     </section>
   );
 }
@@ -189,7 +194,9 @@ function NumField({ label, value, set, after, step = 0.01 }: {
   );
 }
 
-function AiRead({ ai }: { ai: WhatIfAi }) {
+function AiRead({ ai, onRegenerate, busy }: {
+  ai: WhatIfAi; onRegenerate: () => void; busy: boolean;
+}) {
   const r = ai.read;
   const call = r.stance?.call ?? "";
   const tone = /买入|加仓/.test(call) ? "text-up" : /减仓|清仓/.test(call) ? "text-down" : "text-ink";
@@ -198,8 +205,22 @@ function AiRead({ ai }: { ai: WhatIfAi }) {
       <div className="flex items-baseline gap-2">
         <span className={`font-semibold ${tone}`}>{call || "—"}</span>
         <span className="text-[11px] text-ink-mute">信心 {r.stance?.conviction ?? "—"}</span>
-        <span className="text-[11px] text-ink-mute ml-auto">
+        <span className="text-[11px] text-ink-mute ml-auto flex items-center gap-1.5">
           {ai.mode === "ghost" ? "幻影" : "真实"} {ai.bar_date}
+          {ai.cached && (
+            <>
+              {/* Said out loud: an instant answer to a question that usually
+                  takes a minute otherwise looks like it did not run. */}
+              <span title={`这份推演生成于 ${ai.generated_at ?? "较早"}，`
+                + `对应的是 ${ai.bar_date} 这根K线。只要没有新的交易日，结论不会变。`}>
+                · 缓存
+              </span>
+              <button onClick={onRegenerate} disabled={busy}
+                className="text-cyan disabled:opacity-60" title="重新调用模型生成">
+                {busy ? "生成中…" : "重新生成"}
+              </button>
+            </>
+          )}
         </span>
       </div>
       {r.headline && <p className="font-medium">{r.headline}</p>}

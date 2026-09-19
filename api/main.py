@@ -415,24 +415,58 @@ def simulate(req: SimReq, ticker: str = TICKER, user: AppUser = Depends(current_
 
 
 @app.post("/whatif-ai/{ticker}")
-def whatif_ai(req: AiReq, ticker: str = TICKER, user: AppUser = Depends(current_user)):
+def whatif_ai(req: AiReq, ticker: str = TICKER, force: bool = Query(False),
+              user: AppUser = Depends(current_user)):
     """
     尾盘推演: the AI read of the ghost bar, or of the last real session when
     no ghost is drawn. One DeepSeek call, 20-60s.
+
+    The read of a REAL bar is cached against that bar. It is a pure function
+    of the session — same stock, same closing bar, same 吸筹 window, same
+    answer — so re-running it on every page open spends a model call and up to
+    a minute to arrive back where it started. Keyed on the bar date rather
+    than a TTL: the read is valid exactly while that bar is the latest one,
+    which no number of hours expresses. See whatif_cache.
+
+    The ghost read is never cached — its inputs are a slider, and the same
+    hypothetical is almost never asked for twice.
+
+    `force` regenerates and replaces whatever was stored.
     """
+    import whatif_cache
     from api import extras
+
     adf, _ = _frames(ticker)
     market, code = markets.parse(ticker)
     ref = market.resolve(code)
     name = (ref.name if ref else None) or ticker
+
+    # The bar the read will describe. Known before the call, which is what
+    # makes a cache lookup possible at all.
+    cacheable = req.mode == "actual"
+    bar_date = str(adf.index[-1].date()) if cacheable else None
+    if cacheable and not force:
+        hit = whatif_cache.load(ticker, bar_date, req.window)
+        if hit:
+            return hit
+
     try:
-        return extras.whatif_ai(adf, ticker, name, mode=req.mode, pct=req.pct,
-                                volume=req.volume, open_=req.open, high=req.high,
-                                low=req.low, window=req.window)
+        out = extras.whatif_ai(adf, ticker, name, mode=req.mode, pct=req.pct,
+                               volume=req.volume, open_=req.open, high=req.high,
+                               low=req.low, window=req.window)
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:
         raise HTTPException(502, f"AI call failed: {exc}")
+
+    if cacheable:
+        # Saved under the bar the READ is actually about. extras returns the
+        # simulated session, which for mode="actual" is the last real bar —
+        # but trusting that here would silently mis-key the row if it ever
+        # stopped being true.
+        whatif_cache.save(ticker, bar_date, req.window, out)
+    out["cached"] = False
+    return out
 
 
 @app.get("/alerts")

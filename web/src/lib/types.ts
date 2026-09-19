@@ -173,6 +173,10 @@ export type CompareResult = {
 export type WhatIfAi = {
   mode: "ghost" | "actual";
   bar_date: string;
+  /** Served from the cache rather than freshly generated. */
+  cached?: boolean;
+  /** When the cached read was made. Absent on a fresh one. */
+  generated_at?: string | null;
   crossings: { what: string; dir: "up" | "down"; detail: string }[];
   read: {
     headline?: string;

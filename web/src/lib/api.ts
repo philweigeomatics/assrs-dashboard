@@ -138,8 +138,9 @@ export const api = {
   topList: () => call<TopList>("/market/toplist"),
   wyckoff: (index: string) => call<Wyckoff>(`/market/wyckoff?index=${index}`),
   rotation: (freq: "w" | "d") => call<Rotation>(`/market/rotation?freq=${freq}`),
-  whatifAi: (t: string, body: Record<string, unknown>) =>
-    call<WhatIfAi>(`/whatif-ai/${t}`, {
+  // `force` regenerates a real-bar read instead of serving the cached one.
+  whatifAi: (t: string, body: Record<string, unknown>, force = false) =>
+    call<WhatIfAi>(`/whatif-ai/${t}?force=${force}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
