@@ -38,6 +38,11 @@ export function Glossary({ title, items, note }: {
                   )}
                 </div>
                 <p className="text-[12px] leading-snug">{it.what}</p>
+                {it.window && (
+                  <p className="text-[11.5px] text-ink-mute">
+                    取样范围 · <span className="text-ink-dim">{it.window}</span>
+                  </p>
+                )}
                 <p className="text-[12px] leading-snug text-ink-dim">{it.reads}</p>
                 {it.caveat && (
                   <p className="text-[12px] leading-snug text-ink-mute">

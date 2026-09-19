@@ -29,6 +29,15 @@ export type Indicator = {
   pass?: string;
   /** How to read it once you have it. */
   reads: string;
+  /**
+   * Which stretch of data this number is computed over.
+   *
+   * Three different windows are in play and the page never said so, which
+   * invites the reasonable assumption that everything uses the z window. The
+   * four gates use the WHOLE out-of-sample history; only z uses the rolling
+   * 60; β uses a rolling 252.
+   */
+  window?: string;
   /** What it does not tell you. The most useful line of the three. */
   caveat?: string;
 };
@@ -77,6 +86,7 @@ export function pairIndicators(gates?: PairGates): Indicator[] {
       label: "协整 p",
       short: `Engle-Granger 协整检验 p 值，< ${nd(g.coint_p)} 通过`,
       what: "两只股票之间有没有长期稳定的价格关系。",
+      window: "整段样本外历史",
       pass: `< ${nd(g.coint_p)}`,
       reads: "注意它问的不是「是不是一起涨跌」，而是「走散之后会不会被拉回来」。"
         + "p 越小，「它们只是恰好都在往上漂」这个解释越站不住。",
@@ -89,12 +99,14 @@ export function pairIndicators(gates?: PairGates): Indicator[] {
       pass: `< ${nd(g.adf_p)}`,
       reads: "和协整检验是两个问题：协整问「两者有没有关系」，ADF 问「价差会不会回来」。"
         + "两个都通过，才算一对可以交易的组合。",
+      window: "整段样本外历史",
       caveat: "算在样本外的价差上（对冲比率没看过当天），所以不是拟合出来的好看结果。",
     },
     {
       label: "Hurst",
       short: `< ${nd(g.hurst_max)} 为均值回归，0.5 是随机游走，高于 0.55 是趋势`,
       what: "价差是回归型的还是趋势型的。0.5 相当于抛硬币。",
+      window: "整段样本外历史",
       pass: `< ${nd(g.hurst_max)}`,
       reads: `低于 ${nd(g.hurst_max)}：拉开了会回来。高于 0.55：拉开了更可能继续拉开 —— `
         + "这时候「偏离两个标准差」不是入场理由，是反过来的理由。这一栏没通过，"
@@ -105,6 +117,7 @@ export function pairIndicators(gates?: PairGates): Indicator[] {
       label: "半衰期",
       short: `价差消掉一半偏离要几个交易日，${g.hl_min}–${g.hl_max} 天最可交易`,
       what: "价差回到一半所需的交易日数（Ornstein-Uhlenbeck 回归）。",
+      window: "整段样本外历史",
       pass: `${g.hl_min}–${g.hl_max} 天`,
       reads: `低于 ${g.hl_min} 天，行情还没等你下单就走完了；超过 ${g.hl_max} 天，`
         + "一笔仓位要压住一个季度等它回来。显示「不收敛」表示回归速度估不出来。",
@@ -122,6 +135,7 @@ export function pairIndicators(gates?: PairGates): Indicator[] {
       label: "Z",
       short: `当前价差偏离最近 ${g.z_window} 天均值几个标准差，|Z| ≥ ${nd(g.entry_z, 1)} 触发`,
       what: `价差偏离它自己最近 ${g.z_window} 天均值的标准差倍数。`,
+      window: `最近 ${g.z_window} 天（滚动）`,
       pass: `|Z| ≥ ${nd(g.entry_z, 1)} 入场，`
         + `|Z| ≥ ${nd(g.watch_z, 1)} 接近信号，回到 0 出场`,
       reads: "负数表示 A 相对 B 便宜（买 A、减持 B），正数反过来。"
@@ -133,6 +147,7 @@ export function pairIndicators(gates?: PairGates): Indicator[] {
       label: "对冲比率 β",
       short: `每 1 份 A 对应多少份 B，由前 ${g.ols_window} 天滚动回归估计并前推一天`,
       what: `价差 = log(A) − β·log(B)。β 由之前 ${g.ols_window} 天的滚动回归估计。`,
+      window: `之前 ${g.ols_window} 天（滚动，前推一天）`,
       reads: "前推一天是关键：当天用的 β 只看过当天之前的数据，"
         + "所以下面所有统计量和历史交易都是样本外的，而不是对过去的描述。",
       caveat: "β 每天都在变。表头显示的是最新一天的值，不一定是某笔历史交易当时用的那个。",

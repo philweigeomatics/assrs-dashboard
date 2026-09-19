@@ -130,6 +130,33 @@ describe("thresholds come from the engine, not from the prose", () => {
   });
 });
 
+describe("which window each number is computed over", () => {
+  const by = () => Object.fromEntries(
+    pairIndicators(GATES).map((i) => [i.label, i]));
+
+  it("says the four gates use the whole history, not the z window", () => {
+    // The reasonable wrong assumption: the page shows "Z窗口 60" at the top,
+    // so everything below it must be 60 days. It is not — only z is.
+    for (const label of ["协整 p", "ADF p", "Hurst", "半衰期"]) {
+      expect(by()[label]!.window, label).toContain("整段");
+    }
+  });
+
+  it("says z is the rolling one, and β its own", () => {
+    expect(by()["Z"]!.window).toContain("60");
+    expect(by()["Z"]!.window).toContain("滚动");
+    expect(by()["对冲比率 β"]!.window).toContain("252");
+  });
+
+  it("takes those windows from the engine too", () => {
+    const moved = Object.fromEntries(
+      pairIndicators({ ...GATES, z_window: 90, ols_window: 504 })
+        .map((i) => [i.label, i]));
+    expect(moved["Z"]!.window).toContain("90");
+    expect(moved["对冲比率 β"]!.window).toContain("504");
+  });
+});
+
 describe("the entries say what the number does NOT tell you", () => {
   it("every gate carries a caveat", () => {
     // The line a reader actually needs. A column that only ever says
