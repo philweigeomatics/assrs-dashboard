@@ -1,11 +1,13 @@
 /**
- * ⚙️ 板块管理 — who is in which sector.
+ * ⚙️ 管理 — the admin page, one section per thing an admin does.
  *
- * A sector's stock list is the input to its PPI, and the PPI drives the
- * heatmap, the breadth grid, the rotation map and the regime score that
- * every user sees. So this page is not a personal setting, and it says so:
- * each write is confirmed against a named sector, removals show what they
- * will leave behind, and nothing here pretends an edit is local.
+ * Sector membership is the first of them and rebuilds are the second,
+ * because they are two halves of one action: changing who is in a sector
+ * does nothing to the dashboard until the PPI is recomputed from it.
+ *
+ * Nothing here is a personal setting. A sector's stock list is the input to
+ * its PPI, and the PPI drives the heatmap, the breadth grid, the rotation
+ * map and the regime score for every user.
  *
  * The nav link is hidden for non-admins, and that is a convenience. The
  * actual gate is on the server — see _require_admin — because hiding a link
@@ -18,26 +20,46 @@ import { api, ApiError } from "../lib/api";
 import type { AdminSector, NewSectorResult, StockRef } from "../lib/types";
 import { NavBar } from "../components/NavBar";
 import { useSymbolSearch } from "../lib/useSymbolSearch";
+import { RebuildPanel } from "../components/admin/RebuildPanel";
+
+/** One entry per thing an admin does. Add here, not to the JSX below. */
+const SECTIONS = [
+  { id: "sectors", label: "🧩 板块管理" },
+  { id: "rebuild", label: "🔄 重建任务" },
+] as const;
+
+type Section = typeof SECTIONS[number]["id"];
 
 export function Admin() {
   const qc = useQueryClient();
+  const [tab, setTab] = useState<Section>("sectors");
   const sectors = useQuery({ queryKey: ["admin", "sectors"],
                              queryFn: api.adminSectors });
   const [open, setOpen] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
-  const refresh = () => qc.invalidateQueries({ queryKey: ["admin", "sectors"] });
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["admin", "sectors"] });
+    qc.invalidateQueries({ queryKey: ["admin", "rebuild"] });
+  };
   const d = sectors.data;
 
   return (
     <div className="min-h-screen bg-canvas text-ink">
       <NavBar />
       <main className="max-w-[1100px] mx-auto px-3 py-4 flex flex-col gap-3">
-        <section className="card p-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h2 className="text-[14px] font-semibold">⚙️ 板块管理</h2>
-          <span className="label">
-            改动会影响所有人 —— 板块成分决定 PPI，PPI 决定热力图、趋势、轮动和评分
-          </span>
+        <section className="card p-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+          <h2 className="text-[14px] font-semibold">⚙️ 管理</h2>
+          <div className="flex items-center gap-1">
+            {SECTIONS.map((x) => (
+              <button key={x.id} onClick={() => setTab(x.id)}
+                className={`h-8 px-3 rounded-lg text-[13px] font-medium transition-colors ${
+                  tab === x.id ? "bg-elevated text-ink" : "text-ink-mute hover:text-ink"
+                }`}>
+                {x.label}
+              </button>
+            ))}
+          </div>
           {d && (
             <span className="ml-auto label tnum">
               {d.sectors.length} 个板块 · {d.total_stocks} 只股票
@@ -54,7 +76,11 @@ export function Admin() {
           </div>
         )}
 
-        {d && (
+        {d && tab === "rebuild" && (
+          <RebuildPanel sectorNames={d.sectors.map((x) => x.name)} />
+        )}
+
+        {d && tab === "sectors" && (
           <>
             <section className="card p-3 flex flex-col gap-2">
               <div className="flex items-baseline gap-3">
@@ -83,7 +109,7 @@ export function Admin() {
 
             <p className="label leading-snug">
               删除是软删除 —— 记录保留，可以看到什么时候移出的，也能再加回来。
-              改完成分后，PPI 要等下一次夜间重建才会反映出来。
+              改完成分后到「重建任务」跑一次，PPI 才会跟上。
             </p>
           </>
         )}
@@ -297,6 +323,17 @@ function NewSector({ existing, minStocks, onDone }: {
       </div>
 
       {err && <p className="text-[12.5px] text-up">{err}</p>}
+
+      {result?.created && (
+        <p className="text-[12.5px] leading-snug">
+          已创建「{result.sector}」。
+          {result.job_id
+            ? <> 重建任务 <span className="font-mono tnum">{result.job_id}</span> 已开始，
+                到「重建任务」可以看进度。</>
+            : <> 但重建没能开始：{result.job_error} —— 板块已经建好了，
+                等当前任务结束后手动重建一次即可。</>}
+        </p>
+      )}
 
       {result && !result.created && result.sql.length > 0 && (
         /* Supabase cannot create a table from the client key, so nothing was

@@ -18,6 +18,8 @@ import types
 import pandas as pd
 import pytest
 
+_NOW = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, ROOT)
 
@@ -43,6 +45,7 @@ class FakeDM:
         self.missing = set(missing)
         self.added, self.removed = [], []
         self.raw_rows = []
+        self.jobs = []
 
     # ── reads ───────────────────────────────────────────────────────────
     def get_sector_stock_map(self):
@@ -60,7 +63,29 @@ class FakeDM:
     def get_missing_breadth_columns(self, names):
         return [n for n in names if n in self.missing]
 
+    # ── rebuild jobs ────────────────────────────────────────────────────
+    def get_recent_rebuild_jobs(self, limit=15):
+        return pd.DataFrame(self.jobs[:limit])
+
+    def create_rebuild_job(self, job_type, sectors):
+        import json as _json
+        job_id = f"job{len(self.jobs) + 1}"
+        self.jobs.insert(0, {
+            "job_id": job_id, "job_type": job_type,
+            "sectors": "__all__" if sectors == "__all__"
+                       else _json.dumps(sectors, ensure_ascii=False),
+            "status": "pending", "progress": 0,
+            "progress_message": "Job created",
+            "created_at": _NOW, "started_at": None,
+            "completed_at": None, "error_message": None,
+        })
+        return job_id
+
     # ── writes ──────────────────────────────────────────────────────────
+    def add_new_sector(self, sector, tickers):
+        for t in tickers:
+            self.add_stock_to_sector(sector, t)
+
     def add_stock_to_sector(self, sector, ticker):
         self.added.append((sector, ticker))
         self.sectors.setdefault(sector, []).append(ticker)
@@ -315,3 +340,158 @@ def test_a_failed_existence_check_blocks_rather_than_assumes(monkeypatch):
     out = admin_api.create_sector("储能", ["300750", "002594"])
     assert out["created"] is False and out["sql"]
     assert fake.added == []
+
+
+# ── rebuild jobs ─────────────────────────────────────────────────────────────
+def _ago(minutes):
+    import datetime as _dt
+    return (_dt.datetime.now() - _dt.timedelta(minutes=minutes)
+            ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+@pytest.fixture
+def started(monkeypatch, dm):
+    """Records what would have been handed to the background thread."""
+    calls = []
+    runner = types.ModuleType("rebuild_runner")
+    runner.start_rebuild_thread = lambda job_id, sectors: calls.append(
+        (job_id, sectors))
+    monkeypatch.setitem(sys.modules, "rebuild_runner", runner)
+    return calls
+
+
+def test_a_rebuild_creates_a_job_and_starts_the_worker(dm, started):
+    out = admin_api.start_rebuild(["银行"])
+    assert out["job_type"] == "sector_rebuild"
+    assert started == [(out["job_id"], ["银行"])]
+
+
+def test_rebuilding_everything_is_marked_as_such(dm, started):
+    out = admin_api.start_rebuild("__all__")
+    assert out["job_type"] == "full_rebuild"
+    assert started[0][1] == "__all__"
+
+
+def test_two_rebuilds_at_once_are_refused(dm, started):
+    """
+    Both wipe and rewrite the same PPI tables, and the loser silently
+    corrupts the winner. The Streamlit page allowed this.
+    """
+    admin_api.start_rebuild(["银行"])
+    dm.jobs[0]["status"] = "running"
+    dm.jobs[0]["progress"] = 40
+
+    with pytest.raises(ValueError, match="还在进行"):
+        admin_api.start_rebuild(["白酒"])
+    assert len(started) == 1, "a second worker was started"
+
+
+def test_a_finished_job_does_not_block_the_next_one(dm, started):
+    admin_api.start_rebuild(["银行"])
+    dm.jobs[0]["status"] = "completed"
+    admin_api.start_rebuild(["白酒"])
+    assert len(started) == 2
+
+
+def test_a_job_whose_thread_died_does_not_block_forever(dm, started):
+    """
+    The thread dies with its instance and the row says 'running' for good.
+    Without this, one killed rebuild locks out every future one.
+    """
+    admin_api.start_rebuild(["银行"])
+    dm.jobs[0].update(status="running",
+                      created_at=_ago(admin_api.STALE_MINUTES + 30))
+
+    admin_api.start_rebuild(["白酒"])
+    assert len(started) == 2
+
+
+def test_a_stalled_job_is_reported_as_stalled(dm, started):
+    admin_api.start_rebuild(["银行"])
+    dm.jobs[0].update(status="running", progress=42,
+                      created_at=_ago(admin_api.STALE_MINUTES + 5))
+
+    job = admin_api.jobs()["jobs"][0]
+    assert job["status"] == "stalled"
+    assert job["progress"] == 42, "progress is kept, only the status changes"
+    assert job["age_minutes"] > admin_api.STALE_MINUTES
+
+
+def test_a_young_running_job_is_still_running(dm, started):
+    admin_api.start_rebuild(["银行"])
+    dm.jobs[0].update(status="running", created_at=_ago(5))
+    assert admin_api.jobs()["jobs"][0]["status"] == "running"
+    assert admin_api.jobs()["running"] is True
+
+
+def test_a_finished_job_is_never_called_stalled(dm, started):
+    """Age alone must not condemn a job that already completed."""
+    admin_api.start_rebuild(["银行"])
+    dm.jobs[0].update(status="completed", progress=100,
+                      created_at=_ago(60 * 24 * 30))
+    assert admin_api.jobs()["jobs"][0]["status"] == "completed"
+    assert admin_api.jobs()["running"] is False
+
+
+def test_the_sector_list_is_readable_not_raw_json(dm, started):
+    admin_api.start_rebuild(["银行", "白酒"])
+    job = admin_api.jobs()["jobs"][0]
+    assert job["sectors"] == ["银行", "白酒"] and job["scope"] == "some"
+
+    dm.jobs.clear()
+    admin_api.start_rebuild("__all__")
+    assert admin_api.jobs()["jobs"][0]["scope"] == "all"
+
+
+def test_unknown_sectors_are_dropped_and_an_empty_list_is_refused(dm, started):
+    out = admin_api.start_rebuild(["银行", "不存在"])
+    assert started[-1][1] == ["银行"]
+
+    dm.jobs[0]["status"] = "completed"
+    with pytest.raises(ValueError, match="没有可重建"):
+        admin_api.start_rebuild(["不存在"])
+    assert out["job_id"]
+
+
+def test_an_unparseable_sectors_field_does_not_break_the_list(dm, started):
+    admin_api.start_rebuild(["银行"])
+    dm.jobs[0]["sectors"] = "not json at all"
+    assert admin_api.jobs()["jobs"][0]["sectors"] == ["not json at all"]
+
+
+# ── creating a sector rebuilds it ────────────────────────────────────────────
+def test_creating_a_sector_starts_its_rebuild(dm, started):
+    """A new sector has no PPI until one is built, so it is part of creating."""
+    out = admin_api.create_sector("储能", ["300750", "002594"])
+    assert out["created"] is True and out["job_id"]
+    assert started == [(out["job_id"], ["储能"])]
+
+
+def test_a_sector_is_still_created_when_a_rebuild_cannot_start(dm, started):
+    """
+    The rows are written either way. Reporting a failure would imply the
+    sector does not exist, and the admin would create it twice.
+    """
+    admin_api.start_rebuild(["银行"])
+    dm.jobs[0]["status"] = "running"
+
+    out = admin_api.create_sector("储能", ["300750", "002594"])
+    assert out["created"] is True
+    assert out["job_id"] is None and "还在进行" in out["job_error"]
+    assert "储能" in dm.get_sector_stock_map()
+
+
+def test_a_blocked_sector_creation_writes_nothing_and_starts_nothing(monkeypatch):
+    """The Supabase path: no rows, no job, just the SQL."""
+    fake = FakeDM(supabase=True, missing={"储能"})
+    monkeypatch.setattr(admin_api, "_dm", lambda: fake)
+    monkeypatch.setitem(sys.modules, "db_config",
+                        types.SimpleNamespace(USE_SUPABASE=True))
+    calls = []
+    runner = types.ModuleType("rebuild_runner")
+    runner.start_rebuild_thread = lambda *a: calls.append(a)
+    monkeypatch.setitem(sys.modules, "rebuild_runner", runner)
+
+    out = admin_api.create_sector("储能", ["300750", "002594"])
+    assert out["created"] is False and out["job_id"] is None
+    assert fake.added == [] and calls == []

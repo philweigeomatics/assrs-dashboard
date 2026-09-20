@@ -3,6 +3,7 @@ import type {
   AdminSectors,
   DiscoverArgs,
   NewSectorResult,
+  RebuildJobs,
   FollowThrough,
   AlertFeed, Analysis, BasketStats, CompareResult, HistoryRef, PairStats, SectorAnalysis,
   AlertNote, EquityBrief, NoteScorecard, PairTradeResult, SimResult, StockRef,
@@ -158,6 +159,14 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, tickers }),
     }),
+  adminJobs: () => call<RebuildJobs>("/admin/rebuild"),
+  /** Empty `sectors` rebuilds every one of them. */
+  adminStartRebuild: (sectors: string[]) =>
+    call<{ job_id: string; job_type: string; sectors: string[] }>(
+      "/admin/rebuild", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sectors }),
+      }),
   strategyScan: (name: string) =>
     call<StrategyResult>(`/strategies/${name}/scan`, { method: "POST" }),
   compareStats: (t: string, other: string, window: string) =>

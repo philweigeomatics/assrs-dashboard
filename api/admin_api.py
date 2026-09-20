@@ -169,11 +169,24 @@ def create_sector(name: str, tickers: list[str]) -> dict:
 
     sql = pending_sql(name)
     if sql:
-        return {"created": False, "sector": name, "stocks": clean, "sql": sql}
+        return {"created": False, "sector": name, "stocks": clean,
+                "sql": sql, "job_id": None, "job_error": None}
 
-    for t in clean:
-        dm.add_stock_to_sector(name, t)
-    return {"created": True, "sector": name, "stocks": clean, "sql": []}
+    dm.add_new_sector(name, clean)
+
+    # A new sector has no PPI until one is built, so the rebuild is part of
+    # creating it rather than a step to remember. If another rebuild is
+    # already running the sector still exists — the reason is returned so the
+    # screen can say "created, rebuild it when the current job finishes"
+    # instead of implying the creation failed.
+    job_id, job_error = None, None
+    try:
+        job_id = start_rebuild([name])["job_id"]
+    except Exception as exc:                                       # noqa: BLE001
+        job_error = str(exc)
+
+    return {"created": True, "sector": name, "stocks": clean, "sql": [],
+            "job_id": job_id, "job_error": job_error}
 
 
 def pending_sql(name: str) -> list[str]:
@@ -199,3 +212,110 @@ def pending_sql(name: str) -> list[str]:
         # here would write a sector whose rebuild can never succeed.
         return [f"-- 无法确认 PPI_{name} 是否存在，请先在 Supabase 中检查"]
     return out
+
+
+# ── rebuild jobs ─────────────────────────────────────────────────────────────
+# A rebuild recomputes PPI and market breadth from the sector map. It takes
+# 20-60 minutes, so it cannot happen inside the request: rebuild_runner starts
+# a thread that writes its progress to the rebuild_jobs table, and the screen
+# polls that table. Nothing ever waits on the thread itself, which is what
+# makes the progress bar survive a page reload.
+
+import json
+from datetime import datetime
+
+#: A job still 'running' after this long has almost certainly lost its thread.
+#: A full rebuild is 20-60 minutes, so this is generous rather than tight —
+#: the cost of calling a live job dead is worse than showing a dead one late.
+STALE_MINUTES = 120
+
+#: Statuses that mean the job has not finished one way or the other.
+OPEN = ("pending", "running")
+
+
+def _age_minutes(stamp: str) -> float | None:
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return (datetime.now() - datetime.strptime(str(stamp)[:19], fmt)
+                    ).total_seconds() / 60
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _job(row: dict) -> dict:
+    raw = row.get("sectors") or "[]"
+    if raw == "__all__":
+        sectors, scope = [], "all"
+    else:
+        try:
+            sectors, scope = json.loads(raw), "some"
+        except Exception:                                          # noqa: BLE001
+            sectors, scope = [str(raw)], "some"
+
+    status = str(row.get("status") or "pending")
+    age = _age_minutes(row.get("created_at"))
+    # A thread dies with its instance. The row then says "running" forever,
+    # and a progress bar that never moves is worse than an honest "unknown".
+    stalled = bool(status in OPEN and age is not None and age > STALE_MINUTES)
+
+    return {
+        "job_id": str(row.get("job_id") or ""),
+        "job_type": str(row.get("job_type") or ""),
+        "scope": scope,
+        "sectors": sectors,
+        "status": "stalled" if stalled else status,
+        "progress": int(row.get("progress") or 0),
+        "message": str(row.get("progress_message") or ""),
+        "error": str(row.get("error_message") or "") or None,
+        "created_at": str(row.get("created_at") or "")[:19],
+        "started_at": str(row.get("started_at") or "")[:19] or None,
+        "completed_at": str(row.get("completed_at") or "")[:19] or None,
+        "age_minutes": round(age, 1) if age is not None else None,
+    }
+
+
+def jobs(limit: int = 15) -> dict:
+    """Recent rebuilds, newest first, with dead ones called dead."""
+    df = _dm().get_recent_rebuild_jobs(limit=limit)
+    rows = [] if df is None or df.empty else [_job(r) for _, r in df.iterrows()]
+    return {
+        "jobs": rows,
+        "running": any(j["status"] in OPEN for j in rows),
+        "stale_minutes": STALE_MINUTES,
+    }
+
+
+def active_job(rows: list[dict]) -> dict | None:
+    """The one job that is genuinely still going, if any."""
+    return next((j for j in rows if j["status"] in OPEN), None)
+
+
+def start_rebuild(sectors: list[str] | str) -> dict:
+    """
+    Kick off a rebuild and return its job id.
+
+    Refuses while another is live. Two rebuilds at once both wipe and rewrite
+    the same PPI tables, and the loser silently corrupts the winner — the
+    Streamlit page allowed this and it is the one thing worth adding here.
+    """
+    dm = _dm()
+    from rebuild_runner import start_rebuild_thread
+
+    live = active_job(jobs(limit=10)["jobs"])
+    if live:
+        raise ValueError(
+            f"任务 {live['job_id']} 还在进行（{live['progress']}%）—— "
+            f"同时跑两个重建会互相覆盖 PPI 表，请等它结束")
+
+    if sectors != "__all__":
+        known = dm.get_sector_stock_map()
+        sectors = [s for s in sectors if s in known]
+        if not sectors:
+            raise ValueError("没有可重建的板块")
+
+    job_type = "full_rebuild" if sectors == "__all__" else "sector_rebuild"
+    job_id = dm.create_rebuild_job(job_type, sectors)
+    start_rebuild_thread(job_id, sectors)
+    return {"job_id": job_id, "job_type": job_type,
+            "sectors": [] if sectors == "__all__" else sectors}

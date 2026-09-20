@@ -925,6 +925,45 @@ def admin_create_sector(req: NewSectorReq, user: AppUser = Depends(current_user)
             raise HTTPException(400, str(exc))
 
 
+class RebuildReq(BaseModel):
+    """Which sectors to rebuild. Empty means every one of them."""
+    sectors: list[str] = Field(default_factory=list, max_length=100)
+
+
+@app.get("/admin/rebuild")
+def admin_rebuild_jobs(user: AppUser = Depends(current_user)):
+    """
+    Recent rebuilds and how far they got.
+
+    The screen polls this while a job is live. Progress lives in the
+    rebuild_jobs table rather than in the worker, so a reload — or a
+    different browser — picks the bar up where it is.
+    """
+    _require_admin(user)
+    from api import admin_api
+
+    with _as_user(user):
+        return admin_api.jobs()
+
+
+@app.post("/admin/rebuild")
+def admin_start_rebuild(req: RebuildReq, user: AppUser = Depends(current_user)):
+    """
+    Start a rebuild of PPI and market breadth.
+
+    Returns as soon as the job row exists; the work continues in a thread and
+    reports through GET /admin/rebuild. 20-60 minutes for every sector.
+    """
+    _require_admin(user)
+    from api import admin_api
+
+    with _as_user(user):
+        try:
+            return admin_api.start_rebuild(req.sectors or "__all__")
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+
+
 def _industry_of(ticker: str) -> str:
     import data_manager
     try:

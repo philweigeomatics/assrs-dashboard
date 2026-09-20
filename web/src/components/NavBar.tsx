@@ -24,7 +24,7 @@ const PAGES = [
 ];
 
 /** Appended for admins only — a convenience, not the gate. */
-const ADMIN_PAGE = { to: "/admin", label: "⚙️ 板块管理" };
+const ADMIN_PAGE = { to: "/admin", label: "⚙️ 管理" };
 
 export function NavBar({ children }: { children?: ReactNode }) {
   const { dev } = useAuth();

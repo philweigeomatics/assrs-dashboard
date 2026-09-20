@@ -542,6 +542,38 @@ export type NewSectorResult = {
   stocks: string[];
   /** Run these in the Supabase SQL editor, then create again. */
   sql: string[];
+  /** The rebuild started for the new sector, if one could be started. */
+  job_id: string | null;
+  /** Why it could not be — the sector still exists. */
+  job_error: string | null;
+};
+
+/**
+ * GET /admin/rebuild — PPI + breadth rebuilds.
+ *
+ * "stalled" is derived, not stored: a worker dies with its instance and
+ * leaves the row saying "running" for good.
+ */
+export type RebuildJob = {
+  job_id: string;
+  job_type: string;
+  scope: "all" | "some";
+  sectors: string[];
+  status: "pending" | "running" | "completed" | "failed" | "stalled";
+  progress: number;
+  message: string;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  age_minutes: number | null;
+};
+
+export type RebuildJobs = {
+  jobs: RebuildJob[];
+  /** True while any job is pending or running — the screen polls on this. */
+  running: boolean;
+  stale_minutes: number;
 };
 
 /** GET /equity/{ticker} — 个股研报. */
