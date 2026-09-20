@@ -285,6 +285,23 @@ function Found({ data, onUse }: {
             </>
           )}
         </p>
+        {f.screened === 0 && f.screen_tested != null && (
+          /* "0 显著" is three situations and a zero tells them apart from
+             none of them: nothing came close, something just missed, or the
+             test never ran. */
+          <p className="text-[11.5px] text-ink-mute leading-snug">
+            前半程实际跑了 <b>{f.screen_tested}</b> 次检验
+            {f.screen_skipped ? `，另有 ${f.screen_skipped} 次跑不起来（数据不足）` : ""}
+            ，其中最小的 p 值是 <b className="tnum">
+              {f.screen_min_p == null ? "—" : fixed(f.screen_min_p, 4)}
+            </b>，p&lt;0.10 的有 <b>{f.screen_under_10}</b> 组。
+            {f.screen_min_p != null && f.screen_min_p > 0.2
+              ? " 也就是说不是差一点，是真的什么都没有。"
+              : " 最好的那组离门槛不远 —— 拉长回看天数很可能就过了。"}
+          </p>
+        )}
+        <p className="text-[11.5px] text-ink-mute leading-snug">
+        </p>
         {f.targeted && (
           <p className="text-[11.5px] text-ink-mute leading-snug">
             这次只问了「{data.target_name ?? data.target}」的同伴，所以没有用相关性筛掉任何一只。

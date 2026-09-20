@@ -422,6 +422,51 @@ def test_the_lead_size_is_not_the_cointegration_hedge_ratio():
     assert "beta" in coint and "lead_beta" not in coint
 
 
+# ── an empty result has to be arguable ───────────────────────────────────────
+def test_an_empty_screen_reports_what_it_saw():
+    """
+    "0 significant" is three different situations: nothing came close, one
+    just missed, or the test never ran. A count of zero tells them apart from
+    nothing, which makes an empty screen impossible to argue with — and an
+    empty screen is the result most worth arguing with.
+    """
+    out = ps.scan(independent(12), "lead-lag", min_corr=0.0)
+    f = out["funnel"]
+
+    assert f["screen_tested"] + f["screen_skipped"] == f["shortlisted"]
+    assert f["screen_min_p"] is None or 0.0 <= f["screen_min_p"] <= 1.0
+    assert f["screen_under_10"] >= f["screened"]
+
+
+def test_the_smallest_p_seen_is_the_smallest_p_there_was():
+    px = leader_follower(beta=0.9, lag=2)
+    out = ps.scan(px, "lead-lag", min_corr=0.0)
+    f = out["funnel"]
+
+    cut = ps.split_point(len(px))
+    train = px.iloc[:cut].pct_change(fill_method=None).dropna(how="all")
+    import itertools
+    mine = []
+    for a, b in itertools.combinations(list(px.columns), 2):
+        r = ps.lead_lag_test(train[a], train[b], 5)
+        if r is not None:
+            mine.append(r["p"])
+    assert f["screen_min_p"] == pytest.approx(min(mine), abs=5e-5)
+
+
+def test_tests_that_could_not_run_are_counted_not_silently_dropped():
+    """
+    A test returning None and a test returning a high p both leave the
+    shortlist and contribute nothing. Only one of them means something is
+    broken, and the funnel could not tell them apart.
+    """
+    px = independent(6)
+    # Too few rows for lead_lag_test's own minimum, so every test refuses.
+    out = ps.scan(px.iloc[:ps.MIN_HALF * 2], "lead-lag", min_corr=0.0)
+    f = out["funnel"]
+    assert f["screen_tested"] + f["screen_skipped"] == f["shortlisted"]
+
+
 # ── the arithmetic of the report ─────────────────────────────────────────────
 def test_the_expected_by_chance_count_matches_what_was_retested():
     out = ps.scan(independent(14), "pair-trade", min_corr=0.0)

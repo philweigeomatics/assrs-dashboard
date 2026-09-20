@@ -273,12 +273,23 @@ def scan(prices: pd.DataFrame, kind: str = "pair-trade", *,
         pairs, funnel = shortlist(train_r, min_corr=min_corr, cap=cap, within=within)
 
     screened, confirmed = [], []
+    # What the screen SAW, not only what it passed. "0 前半程显著" is a
+    # different statement depending on whether the best p was 0.06 or 0.51,
+    # and a different one again if the test could not run at all — and none
+    # of those are distinguishable from a count of zero. Cheap to carry, and
+    # the only way an empty result can be argued with.
+    seen: list[float] = []
+    skipped = 0
     for a, b, r in pairs:
         if kind == "lead-lag":
             tr = lead_lag_test(train_r[a], train_r[b], maxlag)
         else:
             tr = coint_test(train_px[a], train_px[b])
-        if tr is None or tr["p"] >= ALPHA:
+        if tr is None:
+            skipped += 1
+            continue
+        seen.append(float(tr["p"]))
+        if tr["p"] >= ALPHA:
             continue
         screened.append((a, b, r, tr))
 
@@ -303,6 +314,11 @@ def scan(prices: pd.DataFrame, kind: str = "pair-trade", *,
     funnel.update({
         "targeted": bool(target),
         "universe": len(cols),
+        # The screen's own evidence, so an empty result can be read.
+        "screen_tested": len(seen),
+        "screen_skipped": skipped,
+        "screen_min_p": round(min(seen), 4) if seen else None,
+        "screen_under_10": sum(1 for p in seen if p < 0.10),
         "screened": len(screened),
         "retested": len(confirmed),
         # How many cleared the holdout on the RAW threshold. This is the number

@@ -982,6 +982,11 @@ export type DiscoverResult = {
     targeted?: boolean;
     target?: string;
     universe: number; screened: number; retested: number;
+    /** What the first-half screen saw, so an empty result can be read. */
+    screen_tested?: number;
+    screen_skipped?: number;
+    screen_min_p?: number | null;
+    screen_under_10?: number;
     /** Cleared the holdout on the RAW threshold — the counterpart to
      *  expected_by_chance, which is also uncorrected. */
     retest_hits: number;
