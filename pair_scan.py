@@ -137,16 +137,37 @@ def shortlist(rets: pd.DataFrame, *, min_corr: float = MIN_CORR,
 
 
 # ── the two screens ──────────────────────────────────────────────────────────
+#: Why the last Granger test could not run. Read by `scan` so a screen that
+#: tested nothing can say WHY rather than reporting an empty result as a
+#: finding — see the note on the bare except below.
+_last_failure: str | None = None
+
+
 def _granger(y: np.ndarray, x: np.ndarray, maxlag: int) -> tuple[float, int]:
-    """Best p-value across lags for 'x helps predict y', and the lag."""
+    """
+    Best p-value across lags for 'x helps predict y', and the lag.
+
+    No `verbose=` argument. It was deprecated in statsmodels 0.14 and REMOVED
+    in 0.15, where passing it is a TypeError — and this function swallows
+    every exception, so on a box that had picked up 0.15 every single test
+    returned nan, `lead_lag_test` returned None for all of them, and the
+    screen reported "no lead-lag relationships" for a library incompatibility.
+    Omitting it works on both versions.
+
+    The bare except stays, because a rank-deficient window genuinely should
+    not take the whole scan down. But it now records WHY, because "the test
+    could not run" and "the test ran and found nothing" are different answers
+    and this function was giving the same one for both.
+    """
+    global _last_failure
     from statsmodels.tsa.stattools import grangercausalitytests
     import warnings
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            res = grangercausalitytests(np.column_stack([y, x]), maxlag=maxlag,
-                                        verbose=False)
-    except Exception:                                              # noqa: BLE001
+            res = grangercausalitytests(np.column_stack([y, x]), maxlag=maxlag)
+    except Exception as exc:                                       # noqa: BLE001
+        _last_failure = f"{type(exc).__name__}: {exc}"[:200]
         return float("nan"), 0
     best_p, best_lag = float("nan"), 0
     for lag, out in res.items():
@@ -280,6 +301,8 @@ def scan(prices: pd.DataFrame, kind: str = "pair-trade", *,
     # the only way an empty result can be argued with.
     seen: list[float] = []
     skipped = 0
+    global _last_failure
+    _last_failure = None
     for a, b, r in pairs:
         if kind == "lead-lag":
             tr = lead_lag_test(train_r[a], train_r[b], maxlag)
@@ -319,6 +342,9 @@ def scan(prices: pd.DataFrame, kind: str = "pair-trade", *,
         "screen_skipped": skipped,
         "screen_min_p": round(min(seen), 4) if seen else None,
         "screen_under_10": sum(1 for p in seen if p < 0.10),
+        # Present only when something actually failed. An empty screen with a
+        # reason attached is a bug report; without one it is a result.
+        "screen_error": _last_failure if skipped else None,
         "screened": len(screened),
         "retested": len(confirmed),
         # How many cleared the holdout on the RAW threshold. This is the number

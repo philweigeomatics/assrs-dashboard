@@ -285,13 +285,25 @@ function Found({ data, onUse }: {
             </>
           )}
         </p>
-        {f.screened === 0 && f.screen_tested != null && (
+        {/* A scan where nothing could RUN is a broken scan, not an empty
+            result, and the two looked identical until they were counted
+            separately. This one gets said first and loudest. */}
+        {f.screen_tested === 0 && (f.screen_skipped ?? 0) > 0 && (
+          <p className="text-[11.5px] text-up leading-snug">
+            ⚠ <b>{f.screen_skipped} 次检验一次都没跑起来</b> ——
+            所以上面的 0 不是「没有关系」，而是<b>没测成</b>。这是后台的问题，不是你的自选股。
+            {f.screen_error && (
+              <> 错误：<code className="font-mono">{f.screen_error}</code></>
+            )}
+          </p>
+        )}
+        {f.screened === 0 && (f.screen_tested ?? 0) > 0 && (
           /* "0 显著" is three situations and a zero tells them apart from
              none of them: nothing came close, something just missed, or the
              test never ran. */
           <p className="text-[11.5px] text-ink-mute leading-snug">
             前半程实际跑了 <b>{f.screen_tested}</b> 次检验
-            {f.screen_skipped ? `，另有 ${f.screen_skipped} 次跑不起来（数据不足）` : ""}
+            {f.screen_skipped ? `，另有 ${f.screen_skipped} 次没跑成` : ""}
             ，其中最小的 p 值是 <b className="tnum">
               {f.screen_min_p == null ? "—" : fixed(f.screen_min_p, 4)}
             </b>，p&lt;0.10 的有 <b>{f.screen_under_10}</b> 组。

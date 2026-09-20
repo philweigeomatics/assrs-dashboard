@@ -987,6 +987,8 @@ export type DiscoverResult = {
     screen_skipped?: number;
     screen_min_p?: number | null;
     screen_under_10?: number;
+    /** Why tests could not run, when any could not. Null on a healthy scan. */
+    screen_error?: string | null;
     /** Cleared the holdout on the RAW threshold — the counterpart to
      *  expected_by_chance, which is also uncorrected. */
     retest_hits: number;

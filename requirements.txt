@@ -7,7 +7,10 @@ ta
 tushare
 scipy
 matplotlib
-statsmodels
+# Pinned: 0.15 removed grangercausalitytests(verbose=), which this repo
+# called. Unpinned, a rebuild silently swapped the API and the lead-lag
+# screen reported 'no relationships' instead of failing.
+statsmodels>=0.14,<0.16
 altair==4.2.2
 pytz
 supabase>=2.0.0
