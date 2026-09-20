@@ -11,6 +11,7 @@ import { TechnicalAnalysis } from "./routes/TechnicalAnalysis";
 import { Alerts } from "./routes/Alerts";
 import { Basket } from "./routes/Basket";
 import { Strategies } from "./routes/Strategies";
+import { Admin } from "./routes/Admin";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
 const queryClient = new QueryClient({
@@ -85,6 +86,14 @@ export function App() {
               element={
                 <RequireAuth>
                   <Basket />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/admin"
+              element={
+                <RequireAuth>
+                  <Admin />
                 </RequireAuth>
               }
             />

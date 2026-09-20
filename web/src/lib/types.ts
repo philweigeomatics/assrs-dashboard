@@ -515,6 +515,35 @@ export type FollowThrough = {
   enough: boolean;
 };
 
+/**
+ * GET /admin/sectors — sector membership, the input to every PPI.
+ *
+ * Admin-only, and the gate is on the server. The nav link is hidden for
+ * everyone else as a convenience, not as the protection.
+ */
+export type AdminSector = {
+  name: string;
+  stocks: StockRef[];
+  /** Soft-deleted rows, kept so a removal can be explained and undone. */
+  removed: { t: string; n: string; removed_at: string }[];
+};
+
+export type AdminSectors = {
+  sectors: AdminSector[];
+  /** Below this a sector's index is one stock wearing a sector's name. */
+  min_stocks: number;
+  total_stocks: number;
+};
+
+/** POST /admin/sectors — created, or blocked on a manual Supabase step. */
+export type NewSectorResult = {
+  created: boolean;
+  sector: string;
+  stocks: string[];
+  /** Run these in the Supabase SQL editor, then create again. */
+  sql: string[];
+};
+
 /** GET /equity/{ticker} — 个股研报. */
 export type EquityPeriod = {
   period: string;

@@ -10,6 +10,8 @@ import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../auth/AuthProvider";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "../lib/api";
 
 const PAGES = [
   { to: "/market", label: "🗺️ 市场看板" },
@@ -21,13 +23,21 @@ const PAGES = [
   { to: "/questrade", label: "🏦 MyQuestrade" },
 ];
 
+/** Appended for admins only — a convenience, not the gate. */
+const ADMIN_PAGE = { to: "/admin", label: "⚙️ 板块管理" };
+
 export function NavBar({ children }: { children?: ReactNode }) {
   const { dev } = useAuth();
+  // Cosmetic only. The server checks the role on every /admin route — see
+  // _require_admin — because hiding a link does not stop a request.
+  const me = useQuery({ queryKey: ["me"], queryFn: api.me,
+                        staleTime: 10 * 60_000, retry: false });
+  const isAdmin = (me.data?.role || "").toLowerCase() === "admin";
   return (
     <header className="sticky top-0 z-40 bg-canvas/90 backdrop-blur border-b border-line">
       <div className="max-w-[1800px] mx-auto px-3 h-14 flex items-center gap-3">
         <nav className="flex items-center gap-1 shrink-0">
-          {PAGES.map((p) => (
+          {(isAdmin ? [...PAGES, ADMIN_PAGE] : PAGES).map((p) => (
             <NavLink key={p.to} to={p.to} end={p.to === "/"}
               className={({ isActive }) =>
                 `px-2 h-8 flex items-center rounded-lg text-[14px] font-semibold transition-colors ${

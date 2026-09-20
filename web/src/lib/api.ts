@@ -1,6 +1,8 @@
 import { devFakeToken, supabase } from "./supabase";
 import type {
+  AdminSectors,
   DiscoverArgs,
+  NewSectorResult,
   FollowThrough,
   AlertFeed, Analysis, BasketStats, CompareResult, HistoryRef, PairStats, SectorAnalysis,
   AlertNote, EquityBrief, NoteScorecard, PairTradeResult, SimResult, StockRef,
@@ -138,6 +140,23 @@ export const api = {
     call<FollowThrough>("/strategies/lead-lag-history", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+    }),
+  // ── admin: sector membership ──────────────────────────────────────────
+  adminSectors: () => call<AdminSectors>("/admin/sectors"),
+  adminAddStock: (sector: string, ticker: string) =>
+    call<{ sector: string; ticker: string; name: string }>(
+      `/admin/sectors/${encodeURIComponent(sector)}/stocks`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticker }),
+      }),
+  adminRemoveStock: (sector: string, ticker: string) =>
+    call<{ sector: string; ticker: string; name: string }>(
+      `/admin/sectors/${encodeURIComponent(sector)}/stocks/${encodeURIComponent(ticker)}`,
+      { method: "DELETE" }),
+  adminCreateSector: (name: string, tickers: string[]) =>
+    call<NewSectorResult>("/admin/sectors", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, tickers }),
     }),
   strategyScan: (name: string) =>
     call<StrategyResult>(`/strategies/${name}/scan`, { method: "POST" }),

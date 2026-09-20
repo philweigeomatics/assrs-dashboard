@@ -842,6 +842,89 @@ def _require_admin(user: AppUser) -> None:
         raise HTTPException(403, "仅管理员可执行此操作")
 
 
+# ── admin: sector membership ─────────────────────────────────────────────────
+# Every route here is gated by _require_admin on the SERVER. A sector's stock
+# list is the input to its PPI, and the PPI drives the heatmap, the breadth
+# grid, the rotation map and the regime score for every user — so these are
+# not personal settings and cannot be protected by hiding a nav link.
+
+
+class SectorStockReq(BaseModel):
+    ticker: str = Field(..., pattern=r"^\d{6}$")
+
+
+class NewSectorReq(BaseModel):
+    """2+ A-share codes and a name that can safely become a table name."""
+    name: str = Field(..., min_length=1, max_length=40)
+    tickers: list[str] = Field(..., min_length=2, max_length=200)
+
+
+@app.get("/admin/sectors")
+def admin_sectors(user: AppUser = Depends(current_user)):
+    """Every sector, its members, and what has been removed from it."""
+    _require_admin(user)
+    from api import admin_api
+
+    with _as_user(user):
+        return admin_api.overview()
+
+
+@app.post("/admin/sectors/{sector}/stocks")
+def admin_add_stock(sector: str, req: SectorStockReq,
+                    user: AppUser = Depends(current_user)):
+    """Add a stock to a sector, or bring a removed one back."""
+    _require_admin(user)
+    from api import admin_api
+
+    with _as_user(user):
+        try:
+            return admin_api.add_stock(sector, req.ticker)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+
+@app.delete("/admin/sectors/{sector}/stocks/{ticker}")
+def admin_remove_stock(sector: str, ticker: str,
+                       user: AppUser = Depends(current_user)):
+    """
+    Soft-remove a stock from a sector.
+
+    DELETE rather than POST because it is one, and because a URL that says
+    what it removes is a URL an admin can read back in a log.
+    """
+    _require_admin(user)
+    from api import admin_api
+
+    with _as_user(user):
+        try:
+            return admin_api.remove_stock(sector, ticker)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+
+@app.post("/admin/sectors")
+def admin_create_sector(req: NewSectorReq, user: AppUser = Depends(current_user)):
+    """
+    Create a sector, or say what has to happen in Supabase first.
+
+    A 200 with created=false and a list of SQL is the normal path on Supabase,
+    not an error: the client key cannot create a table, and writing the
+    membership rows anyway would leave a sector every rebuild then fails on.
+    """
+    _require_admin(user)
+    from api import admin_api
+
+    with _as_user(user):
+        try:
+            return admin_api.create_sector(req.name, req.tickers)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+
 def _industry_of(ticker: str) -> str:
     import data_manager
     try:
