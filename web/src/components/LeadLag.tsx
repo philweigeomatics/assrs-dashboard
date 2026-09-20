@@ -36,7 +36,7 @@ import { api, ApiError } from "../lib/api";
 import type { LeadLagResult, LeadLagRow, Num, StockRef } from "../lib/types";
 import { useSymbolSearch } from "../lib/useSymbolSearch";
 import { usePersistentState } from "../lib/usePersistentState";
-import { Discover } from "./Discover";
+import { DiscoverInputs, DiscoverResults, useDiscover } from "./Discover";
 import { LeadLagHistory } from "./LeadLagHistory";
 import { fixed } from "../lib/format";
 
@@ -51,6 +51,9 @@ export function LeadLag() {
 
   const stocks = useQuery({ queryKey: ["stocks"], queryFn: api.stocks,
     staleTime: 6 * 3600_000 });
+  // The search's state lives here so its controls can sit beside this
+  // panel's while its results sit below both.
+  const discover = useDiscover("lead-lag");
   const run = useMutation({
     mutationFn: () => api.leadLag({
       ticker: subject!.t, peers: peers.map((p) => p.t),
@@ -62,6 +65,10 @@ export function LeadLag() {
 
   return (
     <>
+      {/* Inputs on one row, outputs underneath. Two half-width panels rather
+          than two full-width ones stacked: the controls are short and the
+          results are what needs the room. */}
+      <div className="grid gap-3 lg:grid-cols-2 items-start">
       <section className="card p-3 flex flex-col gap-2.5">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h2 className="text-[14px] font-semibold">🕰️ 领先滞后</h2>
@@ -109,22 +116,25 @@ export function LeadLag() {
         )}
       </section>
 
-      {/* Finding the pairs matters more than testing the ones you guessed,
-          so the search sits above the manual picker and can load into it. */}
-      <Discover kind="lead-lag" onUse={(a, b, [na, nb]) => {
+        <DiscoverInputs d={discover} />
+      </div>
+
+      <DiscoverResults d={discover} onUse={(a, b, [na, nb]) => {
         setSubject({ t: a, n: na });
         setPeers([{ t: b, n: nb }]);
         globalThis.scrollTo({ top: 0, behavior: "smooth" });
       }} />
 
-      {run.data && <Results data={run.data} />}
-
-      {/* A verdict about two years is a summary; this is the history it
-          summarised. Shown for the first peer, because the panel is about ONE
-          pair and picking which one is the reader's call. */}
-      {subject && peers[0] && (
-        <LeadLagHistory a={subject.t} b={peers[0].t}
-          nameA={subject.n} nameB={peers[0].n} />
+      {run.data && (
+        <section className="card p-3 flex flex-col gap-3">
+          <Results data={run.data} />
+          {/* The verdict above is a summary of a history; this is the
+              history. Same box, because they are two readings of one test. */}
+          {subject && peers[0] && (
+            <LeadLagHistory a={subject.t} b={peers[0].t}
+              nameA={subject.n} nameB={peers[0].n} />
+          )}
+        </section>
       )}
     </>
   );
@@ -180,10 +190,11 @@ function Picker({ label, stocks, picked, exclude, onAdd, onRemove, single, max }
   );
 }
 
+/** Rendered inside the results card, so no card of its own. */
 function Results({ data }: { data: LeadLagResult }) {
   const t = data.tests;
   return (
-    <section className="card p-3 flex flex-col gap-3">
+    <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <h3 className="text-[13.5px] font-semibold">
           {data.name} <span className="font-mono text-ink-mute">{data.ticker}</span>
@@ -239,7 +250,7 @@ function Results({ data }: { data: LeadLagResult }) {
           {data.missing.map((m) => `${m.ticker} ${m.name}`).join("、")}
         </p>
       )}
-    </section>
+    </div>
   );
 }
 

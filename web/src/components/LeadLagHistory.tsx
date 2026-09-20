@@ -28,8 +28,12 @@ import type { ApiError } from "../lib/api";
 import type { LeadLagHistory as History } from "../lib/types";
 import { fixed, signed } from "../lib/format";
 
-const CELL = 7;        // px per window column
-const ROW = 15;        // px per lag row
+//: Big enough to read a single cell. 140 windows at this width overflow a
+//: desktop column, which is what the horizontal scroll is for — shrinking
+//: the cells until they all fit produces a strip nobody can interpret.
+const CELL = 14;       // px per window column
+const ROW = 24;        // px per lag row
+const GUTTER = 88;     // px for the lag labels — enough for a 4-char name
 
 /** Blue when A leads, violet when B does, grey under the noise band. */
 function cellColour(v: number | null, band: number): string {
@@ -54,7 +58,7 @@ export function LeadLagHistory({ a, b, nameA, nameB }: {
   const d = run.data;
 
   return (
-    <section className="card p-3 flex flex-col gap-2.5">
+    <div className="flex flex-col gap-2.5 border-t border-line pt-3">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <h3 className="text-[13.5px] font-semibold">🕰 领先滞后历史</h3>
         <span className="label">
@@ -91,7 +95,7 @@ export function LeadLagHistory({ a, b, nameA, nameB }: {
         <>
           <Verdict d={d} />
 
-          <Panel title="实际" panel={d.panel} nameA={nameA} nameB={nameB} />
+          <Panel panel={d.panel} nameA={nameA} nameB={nameB} />
           {/* Directly below, so the comparison is unavoidable. */}
           <div className="flex flex-col gap-1">
             <p className="label leading-snug">
@@ -164,7 +168,7 @@ export function LeadLagHistory({ a, b, nameA, nameB }: {
           点「看历史」——会画出每个窗口里两只股票在各个滞后上的相关程度
         </p>
       )}
-    </section>
+    </div>
   );
 }
 
@@ -199,40 +203,97 @@ function Verdict({ d }: { d: History }) {
   );
 }
 
-function Panel({ title, panel, nameA, nameB }: {
-  title: string; panel: History["panel"]; nameA: string; nameB: string;
+function Panel({ panel, nameA, nameB }: {
+  panel: History["panel"]; nameA: string; nameB: string;
 }) {
   const w = panel.dates.length * CELL;
+  // A date every ~10 columns; more than that and the labels collide.
+  const tickEvery = Math.max(1, Math.ceil(120 / CELL));
   return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-baseline gap-2">
-        <span className="text-[12.5px] font-medium">{title}</span>
-        <span className="label">
-          上半＝{nameA} 先动，下半＝{nameB} 先动，中间一行＝同步
-        </span>
-      </div>
+    <div className="flex flex-col gap-1.5">
+      <Legend band={panel.band} nameA={nameA} nameB={nameB} />
       <div className="overflow-x-auto">
-        <div style={{ width: w, minWidth: "100%" }}>
+        <div style={{ width: w + GUTTER, minWidth: "100%" }}>
           {panel.lags.map((lag, r) => (
             <div key={lag} className="flex items-center" style={{ height: ROW }}>
-              <span className="w-12 shrink-0 text-[10.5px] text-ink-mute tnum text-right pr-1.5">
-                {lag === 0 ? "同步" : `${lag > 0 ? "+" : ""}${lag}`}
+              <span className="shrink-0 text-[11px] tnum text-right pr-2
+                whitespace-nowrap overflow-hidden"
+                style={{ width: GUTTER }}>
+                {lag === 0
+                  ? <span className="text-ink-dim">同步</span>
+                  : <>
+                      <span className="text-ink-mute">
+                        {(lag > 0 ? nameA : nameB).slice(0, 4)}
+                      </span>
+                      <span className="text-ink-dim"> {Math.abs(lag)}天</span>
+                    </>}
               </span>
               <div className="flex">
                 {panel.matrix.map((row, c) => (
-                  <div key={c} title={`${panel.dates[c]} · 滞后 ${lag} · r=${fixed(row[r], 2)}`}
-                    style={{ width: CELL, height: ROW - 2,
+                  <div key={c}
+                    title={`${panel.dates[c]} · ${lag === 0 ? "同步"
+                      : `${lag > 0 ? nameA : nameB} 先动 ${Math.abs(lag)} 天`}`
+                      + ` · r=${fixed(row[r], 2)}`}
+                    style={{ width: CELL - 1, height: ROW - 2, marginRight: 1,
+                             borderRadius: 2,
                              background: cellColour(row[r] ?? null, panel.band) }} />
                 ))}
               </div>
             </div>
           ))}
-          <div className="flex justify-between label pl-12" style={{ width: w }}>
-            <span className="font-mono tnum">{panel.dates[0]}</span>
-            <span className="font-mono tnum">{panel.dates[panel.dates.length - 1]}</span>
+          <div className="flex" style={{ paddingLeft: GUTTER }}>
+            {panel.dates.map((dt, c) => (
+              <div key={c} style={{ width: CELL }} className="shrink-0">
+                {c % tickEvery === 0 && (
+                  <span className="block text-[10px] text-ink-mute font-mono whitespace-nowrap">
+                    {dt.slice(2, 7)}
+                  </span>
+                )}
+              </div>
+            ))}
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * What the colours mean, without hovering.
+ *
+ * The row says WHO moved first; the colour says whether they moved the same
+ * way or opposite ways. Two different things encoded in two different
+ * channels, which is unreadable unless it is spelled out.
+ */
+function Legend({ band, nameA, nameB }: {
+  band: number; nameA: string; nameB: string;
+}) {
+  const swatch = (bg: string) => (
+    <span className="inline-block w-4 h-3 rounded-sm align-middle" style={{ background: bg }} />
+  );
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px]">
+      <span className="flex items-center gap-1.5">
+        <span className="text-ink-mute">行＝谁先动：</span>
+        <span>上半 {nameA}</span>
+        <span className="text-ink-dim">·</span>
+        <span>中间 同步</span>
+        <span className="text-ink-dim">·</span>
+        <span>下半 {nameB}</span>
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="text-ink-mute">色＝</span>
+        {swatch("rgba(6,182,212,0.9)")}<span>同向</span>
+        {swatch("rgba(168,85,247,0.9)")}<span>反向</span>
+        {swatch("rgba(148,163,184,0.25)")}
+        <span className="text-ink-mute">|r| &lt; {band}（噪声）</span>
+      </span>
+      <span className="flex items-center gap-1.5 text-ink-mute">
+        深浅＝强弱
+        {swatch("rgba(6,182,212,0.3)")}
+        {swatch("rgba(6,182,212,0.55)")}
+        {swatch("rgba(6,182,212,0.9)")}
+      </span>
     </div>
   );
 }

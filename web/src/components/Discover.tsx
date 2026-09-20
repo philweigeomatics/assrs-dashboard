@@ -67,8 +67,7 @@ function DHead({ label, tip: t }: { label: string; tip: string }) {
  * stock and keeping the best, is the all-pairs search with the correction
  * quietly removed. The caption says so.
  */
-function TargetPicker({ kind, value, onChange }: {
-  kind: "pair-trade" | "lead-lag";
+function TargetPicker({ value, onChange }: {
   value: StockRef | null;
   onChange: (v: StockRef | null) => void;
 }) {
@@ -112,22 +111,19 @@ function TargetPicker({ kind, value, onChange }: {
           )}
         </div>
       )}
-      <span className="label leading-snug max-w-[62ch]">
-        {value
-          ? `只检验它和其余自选股的组合 —— 检验数少几十倍，多重检验的代价也小得多。`
-          : `留空则全量两两配对。${kind === "lead-lag"
-            ? "八十只股票是 6,320 次方向检验，光靠运气就有三百多个「显著」。"
-            : "八十只股票是 3,160 对。"}`}
-      </span>
+      {!value && <span className="label">留空则全量两两配对</span>}
     </div>
   );
 }
 
-export function Discover({ kind, onUse }: {
-  kind: "pair-trade" | "lead-lag";
-  /** Hand a found pair to the manual screen beside this one. */
-  onUse?: (a: string, b: string, names: [string, string]) => void;
-}) {
+/**
+ * The search's state, separated from where it is drawn.
+ *
+ * The inputs belong beside the other inputs and the results belong below
+ * both, which they cannot do while one component renders them in sequence.
+ * So the state lives here and the page decides the layout.
+ */
+export function useDiscover(kind: "pair-trade" | "lead-lag") {
   const [minCorr, setMinCorr] = usePersistentState<number>("assrs.disc.corr", 0.45);
   const [within, setWithin] = usePersistentState<boolean>("assrs.disc.sector", false);
   const [days, setDays] = usePersistentState<number>("assrs.disc.days", 504);
@@ -166,18 +162,25 @@ export function Discover({ kind, onUse }: {
   const data = run.data ?? stored.data ?? null;
   const error = (run.error ?? stored.error) as ApiError | null;
 
+  return { kind, minCorr, setMinCorr, within, setWithin, days, setDays,
+           target, setTarget, targeted, busy, data, error,
+           loading: stored.isPending, run };
+}
+
+export type DiscoverState = ReturnType<typeof useDiscover>;
+
+/** The controls. Sits with the other inputs, above the results. */
+export function DiscoverInputs({ d }: { d: DiscoverState }) {
+  const { minCorr, setMinCorr, within, setWithin, days, setDays,
+          target, setTarget, targeted, busy, data, run } = d;
   return (
     <section className="card p-3 flex flex-col gap-2.5">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <h3 className="text-[13.5px] font-semibold">🔎 从自选股中搜索</h3>
-        <span className="label">
-          {targeted
-            ? "只问一只股票的同伴 —— 检验数量少几十倍，所以不必先按相关性筛掉谁"
-            : "全量配对，先筛再验，最后用没参与筛选的那一半数据确认"}
-        </span>
+        <span className="label">先筛再验，用没参与筛选的那一半数据确认</span>
       </div>
 
-      <TargetPicker kind={kind} value={target} onChange={setTarget} />
+      <TargetPicker value={target} onChange={setTarget} />
 
       <div className="flex flex-wrap items-center gap-2">
         {/* A correlation floor exists to make 3,160 pairs affordable. With a
@@ -210,11 +213,9 @@ export function Discover({ kind, onUse }: {
             仅同板块
           </label>
         )}
-        <button onClick={() => run.mutate(Boolean(data))} disabled={busy || stored.isPending}
+        <button onClick={() => run.mutate(Boolean(data))} disabled={busy || d.loading}
           className="h-8 px-4 rounded-lg bg-cyan text-white text-[13px] font-semibold disabled:opacity-60">
-          {busy ? "搜索中…（数十只股票要逐只取行情）"
-            : stored.isPending ? "读取中…"
-              : data ? "重新搜索" : "开始搜索"}
+          {busy ? "搜索中…" : d.loading ? "读取中…" : data ? "重新搜索" : "开始搜索"}
         </button>
         {data?.cached && (
           <span className="label"
@@ -226,9 +227,36 @@ export function Discover({ kind, onUse }: {
         )}
       </div>
 
-      {error && <p className="text-[12.5px] text-up">{error.message}</p>}
-      {data && <Found data={data} onUse={onUse} />}
+      {d.error && <p className="text-[12.5px] text-up">{d.error.message}</p>}
     </section>
+  );
+}
+
+/** The results. Sits below every input on the page, not under its own. */
+export function DiscoverResults({ d, onUse }: {
+  d: DiscoverState;
+  /** Hand a found pair to the manual screen beside this one. */
+  onUse?: (a: string, b: string, names: [string, string]) => void;
+}) {
+  if (!d.data) return null;
+  return (
+    <section className="card p-3 flex flex-col gap-2.5">
+      <Found data={d.data} onUse={onUse} />
+    </section>
+  );
+}
+
+/** Both, stacked — for pages that have room for the old arrangement. */
+export function Discover({ kind, onUse }: {
+  kind: "pair-trade" | "lead-lag";
+  onUse?: (a: string, b: string, names: [string, string]) => void;
+}) {
+  const d = useDiscover(kind);
+  return (
+    <>
+      <DiscoverInputs d={d} />
+      <DiscoverResults d={d} onUse={onUse} />
+    </>
   );
 }
 
@@ -316,9 +344,7 @@ function Found({ data, onUse }: {
         </p>
         {f.targeted && (
           <p className="text-[11.5px] text-ink-mute leading-snug">
-            这次只问了「{data.target_name ?? data.target}」的同伴，所以没有用相关性筛掉任何一只。
-            换一只目标股就是另一次独立的搜索 —— 逐只试过去再挑最好看的那次，
-            等于做了全量搜索却没有付多重检验的账。
+            换一只目标股是另一次独立的搜索；逐只试过去再挑最好看的那次，结论就不成立了。
           </p>
         )}
         {!f.targeted && f.pairs_correlated > f.shortlisted && (
