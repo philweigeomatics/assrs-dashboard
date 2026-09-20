@@ -477,6 +477,47 @@ export type PairTradeResult = {
              name_a: string; name_b: string; why: string }[];
 };
 
+/** POST /strategies/lead-lag-history — one pair's history, not one verdict. */
+export type LeadLagEpisode = {
+  lag: number;
+  leads: "a" | "b";
+  from: string; to: string;
+  /** Consecutive windows, NOT a sample size — neighbours overlap heavily. */
+  windows: number;
+  mean_corr: Num; peak_corr: Num;
+  /** Longer than every rotation managed. A prompt to look, not a finding. */
+  beats_null?: boolean;
+};
+
+export type LeadLagHistory = {
+  a: string; b: string; name_a: string; name_b: string;
+  lookback_days: number;
+  panel: {
+    dates: string[];
+    lags: number[];
+    /** [window][lag] cross-correlation, null where it could not be computed. */
+    matrix: (number | null)[][];
+    window: number; step: number;
+    /** |r| a single window reaches by luck ~5% of the time. Not significance. */
+    band: number;
+  };
+  windows: number;
+  named: number;
+  named_share: number;
+  /** Share of directed windows whose dominant lag is 0 — i.e. no lead at all. */
+  sync_share: number;
+  share: Record<string, number>;
+  longest_run: number;
+  episodes: LeadLagEpisode[];
+  notable: number;
+  /** What this pair produces with the alignment rotated away. */
+  null: {
+    rotations: number;
+    longest_median: number; longest_max: number;
+    episodes_median: number; named_share_median: number;
+  };
+};
+
 /** GET /equity/{ticker} — 个股研报. */
 export type EquityPeriod = {
   period: string;

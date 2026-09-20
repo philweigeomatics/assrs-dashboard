@@ -298,3 +298,39 @@ def discover(tickers: list[str], kind: str = "pair-trade", *,
     if target:
         out["target_name"] = _names([target]).get(target, target)
     return out
+
+
+def history(a: str, b: str, *, lookback_days: int = DISCOVER_DAYS,
+            window: int = 60, step: int = 5, maxlag: int = 5) -> dict:
+    """
+    The rolling lead-lag panel for one pair, with its own null distribution.
+
+    Deliberately not a verdict. `analyse` answers "is there a lead-lag
+    relationship in this history"; this answers "what did the relationship
+    look like, month by month" — which is the question a person can actually
+    bring judgement to, and the one a single arrow and q-value destroys.
+    """
+    import lead_lag_profile as llp
+    import lead_lag_stats as lls
+
+    codes = [c for c in (a, b) if c and c.isdigit() and len(c) == 6]
+    if len(set(codes)) != 2:
+        raise LookupError("需要两只不同的 A 股")
+
+    rets, _px = lls.fetch_qfq_returns(list(dict.fromkeys(codes)),
+                                      lookback_days=lookback_days)
+    if rets.empty or a not in rets.columns or b not in rets.columns:
+        raise RuntimeError("行情暂时读取不到 — 请稍后重试")
+
+    panel = llp.profile(rets[a], rets[b], window=window, step=step, maxlag=maxlag)
+    null = llp.nulls(rets[a], rets[b], window=window, step=step, maxlag=maxlag)
+    out = llp.summarise(panel, null)
+
+    names = _names([a, b])
+    return {
+        "a": a, "b": b,
+        "name_a": names.get(a, a), "name_b": names.get(b, b),
+        "lookback_days": lookback_days,
+        "panel": panel,
+        **out,
+    }

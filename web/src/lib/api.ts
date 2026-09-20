@@ -1,6 +1,7 @@
 import { devFakeToken, supabase } from "./supabase";
 import type {
   DiscoverArgs,
+  LeadLagHistory,
   AlertFeed, Analysis, BasketStats, CompareResult, HistoryRef, PairStats, SectorAnalysis,
   AlertNote, EquityBrief, NoteScorecard, PairTradeResult, SimResult, StockRef,
   StrategyResult, WhatIfAi,
@@ -129,6 +130,12 @@ export const api = {
   // `force` re-runs the two-minute search instead of serving the stored one.
   discover: (body: DiscoverArgs, force = false) =>
     call<DiscoverResult>(`/strategies/discover?force=${force}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  leadLagHistory: (body: { a: string; b: string; lookback_days: number;
+                           window: number }) =>
+    call<LeadLagHistory>("/strategies/lead-lag-history", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),

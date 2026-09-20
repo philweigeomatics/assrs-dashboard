@@ -37,6 +37,7 @@ import type { LeadLagResult, LeadLagRow, Num, StockRef } from "../lib/types";
 import { useSymbolSearch } from "../lib/useSymbolSearch";
 import { usePersistentState } from "../lib/usePersistentState";
 import { Discover } from "./Discover";
+import { LeadLagHistory } from "./LeadLagHistory";
 import { fixed } from "../lib/format";
 
 const MAX_PEERS = 15;
@@ -117,6 +118,14 @@ export function LeadLag() {
       }} />
 
       {run.data && <Results data={run.data} />}
+
+      {/* A verdict about two years is a summary; this is the history it
+          summarised. Shown for the first peer, because the panel is about ONE
+          pair and picking which one is the reader's call. */}
+      {subject && peers[0] && (
+        <LeadLagHistory a={subject.t} b={peers[0].t}
+          nameA={subject.n} nameB={peers[0].n} />
+      )}
     </>
   );
 }

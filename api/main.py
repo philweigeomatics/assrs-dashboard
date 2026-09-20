@@ -1560,6 +1560,43 @@ def _discover_key(user: AppUser, kind: str, lookback_days: int,
                                         market_clock.latest_session())
 
 
+class HistoryReq(BaseModel):
+    """
+    One pair's lead-lag history, rather than one verdict about it.
+
+    Both codes are A-shares. The window is in trading sessions; shorter sees
+    regime changes sooner and is noisier, which is a trade the reader makes
+    rather than one made for them.
+    """
+    a: str = Field(..., pattern=r"^\d{6}$")
+    b: str = Field(..., pattern=r"^\d{6}$")
+    lookback_days: int = Field(504, ge=252, le=1000)
+    window: int = Field(60, ge=30, le=180)
+    step: int = Field(5, ge=1, le=20)
+    maxlag: int = Field(5, ge=1, le=10)
+
+
+@app.post("/strategies/lead-lag-history")
+def strategies_lead_lag_history(req: HistoryReq,
+                                user: AppUser = Depends(current_user)):
+    """
+    When did A lead B, by how much, and for how long — with a null beside it.
+
+    Not cached in the database: it is a handful of correlations over one pair,
+    fast enough that storing it would cost more than recomputing it.
+    """
+    from api import lead_lag_api
+
+    try:
+        return lead_lag_api.history(req.a, req.b, lookback_days=req.lookback_days,
+                                    window=req.window, step=req.step,
+                                    maxlag=req.maxlag)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
 @app.get("/strategies/discover")
 def strategies_discover_stored(kind: str = Query("pair-trade",
                                                  pattern="^(pair-trade|lead-lag)$"),
