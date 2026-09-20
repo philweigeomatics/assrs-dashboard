@@ -283,8 +283,12 @@ function Legend({ band, nameA, nameB }: {
       </span>
       <span className="flex items-center gap-1.5">
         <span className="text-ink-mute">色＝</span>
-        {swatch("rgba(6,182,212,0.9)")}<span>同向</span>
-        {swatch("rgba(168,85,247,0.9)")}<span>反向</span>
+        {swatch("rgba(6,182,212,0.9)")}
+        <span title="先动的那只涨，另一只几天后也涨；跌也一起跌">同向</span>
+        {swatch("rgba(168,85,247,0.9)")}
+        <span title="先动的那只涨，另一只几天后反而跌 —— 时间上仍是领先，方向相反">
+          反向<span className="text-ink-mute">（一涨一跌）</span>
+        </span>
         {swatch("rgba(148,163,184,0.25)")}
         <span className="text-ink-mute">|r| &lt; {band}（噪声）</span>
       </span>
