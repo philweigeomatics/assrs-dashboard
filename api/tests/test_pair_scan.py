@@ -43,6 +43,21 @@ def independent(k=12) -> pd.DataFrame:
     return frame({f"S{i:02d}": noise(i) for i in range(k)})
 
 
+def leader_follower(beta=0.9, lag=2, seed=5, n=N) -> pd.DataFrame:
+    """
+    FOLLOWER's return is `beta` times LEADER's, `lag` days later, plus noise.
+
+    So the slope the screen reports for this pair has a known right answer,
+    which is what makes "how big is the lead" testable at all.
+    """
+    rng = np.random.default_rng(seed)
+    driver = rng.normal(0, 0.012, n)
+    follower = np.r_[np.zeros(lag), driver[:-lag]] * beta + rng.normal(0, 0.004, n)
+    return frame({"LEADER": 100 * np.exp(np.cumsum(driver)),
+                  "FOLLOWER": 100 * np.exp(np.cumsum(follower)),
+                  "N1": noise(31), "N2": noise(32)})
+
+
 def cointegrated(seed=0, n=N, kappa=0.08):
     """Two prices tied by a mean-reverting spread, all the way through."""
     rng = np.random.default_rng(seed)
@@ -354,6 +369,57 @@ def test_a_targeted_scan_still_splits_train_from_test():
     out = ps.scan(px, "lead-lag", target=px.columns[0])
     assert out["train"]["to"] < out["test"]["from"]
     assert out["train"]["sessions"] + out["test"]["sessions"] == out["sessions"]
+
+
+# ── how big, not just whether ────────────────────────────────────────────────
+def test_a_lead_reports_its_size_not_only_its_p_value():
+    """
+    A Granger p-value says knowing the leader helps predict the follower. It
+    says nothing about by how much, and "领先 4 天, q=0.018" with no magnitude
+    beside it reads as though a 5% move implies a 5% move. On the real
+    watchlist the slope is about 0.06 and the R-squared under 2%.
+    """
+    px = leader_follower(beta=0.6, lag=2)
+    out = ps.scan(px, "lead-lag", min_corr=0.0)
+    row = next(r for r in out["rows"]
+               if {r["a"], r["b"]} == {"LEADER", "FOLLOWER"})
+
+    assert row["lead_beta"] is not None and row["lead_r2"] is not None
+    # The generator puts 0.6 of the leader's move into the follower.
+    assert row["lead_beta"] == pytest.approx(0.6, abs=0.25)
+    assert 0.0 <= row["lead_r2"] <= 1.0
+    assert row["lead_r2"] > 0.05, "a planted relationship should explain something"
+
+
+def test_the_size_is_measured_on_the_holdout_half():
+    """Fitting it on the half that selected the pair would inflate it."""
+    px = leader_follower(beta=0.6, lag=2)
+    out = ps.scan(px, "lead-lag", min_corr=0.0)
+    row = next(r for r in out["rows"]
+               if {r["a"], r["b"]} == {"LEADER", "FOLLOWER"})
+
+    cut = ps.split_point(len(px))
+    test_r = px.iloc[cut:].pct_change(fill_method=None).dropna(how="all")
+    direct = ps.lead_lag_test(test_r["LEADER"], test_r["FOLLOWER"], 5)
+    # Equal to the rounding the payload applies, not merely close.
+    assert row["lead_beta"] == pytest.approx(direct["beta"], abs=1e-3)
+
+
+def test_the_lead_size_is_not_the_cointegration_hedge_ratio():
+    """
+    Two different quantities that would both be spelled beta: a lagged
+    response in percent, and a hedge ratio on log prices. Kept under
+    different names so a column can never show one labelled as the other.
+    """
+    lead = next(r for r in ps.scan(leader_follower(beta=0.6, lag=2),
+                                   "lead-lag", min_corr=0.0)["rows"]
+                if {r["a"], r["b"]} == {"LEADER", "FOLLOWER"})
+    a, b = cointegrated()
+    coint = ps.scan(frame({"A": a, "B": b, "N1": noise(41), "N2": noise(42)}),
+                    "pair-trade", min_corr=0.0)["rows"][0]
+
+    assert "lead_beta" in lead and "beta" not in lead
+    assert "beta" in coint and "lead_beta" not in coint
 
 
 # ── the arithmetic of the report ─────────────────────────────────────────────

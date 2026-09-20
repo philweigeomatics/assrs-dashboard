@@ -274,7 +274,16 @@ function Found({ data, onUse }: {
           {lead && " 领先滞后还要求前后两半指向同一只股票领先 —— "
             + "方向相反的组合不算通过，所以上面「纯靠运气」的预期也相应减半（碰巧显著、"
             + "又碰巧猜对方向，概率是一半）。"}
-          {f.survivors === 0 && " 这一轮没有可用的配对，这本身就是答案。"}
+          {f.survivors === 0 && f.retested > 0
+            && " 这一轮没有可用的配对，这本身就是答案。"}
+          {f.retested === 0 && (
+            <>
+              {" "}<b>没有任何组合进入验证</b> —— 这不是「没有配对」，
+              而是前半程就没筛出东西可验。回看 {data.lookback_days} 天切成两半后
+              每半只有 {data.train.sessions} 个交易日，检验的功效很低；
+              换 504 或 756 天通常就有结果了。
+            </>
+          )}
         </p>
         {f.targeted && (
           <p className="text-[11.5px] text-ink-mute leading-snug">
@@ -314,6 +323,7 @@ function Found({ data, onUse }: {
                 {lead
                   ? <>
                       <th className="text-left font-medium px-2 py-1.5">方向</th>
+                      <DHead label="效应" tip={tip("效应")} />
                       <th className="text-center font-medium px-2 py-1.5">
                         <Hint tip={tip("一致")}>一致</Hint>
                       </th>
@@ -388,6 +398,18 @@ function Row({ r, lead, onUse, showCorr }: {
               title={`${leader}（${leadCode}）的走势领先另一只 ${r.lag} 个交易日`}>
               {leader} <span className="font-mono text-ink-mute">{leadCode}</span>
               {" "}领先 {r.lag} 天
+            </td>
+            <td className="px-2 py-1 text-right tnum whitespace-nowrap"
+              title={r.lead_beta == null ? ""
+                : `领先股每涨 1%，另一只在 ${r.lag} 天后平均涨 ${fixed(r.lead_beta, 3)}%`
+                  + `（解释了它日涨跌的 ${fixed((r.lead_r2 ?? 0) * 100, 1)}%）。`
+                  + `涨 5% 对应约 ${fixed(r.lead_beta * 5, 2)}%。`}>
+              <span className={Math.abs(r.lead_beta ?? 0) < 0.2 ? "text-ink-mute" : ""}>
+                {r.lead_beta == null ? "—" : `${fixed(r.lead_beta, 2)}×`}
+              </span>
+              <span className="text-ink-mute text-[11px]">
+                {" "}{fixed((r.lead_r2 ?? 0) * 100, 1)}%
+              </span>
             </td>
             <td className="px-2 py-1 text-center"
               title={r.same_direction

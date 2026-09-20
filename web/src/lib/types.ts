@@ -936,7 +936,11 @@ export type DiscoverRow = {
   survives: boolean;
   n_test: number;
   /** lead-lag only */
-  leads?: "a" | "b"; lag?: number; same_direction?: boolean;
+  leads?: "a" | "b";
+  /** Per 1% the leader moves, the follower moves this many % `lag` days on. */
+  lead_beta?: Num;
+  /** Share of the follower's daily variance that relationship explains. */
+  lead_r2?: Num; lag?: number; same_direction?: boolean;
   /** pair-trade only */
   beta?: Num; half_life?: Num; tradeable?: boolean;
 };

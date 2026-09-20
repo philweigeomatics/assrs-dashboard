@@ -170,9 +170,25 @@ def lead_lag_test(a: pd.Series, b: pd.Series, maxlag: int = 5) -> dict | None:
         return None
 
     leads = "a" if (not math.isnan(p_ab) and p_ab <= (p_ba if not math.isnan(p_ba) else 9)) else "b"
+    lag = lag_ab if leads == "a" else lag_ba
+
+    # HOW BIG, not just whether. A Granger p-value says "knowing the leader
+    # helps predict the follower"; it says nothing about by how much, and on
+    # daily A-share returns the honest answer is "barely". Without a
+    # magnitude beside it, "领先 4 天, q=0.018" reads as though a 5% move in
+    # the leader implies a 5% move in the follower. Measured, it implies
+    # about 0.3%.
+    x, y = (av, bv) if leads == "a" else (bv, av)
+    beta = r2 = float("nan")
+    if lag and len(x) > lag + 30:
+        xs, ys = x[:-lag], y[lag:]
+        if xs.std() > 1e-12 and ys.std() > 1e-12:
+            beta = float(np.polyfit(xs, ys, 1)[0])
+            r2 = float(np.corrcoef(xs, ys)[0, 1] ** 2)
+
     return {"p": best, "p_ab": p_ab, "p_ba": p_ba,
-            "lag": lag_ab if leads == "a" else lag_ba,
-            "leads": leads, "n": len(aligned)}
+            "lag": lag, "leads": leads, "n": len(aligned),
+            "beta": beta, "r2": r2}
 
 
 def coint_test(a: pd.Series, b: pd.Series) -> dict | None:
@@ -343,6 +359,11 @@ def _row(c: dict, q: float, kind: str) -> dict:
             "leads": te["leads"], "lag": int(te["lag"]),
             "same_direction": agrees,
             "survives": cleared and agrees,
+            # Measured on the holdout half, so the size is out-of-sample too.
+            # Named apart from the cointegration `beta`, which is a hedge
+            # ratio and an entirely different quantity.
+            "lead_beta": _n(te.get("beta"), 3),
+            "lead_r2": _n(te.get("r2"), 4),
         })
     else:
         row.update({
