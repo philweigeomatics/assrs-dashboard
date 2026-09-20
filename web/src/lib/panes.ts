@@ -72,6 +72,22 @@ const GREEN = "#16a34a";
 const bull = (d: Analysis) => (d.up_is_red ? RED : GREEN);
 const bear = (d: Analysis) => (d.up_is_red ? GREEN : RED);
 
+// Deeper shades, where a marker needs to read apart from its neighbours.
+const RED_DARK = "#b91c1c";
+const GREEN_DARK = "#15803d";
+const bullDark = (d: Analysis) => (d.up_is_red ? RED_DARK : GREEN_DARK);
+const bearDark = (d: Analysis) => (d.up_is_red ? GREEN_DARK : RED_DARK);
+
+// Translucent [bullish, bearish] pair for sign-coloured bars and bands, in
+// that same inversion — these take their colours as literals, so written out
+// by hand they stay Shanghai-coloured on a New York chart while the candles
+// flip, which is exactly what the volume and MACD panes used to do.
+const fill = (d: Analysis, a: number): [string, string] => {
+  const red = `rgba(220,38,38,${a})`;
+  const green = `rgba(22,163,74,${a})`;
+  return d.up_is_red ? [red, green] : [green, red];
+};
+
 /** True when at least one bar of this series carries a value. */
 function hasData(d: Analysis, key: SeriesKey): boolean {
   const v = d.series[key];
@@ -101,8 +117,8 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
       { key: "m_sqz", label: "挤压", idx: d.markers.price.squeeze, position: "aboveBar", shape: "square", color: "#64748b", defaultHidden: true },
       { key: "m_sqz_bull", label: "挤压突破", idx: d.markers.price.squeeze_bull, position: "belowBar", shape: "arrowUp", color: bull(d), text: "突破" },
       { key: "m_sqz_bear", label: "挤压下破", idx: d.markers.price.squeeze_bear, position: "aboveBar", shape: "arrowDown", color: bear(d), text: "下破" },
-      { key: "m_dt_rev", label: "下跌反转", idx: d.markers.price.downtrend_reversal, position: "belowBar", shape: "arrowUp", color: "#b91c1c" },
-      { key: "m_ut_rev", label: "上涨反转", idx: d.markers.price.uptrend_reversal, position: "aboveBar", shape: "arrowDown", color: "#15803d" },
+      { key: "m_dt_rev", label: "下跌反转", idx: d.markers.price.downtrend_reversal, position: "belowBar", shape: "arrowUp", color: bullDark(d) },
+      { key: "m_ut_rev", label: "上涨反转", idx: d.markers.price.uptrend_reversal, position: "aboveBar", shape: "arrowDown", color: bearDark(d) },
       { key: "m_exit", label: "MACD离场", idx: d.markers.price.exit_macd, position: "aboveBar", shape: "arrowDown", color: "#ea580c" },
       { key: "m_sbuy", label: "强买", idx: d.markers.price.screaming_buy, position: "belowBar", shape: "arrowUp", color: bull(d), text: "★买" },
       { key: "m_ssell", label: "强卖", idx: d.markers.price.screaming_sell, position: "aboveBar", shape: "arrowDown", color: bear(d), text: "★卖" },
@@ -116,7 +132,7 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
       id: "volume", title: "成交量 / OBV", height: 110,
       lines: [
         { key: "Volume", label: "量", values: d.ohlcv.v, color: "#94a3b8", kind: "histogram",
-          signBy: "body", signColors: ["rgba(239,68,68,0.6)", "rgba(34,197,94,0.6)"], decimals: 0 },
+          signBy: "body", signColors: fill(d, 0.6), decimals: 0 },
         { key: "Vol_Scaled_OBV", label: "OBV", values: s(d, "Vol_Scaled_OBV"), color: "#f59e0b",
           width: 2, scaleId: "obv", scaleMargins: { top: 0.1, bottom: 0.1 }, decimals: 2 },
         { key: "OBV_Mom", label: "OBV动能20", values: s(d, "OBV_Mom"), color: "#2563eb",
@@ -129,7 +145,7 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
       id: "macd", title: "MACD", height: 140,
       lines: [
         { key: "MACD_Hist", label: "柱×2.5", values: s(d, "MACD_Hist"), color: "#94a3b8", kind: "histogram",
-          signBy: "value", signColors: ["rgba(239,68,68,0.55)", "rgba(34,197,94,0.55)"], decimals: 3 },
+          signBy: "value", signColors: fill(d, 0.55), decimals: 3 },
         { key: "MACD", label: "MACD", values: s(d, "MACD"), color: "#2563eb", decimals: 3 },
         { key: "MACD_Signal", label: "信号", values: s(d, "MACD_Signal"), color: "#f59e0b", decimals: 3 },
       ],
@@ -140,8 +156,8 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
       ],
       guides: [{ value: 0 }],
       bands: [
-        { segments: d.bands.macd_uptrend, color: "rgba(239,68,68,0.08)", label: "大级别上涨" },
-        { segments: d.bands.macd_downtrend, color: "rgba(34,197,94,0.08)", label: "大级别下跌" },
+        { segments: d.bands.macd_uptrend, color: fill(d, 0.08)[0], label: "大级别上涨" },
+        { segments: d.bands.macd_downtrend, color: fill(d, 0.08)[1], label: "大级别下跌" },
       ],
     },
     {
@@ -165,8 +181,8 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
         { key: "ADX_LOWESS", label: "平滑", values: s(d, "ADX_LOWESS"), color: "#f59e0b", width: 2, decimals: 1 },
         { key: "ADX_BB_Upper", label: "带上", values: s(d, "ADX_BB_Upper"), color: "#cbd5e1", decimals: 1, defaultHidden: true },
         { key: "ADX_BB_Lower", label: "带下", values: s(d, "ADX_BB_Lower"), color: "#cbd5e1", decimals: 1, defaultHidden: true },
-        { key: "DI_Plus", label: "+DI", values: s(d, "DI_Plus"), color: "#ef4444", decimals: 1 },
-        { key: "DI_Minus", label: "−DI", values: s(d, "DI_Minus"), color: "#22c55e", decimals: 1 },
+        { key: "DI_Plus", label: "+DI", values: s(d, "DI_Plus"), color: bull(d), decimals: 1 },
+        { key: "DI_Minus", label: "−DI", values: s(d, "DI_Minus"), color: bear(d), decimals: 1 },
       ],
       markers: [
         { key: "ma_sbuy", label: "DI强买", idx: d.markers.adx.di_screaming_buy, position: "belowBar", shape: "arrowUp", color: bull(d), text: "★", anchor: "ADX" },
@@ -174,7 +190,7 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
         { key: "ma_bot", label: "筑底", idx: d.markers.adx.bottoming, position: "belowBar", shape: "circle", color: bull(d), anchor: "ADX" },
         { key: "ma_rup", label: "转强", idx: d.markers.adx.reversing_up, position: "belowBar", shape: "arrowUp", color: "#f97316", anchor: "ADX" },
         { key: "ma_peak", label: "见顶", idx: d.markers.adx.peaking, position: "aboveBar", shape: "circle", color: bear(d), anchor: "ADX" },
-        { key: "ma_rdn", label: "转弱", idx: d.markers.adx.reversing_down, position: "aboveBar", shape: "arrowDown", color: "#22c55e", anchor: "ADX" },
+        { key: "ma_rdn", label: "转弱", idx: d.markers.adx.reversing_down, position: "aboveBar", shape: "arrowDown", color: bear(d), anchor: "ADX" },
       ],
       guides: [{ value: 25, color: "#e5e7eb" }],
       bands: [],
@@ -183,8 +199,12 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
     {
       id: "z", title: "Z-Score (20日)", height: 100,
       lines: [
+        // Bars first so the price-Z line draws over them. Coloured by the
+        // candle body, like the volume pane: the sign of 量Z only says heavy
+        // or thin, so red/green here has to mean the day's direction.
+        { key: "Volume_Z", label: "量Z", values: s(d, "Volume_Z"), color: "#94a3b8", kind: "histogram",
+          signBy: "body", signColors: fill(d, 0.45), decimals: 2 },
         { key: "Price_Z", label: "价格Z", values: s(d, "Price_Z"), color: "#7c3aed", width: 2, decimals: 2 },
-        { key: "Volume_Z", label: "量Z", values: s(d, "Volume_Z"), color: "#0ea5e9", decimals: 2 },
       ],
       markers: [
         { key: "mz_os", label: "超卖≤−2.5", idx: d.markers.z.oversold, position: "belowBar", shape: "arrowUp", color: bull(d), anchor: "Price_Z" },
@@ -216,7 +236,7 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
       id: "mf", title: "主力净流入 (万元)", height: 110,
       lines: [
         { key: "MF_Daily", label: "每日", values: s(d, "MF_Daily"), color: "#94a3b8", kind: "histogram",
-          signBy: "value", signColors: ["rgba(220,38,38,0.7)", "rgba(22,163,74,0.7)"], decimals: 0 },
+          signBy: "value", signColors: fill(d, 0.7), decimals: 0 },
         { key: "MF_Rolling", label: "近20日", values: s(d, "MF_Rolling"), color: "#2563eb", width: 2,
           scaleId: "mfroll", scaleMargins: { top: 0.1, bottom: 0.1 }, decimals: 0 },
       ],
