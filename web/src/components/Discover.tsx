@@ -31,9 +31,11 @@
  */
 
 import { Link } from "react-router-dom";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api";
-import type { DiscoverResult, DiscoverRow } from "../lib/types";
+import type { DiscoverResult, DiscoverRow, StockRef } from "../lib/types";
+import { useSymbolSearch } from "../lib/useSymbolSearch";
 import { usePersistentState } from "../lib/usePersistentState";
 import { fixed } from "../lib/format";
 import { Glossary, Hint } from "./Glossary";
@@ -51,6 +53,76 @@ function DHead({ label, tip: t }: { label: string; tip: string }) {
   );
 }
 
+/**
+ * Which stock the search is about.
+ *
+ * "Are there any lead-lag pairs among my eighty stocks" is a fishing
+ * expedition: 3,160 pairs, 6,320 directional tests, and a correction so
+ * heavy that a real but modest relationship cannot clear it. "What leads
+ * 长电科技" is a question someone actually has, costs 81 tests, and every
+ * peer gets examined instead of the most-correlated fifth.
+ *
+ * Both are offered, because the sweep can still surface a pair nobody would
+ * have thought to ask about — but running the sweep, then re-running it per
+ * stock and keeping the best, is the all-pairs search with the correction
+ * quietly removed. The caption says so.
+ */
+function TargetPicker({ kind, value, onChange }: {
+  kind: "pair-trade" | "lead-lag";
+  value: StockRef | null;
+  onChange: (v: StockRef | null) => void;
+}) {
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState(false);
+  const stocks = useQuery({ queryKey: ["stocks"], queryFn: api.stocks,
+                            staleTime: 6 * 3600_000 });
+  const { items } = useSymbolSearch({
+    query: q, stocks: stocks.data ?? [], markets: ["CN"], limit: 8,
+  });
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="label">围绕这只股票搜索</span>
+      {value ? (
+        <span className="h-7 pl-2 pr-1 rounded-md bg-sunken flex items-center gap-1.5 text-[12.5px]">
+          <span className="truncate max-w-[140px]">{value.n}</span>
+          <span className="font-mono tnum text-[11px] text-ink-mute">{value.t}</span>
+          <button onClick={() => onChange(null)} aria-label={`清除 ${value.n}`}
+            className="text-ink-mute hover:text-ink px-1">✕</button>
+        </span>
+      ) : (
+        <div className="relative">
+          <input value={q} onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+            onFocus={() => setOpen(true)}
+            onBlur={() => globalThis.setTimeout(() => setOpen(false), 150)}
+            placeholder="输入代码或名称…"
+            className="h-7 w-44 px-2 rounded-md bg-sunken text-[12.5px] outline-none
+              focus:ring-2 focus:ring-cyan/40" />
+          {open && items.length > 0 && (
+            <div className="card absolute left-0 mt-1 z-30 w-64 py-1">
+              {items.map((s) => (
+                <button key={s.t} onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => { onChange({ t: s.t, n: s.n }); setQ(""); setOpen(false); }}
+                  className="w-full flex items-baseline gap-2 px-2 py-1 text-left hover:bg-elevated">
+                  <span className="font-mono tnum text-[12px] text-ink-dim shrink-0">{s.t}</span>
+                  <span className="text-[12.5px] truncate">{s.n}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      <span className="label leading-snug max-w-[62ch]">
+        {value
+          ? `只检验它和其余自选股的组合 —— 检验数少几十倍，多重检验的代价也小得多。`
+          : `留空则全量两两配对。${kind === "lead-lag"
+            ? "八十只股票是 6,320 次方向检验，光靠运气就有三百多个「显著」。"
+            : "八十只股票是 3,160 对。"}`}
+      </span>
+    </div>
+  );
+}
+
 export function Discover({ kind, onUse }: {
   kind: "pair-trade" | "lead-lag";
   /** Hand a found pair to the manual screen beside this one. */
@@ -59,10 +131,17 @@ export function Discover({ kind, onUse }: {
   const [minCorr, setMinCorr] = usePersistentState<number>("assrs.disc.corr", 0.45);
   const [within, setWithin] = usePersistentState<boolean>("assrs.disc.sector", false);
   const [days, setDays] = usePersistentState<number>("assrs.disc.days", 504);
+  // Which stock the search is ABOUT. Empty means the old all-pairs sweep.
+  const [target, setTarget] = usePersistentState<StockRef | null>(
+    `assrs.disc.target.${kind}`, null);
 
+  const targeted = Boolean(target);
   const qc = useQueryClient();
-  const args = { kind, lookback_days: days, min_corr: minCorr, within_sector: within };
-  const key = ["discover", kind, days, minCorr, within] as const;
+  const args = {
+    kind, lookback_days: days, min_corr: minCorr, within_sector: within,
+    target: target?.t ?? null,
+  };
+  const key = ["discover", kind, days, minCorr, within, target?.t ?? ""] as const;
 
   // Asked on every mount, and it is safe to: the GET only ever READS what the
   // server stored. That is what makes a finished search come back after a
@@ -92,20 +171,29 @@ export function Discover({ kind, onUse }: {
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <h3 className="text-[13.5px] font-semibold">🔎 从自选股中搜索</h3>
         <span className="label">
-          不用自己挑 —— 全量配对，先筛再验，最后用没参与筛选的那一半数据确认
+          {targeted
+            ? "只问一只股票的同伴 —— 检验数量少几十倍，所以不必先按相关性筛掉谁"
+            : "全量配对，先筛再验，最后用没参与筛选的那一半数据确认"}
         </span>
       </div>
 
+      <TargetPicker kind={kind} value={target} onChange={setTarget} />
+
       <div className="flex flex-wrap items-center gap-2">
-        <label className="label flex items-center gap-1"
-          title="先按同期相关性粗筛。这不是显著性检验，只是缩小范围。">
-          相关性下限
-          <input type="range" min={0} max={90} step={5}
-            value={Math.round(minCorr * 100)}
-            onChange={(e) => setMinCorr(Number(e.target.value) / 100)}
-            className="w-24 accent-[var(--color-cyan)]" />
-          <span className="tnum w-8">{fixed(minCorr, 2)}</span>
-        </label>
+        {/* A correlation floor exists to make 3,160 pairs affordable. With a
+            target there are eighty, and filtering would only remove peers
+            that could have been tested. */}
+        {!targeted && (
+          <label className="label flex items-center gap-1"
+            title="先按同期相关性粗筛。这不是显著性检验，只是缩小范围。">
+            相关性下限
+            <input type="range" min={0} max={90} step={5}
+              value={Math.round(minCorr * 100)}
+              onChange={(e) => setMinCorr(Number(e.target.value) / 100)}
+              className="w-24 accent-[var(--color-cyan)]" />
+            <span className="tnum w-8">{fixed(minCorr, 2)}</span>
+          </label>
+        )}
         <label className="label flex items-center gap-1" title="历史长度，对半切开">
           回看
           <select value={days} onChange={(e) => setDays(Number(e.target.value))}
@@ -113,13 +201,15 @@ export function Discover({ kind, onUse }: {
             {[252, 504, 756].map((d) => <option key={d} value={d}>{d} 天</option>)}
           </select>
         </label>
-        <label className="label flex items-center gap-1.5"
-          title="只在同一板块内配对。跨行业的高相关，通常说的是大盘，不是这两只股票之间的关系。">
-          <input type="checkbox" checked={within}
-            onChange={(e) => setWithin(e.target.checked)}
-            className="accent-[var(--color-cyan)]" />
-          仅同板块
-        </label>
+        {!targeted && (
+          <label className="label flex items-center gap-1.5"
+            title="只在同一板块内配对。跨行业的高相关，通常说的是大盘，不是这两只股票之间的关系。">
+            <input type="checkbox" checked={within}
+              onChange={(e) => setWithin(e.target.checked)}
+              className="accent-[var(--color-cyan)]" />
+            仅同板块
+          </label>
+        )}
         <button onClick={() => run.mutate(Boolean(data))} disabled={busy || stored.isPending}
           className="h-8 px-4 rounded-lg bg-cyan text-white text-[13px] font-semibold disabled:opacity-60">
           {busy ? "搜索中…（数十只股票要逐只取行情）"
@@ -156,15 +246,18 @@ function Found({ data, onUse }: {
         <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px]">
           <Step n={f.universe} label="只股票" />
           <Arrow />
-          <Step n={f.pairs_possible} label="组配对" />
+          <Step n={f.pairs_possible}
+            label={f.targeted ? `个同伴（对 ${data.target_name ?? data.target}）` : "组配对"} />
           <Arrow />
           {/* When the cap bites, say so. "250 shortlisted" reads as "250
               qualified" and hides that 900 did and 650 were dropped by a
-              ceiling rather than by the threshold. */}
+              ceiling rather than by the threshold. With a target nothing was
+              dropped at all, and claiming a threshold would be a lie. */}
           <Step n={f.shortlisted} strong={false}
-            label={f.pairs_correlated > f.shortlisted
-              ? `已测（相关性 ≥ ${fixed(f.min_corr, 2)} 的共 ${f.pairs_correlated} 组，取最相关的前 ${f.shortlisted}）`
-              : `相关性 ≥ ${fixed(f.min_corr, 2)}`} />
+            label={f.targeted ? "全部检验（无相关性筛选）"
+              : f.pairs_correlated > f.shortlisted
+                ? `已测（相关性 ≥ ${fixed(f.min_corr, 2)} 的共 ${f.pairs_correlated} 组，取最相关的前 ${f.shortlisted}）`
+                : `相关性 ≥ ${fixed(f.min_corr, 2)}`} />
           <Arrow />
           <Step n={f.screened} label="前半程显著" />
           <Arrow />
@@ -178,9 +271,19 @@ function Found({ data, onUse }: {
           <b> {fixed(f.expected_by_chance, 1)} </b>组通过。
           经多重检验校正后真正站住的是
           <b className={f.survivors ? "text-up" : ""}> {f.survivors} </b>组。
+          {lead && " 领先滞后还要求前后两半指向同一只股票领先 —— "
+            + "方向相反的组合不算通过，所以上面「纯靠运气」的预期也相应减半（碰巧显著、"
+            + "又碰巧猜对方向，概率是一半）。"}
           {f.survivors === 0 && " 这一轮没有可用的配对，这本身就是答案。"}
         </p>
-        {f.pairs_correlated > f.shortlisted && (
+        {f.targeted && (
+          <p className="text-[11.5px] text-ink-mute leading-snug">
+            这次只问了「{data.target_name ?? data.target}」的同伴，所以没有用相关性筛掉任何一只。
+            换一只目标股就是另一次独立的搜索 —— 逐只试过去再挑最好看的那次，
+            等于做了全量搜索却没有付多重检验的账。
+          </p>
+        )}
+        {!f.targeted && f.pairs_correlated > f.shortlisted && (
           <p className="text-[11.5px] text-brand-ink leading-snug">
             ⚠ 相关性 ≥ {fixed(f.min_corr, 2)} 的有 {f.pairs_correlated} 组，
             但每轮最多只检验最相关的 {f.shortlisted} 组 —— 此时<b>调低</b>阈值不会有任何变化，
@@ -191,7 +294,9 @@ function Found({ data, onUse }: {
 
       {data.rows.length === 0 ? (
         <p className="label py-4 text-center">
-          没有一组通过前半程的筛选。可以把相关性下限调低，或拉长回看天数。
+          没有一组通过前半程的筛选。
+          {f.targeted ? "可以换一只目标股，或拉长回看天数。"
+            : "可以把相关性下限调低，或拉长回看天数。"}
         </p>
       ) : (
         <div className="overflow-auto rounded-lg border border-line max-h-[460px]">
@@ -200,7 +305,9 @@ function Found({ data, onUse }: {
               <tr className="border-b border-line text-ink-mute">
                 <th className="text-left font-medium px-2 py-1.5">A</th>
                 <th className="text-left font-medium px-2 py-1.5">B</th>
-                <DHead label="相关" tip={tip("相关（粗筛）")} />
+                {/* Nothing was filtered on correlation, so the column would
+                    be a row of dashes pretending to be data. */}
+                {!f.targeted && <DHead label="相关" tip={tip("相关（粗筛）")} />}
                 <DHead label="p 前" tip={tip("p 前")} />
                 <DHead label="p 后" tip={tip("p 后")} />
                 <DHead label="q" tip={tip("q")} />
@@ -221,7 +328,8 @@ function Found({ data, onUse }: {
             </thead>
             <tbody>
               {data.rows.map((r) => (
-                <Row key={`${r.a}-${r.b}`} r={r} lead={lead} onUse={onUse} />
+                <Row key={`${r.a}-${r.b}`} r={r} lead={lead} onUse={onUse}
+                  showCorr={!f.targeted} />
               ))}
             </tbody>
           </table>
@@ -248,8 +356,8 @@ function Step({ n, label, strong }: { n: number; label: string; strong?: boolean
 
 const Arrow = () => <span className="text-ink-mute">→</span>;
 
-function Row({ r, lead, onUse }: {
-  r: DiscoverRow; lead: boolean;
+function Row({ r, lead, onUse, showCorr }: {
+  r: DiscoverRow; lead: boolean; showCorr: boolean;
   onUse?: (a: string, b: string, names: [string, string]) => void;
 }) {
   // The name, not the code — "600584 领先 2 天" makes the reader go and look
@@ -267,7 +375,9 @@ function Row({ r, lead, onUse }: {
         <Link to={`/?t=${r.b}`} className="text-cyan font-mono">{r.b}</Link>{" "}
         <span className="truncate">{r.name_b}</span>
       </td>
-      <td className="px-2 py-1 text-right tnum">{fixed(r.corr, 2)}</td>
+      {showCorr && (
+        <td className="px-2 py-1 text-right tnum">{fixed(r.corr, 2)}</td>
+      )}
       <td className="px-2 py-1 text-right tnum text-ink-mute">{fixed(r.p_train, 3)}</td>
       <td className="px-2 py-1 text-right tnum">{fixed(r.p_test, 3)}</td>
       <td className={`px-2 py-1 text-right tnum font-medium ${

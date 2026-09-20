@@ -1,5 +1,6 @@
 import { devFakeToken, supabase } from "./supabase";
 import type {
+  DiscoverArgs,
   AlertFeed, Analysis, BasketStats, CompareResult, HistoryRef, PairStats, SectorAnalysis,
   AlertNote, EquityBrief, NoteScorecard, PairTradeResult, SimResult, StockRef,
   StrategyResult, WhatIfAi,
@@ -120,14 +121,13 @@ export const api = {
   // The stored result for this exact search, or null. Never computes — this
   // is what a page load asks, so that opening the tab can never start a
   // two-minute job.
-  discoverStored: (q: { kind: "pair-trade" | "lead-lag"; lookback_days: number;
-                        min_corr: number; within_sector: boolean }) =>
+  discoverStored: (q: DiscoverArgs) =>
     call<DiscoverResult | null>(
       `/strategies/discover?kind=${q.kind}&lookback_days=${q.lookback_days}`
-      + `&min_corr=${q.min_corr}&within_sector=${q.within_sector}`),
+      + `&min_corr=${q.min_corr}&within_sector=${q.within_sector}`
+      + (q.target ? `&target=${encodeURIComponent(q.target)}` : "")),
   // `force` re-runs the two-minute search instead of serving the stored one.
-  discover: (body: { kind: "pair-trade" | "lead-lag"; lookback_days: number;
-                     min_corr: number; within_sector: boolean }, force = false) =>
+  discover: (body: DiscoverArgs, force = false) =>
     call<DiscoverResult>(`/strategies/discover?force=${force}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

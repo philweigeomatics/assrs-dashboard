@@ -286,11 +286,117 @@ def test_an_engineered_lead_is_found_and_pointed_the_right_way():
     assert row["same_direction"] is True
 
 
+# ── one target instead of every pair ─────────────────────────────────────────
+def test_a_target_tests_every_peer_and_skips_the_correlation_filter():
+    """
+    The filter exists to make 3,160 pairs affordable. With a target there are
+    79, and at that size filtering only removes peers that could have been
+    tested — the most correlated fifth of a watchlist is not where a lead-lag
+    relationship is obliged to live.
+    """
+    px = independent(12)
+    out = ps.scan(px, "lead-lag", target=px.columns[0], min_corr=0.99)
+    f = out["funnel"]
+
+    assert f["targeted"] is True
+    assert f["shortlisted"] == len(px.columns) - 1
+    # min_corr 0.99 would leave nothing standing if it were applied at all.
+    assert f["min_corr"] is None
+    assert f["pairs_possible"] == len(px.columns) - 1
+
+
+def test_every_tested_pair_actually_involves_the_target():
+    px = independent(10)
+    target = px.columns[3]
+    out = ps.scan(px, "lead-lag", target=target)
+    assert out["rows"], "nothing was tested"
+    assert all(target in (r["a"], r["b"]) for r in out["rows"])
+
+
+def test_the_target_is_always_the_first_leg():
+    """So "who leads" reads the same way on every row downstream."""
+    px = independent(10)
+    target = px.columns[5]
+    out = ps.scan(px, "lead-lag", target=target)
+    assert all(r["a"] == target for r in out["rows"])
+
+
+def test_a_target_with_no_usable_history_says_so():
+    """
+    Silently returning an empty result is the failure mode this replaces:
+    under the all-pairs screen a watchlist stock could be dropped by the
+    correlation filter and nothing on screen said it was never examined.
+    """
+    px = independent(8)
+    with pytest.raises(LookupError, match="不在可用的自选股"):
+        ps.scan(px, "lead-lag", target="NOT_A_TICKER")
+
+
+def test_the_multiple_testing_bill_is_the_smaller_one():
+    """
+    The whole statistical argument for the redesign: the correction is over
+    the peers of one stock, not over every pair in the watchlist.
+    """
+    px = independent(20)
+    wide = ps.scan(px, "lead-lag", min_corr=0.0)
+    narrow = ps.scan(px, "lead-lag", target=px.columns[0])
+
+    assert narrow["funnel"]["pairs_possible"] == 19
+    assert wide["funnel"]["pairs_possible"] == 190
+    assert (narrow["funnel"]["expected_by_chance"]
+            < wide["funnel"]["expected_by_chance"])
+
+
+def test_a_targeted_scan_still_splits_train_from_test():
+    """The redesign changes WHICH pairs are tested, not the honesty of the
+    test. Losing the holdout while moving the shortlist would be a bad trade."""
+    px = independent(10)
+    out = ps.scan(px, "lead-lag", target=px.columns[0])
+    assert out["train"]["to"] < out["test"]["from"]
+    assert out["train"]["sessions"] + out["test"]["sessions"] == out["sessions"]
+
+
 # ── the arithmetic of the report ─────────────────────────────────────────────
 def test_the_expected_by_chance_count_matches_what_was_retested():
-    out = ps.scan(independent(14), "lead-lag", min_corr=0.0)
+    out = ps.scan(independent(14), "pair-trade", min_corr=0.0)
     f = out["funnel"]
     assert f["expected_by_chance"] == pytest.approx(f["retested"] * ps.ALPHA, abs=0.01)
+
+
+def test_a_lead_lag_coincidence_has_to_get_the_arrow_right_too():
+    """
+    Surviving lead-lag means clearing BH *and* both halves naming the same
+    leader. A noise pair clears the first by luck at rate alpha and the
+    second at 1/2, so the bar a survivor count is measured against is half
+    as high. Leaving it at alpha would quietly flatter the screen by 2x.
+    """
+    out = ps.scan(independent(14), "lead-lag", min_corr=0.0)
+    f = out["funnel"]
+    assert f["expected_by_chance"] == pytest.approx(
+        f["retested"] * ps.ALPHA * 0.5, abs=0.01)
+
+
+def test_a_pair_that_swaps_leader_between_halves_does_not_survive():
+    """
+    The measurement that forced this: across 14 real targets, 75 pairs
+    cleared BH and only 53% agreed on direction — and pure noise agrees 50%
+    of the time. A screen reporting all 75 is reporting coincidences.
+    """
+    out = ps.scan(independent(16), "lead-lag", min_corr=0.0)
+    flipped = [r for r in out["rows"] if not r["same_direction"]]
+    assert flipped, "fixture produced no disagreeing pairs to check"
+    assert all(r["survives"] is False for r in flipped)
+
+    # And the count in the funnel is the filtered one, not the BH one.
+    assert out["funnel"]["survivors"] == sum(
+        1 for r in out["rows"] if r["survives"])
+    assert all(r["same_direction"] for r in out["rows"] if r["survives"])
+
+
+def test_direction_agreement_is_not_applied_to_cointegration():
+    """A spread has no direction to disagree about."""
+    out = ps.scan(independent(12), "pair-trade", min_corr=0.0)
+    assert all("same_direction" not in r for r in out["rows"])
 
 
 def test_the_raw_holdout_count_is_reported_beside_what_noise_would_give():

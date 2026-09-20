@@ -253,7 +253,7 @@ def sector_of() -> dict:
 
 def discover(tickers: list[str], kind: str = "pair-trade", *,
              lookback_days: int = DISCOVER_DAYS, min_corr: float | None = None,
-             within_sector: bool = False) -> dict:
+             within_sector: bool = False, target: str | None = None) -> dict:
     """
     Search a whole list for pairs, instead of being told which to test.
 
@@ -273,10 +273,16 @@ def discover(tickers: list[str], kind: str = "pair-trade", *,
     if prices.empty:
         raise RuntimeError("行情暂时读取不到 — 请稍后重试")
 
-    groups = sector_of() if within_sector else None
+    if target and target not in codes:
+        raise LookupError(f"{target} 不在自选股里 — 先把它加进自选股")
+
+    # A target replaces the shortlist, so the sector restriction and the
+    # correlation floor have nothing left to do: every peer is tested either
+    # way, and saying otherwise on screen would be a lie about the funnel.
+    groups = sector_of() if (within_sector and not target) else None
     out = pair_scan.scan(prices, kind,
                          min_corr=pair_scan.MIN_CORR if min_corr is None else min_corr,
-                         within=groups)
+                         within=groups, target=target or None)
 
     names = _names(sorted({c for r in out["rows"] for c in (r["a"], r["b"])}))
     sectors = groups if groups is not None else sector_of()
@@ -286,6 +292,9 @@ def discover(tickers: list[str], kind: str = "pair-trade", *,
         row["sector_a"] = sectors.get(row["a"], "")
         row["sector_b"] = sectors.get(row["b"], "")
     out["requested"] = len(codes)
-    out["within_sector"] = bool(within_sector)
+    out["within_sector"] = bool(within_sector and not target)
     out["lookback_days"] = lookback_days
+    out["target"] = target or None
+    if target:
+        out["target_name"] = _names([target]).get(target, target)
     return out

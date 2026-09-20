@@ -27,7 +27,8 @@ import discover_cache as dc  # noqa: E402
 import market_clock as mc  # noqa: E402
 
 WATCH = ["600519", "000001", "600522"]
-PARAMS = {"lookback_days": 504, "min_corr": 0.45, "within_sector": False}
+PARAMS = {"lookback_days": 504, "min_corr": 0.45, "within_sector": False,
+          "target": None}
 RESULT = {"kind": "pair-trade", "rows": [{"a": "600519", "b": "000001"}],
           "funnel": {"survivors": 1}}
 
@@ -81,6 +82,7 @@ def test_the_same_search_comes_back_without_re_running():
     {"min_corr": 0.6},                             # a different shortlist
     {"within_sector": True},                       # a different candidate set
     {"watch": WATCH + ["300750"]},                 # a different universe
+    {"target": "600519"},                          # a different stock's peers
 ])
 def test_anything_that_changes_the_answer_is_a_miss(change):
     db = FakeDB()

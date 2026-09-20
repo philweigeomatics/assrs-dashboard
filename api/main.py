@@ -1529,15 +1529,23 @@ def lead_lag(req: LeadLagReq, user: AppUser = Depends(current_user)):
 
 
 class DiscoverReq(BaseModel):
-    """Search the watchlist for pairs, rather than being told which to test."""
+    """
+    Search the watchlist for pairs, rather than being told which to test.
+
+    `target` narrows the search to one stock's peers. It is a different and
+    much cheaper question — 79 pairs rather than 3,160 — so the correlation
+    floor and the sector restriction do not apply when it is set.
+    """
     kind: str = Field("pair-trade", pattern="^(pair-trade|lead-lag)$")
     lookback_days: int = Field(504, ge=252, le=1000)
     min_corr: float = Field(0.45, ge=0.0, le=0.95)
     within_sector: bool = False
+    target: str | None = Field(None, pattern=r"^\d{6}$")
 
 
 def _discover_key(user: AppUser, kind: str, lookback_days: int,
-                  min_corr: float, within_sector: bool):
+                  min_corr: float, within_sector: bool,
+                  target: str | None = None):
     """(watchlist codes, cache key) for one search. Shared by the GET and POST."""
     import discover_cache
     import market_clock
@@ -1547,7 +1555,7 @@ def _discover_key(user: AppUser, kind: str, lookback_days: int,
         rows = data_manager.get_watchlist() or []
     codes = [str(r.get("ticker") or "") for r in rows]
     params = {"lookback_days": lookback_days, "min_corr": min_corr,
-              "within_sector": within_sector}
+              "within_sector": within_sector, "target": target}
     return codes, discover_cache.key_of(kind, params, codes,
                                         market_clock.latest_session())
 
@@ -1558,6 +1566,7 @@ def strategies_discover_stored(kind: str = Query("pair-trade",
                                lookback_days: int = Query(504, ge=252, le=1000),
                                min_corr: float = Query(0.45, ge=0.0, le=0.95),
                                within_sector: bool = Query(False),
+                               target: str | None = Query(None, pattern=r"^\d{6}$"),
                                user: AppUser = Depends(current_user)):
     """
     The stored result for this exact search, or null. NEVER computes.
@@ -1569,7 +1578,8 @@ def strategies_discover_stored(kind: str = Query("pair-trade",
     two-minute job by accident.
     """
     import discover_cache
-    _, key = _discover_key(user, kind, lookback_days, min_corr, within_sector)
+    _, key = _discover_key(user, kind, lookback_days, min_corr, within_sector,
+                           target)
     return discover_cache.load(user.id, key)
 
 
@@ -1596,7 +1606,7 @@ def strategies_discover(req: DiscoverReq, force: bool = Query(False),
     import discover_cache
 
     codes, key = _discover_key(user, req.kind, req.lookback_days,
-                               req.min_corr, req.within_sector)
+                               req.min_corr, req.within_sector, req.target)
     if not codes:
         raise HTTPException(404, "自选股为空 — 先在自选股页面添加股票")
 
@@ -1608,7 +1618,8 @@ def strategies_discover(req: DiscoverReq, force: bool = Query(False),
     try:
         out = lead_lag_api.discover(
             codes, req.kind, lookback_days=req.lookback_days,
-            min_corr=req.min_corr, within_sector=req.within_sector)
+            min_corr=req.min_corr, within_sector=req.within_sector,
+            target=req.target)
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:

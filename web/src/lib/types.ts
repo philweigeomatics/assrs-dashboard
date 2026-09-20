@@ -941,6 +941,19 @@ export type DiscoverRow = {
   beta?: Num; half_life?: Num; tradeable?: boolean;
 };
 
+/**
+ * One search. `target` narrows it to that stock's peers, which is a cheaper
+ * question than all-pairs and makes min_corr / within_sector inapplicable —
+ * the server ignores both when it is set.
+ */
+export type DiscoverArgs = {
+  kind: "pair-trade" | "lead-lag";
+  lookback_days: number;
+  min_corr: number;
+  within_sector: boolean;
+  target?: string | null;
+};
+
 export type DiscoverResult = {
   kind: "pair-trade" | "lead-lag";
   /** Served from storage rather than re-run. */
@@ -951,13 +964,20 @@ export type DiscoverResult = {
   requested: number;
   within_sector: boolean;
   lookback_days: number;
+  /** Set when the search was about one stock's peers rather than all pairs. */
+  target?: string | null;
+  target_name?: string | null;
   sessions: number;
   train: { from: string; to: string; sessions: number };
   test: { from: string; to: string; sessions: number };
   /** The whole point: four survivors mean nothing without the 3,160 tested. */
   funnel: {
     pairs_possible: number; pairs_correlated: number; shortlisted: number;
-    min_corr: number; universe: number; screened: number; retested: number;
+    /** null when a target replaced the shortlist — no filter was applied. */
+    min_corr: number | null;
+    targeted?: boolean;
+    target?: string;
+    universe: number; screened: number; retested: number;
     /** Cleared the holdout on the RAW threshold — the counterpart to
      *  expected_by_chance, which is also uncorrected. */
     retest_hits: number;

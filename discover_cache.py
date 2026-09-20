@@ -15,6 +15,7 @@ of the validity check:
     lookback_days      a different window is a different history
     min_corr           a different shortlist
     within_sector      a different candidate set
+    target             a different stock's peers is a different question
     the latest session a new close is new evidence
 
 Nothing else can change the answer, so nothing else should expire it — which
@@ -65,6 +66,9 @@ def key_of(kind: str, params: dict, tickers, session: str) -> dict:
         # float equality would make every load a miss.
         "min_corr": round(float(params.get("min_corr") or 0), 3),
         "within_sector": bool(params.get("within_sector")),
+        # A different target is a different search entirely. Leaving it out
+        # would serve one stock's peers as another's.
+        "target": str(params.get("target") or ""),
         "watchlist": fingerprint(tickers),
         "session": str(session),
     }

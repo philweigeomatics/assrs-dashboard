@@ -78,6 +78,32 @@ def usable(prices: pd.DataFrame, min_sessions: int) -> list[str]:
             if int(prices[c].notna().sum()) >= min_sessions]
 
 
+def peers_of(columns, target: str) -> tuple[list[tuple], dict]:
+    """
+    Every other stock, paired with one target. No correlation filter.
+
+    The filter exists to make an all-pairs sweep affordable: eighty stocks are
+    3,160 pairs and 6,320 directional tests, so the field has to be narrowed
+    before anything is tested. Naming a target narrows it by a different and
+    better means — 79 pairs, 158 tests — and at that size there is nothing
+    left to afford. Testing every peer is strictly more informative than
+    testing the most correlated fifth of them.
+
+    It is also a different QUESTION, and the better one. "Are there any
+    lead-lag pairs among my eighty stocks" is a fishing expedition whose
+    honest answer is usually no. "What leads 长电科技" is something a person
+    actually wants to know, and the multiple-testing bill for asking it is
+    forty times smaller.
+
+    The target is always `a`, so "who leads" reads consistently downstream.
+    """
+    if target not in columns:
+        raise LookupError(f"{target} 不在可用的自选股里 — 可能是历史太短或行情缺失")
+    pairs = [(target, other, float("nan")) for other in columns if other != target]
+    return pairs, {"pairs_possible": len(pairs), "pairs_correlated": len(pairs),
+                   "shortlisted": len(pairs), "min_corr": None, "target": target}
+
+
 def shortlist(rets: pd.DataFrame, *, min_corr: float = MIN_CORR,
               cap: int = MAX_CANDIDATES,
               within: dict[str, str] | None = None) -> tuple[list[tuple], dict]:
@@ -191,9 +217,14 @@ def _half_life(spread: pd.Series) -> float:
 # ── the funnel ───────────────────────────────────────────────────────────────
 def scan(prices: pd.DataFrame, kind: str = "pair-trade", *,
          min_corr: float = MIN_CORR, cap: int = MAX_CANDIDATES,
-         maxlag: int = 5, within: dict[str, str] | None = None) -> dict:
+         maxlag: int = 5, within: dict[str, str] | None = None,
+         target: str | None = None) -> dict:
     """
-    Search a whole watchlist, and report how much of what was found is real.
+    Search a watchlist, and report how much of what was found is real.
+
+    With `target`, the search is every peer against that one stock and the
+    correlation filter is not applied — see peers_of. Without it, the search
+    is all pairs and the filter is what makes that affordable.
 
     Raises LookupError when the history cannot support a split — half of a
     year is not enough for a cointegration test, and a screen that ran anyway
@@ -218,8 +249,12 @@ def scan(prices: pd.DataFrame, kind: str = "pair-trade", *,
 
     # Shortlisted on the TRAINING half only. Using the whole history here
     # would let the confirming half influence which pairs got chosen, which
-    # is the leak this design exists to prevent.
-    pairs, funnel = shortlist(train_r, min_corr=min_corr, cap=cap, within=within)
+    # is the leak this design exists to prevent. Naming a target skips the
+    # step entirely, so there is no selection to leak.
+    if target:
+        pairs, funnel = peers_of(cols, target)
+    else:
+        pairs, funnel = shortlist(train_r, min_corr=min_corr, cap=cap, within=within)
 
     screened, confirmed = [], []
     for a, b, r in pairs:
@@ -238,7 +273,8 @@ def scan(prices: pd.DataFrame, kind: str = "pair-trade", *,
             te = coint_test(test_px[a], test_px[b])
         if te is None:
             continue
-        confirmed.append({"a": a, "b": b, "corr": round(r, 3),
+        confirmed.append({"a": a, "b": b,
+                          "corr": None if r != r else round(r, 3),
                           "train": tr, "test": te})
 
     qs = _bh([c["test"]["p"] for c in confirmed])
@@ -249,6 +285,7 @@ def scan(prices: pd.DataFrame, kind: str = "pair-trade", *,
     rows.sort(key=lambda r: (not r["survives"], r["q"]))
 
     funnel.update({
+        "targeted": bool(target),
         "universe": len(cols),
         "screened": len(screened),
         "retested": len(confirmed),
@@ -257,8 +294,12 @@ def scan(prices: pd.DataFrame, kind: str = "pair-trade", *,
         # corrected survivor count against an uncorrected expectation would be
         # comparing two different things and flattering the screen.
         "retest_hits": sum(1 for c in confirmed if c["test"]["p"] < ALPHA),
-        # If every retest were pure noise, this many would pass anyway.
-        "expected_by_chance": round(len(confirmed) * ALPHA, 2),
+        # If every retest were pure noise, this many would pass anyway. For
+        # lead-lag a coincidence must ALSO land the same arrow in both halves
+        # to survive, and noise does that half the time — so the bar a
+        # survivor count is measured against is half as high.
+        "expected_by_chance": round(len(confirmed) * ALPHA
+                                    * (0.5 if kind == "lead-lag" else 1.0), 2),
         "survivors": sum(1 for r in rows if r["survives"]),
         "alpha": ALPHA,
     })
@@ -276,20 +317,32 @@ def scan(prices: pd.DataFrame, kind: str = "pair-trade", *,
 
 def _row(c: dict, q: float, kind: str) -> dict:
     tr, te = c["train"], c["test"]
+    cleared = bool(q is not None and q < ALPHA)
     row = {
         "a": c["a"], "b": c["b"], "corr": c["corr"],
         "p_train": _n(tr["p"], 5), "p_test": _n(te["p"], 5),
         "q": _n(q, 5) if q is not None else None,
-        "survives": bool(q is not None and q < ALPHA),
+        "survives": cleared,
         "n_test": int(te["n"]),
     }
     if kind == "lead-lag":
+        # Does the confirming half agree about WHICH one leads? A pair that
+        # swaps direction between halves is not a weak lead — it is noise
+        # that happened to be significant twice, and a coin flip decided the
+        # arrow each time.
+        #
+        # This is a survival requirement rather than a column to read,
+        # because measured on the real watchlist it is the thing that
+        # separates the screen from a random number generator: of 75 pairs
+        # that cleared BH across 14 targets, 53% agreed on direction, and
+        # pure noise agrees 50% of the time. Solving the mixture says only
+        # about 6% of them were real. Reading "存活 19" without the arrows
+        # is reading mostly coincidences.
+        agrees = tr["leads"] == te["leads"]
         row.update({
             "leads": te["leads"], "lag": int(te["lag"]),
-            # Does the confirming half agree about WHICH one leads? A pair
-            # that swaps direction between halves is not a lead, it is noise
-            # that happened to be significant twice.
-            "same_direction": tr["leads"] == te["leads"],
+            "same_direction": agrees,
+            "survives": cleared and agrees,
         })
     else:
         row.update({
