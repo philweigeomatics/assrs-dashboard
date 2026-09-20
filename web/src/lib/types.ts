@@ -477,45 +477,42 @@ export type PairTradeResult = {
              name_a: string; name_b: string; why: string }[];
 };
 
-/** POST /strategies/lead-lag-history — one pair's history, not one verdict. */
-export type LeadLagEpisode = {
-  lag: number;
-  leads: "a" | "b";
-  from: string; to: string;
-  /** Consecutive windows, NOT a sample size — neighbours overlap heavily. */
-  windows: number;
-  mean_corr: Num; peak_corr: Num;
-  /** Longer than every rotation managed. A prompt to look, not a finding. */
-  beats_null?: boolean;
+/**
+ * POST /strategies/lead-lag-history — same-direction follow-through.
+ *
+ * Every number in σ of the FOLLOWER's own trailing volatility, and every
+ * response sign-aligned to the leader's move: positive always means "went
+ * the same way", whether the pair rose together or fell together.
+ */
+export type FollowEvent = {
+  date: string;
+  /** The leader's move that day, in percent and in its own sigma. */
+  a_ret: number; a_z: number;
+  dir: "up" | "down";
+  /** Follower's move at lag 0..maxlag, sign-aligned, in its own sigma. */
+  resp: (number | null)[];
+  /** Running total of resp from lag 1. */
+  cum: (number | null)[];
+  b_ret: (number | null)[];
 };
 
-export type LeadLagHistory = {
+export type FollowThrough = {
   a: string; b: string; name_a: string; name_b: string;
-  lookback_days: number;
-  panel: {
-    dates: string[];
-    lags: number[];
-    /** [window][lag] cross-correlation, null where it could not be computed. */
-    matrix: (number | null)[][];
-    window: number; step: number;
-    /** |r| a single window reaches by luck ~5% of the time. Not significance. */
-    band: number;
-  };
-  windows: number;
-  named: number;
-  named_share: number;
-  /** Share of directed windows whose dominant lag is 0 — i.e. no lead at all. */
-  sync_share: number;
-  share: Record<string, number>;
-  longest_run: number;
-  episodes: LeadLagEpisode[];
-  notable: number;
-  /** What this pair produces with the alignment rotated away. */
-  null: {
-    rotations: number;
-    longest_median: number; longest_max: number;
-    episodes_median: number; named_share_median: number;
-  };
+  lookback_days: number; window: number; threshold: number; maxlag: number;
+  /** Sigma the follower must clear, same direction, to count as following. */
+  follow: number;
+  from: string; to: string; sessions: number;
+  lags: { lag: number; n: number; mean: Num; median: Num; hit: Num; cum: Num }[];
+  /** The same measurement with the pair slid out of alignment. */
+  null: { lag: number; mean: number; mean_hi: number;
+          hit: number; hit_hi: number; rotations: number }[];
+  events: FollowEvent[];
+  /** Null unless a lag cleared all three conditions — see rotation.verdict. */
+  best_lag: number | null;
+  margin: Num;
+  /** Same-day response. Usually the whole story, and never a lead. */
+  same_day: Num;
+  enough: boolean;
 };
 
 /** GET /equity/{ticker} — 个股研报. */

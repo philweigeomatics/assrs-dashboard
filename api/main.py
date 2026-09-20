@@ -1562,17 +1562,18 @@ def _discover_key(user: AppUser, kind: str, lookback_days: int,
 
 class HistoryReq(BaseModel):
     """
-    One pair's lead-lag history, rather than one verdict about it.
+    One pair's follow-through, event by event.
 
-    Both codes are A-shares. The window is in trading sessions; shorter sees
-    regime changes sooner and is noisier, which is a trade the reader makes
-    rather than one made for them.
+    `window` is the trailing volatility each move is measured against;
+    `threshold` is how big a day has to be, in the leader's own sigma, to
+    count as an event at all.
     """
     a: str = Field(..., pattern=r"^\d{6}$")
     b: str = Field(..., pattern=r"^\d{6}$")
     lookback_days: int = Field(504, ge=252, le=1000)
     window: int = Field(60, ge=30, le=180)
-    step: int = Field(5, ge=1, le=20)
+    #: How big a move by the leader counts as an event, in its own sigma.
+    threshold: float = Field(1.5, ge=1.0, le=3.0)
     maxlag: int = Field(5, ge=1, le=10)
 
 
@@ -1589,7 +1590,7 @@ def strategies_lead_lag_history(req: HistoryReq,
 
     try:
         return lead_lag_api.history(req.a, req.b, lookback_days=req.lookback_days,
-                                    window=req.window, step=req.step,
+                                    window=req.window, threshold=req.threshold,
                                     maxlag=req.maxlag)
     except LookupError as exc:
         raise HTTPException(404, str(exc))

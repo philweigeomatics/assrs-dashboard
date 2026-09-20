@@ -1,7 +1,7 @@
 import { devFakeToken, supabase } from "./supabase";
 import type {
   DiscoverArgs,
-  LeadLagHistory,
+  FollowThrough,
   AlertFeed, Analysis, BasketStats, CompareResult, HistoryRef, PairStats, SectorAnalysis,
   AlertNote, EquityBrief, NoteScorecard, PairTradeResult, SimResult, StockRef,
   StrategyResult, WhatIfAi,
@@ -133,9 +133,9 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
-  leadLagHistory: (body: { a: string; b: string; lookback_days: number;
-                           window: number }) =>
-    call<LeadLagHistory>("/strategies/lead-lag-history", {
+  followThrough: (body: { a: string; b: string; lookback_days: number;
+                          threshold: number }) =>
+    call<FollowThrough>("/strategies/lead-lag-history", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),

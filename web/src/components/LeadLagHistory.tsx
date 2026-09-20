@@ -1,71 +1,55 @@
 /**
- * 领先滞后历史 — when did A lead B, by how much, and for how long.
+ * 跟随分析 — on the days one moved, did the other follow?
  *
- * Not a verdict. The screen beside this one answers "is there a relationship
- * in this history"; that answer is one arrow and one q-value for two years of
- * data, and we have measured what it costs: half the pairs that cleared the
- * correction pointed the other way in the second half of the same history.
+ * Same direction only, and measured in the follower's own volatility. Both
+ * of those replace a correlation reading that got them wrong: a correlation
+ * treats an inverse move as a relationship of equal standing, and it treats
+ * a 1% move as a response from a stock whose ordinary day is 3%.
  *
- * So this draws the history instead and lets a person read it. Each column is
- * a 60-session window, each row a lag, each cell the cross-correlation. A
- * stripe that holds at one lag for months is a behaviour; a speckle is two
- * unrelated stocks.
- *
- * THE NULLS ARE NOT DECORATION. Every rolling window has a best lag, noise
- * included — and because neighbouring windows share 55 of their 60 sessions,
- * a chance correlation persists for a dozen windows by construction. On forty
- * pairs of independent random walks the longest run had a MEDIAN of 9. So
- * what rotation produces sits immediately under the panel, as bars rather
- * than a second heatmap: the same information in a fraction of the space, and
- * no risk of a reader mistaking the placebo for the real thing. Anyone
- * reading the panel alone will see relationships that are not there.
+ * The output is dated events rather than an average. An average over two
+ * years cannot tell you whether the behaviour is still there; twenty dated
+ * rows can.
  */
 
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import type { ApiError } from "../lib/api";
-import type { LeadLagHistory as History } from "../lib/types";
+import type { FollowThrough } from "../lib/types";
 import { fixed, signed } from "../lib/format";
 
-//: Big enough to read a single cell. 140 windows at this width overflow a
-//: desktop column, which is what the horizontal scroll is for — shrinking
-//: the cells until they all fit produces a strip nobody can interpret.
-const CELL = 14;       // px per window column
-const ROW = 24;        // px per lag row
-const GUTTER = 88;     // px for the lag labels — enough for a 4-char name
-
-/** Blue when A leads, violet when B does, grey under the noise band. */
-function cellColour(v: number | null, band: number): string {
-  if (v == null) return "transparent";
-  const mag = Math.abs(v);
-  if (mag < band) return `rgba(148,163,184,${0.10 + mag * 0.3})`;
-  const strength = Math.min(1, (mag - band) / (0.7 - band));
-  const alpha = 0.25 + strength * 0.65;
-  return v > 0
-    ? `rgba(6,182,212,${alpha})`
-    : `rgba(168,85,247,${alpha})`;
-}
+/** Sigma at which a bar is drawn full width. */
+const SCALE = 1.6;
 
 export function LeadLagHistory({ a, b, nameA, nameB }: {
   a: string; b: string; nameA: string; nameB: string;
 }) {
   const [days, setDays] = useState(504);
-  const [window, setWindow] = useState(60);
+  const [threshold, setThreshold] = useState(1.5);
+  const [flip, setFlip] = useState(false);
+  const lead = flip ? b : a;
+  const follow = flip ? a : b;
+  const leadName = flip ? nameB : nameA;
+  const followName = flip ? nameA : nameB;
+
   const run = useMutation({
-    mutationFn: () => api.leadLagHistory({ a, b, lookback_days: days, window }),
+    mutationFn: () => api.followThrough({
+      a: lead, b: follow, lookback_days: days, threshold,
+    }),
   });
   const d = run.data;
 
   return (
     <div className="flex flex-col gap-2.5 border-t border-line pt-3">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <h3 className="text-[13.5px] font-semibold">🕰 领先滞后历史</h3>
+        <h3 className="text-[13.5px] font-semibold">🔁 跟随分析</h3>
         <span className="label">
-          不下结论 —— 把「什么时候、领先几天、持续多久」摊开，由你判断
+          {leadName} 大涨大跌的那些天，{followName} 之后跟不跟
         </span>
         <div className="ml-auto flex items-center gap-2">
-          <label className="label flex items-center gap-1" title="总回看长度">
+          <button onClick={() => { setFlip(!flip); run.reset(); }}
+            className="h-7 px-2 rounded-md bg-sunken text-[12px]">⇄ 换方向</button>
+          <label className="label flex items-center gap-1">
             回看
             <select value={days} onChange={(e) => setDays(Number(e.target.value))}
               className="h-7 px-1 rounded-md bg-sunken text-[12.5px] tnum outline-none">
@@ -73,16 +57,18 @@ export function LeadLagHistory({ a, b, nameA, nameB }: {
             </select>
           </label>
           <label className="label flex items-center gap-1"
-            title="每个窗口多少个交易日。短一些能更早看到关系变化，也更容易看到噪声。">
-            窗口
-            <select value={window} onChange={(e) => setWindow(Number(e.target.value))}
+            title="多大的一天才算「动了」，按这只股票自己的波动衡量">
+            起点
+            <select value={threshold}
+              onChange={(e) => setThreshold(Number(e.target.value))}
               className="h-7 px-1 rounded-md bg-sunken text-[12.5px] tnum outline-none">
-              {[40, 60, 90, 120].map((v) => <option key={v} value={v}>{v} 天</option>)}
+              {[1.2, 1.5, 2.0, 2.5].map((v) =>
+                <option key={v} value={v}>{v.toFixed(1)}σ</option>)}
             </select>
           </label>
           <button onClick={() => run.mutate()} disabled={run.isPending}
             className="h-8 px-3 rounded-lg bg-cyan text-white text-[13px] font-semibold disabled:opacity-60">
-            {run.isPending ? "计算中…" : d ? "重新计算" : "看历史"}
+            {run.isPending ? "计算中…" : d ? "重新计算" : "分析"}
           </button>
         </div>
       </div>
@@ -90,247 +76,163 @@ export function LeadLagHistory({ a, b, nameA, nameB }: {
       {run.isError && (
         <p className="text-[12.5px] text-up">{(run.error as ApiError).message}</p>
       )}
-
-      {d && (
-        <>
-          <Verdict d={d} />
-
-          <Panel panel={d.panel} nameA={nameA} nameB={nameB} />
-          {/* Directly below, so the comparison is unavoidable. */}
-          <div className="flex flex-col gap-1">
-            <p className="label leading-snug">
-              把 {nameB} 的时间轴整体转动一圈，两只股票之间真实的对应关系就没了 ——
-              再跑同样的计算 {d.null.rotations} 次，得到的就是这个方法
-              在「什么都没有」时会给出的数字。实际那一条要明显高过它才说明问题。
-            </p>
-            <NullBar d={d} />
-          </div>
-
-          {d.episodes.length > 0 && (
-            <div className="overflow-x-auto">
-              <table className="w-full text-[12px] border-collapse">
-                <thead>
-                  <tr className="text-ink-mute">
-                    <th className="text-left font-normal pb-1 pr-3">时间段</th>
-                    <th className="text-left font-normal pb-1 pr-3">谁先动</th>
-                    <th className="text-right font-normal pb-1 px-2">相差</th>
-                    <th className="text-right font-normal pb-1 px-2"
-                      title="连续多少个窗口保持同一个滞后。相邻窗口重叠很多，所以这不是独立样本数。">
-                      持续（窗口）
-                    </th>
-                    <th className="text-right font-normal pb-1 px-2">平均 r</th>
-                    <th className="text-right font-normal pb-1 pl-2">最强 r</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {d.episodes.map((e, i) => (
-                    <tr key={i} className={`border-t border-line ${
-                      e.beats_null ? "" : "opacity-55"}`}>
-                      <td className="py-1 pr-3 font-mono tnum whitespace-nowrap">
-                        {e.from} → {e.to}
-                      </td>
-                      <td className="py-1 pr-3 whitespace-nowrap">
-                        {e.lag === 0 ? (
-                          <span className="text-ink-dim">同步（没有先后）</span>
-                        ) : (
-                          <>{e.leads === "a" ? nameA : nameB}<span className="text-ink-mute"> 先动</span></>
-                        )}
-                      </td>
-                      <td className="py-1 px-2 text-right tnum">
-                        {e.lag === 0 ? "—" : `${Math.abs(e.lag)} 天`}
-                      </td>
-                      <td className="py-1 px-2 text-right tnum">
-                        {e.windows}
-                        {e.beats_null && (
-                          <span className="text-up" title="比所有轮转出来的最长片段都长">
-                            {" "}★
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-1 px-2 text-right tnum">{signed(e.mean_corr, 2)}</td>
-                      <td className="py-1 pl-2 text-right tnum">{signed(e.peak_corr, 2)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <p className="label mt-1.5 leading-snug">
-                ★ 表示这段比 {d.null.rotations} 次轮转里最长的那一段还长
-                （轮转最长 {d.null.longest_max} 个窗口）。没有 ★ 的段落不代表是假的，
-                只代表<b>光凭长度分辨不出来</b> —— 相邻窗口重叠 {d.panel.window - d.panel.step}/
-                {d.panel.window} 个交易日，连续十几个窗口保持同一个滞后，随机数据里也很常见。
-              </p>
-            </div>
-          )}
-        </>
-      )}
+      {d && <Report d={d} leadName={leadName} followName={followName} />}
       {!d && !run.isPending && (
         <p className="label py-3 text-center">
-          点「看历史」——会画出每个窗口里两只股票在各个滞后上的相关程度
+          点「分析」——只看同向跟随，幅度按 {followName} 自己的波动折算
         </p>
       )}
     </div>
   );
 }
 
-/** The one-line reading, which is usually "they just move together". */
-function Verdict({ d }: { d: History }) {
-  const sync = d.sync_share >= 0.6;
-  const quiet = d.named_share <= d.null.named_share_median + 0.1;
-  return (
-    <div className="rounded-lg bg-sunken px-2.5 py-2 flex flex-col gap-1">
-      <p className="text-[12.5px] leading-snug">
-        {quiet ? (
-          <>这两只在大部分时间里<b>没有稳定的对应关系</b> ——
-            有方向的窗口只占 {(d.named_share * 100).toFixed(0)}%，
-            而随机轮转也有 {(d.null.named_share_median * 100).toFixed(0)}%。</>
-        ) : sync ? (
-          <><b>它们基本是同步的</b>：在有方向的窗口里，
-            {(d.sync_share * 100).toFixed(0)}% 的主导滞后是 0 天 ——
-            也就是同一天一起动，<b>没有可以抢跑的时间差</b>。
-            剩下那些有先后的片段更短，也更零散。</>
-        ) : (
-          <>主导滞后有 {(d.sync_share * 100).toFixed(0)}% 的时间是 0 天（同步），
-            其余时间出现过 {d.episodes.filter((e) => e.lag !== 0).length} 段有先后的关系
-            —— 具体看下表，长度和方向都在变。</>
-        )}
-      </p>
-      <p className="label leading-snug">
-        {d.windows} 个窗口 · 每个 {d.panel.window} 个交易日 · 噪声带 |r| ≥ {d.panel.band}
-        {" · "}最长连续 {d.longest_run} 个窗口（轮转出来的中位是 {d.null.longest_median}，
-        最长 {d.null.longest_max}）
-      </p>
-    </div>
-  );
-}
-
-function Panel({ panel, nameA, nameB }: {
-  panel: History["panel"]; nameA: string; nameB: string;
+function Report({ d, leadName, followName }: {
+  d: FollowThrough; leadName: string; followName: string;
 }) {
-  const w = panel.dates.length * CELL;
-  // A date every ~10 columns; more than that and the labels collide.
-  const tickEvery = Math.max(1, Math.ceil(120 / CELL));
+  const byLag = Object.fromEntries(d.null.map((n) => [n.lag, n]));
+  const sameDay = d.lags.find((l) => l.lag === 0);
+  const best = d.best_lag ? d.lags.find((l) => l.lag === d.best_lag) : null;
+
   return (
-    <div className="flex flex-col gap-1.5">
-      <Legend band={panel.band} nameA={nameA} nameB={nameB} />
-      <div className="overflow-x-auto">
-        <div style={{ width: w + GUTTER, minWidth: "100%" }}>
-          {panel.lags.map((lag, r) => (
-            <div key={lag} className="flex items-center" style={{ height: ROW }}>
-              <span className="shrink-0 text-[11px] tnum text-right pr-2
-                whitespace-nowrap overflow-hidden"
-                style={{ width: GUTTER }}>
-                {lag === 0
-                  ? <span className="text-ink-dim">同步</span>
-                  : <>
-                      <span className="text-ink-mute">
-                        {(lag > 0 ? nameA : nameB).slice(0, 4)}
-                      </span>
-                      <span className="text-ink-dim"> {Math.abs(lag)}天</span>
-                    </>}
-              </span>
-              <div className="flex">
-                {panel.matrix.map((row, c) => (
-                  <div key={c}
-                    title={`${panel.dates[c]} · ${lag === 0 ? "同步"
-                      : `${lag > 0 ? nameA : nameB} 先动 ${Math.abs(lag)} 天`}`
-                      + ` · r=${fixed(row[r], 2)}`}
-                    style={{ width: CELL - 1, height: ROW - 2, marginRight: 1,
-                             borderRadius: 2,
-                             background: cellColour(row[r] ?? null, panel.band) }} />
+    <>
+      <div className="rounded-lg bg-sunken px-2.5 py-2 flex flex-col gap-1">
+        <p className="text-[12.5px] leading-snug">
+          {!d.enough ? (
+            <>只有 <b>{d.events.length}</b> 次事件，太少，不足以下判断。
+              可以把「起点」调低，或拉长回看天数。</>
+          ) : best ? (
+            <><b>{leadName} 领先 {d.best_lag} 天</b>：它大动之后第 {d.best_lag} 天，
+              {followName} 平均同向走 <b>{signed(best.mean, 2)}σ</b>，
+              {d.events.length} 次里 <b>{((best.hit ?? 0) * 100).toFixed(0)}%</b> 跟了上来
+              （随机轮转只有 {signed(byLag[d.best_lag ?? 0]?.mean_hi, 2)}σ）。</>
+          ) : (
+            <><b>没有可用的时间差。</b>
+              {sameDay && (sameDay.mean ?? 0) >= 0.5
+                ? <> 两只是<b>同一天一起动</b>的（当天 {signed(sameDay.mean, 2)}σ），
+                    之后几天就不再跟了 —— 想抢跑没有窗口。</>
+                : <> {leadName} 大动之后，{followName} 并没有明显跟随。</>}
+            </>
+          )}
+        </p>
+        <p className="label">
+          {d.from} → {d.to} · {leadName} 有 {d.events.length} 天动了超过 {d.threshold}σ
+          · 幅度按 {followName} 自己前 {d.window} 天的波动折算
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px]">
+          <span className="text-ink-mute">第几天的同向跟随（{followName} 的 σ）</span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-3 h-2 rounded-sm bg-cyan" />实际
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-3 h-2 rounded-sm bg-ink-mute/50" />随机轮转
+          </span>
+          <span className="text-ink-mute">虚线＝{d.follow}σ，算「跟上了」的门槛</span>
+        </div>
+        {d.lags.map((l) => (
+          <LagBar key={l.lag} row={l} nul={byLag[l.lag]} follow={d.follow}
+            best={l.lag === d.best_lag} />
+        ))}
+      </div>
+
+      {d.events.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[12px] border-collapse">
+            <thead>
+              <tr className="text-ink-mute">
+                <th className="text-left font-normal pb-1 pr-3">{leadName} 大动那天</th>
+                <th className="text-right font-normal pb-1 px-2">涨跌</th>
+                <th className="text-right font-normal pb-1 px-2"
+                  title="以它自己前 60 天的波动衡量">幅度</th>
+                {d.lags.filter((l) => l.lag > 0).map((l) => (
+                  <th key={l.lag} className="text-right font-normal pb-1 px-2">
+                    +{l.lag}天
+                  </th>
                 ))}
-              </div>
-            </div>
-          ))}
-          <div className="flex" style={{ paddingLeft: GUTTER }}>
-            {panel.dates.map((dt, c) => (
-              <div key={c} style={{ width: CELL }} className="shrink-0">
-                {c % tickEvery === 0 && (
-                  <span className="block text-[10px] text-ink-mute font-mono whitespace-nowrap">
-                    {dt.slice(2, 7)}
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
+                <th className="text-right font-normal pb-1 pl-2"
+                  title="之后几天累计的同向幅度">累计</th>
+              </tr>
+            </thead>
+            <tbody>
+              {d.events.slice(0, 25).map((e, i) => (
+                <tr key={i} className="border-t border-line">
+                  <td className="py-1 pr-3 font-mono tnum whitespace-nowrap">
+                    {e.date}
+                    <span className={`ml-1.5 ${e.dir === "up" ? "text-up" : "text-down"}`}>
+                      {e.dir === "up" ? "↑" : "↓"}
+                    </span>
+                  </td>
+                  <td className={`py-1 px-2 text-right font-mono tnum ${
+                    e.a_ret > 0 ? "text-up" : "text-down"}`}>
+                    {signed(e.a_ret, 1, "%")}
+                  </td>
+                  <td className="py-1 px-2 text-right font-mono tnum text-ink-dim">
+                    {fixed(Math.abs(e.a_z), 1)}σ
+                  </td>
+                  {d.lags.filter((l) => l.lag > 0).map((l) => (
+                    <Cell key={l.lag} v={e.resp[l.lag] ?? null} follow={d.follow} />
+                  ))}
+                  <Cell v={e.cum[d.maxlag] ?? null} follow={d.follow} bold />
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="label mt-1.5 leading-snug">
+            表里的数字是 {followName} 当天走了多少个自己的 σ，<b>正数＝和 {leadName} 同向</b>。
+            所以 −1% 对一只平时 ±3% 的股票只有 −0.3σ，算不上跟随。
+            {d.events.length > 25 && ` 只列出最近 25 次，共 ${d.events.length} 次。`}
+          </p>
         </div>
-      </div>
-    </div>
+      )}
+    </>
   );
 }
 
-/**
- * What the colours mean, without hovering.
- *
- * The row says WHO moved first; the colour says whether they moved the same
- * way or opposite ways. Two different things encoded in two different
- * channels, which is unreadable unless it is spelled out.
- */
-function Legend({ band, nameA, nameB }: {
-  band: number; nameA: string; nameB: string;
+function LagBar({ row, nul, follow, best }: {
+  row: FollowThrough["lags"][number];
+  nul?: FollowThrough["null"][number];
+  follow: number; best: boolean;
 }) {
-  const swatch = (bg: string) => (
-    <span className="inline-block w-4 h-3 rounded-sm align-middle" style={{ background: bg }} />
-  );
+  const pct = (v: number) => `${Math.min(100, (Math.abs(v) / SCALE) * 100)}%`;
+  const mean = row.mean ?? 0;
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px]">
-      <span className="flex items-center gap-1.5">
-        <span className="text-ink-mute">行＝谁先动：</span>
-        <span>上半 {nameA}</span>
-        <span className="text-ink-dim">·</span>
-        <span>中间 同步</span>
-        <span className="text-ink-dim">·</span>
-        <span>下半 {nameB}</span>
+    <div className="flex items-center gap-2 text-[11.5px]">
+      <span className={`w-16 shrink-0 tnum text-right ${
+        best ? "font-semibold" : "text-ink-mute"}`}>
+        {row.lag === 0 ? "当天" : `第 ${row.lag} 天`}
       </span>
-      <span className="flex items-center gap-1.5">
-        <span className="text-ink-mute">色＝</span>
-        {swatch("rgba(6,182,212,0.9)")}
-        <span title="先动的那只涨，另一只几天后也涨；跌也一起跌">同向</span>
-        {swatch("rgba(168,85,247,0.9)")}
-        <span title="先动的那只涨，另一只几天后反而跌 —— 时间上仍是领先，方向相反">
-          反向<span className="text-ink-mute">（一涨一跌）</span>
-        </span>
-        {swatch("rgba(148,163,184,0.25)")}
-        <span className="text-ink-mute">|r| &lt; {band}（噪声）</span>
-      </span>
-      <span className="flex items-center gap-1.5 text-ink-mute">
-        深浅＝强弱
-        {swatch("rgba(6,182,212,0.3)")}
-        {swatch("rgba(6,182,212,0.55)")}
-        {swatch("rgba(6,182,212,0.9)")}
+      <div className="flex-1 relative h-5 rounded-sm bg-panel overflow-hidden">
+        {/* The follow threshold, so a bar can be judged without arithmetic. */}
+        <div className="absolute top-0 bottom-0 border-l border-dashed border-line-bright"
+          style={{ left: pct(follow) }} />
+        <div className={`absolute top-0.5 h-2 rounded-sm ${
+          mean >= 0 ? "bg-cyan" : "bg-down"}`} style={{ width: pct(mean) }} />
+        {nul && (
+          <div className="absolute bottom-0.5 h-1.5 rounded-sm bg-ink-mute/50"
+            style={{ width: pct(nul.mean_hi) }} />
+        )}
+      </div>
+      <span className={`w-12 shrink-0 tnum text-right ${
+        best ? "font-semibold text-up" : ""}`}>{signed(row.mean, 2)}σ</span>
+      <span className="w-10 shrink-0 tnum text-right text-ink-mute">
+        {row.hit == null ? "—" : `${(row.hit * 100).toFixed(0)}%`}
       </span>
     </div>
   );
 }
 
-/** The null as numbers rather than a second heatmap — same information, a
- *  fraction of the screen, and harder to mistake for the real thing. */
-function NullBar({ d }: { d: History }) {
-  const bar = (label: string, real: number, sham: number, suffix = "") => {
-    const max = Math.max(real, sham, 1);
-    return (
-      <div className="flex items-center gap-2 text-[11.5px]">
-        <span className="w-24 shrink-0 text-ink-mute">{label}</span>
-        <div className="flex-1 flex flex-col gap-0.5">
-          <div className="flex items-center gap-1.5">
-            <div className="h-2 rounded-sm bg-cyan"
-              style={{ width: `${(real / max) * 100}%` }} />
-            <span className="tnum">{real}{suffix} 实际</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <div className="h-2 rounded-sm bg-ink-mute/50"
-              style={{ width: `${(sham / max) * 100}%` }} />
-            <span className="tnum text-ink-mute">{sham}{suffix} 轮转</span>
-          </div>
-        </div>
-      </div>
-    );
-  };
+function Cell({ v, follow, bold }: {
+  v: number | null; follow: number; bold?: boolean;
+}) {
+  const followed = v != null && v >= follow;
   return (
-    <div className="rounded-lg bg-sunken px-2.5 py-2 flex flex-col gap-2">
-      {bar("最长连续", d.longest_run, d.null.longest_max, " 窗口")}
-      {bar("有方向的窗口", Math.round(d.named_share * 100),
-           Math.round(d.null.named_share_median * 100), "%")}
-      {bar("片段数", d.episodes.length, Math.round(d.null.episodes_median), " 段")}
-    </div>
+    <td className={`py-1 px-2 text-right font-mono tnum ${bold ? "font-medium" : ""} ${
+      v == null ? "text-ink-mute"
+        : followed ? "text-up"
+          : v < 0 ? "text-ink-dim" : "text-ink-mute"}`}>
+      {v == null ? "—" : signed(v, 1)}
+    </td>
   );
 }

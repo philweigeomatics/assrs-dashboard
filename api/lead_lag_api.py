@@ -301,17 +301,18 @@ def discover(tickers: list[str], kind: str = "pair-trade", *,
 
 
 def history(a: str, b: str, *, lookback_days: int = DISCOVER_DAYS,
-            window: int = 60, step: int = 5, maxlag: int = 5) -> dict:
+            window: int = 60, threshold: float = 1.5,
+            maxlag: int = 5) -> dict:
     """
-    The rolling lead-lag panel for one pair, with its own null distribution.
+    On the days A moved, did B follow — same direction, B's own units.
 
-    Deliberately not a verdict. `analyse` answers "is there a lead-lag
-    relationship in this history"; this answers "what did the relationship
-    look like, month by month" — which is the question a person can actually
-    bring judgement to, and the one a single arrow and q-value destroys.
+    Not a verdict and not a correlation. See rotation.py for why both of
+    those were the wrong shape: a correlation counts an inverse move as a
+    relationship, and it counts a 1% move from a 3%-a-day stock as a
+    response. This reports dated events and the follow-through after each.
     """
-    import lead_lag_profile as llp
     import lead_lag_stats as lls
+    import rotation as rot
 
     codes = [c for c in (a, b) if c and c.isdigit() and len(c) == 6]
     if len(set(codes)) != 2:
@@ -322,15 +323,24 @@ def history(a: str, b: str, *, lookback_days: int = DISCOVER_DAYS,
     if rets.empty or a not in rets.columns or b not in rets.columns:
         raise RuntimeError("行情暂时读取不到 — 请稍后重试")
 
-    panel = llp.profile(rets[a], rets[b], window=window, step=step, maxlag=maxlag)
-    null = llp.nulls(rets[a], rets[b], window=window, step=step, maxlag=maxlag)
-    out = llp.summarise(panel, null)
+    kw = {"window": window, "threshold": threshold, "maxlag": maxlag}
+    fired = rot.follow_through(rets[a], rets[b], **kw)
+    lags = rot.summarise(fired)
+    null = rot.nulls(rets[a], rets[b], **kw)
+    call = rot.verdict(lags, null)
 
     names = _names([a, b])
     return {
         "a": a, "b": b,
         "name_a": names.get(a, a), "name_b": names.get(b, b),
         "lookback_days": lookback_days,
-        "panel": panel,
-        **out,
+        "window": window, "threshold": threshold, "maxlag": maxlag,
+        "follow": rot.FOLLOW_Z,
+        "from": fired["from"], "to": fired["to"], "sessions": fired["sessions"],
+        "lags": lags,
+        "null": null,
+        # Newest first: whether the behaviour is still there matters more
+        # than whether it was there in 2023.
+        "events": list(reversed(fired["events"])),
+        **call,
     }
