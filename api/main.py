@@ -1256,6 +1256,10 @@ _leverage_cache = TTLCache(maxsize=1, ttl_s=30 * 60)
 _toplist_cache = TTLCache(maxsize=1, ttl_s=4 * 3600)
 _wyckoff_cache = TTLCache(maxsize=4, ttl_s=60 * 60)
 _rotation_cache = TTLCache(maxsize=4, ttl_s=6 * 3600)
+#: Short, because half these markets are open while someone is looking at it
+#: — a five-minute-old number for a live session is fine, an hour-old one
+#: reads as a close and is not.
+_indices_cache = TTLCache(maxsize=1, ttl_s=5 * 60)
 
 #: Indices the Wyckoff panel will run on. An allow-list rather than a free
 #: parameter: the phases are only meaningful on a broad index, and an open
@@ -1278,6 +1282,20 @@ def _market_panel(cache, key, build):
         raise HTTPException(503, str(exc))
     except Exception as exc:                                    # noqa: BLE001
         raise HTTPException(503, f"{type(exc).__name__}: {exc}"[:200])
+
+
+@app.get("/market/indices")
+def market_indices(user: AppUser = Depends(current_user)):
+    """
+    A-share, Asia-Pacific and Western indices, each with its own close date.
+
+    Every row carries the date its number belongs to and how many sessions
+    behind the newest that is, because these markets are not on the same
+    clock — see world_indices for why one date over the whole strip would be
+    a lie on any morning in Shanghai.
+    """
+    import world_indices
+    return _market_panel(_indices_cache, "all", world_indices.snapshot)
 
 
 @app.get("/market/heatmap")

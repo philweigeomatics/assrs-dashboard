@@ -4,6 +4,7 @@ import type {
   DiscoverArgs,
   NewSectorResult,
   RebuildJobs,
+  WorldIndices,
   FollowThrough,
   AlertFeed, Analysis, BasketStats, CompareResult, HistoryRef, PairStats, SectorAnalysis,
   AlertNote, EquityBrief, NoteScorecard, PairTradeResult, SimResult, StockRef,
@@ -159,6 +160,7 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, tickers }),
     }),
+  indices: () => call<WorldIndices>("/market/indices"),
   adminJobs: () => call<RebuildJobs>("/admin/rebuild"),
   /** Empty `sectors` rebuilds every one of them. */
   adminStartRebuild: (sectors: string[]) =>

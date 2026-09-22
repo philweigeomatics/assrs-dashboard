@@ -1,8 +1,9 @@
 /**
  * 市场看板 — the whole market before any single stock.
  *
- * Five questions, in the order you would actually ask them on opening the app:
+ * Six questions, in the order you would actually ask them on opening the app:
  *
+ *   how did the world close?         全球指数
  *   where did money go today?        heatmap  ⇄  sector trend history
  *   where is it moving next?         相对轮动图
  *   what regime is the index in?     统计威科夫
@@ -29,6 +30,7 @@ import { RotationMap } from "../components/market/RotationMap";
 import { WyckoffPanel } from "../components/market/WyckoffPanel";
 import { LeveragePanel } from "../components/market/LeveragePanel";
 import { TopList } from "../components/market/TopList";
+import { IndexStrip } from "../components/market/IndexStrip";
 import { usePersistentState } from "../lib/usePersistentState";
 import { useSize } from "../lib/useSize";
 import { signed } from "../lib/format";
@@ -47,6 +49,10 @@ export function Dashboard() {
   const [freq, setFreq] = usePersistentState<"w" | "d">("assrs.mkt.rotfreq", "w");
   const [index, setIndex] = usePersistentState<string>("assrs.mkt.index", "000300.SH");
 
+  // Above everything else and on its own short clock: half these markets
+  // are open while someone is looking at the page.
+  const indices = useQuery({ queryKey: ["mkt", "indices"], queryFn: api.indices,
+    staleTime: 5 * 60_000, refetchInterval: 5 * 60_000 });
   const heatmap = useQuery({ queryKey: ["mkt", "heatmap"], queryFn: api.heatmap,
     staleTime: 20 * 60_000, enabled: view === "heatmap" });
   const breadth = useQuery({ queryKey: ["mkt", "breadth"], queryFn: () => api.breadth(60),
@@ -64,6 +70,12 @@ export function Dashboard() {
     <div className="min-h-screen">
       <NavBar />
       <main className="max-w-[1800px] mx-auto px-3 py-3 flex flex-col gap-3">
+        <Panel title="🌏 全球指数"
+          subtitle="A 股、亚太、欧美主要指数的最新涨跌。各市场收盘时间不同，卡片标的是它自己那根的日期。"
+          q={indices}>
+          {indices.data && <IndexStrip data={indices.data} />}
+        </Panel>
+
         <Panel
           title={view === "heatmap" ? "🗺️ 市场热力图" : "📊 板块趋势历史"}
           subtitle={view === "heatmap"

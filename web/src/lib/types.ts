@@ -516,6 +516,32 @@ export type FollowThrough = {
 };
 
 /**
+ * GET /market/indices — the index strip above the heatmap.
+ *
+ * These markets close at different times, so every row carries its own date.
+ * `behind_days` is against the newest row in the whole strip, not against
+ * today; `today` means the bar belongs to the current date in that market's
+ * timezone, i.e. the session may still be running.
+ */
+export type WorldIndex = {
+  code: string;
+  name: string;
+  close: number;
+  change_pct: number;
+  date: string;
+  spark: number[];
+  behind_days?: number;
+  today?: boolean;
+};
+
+export type WorldIndices = {
+  groups: { name: string; tz: string; indices: WorldIndex[]; missing: number }[];
+  as_of: string | null;
+  fetched_at: string;
+  total: number;
+};
+
+/**
  * GET /admin/sectors — sector membership, the input to every PPI.
  *
  * Admin-only, and the gate is on the server. The nav link is hidden for
