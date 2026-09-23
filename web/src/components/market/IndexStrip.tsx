@@ -21,9 +21,9 @@
 import type { WorldIndex, WorldIndices } from "../../lib/types";
 import { moveClass, signed } from "../../lib/format";
 
-/** Sparkline box. Small enough to sit inside a card without a library. */
-const SW = 64;
-const SH = 18;
+/** Sparkline viewBox. The svg stretches to the card; these set the shape. */
+const SW = 100;
+const SH = 22;
 
 export function IndexStrip({ data }: { data: WorldIndices }) {
   const anyBehind = data.groups.some((g) =>
@@ -39,7 +39,8 @@ export function IndexStrip({ data }: { data: WorldIndices }) {
               <span className="label text-brand-ink">{g.missing} 个读取失败</span>
             )}
           </div>
-          <div className="flex flex-wrap items-stretch gap-1.5">
+          <div className="grid gap-1.5 grid-cols-2 sm:grid-cols-3
+            lg:grid-cols-4 xl:grid-cols-6">
             {g.indices.map((i) => <Card key={i.code} i={i} newest={data.as_of} />)}
             {g.indices.length === 0 && (
               <span className="self-center label">暂无数据</span>
@@ -67,7 +68,7 @@ function Card({ i, newest }: { i: WorldIndex; newest: string | null }) {
       + (stale ? `，比最新的 ${newest} 落后 ${behind} 个交易日` : "")
       + (i.today ? " · 这是该市场今天的数据；若还在交易时段，涨跌是盘中的，收盘前还会变"
                  : "")}
-      className={`card px-2 py-1.5 flex flex-col gap-0.5 min-w-[118px] ${
+      className={`card px-2.5 py-2 flex flex-col gap-1 ${
         stale ? "opacity-60" : ""}`}>
       <div className="flex items-baseline gap-1.5">
         <span className="text-[12px] truncate">{i.name}</span>
@@ -86,8 +87,8 @@ function Card({ i, newest }: { i: WorldIndex; newest: string | null }) {
           {signed(i.change_pct, 2, "%")}
         </span>
       </div>
-      <div className="flex items-end justify-between gap-1">
-        <Spark values={i.spark} up={i.change_pct >= 0} />
+      <div className="flex items-end gap-1.5">
+        <div className="flex-1 min-w-0"><Spark values={i.spark} up={i.change_pct >= 0} /></div>
         {stale && (
           <span className="text-[10px] text-ink-mute tnum shrink-0">
             {i.date.slice(5)}
@@ -107,8 +108,8 @@ function Spark({ values, up }: { values: number[]; up: boolean }) {
     `${k === 0 ? "M" : "L"}${((k / (values.length - 1)) * SW).toFixed(1)} ${
       (SH - ((v - lo) / span) * (SH - 2) - 1).toFixed(1)}`).join("");
   return (
-    <svg viewBox={`0 0 ${SW} ${SH}`} width={SW} height={SH} className="block"
-      aria-hidden="true">
+    <svg viewBox={`0 0 ${SW} ${SH}`} preserveAspectRatio="none"
+      className="block w-full" style={{ height: SH }} aria-hidden="true">
       <path d={d} fill="none" strokeWidth={1.25} vectorEffect="non-scaling-stroke"
         stroke={up ? "var(--color-up)" : "var(--color-down)"} />
     </svg>

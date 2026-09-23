@@ -53,8 +53,14 @@ GROUPS: list[dict] = [
         ("000905.SH", "中证500"),
         ("000688.SH", "科创50"),
     ]},
-    {"name": "亚太", "source": "yahoo", "tz": "Asia/Tokyo", "members": [
+    # Hong Kong gets two rows: 恒生 is the headline, but 国企 is the one that
+    # moves with the mainland names an A-share reader already follows.
+    # 恒生科技 is deliberately absent — Yahoo has the symbol and no history
+    # behind it, so it would be a permanently blank card.
+    {"name": "亚太", "source": "yahoo", "tz": "Asia/Hong_Kong", "members": [
         ("^HSI", "恒生指数"),
+        ("^HSCE", "恒生国企"),
+        ("^TWII", "台湾加权"),
         ("^N225", "日经225"),
         ("^KS11", "韩国综合"),
         ("^AXJO", "澳洲200"),
