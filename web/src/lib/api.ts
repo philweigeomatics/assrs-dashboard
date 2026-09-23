@@ -4,6 +4,10 @@ import type {
   DiscoverArgs,
   NewSectorResult,
   RebuildJobs,
+  FundDetail,
+  OptMethod,
+  PortfolioBuild,
+  SavedFund,
   WorldIndices,
   FollowThrough,
   AlertFeed, Analysis, BasketStats, CompareResult, HistoryRef, PairStats, SectorAnalysis,
@@ -161,6 +165,29 @@ export const api = {
       body: JSON.stringify({ name, tickers }),
     }),
   indices: () => call<WorldIndices>("/market/indices"),
+
+  // ── portfolio construction ────────────────────────────────────────────
+  optMethods: () => call<{ methods: OptMethod[]; default_cap_pct: number;
+                           min_weight_pct: number }>("/portfolio/methods"),
+  portfolioBuild: (body: {
+    symbols: string[]; method: string; cap_pct: number;
+    lookback: number; duration: number; rf_pct: number;
+  }) => call<PortfolioBuild>("/portfolio/build", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }),
+  funds: () => call<{ funds: SavedFund[] }>("/portfolio/funds"),
+  saveFund: (body: { name: string; benchmark: string | null;
+                     holdings: { t: string; weight_pct: number }[] }) =>
+    call<{ id: number; name: string; inception: string; holdings: number }>(
+      "/portfolio/funds", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+  fundDetail: (id: number) => call<FundDetail>(`/portfolio/funds/${id}`),
+  deleteFund: (id: number) =>
+    call<{ id: number; deleted: boolean }>(`/portfolio/funds/${id}`,
+      { method: "DELETE" }),
   adminJobs: () => call<RebuildJobs>("/admin/rebuild"),
   /** Empty `sectors` rebuilds every one of them. */
   adminStartRebuild: (sectors: string[]) =>

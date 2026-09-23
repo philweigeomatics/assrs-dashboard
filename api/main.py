@@ -925,6 +925,112 @@ def admin_create_sector(req: NewSectorReq, user: AppUser = Depends(current_user)
             raise HTTPException(400, str(exc))
 
 
+# ── portfolio construction ───────────────────────────────────────────────────
+# The optimiser is shared with the Questrade book (optimise.py); what is here
+# is the A-share / US side of it plus the saved portfolios, which live in the
+# same `funds` tables the Streamlit page writes.
+
+class BuildReq(BaseModel):
+    """
+    2-30 tickers from ONE market, and how to weight them.
+
+    One market because A-shares and US names trade on different calendars —
+    see portfolio_build for why intersecting them quietly shortens the
+    sample. The refusal happens there; this only bounds the request.
+    """
+    symbols: list[str] = Field(..., min_length=2, max_length=30)
+    method: str = Field("min_var", pattern="^(min_var|risk_parity|equal|max_sharpe)$")
+    cap_pct: float = Field(25.0, ge=5.0, le=100.0)
+    lookback: int = Field(242, ge=60, le=1000)
+    duration: int = Field(1, ge=1, le=30)
+    rf_pct: float = Field(0.0, ge=0.0, le=10.0)
+
+
+class SaveFundReq(BaseModel):
+    name: str = Field(..., min_length=1, max_length=60)
+    holdings: list[dict] = Field(..., min_length=2, max_length=60)
+    benchmark: str | None = None
+
+
+@app.get("/portfolio/methods")
+def portfolio_methods(user: AppUser = Depends(current_user)):
+    """The optimisation methods, with what each one actually does."""
+    import optimise
+    return {"methods": [{"id": k, **v} for k, v in optimise.METHODS.items()],
+            "default_cap_pct": round(optimise.DEFAULT_CAP * 100, 1),
+            "min_weight_pct": round(optimise.MIN_WEIGHT * 100, 2)}
+
+
+@app.post("/portfolio/build")
+def portfolio_build_route(req: BuildReq, user: AppUser = Depends(current_user)):
+    """
+    Weights, the stats they produce, the frontier they sit on, and the curve
+    they would have traced — all from one call so they cannot disagree.
+    """
+    import portfolio_build
+
+    def run():
+        return portfolio_build.build(
+            req.symbols, method=req.method, cap=req.cap_pct / 100.0,
+            lookback=req.lookback, duration=req.duration,
+            rf_annual=req.rf_pct / 100.0)
+
+    key = (tuple(sorted(req.symbols)), req.method, req.cap_pct,
+           req.lookback, req.duration, req.rf_pct)
+    try:
+        return _portfolio_cache.get_or_compute(key, run)
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.get("/portfolio/funds")
+def portfolio_funds(user: AppUser = Depends(current_user)):
+    """Every portfolio this user has saved."""
+    from api import portfolio_api
+
+    with _as_user(user):
+        return portfolio_api.list_funds(user.id)
+
+
+@app.post("/portfolio/funds")
+def portfolio_save_fund(req: SaveFundReq, user: AppUser = Depends(current_user)):
+    """Save an allocation under a name, as of today."""
+    from api import portfolio_api
+
+    with _as_user(user):
+        try:
+            return portfolio_api.create_fund(user.id, req.name, req.holdings,
+                                             req.benchmark)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+
+@app.get("/portfolio/funds/{fund_id}")
+def portfolio_fund_detail(fund_id: int, user: AppUser = Depends(current_user)):
+    """One saved portfolio and what it currently holds."""
+    from api import portfolio_api
+
+    with _as_user(user):
+        try:
+            return portfolio_api.fund_detail(user.id, fund_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+
+
+@app.delete("/portfolio/funds/{fund_id}")
+def portfolio_delete_fund(fund_id: int, user: AppUser = Depends(current_user)):
+    """Remove a saved portfolio. Scoped to its owner."""
+    from api import portfolio_api
+
+    with _as_user(user):
+        try:
+            return portfolio_api.delete_fund(user.id, fund_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+
+
 class RebuildReq(BaseModel):
     """Which sectors to rebuild. Empty means every one of them."""
     sectors: list[str] = Field(default_factory=list, max_length=100)
@@ -1260,6 +1366,9 @@ _rotation_cache = TTLCache(maxsize=4, ttl_s=6 * 3600)
 #: — a five-minute-old number for a live session is fine, an hour-old one
 #: reads as a close and is not.
 _indices_cache = TTLCache(maxsize=1, ttl_s=5 * 60)
+#: A build is a dozen price fetches plus two dozen constrained solves, and
+#: the screen re-asks on every slider change.
+_portfolio_cache = TTLCache(maxsize=20, ttl_s=20 * 60)
 
 #: Indices the Wyckoff panel will run on. An allow-list rather than a free
 #: parameter: the phases are only meaningful on a broad index, and an open

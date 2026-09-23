@@ -515,6 +515,46 @@ export type FollowThrough = {
   enough: boolean;
 };
 
+/** GET /portfolio/methods — what each optimiser actually does. */
+export type OptMethod = {
+  id: "min_var" | "risk_parity" | "equal" | "max_sharpe";
+  label: string; en: string; needs_returns: boolean; means: string;
+};
+
+/** POST /portfolio/build — one call, so the numbers cannot disagree. */
+export type PortfolioBuild = {
+  market: string;
+  method: string; method_label: string;
+  /** effective_cap is never tighter than 2/n, so these two differ. */
+  cap_pct: number; cap_asked_pct: number;
+  lookback: number; duration: number;
+  from: string; to: string;
+  /** Tickers that had no price data at all. */
+  missing: string[];
+  holdings: { t: string; n: string; weight_pct: number }[];
+  stats: { ann_return_pct: Num; ann_vol_pct: Num; sharpe: Num;
+           max_drawdown_pct: Num };
+  equal_stats: { ann_return_pct: Num; ann_vol_pct: Num; sharpe: Num;
+                 max_drawdown_pct: Num };
+  frontier: { vol_pct: number; ret_pct: number }[];
+  correlation: { labels: string[]; rows: (number | null)[][] };
+  dates: string[];
+  curve: number[];
+  equal_curve: number[];
+  benchmark: { label: string; curve: (number | null)[] } | null;
+};
+
+/** GET /portfolio/funds — saved allocations. */
+export type SavedFund = {
+  id: number; name: string; benchmark: string | null;
+  inception: string | null; created_at: string; holdings: number;
+};
+
+export type FundDetail = {
+  id: number; name: string; benchmark: string | null; inception: string | null;
+  holdings: { t: string; weight_pct: number; since: string }[];
+};
+
 /**
  * GET /market/indices — the index strip above the heatmap.
  *

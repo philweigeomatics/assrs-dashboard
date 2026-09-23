@@ -12,6 +12,7 @@ import { Alerts } from "./routes/Alerts";
 import { Basket } from "./routes/Basket";
 import { Strategies } from "./routes/Strategies";
 import { Admin } from "./routes/Admin";
+import { Portfolio } from "./routes/Portfolio";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
 const queryClient = new QueryClient({
@@ -86,6 +87,14 @@ export function App() {
               element={
                 <RequireAuth>
                   <Basket />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/portfolio"
+              element={
+                <RequireAuth>
+                  <Portfolio />
                 </RequireAuth>
               }
             />

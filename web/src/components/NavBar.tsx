@@ -20,6 +20,7 @@ const PAGES = [
   { to: "/alerts", label: "🔔 今日提醒" },
   { to: "/basket", label: "🧺 多股对比" },
   { to: "/strategies", label: "⚡ 策略" },
+  { to: "/portfolio", label: "💼 组合" },
   { to: "/questrade", label: "🏦 MyQuestrade" },
 ];
 
