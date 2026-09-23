@@ -37,8 +37,9 @@ class FakeMarket:
     def __init__(self, frames):
         self.frames = frames
 
-    def fetch_ohlcv(self, symbol):
-        s = self.frames.get(symbol)
+    def fetch_ohlcv(self, code, years=3):
+        # Keyed by the BARE code, as a real adapter is.
+        s = self.frames.get(code)
         return None if s is None else pd.DataFrame({"Close": s})
 
 
@@ -50,6 +51,7 @@ def cn(monkeypatch):
     mod.canonical = lambda s: s
     mod.split = lambda s: ("US", s.split(":")[-1]) if s.startswith("US:") else ("CN", s)
     mod.get = lambda s: FakeMarket(frames)
+    mod.parse = lambda s: (FakeMarket(frames), mod.split(s)[1])
     monkeypatch.setitem(sys.modules, "markets", mod)
 
     dm = types.ModuleType("data_manager")
@@ -316,7 +318,8 @@ def test_daily_metrics_stay_daily_when_duration_is_longer(cn):
 def test_names_and_missing_tickers_are_reported(monkeypatch, cn):
     frames = dict(cn)
     mod = sys.modules["markets"]
-    monkeypatch.setattr(mod, "get", lambda s: FakeMarket(frames))
+    monkeypatch.setattr(mod, "parse",
+                        lambda s: (FakeMarket(frames), mod.split(s)[1]))
     out = pb.build([*cn, "999999"], max_weight=0.5)
     assert out["missing"] == ["999999"]
     assert {h["t"]: h["n"] for h in out["holdings"]}["600519"] == "贵州茅台"
@@ -336,20 +339,23 @@ def test_one_unpriceable_ticker_does_not_empty_the_frame(monkeypatch, cn):
     frames = dict(cn)
     frames["BROKEN"] = pd.Series(np.nan, index=IDX)
     mod = sys.modules["markets"]
-    monkeypatch.setattr(mod, "get", lambda s: FakeMarket(frames))
+    monkeypatch.setattr(mod, "parse",
+                        lambda s: (FakeMarket(frames), mod.split(s)[1]))
     px = pb.load_closes([*cn, "BROKEN"], 200)
     assert "BROKEN" not in px.columns and len(px) == 201
 
 
 def test_too_little_overlap_is_refused(cn):
     frames = {"A": walk(1).iloc[-20:], "B": walk(2).iloc[-20:]}
-    sys.modules["markets"].get = lambda s: FakeMarket(frames)
+    mod = sys.modules["markets"]
+    mod.parse = lambda s: (FakeMarket(frames), mod.split(s)[1])
     with pytest.raises(LookupError, match="共同交易日"):
         pb.load_closes(["A", "B"], 242)
 
 
 def test_everything_failing_is_a_fetch_error(cn):
-    sys.modules["markets"].get = lambda s: FakeMarket({})
+    mod = sys.modules["markets"]
+    mod.parse = lambda s: (FakeMarket({}), mod.split(s)[1])
     with pytest.raises(RuntimeError, match="行情"):
         pb.load_closes(["600519"], 242)
 
@@ -474,3 +480,65 @@ def _skewed_moments():
     mu = rets.mean() * pb.TRADING_DAYS
     cov = rets.cov() * pb.TRADING_DAYS
     return mu, cov
+
+
+# ── adapters take bare codes, not canonical symbols ──────────────────────────
+def test_load_closes_hands_the_adapter_a_bare_code(monkeypatch):
+    """
+    The US bug: `US:AAPL` went straight to Yahoo, which 404s on it. A-shares
+    hid it for months — a CN canonical symbol IS its bare code.
+    """
+    seen: list[str] = []
+
+    class Fake:
+        def fetch_ohlcv(self, code, years=3):
+            seen.append(code)
+            idx = pd.bdate_range("2024-01-01", periods=120)
+            return pd.DataFrame({"Close": np.linspace(10, 20, 120)}, index=idx)
+
+    import markets
+    monkeypatch.setattr(markets, "parse", lambda s: (Fake(), s.split(":", 1)[-1]))
+    px = pb.load_closes(["US:AAPL", "US:MSFT"], 60)
+
+    assert seen == ["AAPL", "MSFT"]          # not US:AAPL
+    assert list(px.columns) == ["US:AAPL", "US:MSFT"]   # keyed canonically
+
+
+def test_unfetchable_symbols_report_which_and_why(monkeypatch):
+    """The old message was 'try again later' — a real bug sent back as weather."""
+    import markets
+
+    def boom(sym):
+        raise LookupError(f"行情源不可用：{sym}")
+
+    monkeypatch.setattr(markets, "parse", boom)
+    with pytest.raises(RuntimeError) as e:
+        pb.load_closes(["US:AAPL", "US:MSFT"], 60)
+    assert "US:AAPL" in str(e.value)
+    assert "行情源不可用" in str(e.value)
+    assert "try again" not in str(e.value).lower()
+
+
+def test_names_fall_back_to_the_ticker_when_lookup_fails(monkeypatch):
+    """A slow or dead name service must not take the optimisation with it."""
+    import markets
+
+    class Dead:
+        def resolve(self, code):
+            raise TimeoutError("nope")
+
+    monkeypatch.setattr(markets, "parse", lambda s: (Dead(), s.split(":", 1)[-1]))
+    assert pb._names(["US:AAPL", "US:MSFT"], "US") == {
+        "US:AAPL": "AAPL", "US:MSFT": "MSFT"}
+
+
+def test_names_use_the_resolved_company_name(monkeypatch):
+    import markets
+    from markets.base import StockRef
+
+    class Live:
+        def resolve(self, code):
+            return StockRef(symbol=code, name=f"{code} Inc.", exchange="NMS")
+
+    monkeypatch.setattr(markets, "parse", lambda s: (Live(), s.split(":", 1)[-1]))
+    assert pb._names(["US:AAPL"], "US") == {"US:AAPL": "AAPL Inc."}

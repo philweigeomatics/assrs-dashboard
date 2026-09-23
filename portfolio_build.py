@@ -53,6 +53,8 @@ MIN_SESSIONS = 60
 #: Weights below this are reported as zero — a 0.3% allocation is a rounding
 #: artefact with a commission attached.
 MIN_WEIGHT = 0.005
+#: Names are a nicety — never let them hold up an optimisation.
+NAME_TIMEOUT_S = 12.0
 
 #: What each market is measured against by default.
 BENCHMARKS = {
@@ -96,19 +98,29 @@ def load_closes(symbols: list[str], lookback: int) -> pd.DataFrame:
 
     frames: dict[str, pd.Series] = {}
     missing: list[str] = []
+    why: list[str] = []
     for raw in symbols:
         sym = markets.canonical(raw)
         try:
-            df = markets.get(sym).fetch_ohlcv(sym)
-        except Exception:                                          # noqa: BLE001
+            # The adapter takes the bare, source-native code — `AAPL`, not
+            # `US:AAPL`. Handing it the canonical form 404s at Yahoo, and
+            # A-shares hid it: their canonical symbol IS the bare code.
+            market, code = markets.parse(sym)
+            df = market.fetch_ohlcv(code)
+        except Exception as exc:                                   # noqa: BLE001
+            why.append(f"{sym}: {type(exc).__name__}: {exc}")
             df = None
         if df is None or df.empty or "Close" not in df:
+            if not why or not why[-1].startswith(f"{sym}:"):
+                why.append(f"{sym}: 没有返回行情")
             missing.append(sym)
             continue
         frames[sym] = df["Close"].rename(sym)
 
     if not frames:
-        raise RuntimeError("行情读取失败 — 请稍后重试")
+        # Say which name failed and how. The bare "try again later" this used
+        # to raise sent a real bug back as a weather report.
+        raise RuntimeError("行情读取失败 — " + "；".join(why[:3]))
 
     px = pd.concat(frames.values(), axis=1)
     px = px.dropna(axis=1, how="all").ffill().dropna(how="any")
@@ -522,15 +534,42 @@ def prune(w: pd.Series) -> pd.Series:
 
 
 def _names(symbols: list[str], market: str) -> dict:
-    if market != "CN":
-        return {s: s.split(":", 1)[-1] for s in symbols}
+    """
+    Company names, because a weight next to `AAPL AAPL` reads as a bug.
+
+    A-shares come from the local basics table in one hit. US and Canadian
+    names have to be asked for one at a time, so they go out together rather
+    than in series — and any that does not answer falls back to its ticker
+    instead of holding up the whole optimisation.
+    """
+    if market == "CN":
+        try:
+            import data_manager
+            rows = data_manager.get_all_stock_basic() or []
+            found = {r["ticker"]: r["name"] for r in rows}
+            return {s: found.get(s, s) for s in symbols}
+        except Exception:                                          # noqa: BLE001
+            return {s: s for s in symbols}
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    import markets
+
+    bare = {s: s.split(":", 1)[-1] for s in symbols}
+
+    def one(sym: str) -> tuple[str, str]:
+        try:
+            adapter, code = markets.parse(sym)
+            ref = adapter.resolve(code)
+            return sym, str(ref.name) if ref and ref.name else bare[sym]
+        except Exception:                                          # noqa: BLE001
+            return sym, bare[sym]
+
     try:
-        import data_manager
-        rows = data_manager.get_all_stock_basic() or []
-        found = {r["ticker"]: r["name"] for r in rows}
-        return {s: found.get(s, s) for s in symbols}
+        with ThreadPoolExecutor(max_workers=min(8, len(symbols))) as pool:
+            return dict(pool.map(one, symbols, timeout=NAME_TIMEOUT_S))
     except Exception:                                              # noqa: BLE001
-        return {s: s for s in symbols}
+        return bare
 
 
 def build(symbols: list[str], *, target_return: float | None = None,
