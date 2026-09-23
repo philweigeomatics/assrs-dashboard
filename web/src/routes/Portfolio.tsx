@@ -13,7 +13,8 @@ import { api, ApiError } from "../lib/api";
 import type { SavedFund } from "../lib/types";
 import { NavBar } from "../components/NavBar";
 import { Optimiser } from "../components/portfolio/Optimiser";
-import { fixed } from "../lib/format";
+import { FundTrack } from "../components/portfolio/FundTrack";
+import { fixed, signed } from "../lib/format";
 
 const SECTIONS = [
   { id: "build", label: "🎯 组合优化" },
@@ -106,14 +107,20 @@ function Fund({ f, open, onToggle, onChanged }: {
   f: SavedFund; open: boolean; onToggle: () => void; onChanged: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
+  // Loaded even when collapsed: the row shows return and alpha, which is
+  // the number worth seeing without clicking into anything.
   const detail = useQuery({
     queryKey: ["pf", "fund", f.id],
     queryFn: () => api.fundDetail(f.id),
-    enabled: open,
+    staleTime: 5 * 60_000,
   });
   const remove = useMutation({
     mutationFn: () => api.deleteFund(f.id),
     onSuccess: () => { setConfirming(false); onChanged(); },
+  });
+  const revalue = useMutation({
+    mutationFn: () => api.revalueFund(f.id),
+    onSuccess: () => detail.refetch(),
   });
 
   return (
@@ -125,6 +132,16 @@ function Fund({ f, open, onToggle, onChanged }: {
         <span className="label tnum">{f.holdings} 只</span>
         {f.benchmark && <span className="label">对标 {f.benchmark}</span>}
         <span className="label font-mono tnum">建于 {f.inception ?? "—"}</span>
+        {detail.data?.tracking.valued && (
+          <span className={`text-[12.5px] tnum font-medium ${
+            (detail.data.tracking.alpha_pct ?? 0) >= 0 ? "text-up" : "text-down"}`}
+            title="相对基准的超额收益">
+            {signed(detail.data.tracking.total_return_pct, 1, "%")}
+            <span className="text-ink-mute font-normal">
+              {" "}· 超额 {signed(detail.data.tracking.alpha_pct, 1, "%")}
+            </span>
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-2">
           {confirming ? (
             <>
@@ -151,20 +168,31 @@ function Fund({ f, open, onToggle, onChanged }: {
         <div className="pl-1">
           {detail.isPending && <p className="label">读取中…</p>}
           {detail.data && (
-            <div className="flex flex-col gap-1">
-              {detail.data.holdings.map((h) => (
-                <div key={h.t} className="flex items-center gap-2 text-[12.5px]">
-                  <span className="w-20 shrink-0 font-mono tnum text-[11.5px]">{h.t}</span>
-                  <div className="flex-1 h-3.5 rounded-sm bg-sunken overflow-hidden">
-                    <div className="h-full rounded-sm bg-cyan"
-                      style={{ width: `${Math.min(100, h.weight_pct)}%` }} />
-                  </div>
-                  <span className="w-14 text-right tnum">{fixed(h.weight_pct, 1)}%</span>
+            <div className="flex flex-col gap-3">
+              <FundTrack d={detail.data}
+                onRevalue={() => revalue.mutate()}
+                revaluing={revalue.isPending} />
+
+              {detail.data.drift.length === 0 && (
+                <div className="flex flex-col gap-1">
+                  <span className="label">建仓时的目标权重</span>
+                  {detail.data.holdings.map((h) => (
+                    <div key={h.t} className="flex items-center gap-2 text-[12.5px]">
+                      <span className="w-20 shrink-0 font-mono tnum text-[11.5px]">{h.t}</span>
+                      <div className="flex-1 h-3.5 rounded-sm bg-sunken overflow-hidden">
+                        <div className="h-full rounded-sm bg-cyan"
+                          style={{ width: `${Math.min(100, h.weight_pct)}%` }} />
+                      </div>
+                      <span className="w-14 text-right tnum">{fixed(h.weight_pct, 1)}%</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
-              <p className="label mt-1">
-                这是建仓时的目标权重。市值会漂移，下一版会把当前实际权重和偏离画出来。
-              </p>
+              )}
+              {revalue.isError && (
+                <p className="text-[12.5px] text-up">
+                  {(revalue.error as ApiError).message}
+                </p>
+              )}
             </div>
           )}
         </div>

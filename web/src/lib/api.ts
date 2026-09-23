@@ -5,7 +5,6 @@ import type {
   NewSectorResult,
   RebuildJobs,
   FundDetail,
-  OptMethod,
   PortfolioBuild,
   SavedFund,
   WorldIndices,
@@ -167,11 +166,9 @@ export const api = {
   indices: () => call<WorldIndices>("/market/indices"),
 
   // ── portfolio construction ────────────────────────────────────────────
-  optMethods: () => call<{ methods: OptMethod[]; default_cap_pct: number;
-                           min_weight_pct: number }>("/portfolio/methods"),
   portfolioBuild: (body: {
-    symbols: string[]; method: string; cap_pct: number;
-    lookback: number; duration: number; rf_pct: number;
+    symbols: string[]; target_return_pct: number | null;
+    max_weight_pct: number; lookback: number; duration: number; rf_pct: number;
   }) => call<PortfolioBuild>("/portfolio/build", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -185,6 +182,9 @@ export const api = {
         body: JSON.stringify(body),
       }),
   fundDetail: (id: number) => call<FundDetail>(`/portfolio/funds/${id}`),
+  revalueFund: (id: number) =>
+    call<{ fund_id: number; ran: boolean }>(
+      `/portfolio/funds/${id}/revalue`, { method: "POST" }),
   deleteFund: (id: number) =>
     call<{ id: number; deleted: boolean }>(`/portfolio/funds/${id}`,
       { method: "DELETE" }),

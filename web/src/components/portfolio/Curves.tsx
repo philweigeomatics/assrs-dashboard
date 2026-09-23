@@ -14,7 +14,7 @@ const VH = 190;
 
 export function Curves({ d }: { d: PortfolioBuild }) {
   const series = [
-    { key: "opt", label: d.method_label, values: d.curve, colour: "var(--color-cyan)" },
+    { key: "opt", label: d.mode === "target" ? "目标组合" : "最大夏普", values: d.curve, colour: "var(--color-cyan)" },
     { key: "eq", label: "等权重", values: d.equal_curve, colour: "#a855f7" },
     ...(d.benchmark
       ? [{

@@ -932,33 +932,24 @@ def admin_create_sector(req: NewSectorReq, user: AppUser = Depends(current_user)
 
 class BuildReq(BaseModel):
     """
-    2-30 tickers from ONE market, and how to weight them.
+    2-30 tickers from ONE market, and where on the frontier to sit.
 
-    One market because A-shares and US names trade on different calendars —
-    see portfolio_build for why intersecting them quietly shortens the
-    sample. The refusal happens there; this only bounds the request.
+    `target_return_pct` null maximises Sharpe; a value asks for the least
+    variance that reaches that annualised return, which is how a point
+    clicked on the frontier becomes weights.
     """
     symbols: list[str] = Field(..., min_length=2, max_length=30)
-    method: str = Field("min_var", pattern="^(min_var|risk_parity|equal|max_sharpe)$")
-    cap_pct: float = Field(25.0, ge=5.0, le=100.0)
+    target_return_pct: float | None = Field(None, ge=-100.0, le=500.0)
+    max_weight_pct: float = Field(30.0, ge=5.0, le=100.0)
     lookback: int = Field(242, ge=60, le=1000)
     duration: int = Field(1, ge=1, le=30)
-    rf_pct: float = Field(0.0, ge=0.0, le=10.0)
+    rf_pct: float = Field(3.0, ge=0.0, le=10.0)
 
 
 class SaveFundReq(BaseModel):
     name: str = Field(..., min_length=1, max_length=60)
     holdings: list[dict] = Field(..., min_length=2, max_length=60)
     benchmark: str | None = None
-
-
-@app.get("/portfolio/methods")
-def portfolio_methods(user: AppUser = Depends(current_user)):
-    """The optimisation methods, with what each one actually does."""
-    import optimise
-    return {"methods": [{"id": k, **v} for k, v in optimise.METHODS.items()],
-            "default_cap_pct": round(optimise.DEFAULT_CAP * 100, 1),
-            "min_weight_pct": round(optimise.MIN_WEIGHT * 100, 2)}
 
 
 @app.post("/portfolio/build")
@@ -971,12 +962,15 @@ def portfolio_build_route(req: BuildReq, user: AppUser = Depends(current_user)):
 
     def run():
         return portfolio_build.build(
-            req.symbols, method=req.method, cap=req.cap_pct / 100.0,
+            req.symbols,
+            target_return=(None if req.target_return_pct is None
+                           else req.target_return_pct / 100.0),
+            max_weight=req.max_weight_pct / 100.0,
             lookback=req.lookback, duration=req.duration,
-            rf_annual=req.rf_pct / 100.0)
+            rf=req.rf_pct / 100.0)
 
-    key = (tuple(sorted(req.symbols)), req.method, req.cap_pct,
-           req.lookback, req.duration, req.rf_pct)
+    key = (tuple(sorted(req.symbols)), req.target_return_pct,
+           req.max_weight_pct, req.lookback, req.duration, req.rf_pct)
     try:
         return _portfolio_cache.get_or_compute(key, run)
     except LookupError as exc:
@@ -1005,6 +999,27 @@ def portfolio_save_fund(req: SaveFundReq, user: AppUser = Depends(current_user))
                                              req.benchmark)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
+
+
+@app.post("/portfolio/funds/{fund_id}/revalue")
+def portfolio_revalue(fund_id: int, user: AppUser = Depends(current_user)):
+    """
+    Run the NAV rollup now instead of waiting for the nightly job.
+
+    The Streamlit manager called this 强制 NAV 计算. Ownership is checked
+    first even though the rollup walks every fund — a stranger should not be
+    able to trigger it by guessing an id.
+    """
+    from api import portfolio_api
+
+    with _as_user(user):
+        try:
+            portfolio_api.fund_detail(user.id, fund_id)
+            return portfolio_api.revalue(fund_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc))
 
 
 @app.get("/portfolio/funds/{fund_id}")

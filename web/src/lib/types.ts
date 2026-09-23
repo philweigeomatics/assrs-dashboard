@@ -515,28 +515,42 @@ export type FollowThrough = {
   enough: boolean;
 };
 
-/** GET /portfolio/methods — what each optimiser actually does. */
-export type OptMethod = {
-  id: "min_var" | "risk_parity" | "equal" | "max_sharpe";
-  label: string; en: string; needs_returns: boolean; means: string;
-};
-
-/** POST /portfolio/build — one call, so the numbers cannot disagree. */
+/**
+ * POST /portfolio/build — the ported mean-variance optimiser.
+ *
+ * `mode` is "max_sharpe" with no target, or "target" when a point on the
+ * frontier was chosen: the least variance that reaches that return.
+ */
 export type PortfolioBuild = {
   market: string;
-  method: string; method_label: string;
-  /** effective_cap is never tighter than 2/n, so these two differ. */
-  cap_pct: number; cap_asked_pct: number;
+  mode: "max_sharpe" | "target";
+  target_return_pct: number | null;
+  max_weight_pct: number;
+  rf_pct: number;
   lookback: number; duration: number;
   from: string; to: string;
-  /** Tickers that had no price data at all. */
   missing: string[];
   holdings: { t: string; n: string; weight_pct: number }[];
+  /** From the annualised moments, so the dot sits on the frontier. */
+  opt: { ann_return_pct: number; ann_vol_pct: number; sharpe: number };
   stats: { ann_return_pct: Num; ann_vol_pct: Num; sharpe: Num;
            max_drawdown_pct: Num };
   equal_stats: { ann_return_pct: Num; ann_vol_pct: Num; sharpe: Num;
                  max_drawdown_pct: Num };
-  frontier: { vol_pct: number; ret_pct: number }[];
+  risk: {
+    enb: number; div_ratio: number;
+    var_95_pct: number; var_99_pct: number;
+    cvar_95_pct: number; cvar_99_pct: number;
+    tail_95: number; tail_99: number;
+    worst_day_pct: number; avg_worst5_pct: number;
+  };
+  assessment: {
+    score: number; max: number; verdict: string;
+    tone: "good" | "warn" | "bad"; summary: string;
+    strengths: string[]; notes: string[]; warnings: string[];
+  };
+  /** `target` is fed back to re-solve at that point. */
+  frontier: { vol_pct: number; ret_pct: number; target: number }[];
   correlation: { labels: string[]; rows: (number | null)[][] };
   dates: string[];
   curve: number[];
@@ -550,9 +564,26 @@ export type SavedFund = {
   inception: string | null; created_at: string; holdings: number;
 };
 
+/** A fund's NAV history against its reference index. */
+export type FundTracking = {
+  valued: boolean;
+  dates: string[];
+  curve: number[];
+  aum: Num;
+  total_return_pct: Num;
+  daily_return_pct: Num;
+  alpha_pct: Num;
+  inception_aum?: number;
+  benchmark: { label: string; curve: (number | null)[] } | null;
+};
+
 export type FundDetail = {
   id: number; name: string; benchmark: string | null; inception: string | null;
   holdings: { t: string; weight_pct: number; since: string }[];
+  tracking: FundTracking;
+  /** Target weight against what the market has made it. */
+  drift: { t: string; target_pct: number; actual_pct: number;
+           drift_pct: number; as_of: string }[];
 };
 
 /**

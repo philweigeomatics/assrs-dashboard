@@ -1,16 +1,14 @@
 /**
- * 组合优化 — pick names, choose how to weight them, see what that would have done.
+ * 组合优化 — the ported mean-variance page.
  *
- * The screen is arranged as the decision is actually made: which market,
- * which names, then how to weight them, then the evidence. The evidence is
- * the part most optimiser UIs skip — an optimiser always produces a
- * portfolio, and on the history it was fitted to that portfolio always looks
- * good, so equal weight and the index are drawn beside it every time.
+ * Default is maximum Sharpe, as the Streamlit page had it. Clicking a point
+ * on the frontier switches to target-return mode and re-solves for the
+ * minimum-variance weights that reach it: the curve is the control, not an
+ * illustration beside a fixed answer.
  *
- * The method's own caveat is shown with the method, not buried in help:
- * 最大夏普 fits historical means, historical means do not repeat, and it
- * routinely returns three names at the cap. Saying so where it is chosen is
- * the difference between a tool and a slot machine.
+ * The assessment comes first in the results, as it did on the page — a
+ * 0-100 score across five risk dimensions with its reasons spelled out,
+ * before any of the charts.
  */
 
 import { useState } from "react";
@@ -34,28 +32,27 @@ const MARKETS: { id: Market; label: string; hint: string }[] = [
 ];
 
 export function Optimiser({ onSaved }: { onSaved: () => void }) {
-  // Kept per market: switching back should not lose the basket you built.
   const [market, setMarket] = usePersistentState<Market>("assrs.pf.market", "CN");
   const [cnPicks, setCnPicks] = usePersistentState<StockRef[]>("assrs.pf.cn", []);
   const [usPicks, setUsPicks] = usePersistentState<StockRef[]>("assrs.pf.us", []);
   const picked = market === "CN" ? cnPicks : usPicks;
   const setPicked = market === "CN" ? setCnPicks : setUsPicks;
 
-  const [method, setMethod] = usePersistentState<string>("assrs.pf.method", "min_var");
-  const [capPct, setCapPct] = usePersistentState<number>("assrs.pf.cap", 25);
+  const [maxWeight, setMaxWeight] = usePersistentState<number>("assrs.pf.cap", 30);
   const [lookback, setLookback] = usePersistentState<number>("assrs.pf.lb", 242);
+  const [duration, setDuration] = usePersistentState<number>("assrs.pf.dur", 1);
+  const [rf, setRf] = usePersistentState<number>("assrs.pf.rf", 3);
 
-  const methods = useQuery({ queryKey: ["pf", "methods"], queryFn: api.optMethods,
-    staleTime: 24 * 3600_000 });
   const run = useMutation({
-    mutationFn: () => api.portfolioBuild({
-      symbols: picked.map((p) => p.t), method, cap_pct: capPct,
-      lookback, duration: 1, rf_pct: 0,
+    mutationFn: (t: number | null) => api.portfolioBuild({
+      symbols: picked.map((p) => p.t), target_return_pct:
+        t === null ? null : Number((t * 100).toFixed(4)),
+      max_weight_pct: maxWeight, lookback, duration, rf_pct: rf,
     }),
   });
 
-  const chosen = methods.data?.methods.find((m) => m.id === method);
   const ready = picked.length >= 2;
+  const go = (t: number | null) => run.mutate(t);
 
   return (
     <div className="flex flex-col gap-3">
@@ -63,8 +60,7 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center gap-1">
             {MARKETS.map((m) => (
-              <button key={m.id} onClick={() => setMarket(m.id)}
-                title={m.hint}
+              <button key={m.id} onClick={() => setMarket(m.id)} title={m.hint}
                 className={`h-8 px-3 rounded-lg text-[13px] font-medium transition-colors ${
                   market === m.id ? "bg-elevated text-ink" : "text-ink-mute hover:text-ink"
                 }`}>
@@ -80,49 +76,52 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
         <Picker market={market} picked={picked} onChange={setPicked} />
 
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <label className="label flex items-center gap-1.5">
-            方法
-            <select value={method} onChange={(e) => setMethod(e.target.value)}
-              className="h-7 px-1.5 rounded-md bg-sunken text-[12.5px] outline-none">
-              {(methods.data?.methods ?? []).map((m) => (
-                <option key={m.id} value={m.id}>{m.label}</option>
-              ))}
-            </select>
+          <label className="label flex items-center gap-1.5"
+            title="任何一只的最大权重">
+            单只上限
+            <input type="range" min={5} max={100} step={5} value={maxWeight}
+              onChange={(e) => setMaxWeight(Number(e.target.value))}
+              className="w-24 accent-[var(--color-cyan)]" />
+            <span className="tnum w-9">{maxWeight}%</span>
           </label>
           <label className="label flex items-center gap-1.5"
-            title="任何一只的最大权重。太紧会退化成等权，所以实际下限是 2/n。">
-            单只上限
-            <input type="range" min={5} max={100} step={5} value={capPct}
-              onChange={(e) => setCapPct(Number(e.target.value))}
-              className="w-28 accent-[var(--color-cyan)]" />
-            <span className="tnum w-9">{capPct}%</span>
-          </label>
-          <label className="label flex items-center gap-1.5" title="协方差用多少个交易日估计">
+            title="协方差和预期收益用多少个交易日估计。242 ≈ A 股一年。">
             回看
             <select value={lookback} onChange={(e) => setLookback(Number(e.target.value))}
               className="h-7 px-1.5 rounded-md bg-sunken text-[12.5px] tnum outline-none">
-              {[60, 120, 242, 504].map((d) => <option key={d} value={d}>{d} 天</option>)}
+              {[60, 90, 120, 180, 242].map((d) => <option key={d} value={d}>{d} 天</option>)}
             </select>
           </label>
-          <button onClick={() => run.mutate()} disabled={!ready || run.isPending}
+          <label className="label flex items-center gap-1.5"
+            title="1=日线，5=周，20=月。只影响协方差矩阵；历史模拟和日度风险指标始终用日收益。">
+            收益周期
+            <input type="number" min={1} max={30} value={duration}
+              onChange={(e) => setDuration(Math.max(1, Number(e.target.value)))}
+              className="w-14 h-7 px-1.5 rounded-md bg-sunken text-[12.5px] tnum outline-none" />
+          </label>
+          <label className="label flex items-center gap-1.5" title="年化无风险利率，用于夏普">
+            无风险
+            <input type="number" min={0} max={10} step={0.5} value={rf}
+              onChange={(e) => setRf(Number(e.target.value))}
+              className="w-16 h-7 px-1.5 rounded-md bg-sunken text-[12.5px] tnum outline-none" />
+            <span>%</span>
+          </label>
+          <button onClick={() => go(null)} disabled={!ready || run.isPending}
             className="ml-auto h-8 px-4 rounded-lg bg-cyan text-white text-[13px]
               font-semibold disabled:opacity-60">
-            {run.isPending ? "计算中…" : ready ? "优化" : "先选两只以上"}
+            {run.isPending ? "计算中…" : ready ? "🚀 优化（最大夏普）" : "先选两只以上"}
           </button>
         </div>
 
-        {chosen && (
-          <p className={`text-[12px] leading-snug ${
-            chosen.id === "max_sharpe" ? "text-brand-ink" : "label"}`}>
-            <b>{chosen.label}</b>：{chosen.means}
-          </p>
-        )}
         {run.isError && (
           <p className="text-[12.5px] text-up">{(run.error as ApiError).message}</p>
         )}
       </section>
 
-      {run.data && <Result d={run.data} market={market} onSaved={onSaved} />}
+      {run.data && (
+        <Result d={run.data} market={market} busy={run.isPending}
+          onPick={go} onSaved={onSaved} />
+      )}
     </div>
   );
 }
@@ -183,33 +182,61 @@ function Picker({ market, picked, onChange }: {
   );
 }
 
-function Result({ d, market, onSaved }: {
-  d: PortfolioBuild; market: Market; onSaved: () => void;
-}) {
-  const held = d.holdings.filter((h) => h.weight_pct > 0);
-  const capBit = d.cap_pct > d.cap_asked_pct + 0.05;
+const TONE: Record<string, string> = {
+  good: "text-up border-up/40 bg-up/5",
+  warn: "text-brand-ink border-brand-ink/40 bg-brand-ink/5",
+  bad: "text-up border-up/50 bg-up/10",
+};
 
+function Result({ d, market, busy, onPick, onSaved }: {
+  d: PortfolioBuild; market: Market; busy: boolean;
+  onPick: (t: number | null) => void; onSaved: () => void;
+}) {
+  const a = d.assessment;
+  const r = d.risk;
   return (
     <>
-      <section className="card p-3 flex flex-col gap-2.5">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h3 className="text-[13.5px] font-semibold">🎯 {d.method_label}目标配置</h3>
-          <span className="label">
-            {d.from} → {d.to} · {d.lookback} 个交易日 · {held.length} 只有权重
-          </span>
+      {/* The assessment leads, as it did on the page. */}
+      <section className={`card p-3 flex flex-col gap-2 border ${TONE[a.tone] ?? ""}`}>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="text-[15px] font-semibold">{a.verdict}</span>
+          <span className="text-[13px] tnum font-semibold">{a.score}/{a.max}</span>
+          <div className="flex-1 min-w-[120px] h-2 rounded-full bg-sunken overflow-hidden">
+            <div className="h-full rounded-full bg-current"
+              style={{ width: `${a.score}%` }} />
+          </div>
           <SaveFund d={d} market={market} onSaved={onSaved} />
         </div>
+        <p className="text-[12.5px] text-ink leading-snug">{a.summary}</p>
+        <div className="grid gap-1 sm:grid-cols-2 lg:grid-cols-3 text-[12px]">
+          {a.strengths.map((x, i) => (
+            <span key={`s${i}`} className="text-ink-dim">✅ {x}</span>
+          ))}
+          {a.notes.map((x, i) => (
+            <span key={`n${i}`} className="text-ink-mute">📊 {x}</span>
+          ))}
+          {a.warnings.map((x, i) => (
+            <span key={`w${i}`} className="text-up">⚠️ {x}</span>
+          ))}
+        </div>
+      </section>
 
-        {capBit && (
-          <p className="text-[12px] text-brand-ink leading-snug">
-            单只上限设的是 {d.cap_asked_pct}%，实际用的是 <b>{d.cap_pct}%</b> ——
-            比 1/n 还紧的上限会让「权重合计 100%」无解，所以下限固定在等权的两倍。
-          </p>
-        )}
+      <section className="card p-3 flex flex-col gap-2.5">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <h3 className="text-[13.5px] font-semibold">
+            🎯 {d.mode === "target"
+              ? `目标年化 ${fixed(d.target_return_pct, 1)}% 的最小方差配置`
+              : "最大夏普配置"}
+          </h3>
+          <span className="label">
+            {d.from} → {d.to} · {d.lookback} 个交易日 · 上限 {d.max_weight_pct}%
+            · 无风险 {d.rf_pct}%
+            {d.duration > 1 && ` · 收益周期 ${d.duration} 天`}
+          </span>
+        </div>
+
         {d.missing.length > 0 && (
-          <p className="text-[12px] text-up">
-            读不到行情，已排除：{d.missing.join("、")}
-          </p>
+          <p className="text-[12px] text-up">读不到行情，已排除：{d.missing.join("、")}</p>
         )}
 
         <div className="flex flex-col gap-1">
@@ -231,68 +258,90 @@ function Result({ d, market, onSaved }: {
           ))}
         </div>
 
-        <Compare d={d} />
-      </section>
+        <table className="w-full text-[12.5px] border-collapse mt-1">
+          <thead>
+            <tr className="text-ink-mute">
+              <th className="text-left font-normal pb-1 pr-3">组合</th>
+              <th className="text-right font-normal pb-1 px-2">年化收益</th>
+              <th className="text-right font-normal pb-1 px-2">年化波动</th>
+              <th className="text-right font-normal pb-1 px-2">夏普</th>
+              <th className="text-right font-normal pb-1 pl-2">最大回撤</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-t border-line font-medium">
+              <td className="py-1 pr-3">本组合（按预期）</td>
+              <td className="py-1 px-2 text-right tnum">{signed(d.opt.ann_return_pct, 1, "%")}</td>
+              <td className="py-1 px-2 text-right tnum">{fixed(d.opt.ann_vol_pct, 1)}%</td>
+              <td className="py-1 px-2 text-right tnum">{fixed(d.opt.sharpe, 2)}</td>
+              <td className="py-1 pl-2 text-right tnum text-ink-mute">—</td>
+            </tr>
+            <tr className="border-t border-line text-ink-dim">
+              <td className="py-1 pr-3">本组合（按实际走势）</td>
+              <td className="py-1 px-2 text-right tnum">{signed(d.stats.ann_return_pct, 1, "%")}</td>
+              <td className="py-1 px-2 text-right tnum">{fixed(d.stats.ann_vol_pct, 1)}%</td>
+              <td className="py-1 px-2 text-right tnum">{fixed(d.stats.sharpe, 2)}</td>
+              <td className="py-1 pl-2 text-right tnum">{fixed(d.stats.max_drawdown_pct, 1)}%</td>
+            </tr>
+            <tr className="border-t border-line text-ink-dim">
+              <td className="py-1 pr-3">等权重（基准线）</td>
+              <td className="py-1 px-2 text-right tnum">{signed(d.equal_stats.ann_return_pct, 1, "%")}</td>
+              <td className="py-1 px-2 text-right tnum">{fixed(d.equal_stats.ann_vol_pct, 1)}%</td>
+              <td className="py-1 px-2 text-right tnum">{fixed(d.equal_stats.sharpe, 2)}</td>
+              <td className="py-1 pl-2 text-right tnum">{fixed(d.equal_stats.max_drawdown_pct, 1)}%</td>
+            </tr>
+          </tbody>
+        </table>
 
-      <section className="card p-3 flex flex-col gap-2">
-        <h3 className="text-[13.5px] font-semibold">📈 历史表现</h3>
-        <p className="label">
-          用最终权重回看这段历史。优化本来就是在这段数据上做的，所以这条线一定好看 ——
-          等权和{d.benchmark ? d.benchmark.label : "基准"}画在一起才读得出来。
-        </p>
-        <Curves d={d} />
+        <div className="grid gap-x-4 gap-y-1 sm:grid-cols-2 lg:grid-cols-5 text-[12px] mt-1">
+          <Metric label="有效仓位数" v={fixed(r.enb, 2)}
+            hint="1/Σw²。接近股票只数说明是真的分散，接近 1 说明是一个赌注。" />
+          <Metric label="分散比" v={fixed(r.div_ratio, 2)}
+            hint="加权平均波动 ÷ 组合波动。大于 1 才有分散化收益。" />
+          <Metric label="VaR 95%" v={`${fixed(r.var_95_pct, 2)}%`}
+            hint="95% 的交易日里，单日亏损不会超过这个数。" />
+          <Metric label="CVaR 95%" v={`${fixed(r.cvar_95_pct, 2)}%`}
+            hint="真的跌破 VaR 的那些天，平均亏这么多。" />
+          <Metric label="尾部比 95%" v={fixed(r.tail_95, 2)}
+            hint="上尾 ÷ 下尾。大于 1 表示极端行情里上行空间更大。" />
+          <Metric label="VaR 99%" v={`${fixed(r.var_99_pct, 2)}%`} />
+          <Metric label="CVaR 99%" v={`${fixed(r.cvar_99_pct, 2)}%`} />
+          <Metric label="尾部比 99%" v={fixed(r.tail_99, 2)} />
+          <Metric label="最差单日" v={`${fixed(r.worst_day_pct, 2)}%`} />
+          <Metric label="最差 5 日均值" v={`${fixed(r.avg_worst5_pct, 2)}%`} />
+        </div>
       </section>
 
       <div className="grid gap-3 lg:grid-cols-2 items-start">
         <section className="card p-3 flex flex-col gap-2">
-          <h3 className="text-[13.5px] font-semibold">📉 有效前沿</h3>
-          <p className="label">
-            每个风险水平下历史上能达到的最高收益。横轴波动、纵轴年化 ——
-            看形状，别从上面挑点：纵轴是历史均值，而历史均值不重复。
-          </p>
-          <Frontier d={d} />
+          <h3 className="text-[13.5px] font-semibold">📉 有效前沿 · 点选目标</h3>
+          <Frontier d={d} onPick={onPick} busy={busy} />
         </section>
-
         <section className="card p-3 flex flex-col gap-2">
           <h3 className="text-[13.5px] font-semibold">🔥 相关性矩阵</h3>
-          <p className="label">
-            两两之间的日收益相关性。整片深色说明这组股票其实是一个赌注，
-            分散只是名义上的。
-          </p>
           <CorrMatrix c={d.correlation} holdings={d.holdings} />
         </section>
       </div>
+
+      <section className="card p-3 flex flex-col gap-2">
+        <h3 className="text-[13.5px] font-semibold">📈 历史模拟</h3>
+        <p className="label">
+          用最终权重回看这段历史。优化就是在这段数据上做的，所以这条线一定好看 ——
+          等权和{d.benchmark ? d.benchmark.label : "基准"}画在一起才读得出来。
+        </p>
+        <Curves d={d} />
+      </section>
     </>
   );
 }
 
-function Compare({ d }: { d: PortfolioBuild }) {
-  const row = (label: string, s: PortfolioBuild["stats"], strong?: boolean) => (
-    <tr className={`border-t border-line ${strong ? "font-medium" : "text-ink-dim"}`}>
-      <td className="py-1 pr-3">{label}</td>
-      <td className="py-1 px-2 text-right tnum">{signed(s.ann_return_pct, 1, "%")}</td>
-      <td className="py-1 px-2 text-right tnum">{fixed(s.ann_vol_pct, 1)}%</td>
-      <td className="py-1 px-2 text-right tnum">{fixed(s.sharpe, 2)}</td>
-      <td className="py-1 pl-2 text-right tnum">{fixed(s.max_drawdown_pct, 1)}%</td>
-    </tr>
-  );
+function Metric({ label, v, hint }: { label: string; v: string; hint?: string }) {
   return (
-    <table className="w-full text-[12.5px] border-collapse mt-1">
-      <thead>
-        <tr className="text-ink-mute">
-          <th className="text-left font-normal pb-1 pr-3">组合</th>
-          <th className="text-right font-normal pb-1 px-2">年化收益</th>
-          <th className="text-right font-normal pb-1 px-2">年化波动</th>
-          <th className="text-right font-normal pb-1 px-2"
-            title="年化收益 ÷ 年化波动，未扣无风险利率">夏普</th>
-          <th className="text-right font-normal pb-1 pl-2">最大回撤</th>
-        </tr>
-      </thead>
-      <tbody>
-        {row(d.method_label, d.stats, true)}
-        {row("等权重（基准线）", d.equal_stats)}
-      </tbody>
-    </table>
+    <span className="flex items-baseline gap-1.5" title={hint}>
+      <span className="text-ink-mute">{label}</span>
+      {hint && <span className="text-ink-mute text-[10px]">ⓘ</span>}
+      <span className="ml-auto tnum font-medium">{v}</span>
+    </span>
   );
 }
 
@@ -314,7 +363,7 @@ function SaveFund({ d, market, onSaved }: {
   if (!open) {
     return (
       <button onClick={() => setOpen(true)}
-        className="ml-auto h-8 px-3 rounded-lg bg-sunken text-[12.5px] font-medium">
+        className="ml-auto h-8 px-3 rounded-lg bg-sunken text-[12.5px] font-medium text-ink">
         💾 存为组合
       </button>
     );
@@ -323,16 +372,15 @@ function SaveFund({ d, market, onSaved }: {
     <div className="ml-auto flex items-center gap-1.5">
       <input value={name} onChange={(e) => setName(e.target.value)}
         placeholder={`${market === "CN" ? "A股" : "美股"}组合名…`} autoFocus
-        className="h-8 w-40 px-2 rounded-md bg-sunken text-[12.5px] outline-none
+        className="h-8 w-40 px-2 rounded-md bg-sunken text-[12.5px] text-ink outline-none
           focus:ring-2 focus:ring-cyan/40" />
-      <button onClick={() => save.mutate()}
-        disabled={!name.trim() || save.isPending}
+      <button onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}
         className="h-8 px-3 rounded-lg bg-cyan text-white text-[12.5px]
           font-semibold disabled:opacity-60">
         {save.isPending ? "保存中…" : "保存"}
       </button>
       <button onClick={() => setOpen(false)}
-        className="h-8 px-2 rounded-lg bg-sunken text-[12.5px]">取消</button>
+        className="h-8 px-2 rounded-lg bg-sunken text-[12.5px] text-ink">取消</button>
       {save.isError && (
         <span className="text-[12px] text-up">{(save.error as ApiError).message}</span>
       )}
