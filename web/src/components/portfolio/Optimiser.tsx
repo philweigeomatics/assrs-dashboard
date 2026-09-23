@@ -12,11 +12,12 @@
  */
 
 import { useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../lib/api";
 import type { PortfolioBuild, StockRef } from "../../lib/types";
 import { useSymbolSearch } from "../../lib/useSymbolSearch";
 import { usePersistentState } from "../../lib/usePersistentState";
+import { BUILD_KEY, signature, type CachedBuild } from "../../lib/buildCache";
 import { fixed, signed } from "../../lib/format";
 import { Curves } from "./Curves";
 import { Frontier } from "./Frontier";
@@ -43,13 +44,28 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
   const [duration, setDuration] = usePersistentState<number>("assrs.pf.dur", 1);
   const [rf, setRf] = usePersistentState<number>("assrs.pf.rf", 3);
 
+  const qc = useQueryClient();
+  const sig = signature({ symbols: picked.map((p) => p.t),
+                          maxWeight, lookback, duration, rf });
+
   const run = useMutation({
     mutationFn: (t: number | null) => api.portfolioBuild({
       symbols: picked.map((p) => p.t), target_return_pct:
         t === null ? null : Number((t * 100).toFixed(4)),
       max_weight_pct: maxWeight, lookback, duration, rf_pct: rf,
     }),
+    onSuccess: (d) => qc.setQueryData<CachedBuild>(BUILD_KEY, { d, sig }),
   });
+
+  // Cache-only: `enabled: false` means the fn never runs, so this is purely a
+  // subscription to whatever the last successful build wrote.
+  const kept = useQuery({
+    queryKey: BUILD_KEY,
+    queryFn: () => null as CachedBuild | null,
+    enabled: false,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  }).data ?? null;
 
   const ready = picked.length >= 2;
   const go = (t: number | null) => run.mutate(t);
@@ -118,9 +134,9 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
         )}
       </section>
 
-      {run.data && (
-        <Result d={run.data} market={market} busy={run.isPending}
-          onPick={go} onSaved={onSaved} />
+      {kept && (
+        <Result d={kept.d} market={market} busy={run.isPending}
+          stale={kept.sig !== sig} onPick={go} onSaved={onSaved} />
       )}
     </div>
   );
@@ -188,14 +204,21 @@ const TONE: Record<string, string> = {
   bad: "text-up border-up/50 bg-up/10",
 };
 
-function Result({ d, market, busy, onPick, onSaved }: {
-  d: PortfolioBuild; market: Market; busy: boolean;
+function Result({ d, market, busy, stale, onPick, onSaved }: {
+  d: PortfolioBuild; market: Market; busy: boolean; stale: boolean;
   onPick: (t: number | null) => void; onSaved: () => void;
 }) {
   const a = d.assessment;
   const r = d.risk;
   return (
-    <>
+    <div className={`flex flex-col gap-3 transition-opacity ${
+      busy ? "opacity-50" : ""}`}>
+      {stale && (
+        <p className="card px-3 py-2 text-[12.5px] text-brand-ink
+          border border-brand-ink/40 bg-brand-ink/5">
+          输入改过了 —— 下面还是上一次的结果，重新算一次才对得上。
+        </p>
+      )}
       {/* The assessment leads, as it did on the page. */}
       <section className={`card p-3 flex flex-col gap-2 border ${TONE[a.tone] ?? ""}`}>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -331,7 +354,7 @@ function Result({ d, market, busy, onPick, onSaved }: {
         </p>
         <Curves d={d} />
       </section>
-    </>
+    </div>
   );
 }
 
