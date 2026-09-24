@@ -1248,3 +1248,60 @@ export type DiscoverResult = {
   };
   rows: DiscoverRow[];
 };
+
+
+/** GET /market/macro — inflation, growth, liquidity and rates. */
+export type MacroCard = {
+  label: string; group: string; unit: string;
+  /** The level that separates expansion from contraction, where one exists. */
+  threshold: number | null;
+  note: string;
+  value: number; prev: Num; change: Num;
+  period: string;
+  history: number[];
+  periods: string[];
+};
+
+export type MacroBoard = {
+  cards: MacroCard[];
+  groups: string[];
+  /** Series that did not come back, named rather than silently absent. */
+  missing: string[];
+  as_of: string;
+};
+
+/** What the front two contracts say about a commodity market. */
+export type TermStructure = {
+  state: "backwardation" | "contango" | "flat";
+  tone: "up" | "down" | "flat";
+  note: string;
+  front_symbol: string; front_price: number;
+  next_symbol: string; next_price: number;
+  spread: number;
+  roll_ann_pct: number;
+  days_between: number;
+  unit: string;
+};
+
+export type FuturesProduct = {
+  code: string; label: string; en: string; unit: string; group: string;
+};
+
+export type CommodityBoard = {
+  trade_date: string;
+  board: (FuturesProduct & {
+    symbol?: string;
+    price: Num;
+    state: TermStructure["state"] | null;
+    tone?: TermStructure["tone"] | null;
+    roll_ann_pct?: Num;
+    spread?: Num;
+  })[];
+  detail: (FuturesProduct & {
+    term: TermStructure | null;
+    curve: { symbol: string; maturity: string; price: number;
+             spread: number; spread_pct: Num; oi: number; vol: number }[];
+    listed: number; shown: number; liquid_only: boolean;
+  }) | null;
+  products: FuturesProduct[];
+};

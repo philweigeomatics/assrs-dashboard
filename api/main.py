@@ -1446,6 +1446,11 @@ _indices_cache = TTLCache(maxsize=1, ttl_s=5 * 60)
 #: A build is a dozen price fetches plus two dozen constrained solves, and
 #: the screen re-asks on every slider change.
 _portfolio_cache = TTLCache(maxsize=20, ttl_s=20 * 60)
+#: Macro is monthly and quarterly data — an hour is already generous.
+_macro_cache = TTLCache(maxsize=1, ttl_s=3600)
+#: One entry per (product, liquidity toggle). Settlements are struck once a
+#: day, so the only reason to re-read is a new trade date.
+_commod_cache = TTLCache(maxsize=30, ttl_s=3600)
 
 #: Indices the Wyckoff panel will run on. An allow-list rather than a free
 #: parameter: the phases are only meaningful on a broad index, and an open
@@ -1468,6 +1473,39 @@ def _market_panel(cache, key, build):
         raise HTTPException(503, str(exc))
     except Exception as exc:                                    # noqa: BLE001
         raise HTTPException(503, f"{type(exc).__name__}: {exc}"[:200])
+
+
+@app.get("/market/macro")
+def market_macro(user: AppUser = Depends(current_user)):
+    """
+    Inflation, growth, liquidity and rates — level, change, and the shape.
+
+    Each card carries its own history so the number has somewhere to sit: a
+    PMI of 49.8 means one thing after three months of 51 and another after
+    three months of 48.
+    """
+    import macro
+    return _market_panel(_macro_cache, "all", macro.macro)
+
+
+@app.get("/market/commodities")
+def market_commodities(code: str | None = None, liquid: bool = True,
+                       user: AppUser = Depends(current_user)):
+    """
+    Front-month prices for twelve products, and one forward curve in full.
+
+    `liquid` keeps only contracts holding at least a tenth of the busiest
+    month's open interest. Chinese commodity trading clusters in the 1/5/9
+    delivery months and the off-months settle administratively, so the raw
+    curve has kinks nobody could have traded.
+    """
+    import macro
+
+    picked = (code or "").upper() or None
+    if picked is not None and picked not in macro.BY_CODE:
+        raise HTTPException(422, f"没有这个品种：{code}")
+    return _market_panel(_commod_cache, (picked, bool(liquid)),
+                         lambda: macro.commodities(picked, liquid_only=liquid))
 
 
 @app.get("/market/indices")

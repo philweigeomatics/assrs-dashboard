@@ -5,6 +5,8 @@ import type {
   NewSectorResult,
   RebuildJobs,
   FundDetail,
+  CommodityBoard,
+  MacroBoard,
   PortfolioBuild,
   WeighResult,
   SavedFund,
@@ -164,6 +166,10 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, tickers }),
     }),
+  macro: () => call<MacroBoard>("/market/macro"),
+  commodities: (code: string | null, liquid: boolean) =>
+    call<CommodityBoard>(
+      `/market/commodities?liquid=${liquid}${code ? `&code=${code}` : ""}`),
   indices: () => call<WorldIndices>("/market/indices"),
 
   // ── portfolio construction ────────────────────────────────────────────

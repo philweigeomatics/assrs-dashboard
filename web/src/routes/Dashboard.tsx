@@ -31,6 +31,8 @@ import { WyckoffPanel } from "../components/market/WyckoffPanel";
 import { LeveragePanel } from "../components/market/LeveragePanel";
 import { TopList } from "../components/market/TopList";
 import { IndexStrip } from "../components/market/IndexStrip";
+import { MacroPanel } from "../components/market/MacroPanel";
+import { CommodityPanel } from "../components/market/CommodityPanel";
 import { usePersistentState } from "../lib/usePersistentState";
 import { useSize } from "../lib/useSize";
 import { signed } from "../lib/format";
@@ -48,6 +50,9 @@ export function Dashboard() {
   const [view, setView] = usePersistentState<"heatmap" | "breadth">("assrs.mkt.view", "heatmap");
   const [freq, setFreq] = usePersistentState<"w" | "d">("assrs.mkt.rotfreq", "w");
   const [index, setIndex] = usePersistentState<string>("assrs.mkt.index", "000300.SH");
+  const [commodity, setCommodity] = usePersistentState<string>("assrs.mkt.comm", "CU");
+  const [liquidOnly, setLiquidOnly] = usePersistentState<boolean>(
+    "assrs.mkt.commliquid", true);
 
   // Above everything else and on its own short clock: half these markets
   // are open while someone is looking at the page.
@@ -65,6 +70,14 @@ export function Dashboard() {
     staleTime: 20 * 60_000 });
   const toplist = useQuery({ queryKey: ["mkt", "toplist"], queryFn: api.topList,
     staleTime: 2 * 3600_000 });
+  // Monthly and quarterly prints, and settlements struck once a day —
+  // nothing here changes while the page is open.
+  const macro = useQuery({ queryKey: ["mkt", "macro"], queryFn: api.macro,
+    staleTime: 3600_000 });
+  const commodities = useQuery({
+    queryKey: ["mkt", "commodities", commodity, liquidOnly],
+    queryFn: () => api.commodities(commodity, liquidOnly),
+    staleTime: 3600_000 });
 
   return (
     <div className="min-h-screen">
@@ -111,6 +124,21 @@ export function Dashboard() {
           subtitle="客户保证金借款余额 —— 最直接的风险偏好指标。红 = 加杠杆，绿 = 去杠杆。"
           q={leverage}>
           {leverage.data && <LeveragePanel data={leverage.data} />}
+        </Panel>
+
+        <Panel title="📊 宏观"
+          subtitle="通胀、增长、流动性与利率。中国数据是月度或季度的，SHIBOR 和美债是日度的；变化是与上一期相比。"
+          q={macro}>
+          {macro.data && <MacroPanel data={macro.data} />}
+        </Panel>
+
+        <Panel title="🛢 大宗商品 · 期限结构"
+          subtitle="一个期货价格本身说明不了什么，近月和远月的高低才说明问题。点任一品种看它的远期曲线。"
+          q={commodities}>
+          {commodities.data && (
+            <CommodityPanel data={commodities.data} onCode={setCommodity}
+              liquid={liquidOnly} onLiquid={setLiquidOnly} />
+          )}
         </Panel>
 
         <Panel title="🐉 龙虎榜"
