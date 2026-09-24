@@ -44,13 +44,17 @@ export function CommodityPanel({ data, onCode, liquid, onLiquid }: {
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-col gap-2">
+      {/*
+        Groups as columns, for the same reason as the macro board: the six
+        groups hold 3/3/2/2/1/1 products, so a six-wide row of tiles left
+        most of every row empty.
+      */}
+      <div className="grid gap-x-3 gap-y-3 items-start
+        grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
         {groups.map((g) => (
-          <div key={g} className="flex flex-col gap-1.5">
+          <div key={g} className="flex flex-col gap-1.5 min-w-0">
             <h4 className="text-[12.5px] font-semibold text-ink-dim">{g}</h4>
-            <div className="grid gap-2 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4
-              xl:grid-cols-6">
-              {data.board.filter((b) => b.group === g).map((b) => {
+            {data.board.filter((b) => b.group === g).map((b) => {
                 const on = picked?.code === b.code;
                 const st = b.state ? STATE[b.state] : null;
                 return (
@@ -83,9 +87,8 @@ export function CommodityPanel({ data, onCode, liquid, onLiquid }: {
                       </span>
                     )}
                   </button>
-                );
-              })}
-            </div>
+              );
+            })}
           </div>
         ))}
       </div>
@@ -150,9 +153,11 @@ function Detail({ d, liquid, onLiquid }: {
         </>
       )}
 
-      <Curve d={d} />
-
-      <div className="overflow-x-auto">
+      {/* Curve beside the table on a wide screen: they are two readings of
+          the same six rows, and stacking them made you scroll between. */}
+      <div className="grid gap-3 items-start xl:grid-cols-[1.35fr_1fr]">
+        <Curve d={d} />
+        <div className="overflow-x-auto">
         <table className="w-full text-[12px] border-collapse">
           <thead>
             <tr className="text-ink-mute">
@@ -186,6 +191,7 @@ function Detail({ d, liquid, onLiquid }: {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       <p className="label">

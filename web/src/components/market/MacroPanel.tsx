@@ -22,17 +22,25 @@ const VH = 32;
 export function MacroPanel({ data }: { data: MacroBoard }) {
   return (
     <div className="flex flex-col gap-3">
-      {data.groups.map((g) => (
-        <div key={g} className="flex flex-col gap-1.5">
-          <h4 className="text-[12.5px] font-semibold text-ink-dim">{g}</h4>
-          <div className="grid gap-2 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3
-            xl:grid-cols-4">
+      {/*
+        The GROUPS are the columns, not the cards. Laying each group out as
+        its own row of four wasted one to two slots every time — none of the
+        five groups holds four cards — so on a wide screen everything bunched
+        into the left half and the rest of the row sat empty. Five groups
+        across fills the width and puts 通胀 / 增长 / 流动性 / 利率 side by
+        side, which is the order you read them in anyway.
+      */}
+      <div className="grid gap-x-4 gap-y-3 items-start
+        sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+        {data.groups.map((g) => (
+          <div key={g} className="flex flex-col gap-1.5 min-w-0">
+            <h4 className="text-[12.5px] font-semibold text-ink-dim">{g}</h4>
             {data.cards.filter((c) => c.group === g).map((c) => (
               <Card key={c.label} c={c} />
             ))}
           </div>
-        </div>
-      ))}
+        ))}
+      </div>
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <span className="label">
@@ -75,14 +83,11 @@ function Card({ c }: { c: MacroCard }) {
         </span>
       </div>
 
-      <div className="flex items-end gap-2">
-        <div className="flex items-baseline gap-1.5 min-w-0">
-          <span className="text-[17px] font-semibold tnum">
-            {fixed(c.value, 2)}
-          </span>
-          <span className="label">{c.unit}</span>
-        </div>
-        <span className={`text-[12px] tnum font-medium ${tone}`}>
+      <div className="flex items-end gap-1.5">
+        <span className="text-[17px] font-semibold tnum shrink-0">
+          {fixed(c.value, 2)}<span className="label font-normal">{c.unit}</span>
+        </span>
+        <span className={`text-[12px] tnum font-medium shrink-0 ${tone}`}>
           {flat ? "持平" : signed(c.change, 2, c.unit)}
         </span>
         <Spark c={c} />
@@ -94,7 +99,7 @@ function Card({ c }: { c: MacroCard }) {
 /** Two years of shape, with the regime line drawn where there is one. */
 function Spark({ c }: { c: MacroCard }) {
   const v = c.history;
-  if (v.length < 2) return <span className="ml-auto" />;
+  if (v.length < 2) return <span className="ml-auto flex-1" />;
 
   const first = v[0] ?? 0;
   const last = v[v.length - 1] ?? 0;
@@ -112,7 +117,8 @@ function Spark({ c }: { c: MacroCard }) {
 
   return (
     <svg viewBox={`0 0 ${VW} ${VH}`} preserveAspectRatio="none"
-      className="ml-auto w-[120px] h-[32px] shrink-0 block" role="img"
+      className="ml-auto flex-1 min-w-[56px] max-w-[130px] h-[32px] block"
+      role="img"
       aria-label={`${c.label} 近 ${v.length} 期走势`}>
       {c.threshold != null && (
         <line x1={0} x2={VW} y1={y(c.threshold)} y2={y(c.threshold)}
