@@ -521,16 +521,27 @@ export type FollowThrough = {
  * `mode` is "max_sharpe" with no target, or "target" when a point on the
  * frontier was chosen: the least variance that reaches that return.
  */
+export type BuildMode = "max_sharpe" | "min_variance" | "risk_parity" | "target";
+
 export type PortfolioBuild = {
   market: string;
-  mode: "max_sharpe" | "target";
+  mode: BuildMode;
+  mode_label: string;
   target_return_pct: number | null;
   max_weight_pct: number;
   rf_pct: number;
   lookback: number; duration: number;
   from: string; to: string;
   missing: string[];
-  holdings: { t: string; n: string; weight_pct: number }[];
+  holdings: { t: string; n: string; weight_pct: number;
+              /** Share of portfolio volatility this position carries. */
+              risk_pct: number }[];
+  /** Only in risk-parity mode: how close to equal the shares actually came. */
+  parity: { equal_pct: Num; max_pct: Num; min_pct: Num;
+            spread_pp: Num; reached: boolean } | null;
+  /** Where the other strategies land, for comparison on the same axes. */
+  marks: { mode: BuildMode; label: string; ret_pct: number;
+           vol_pct: number; sharpe: Num }[];
   /** From the annualised moments, so the dot sits on the frontier. */
   opt: { ann_return_pct: number; ann_vol_pct: number; sharpe: number };
   stats: { ann_return_pct: Num; ann_vol_pct: Num; sharpe: Num;

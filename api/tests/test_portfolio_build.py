@@ -642,3 +642,181 @@ def test_weighing_rejects_an_empty_allocation(cn):
 def moments_of_full(frames, cols, duration=1):
     px = pd.concat([frames[c].rename(c) for c in cols], axis=1).dropna()
     return pb.moments(px, duration)
+
+
+# ── risk contribution ────────────────────────────────────────────────────────
+def test_risk_contributions_sum_to_one():
+    cov = np.array([[0.04, 0.01], [0.01, 0.09]])
+    rc = pb.risk_contributions(np.array([0.6, 0.4]), cov)
+    assert rc.sum() == pytest.approx(1.0)
+
+
+def test_risk_contribution_is_not_the_weight():
+    """
+    The whole reason this column exists. On live A-shares the max-Sharpe book
+    held one semiconductor name at 30% of capital and 89% of the volatility.
+    """
+    cov = np.array([[0.01, 0.0], [0.0, 0.64]])      # 10% vol vs 80% vol
+    w = np.array([0.5, 0.5])
+    rc = pb.risk_contributions(w, cov)
+    assert rc[1] > 0.9
+    assert rc[0] < 0.1
+
+
+def test_equal_risk_contribution_when_assets_are_identical():
+    cov = np.array([[0.04, 0.0], [0.0, 0.04]])
+    rc = pb.risk_contributions(np.array([0.5, 0.5]), cov)
+    assert rc[0] == pytest.approx(0.5)
+    assert rc[1] == pytest.approx(0.5)
+
+
+def test_risk_contributions_of_a_zero_variance_book_are_zero():
+    """No division by a zero sigma."""
+    rc = pb.risk_contributions(np.array([0.5, 0.5]), np.zeros((2, 2)))
+    assert list(rc) == [0.0, 0.0]
+
+
+# ── risk parity ──────────────────────────────────────────────────────────────
+def test_risk_parity_equalises_risk_not_weight():
+    """
+    Two uncorrelated assets, one four times as volatile. Equal risk means the
+    quiet one gets four times the weight — which is exactly the thing equal
+    weighting gets wrong.
+    """
+    cov = pd.DataFrame(np.array([[0.01, 0.0], [0.0, 0.16]]),
+                       index=["a", "b"], columns=["a", "b"])
+    w = pb.risk_parity(cov, max_weight=1.0)
+    assert w.sum() == pytest.approx(1.0)
+    assert w[0] / w[1] == pytest.approx(4.0, rel=0.02)
+    rc = pb.risk_contributions(w, cov.to_numpy())
+    assert rc[0] == pytest.approx(0.5, abs=0.01)
+
+
+def test_risk_parity_gives_every_holding_the_same_risk_share():
+    rng = np.random.default_rng(7)
+    a = rng.normal(0, 0.01, 400)
+    frame = pd.DataFrame({
+        "a": a,
+        "b": a * 0.8 + rng.normal(0, 0.01, 400),
+        "c": rng.normal(0, 0.03, 400),
+        "d": rng.normal(0, 0.005, 400),
+    })
+    cov = frame.cov() * pb.TRADING_DAYS
+    w = pb.risk_parity(cov, max_weight=1.0)
+    rc = pb.risk_contributions(w, cov.to_numpy())
+    assert rc.max() - rc.min() < 0.01
+
+
+def test_risk_parity_never_uses_expected_returns():
+    """
+    Its argument for existing. Doubling every mean must not move a weight —
+    if it does, a forecast has crept into a method that refuses to make one.
+    """
+    rng = np.random.default_rng(3)
+    frame = pd.DataFrame(rng.normal(0, 0.02, size=(300, 4)),
+                         columns=list("abcd"))
+    cov = frame.cov() * pb.TRADING_DAYS
+    mu = frame.mean() * pb.TRADING_DAYS
+
+    a = pb.weights_for("risk_parity", mu, cov,
+                       target_return=None, max_weight=1.0)
+    b = pb.weights_for("risk_parity", mu * 2.0, cov,
+                       target_return=None, max_weight=1.0)
+    assert np.allclose(a, b)
+
+
+def test_risk_parity_respects_the_weight_cap():
+    cov = pd.DataFrame(np.diag([0.0004, 0.16, 0.16, 0.16]),
+                       index=list("abcd"), columns=list("abcd"))
+    w = pb.risk_parity(cov, max_weight=0.40)
+    assert w.max() <= 0.40 + 1e-6
+    assert w.sum() == pytest.approx(1.0)
+
+
+def test_parity_quality_admits_when_the_cap_blocked_it():
+    """A page that says 风险平价 while one name carries a third is lying."""
+    cov = pd.DataFrame(np.diag([0.0004, 0.16, 0.16, 0.16]),
+                       index=list("abcd"), columns=list("abcd"))
+    capped = pb.parity_quality(pb.risk_parity(cov, max_weight=0.40),
+                               cov.to_numpy())
+    assert capped["reached"] is False
+    assert capped["spread_pp"] > 1.0
+
+    free = pb.parity_quality(pb.risk_parity(cov, max_weight=1.0),
+                             cov.to_numpy())
+    assert free["reached"] is True
+
+
+def test_inverse_vol_is_the_naive_version_and_ignores_correlation():
+    cov = pd.DataFrame(np.array([[0.01, 0.0095], [0.0095, 0.01]]),
+                       index=["a", "b"], columns=["a", "b"])
+    w = pb.inverse_vol(cov, max_weight=1.0)
+    assert w[0] == pytest.approx(0.5)      # same vol, so same weight
+    assert w[1] == pytest.approx(0.5)
+
+
+# ── the modes ────────────────────────────────────────────────────────────────
+def test_min_variance_mode_has_the_lowest_volatility_of_the_three(cn):
+    cols = list(cn)
+    _, mu, cov, _ = moments_of_full(cn, cols)
+    vols = {}
+    for mode in ("max_sharpe", "min_variance", "risk_parity"):
+        w = pb.weights_for(mode, mu, cov, target_return=None, max_weight=0.5)
+        vols[mode] = pb.performance(w, mu.to_numpy(), cov.to_numpy())[1]
+    assert vols["min_variance"] <= vols["max_sharpe"] + 1e-9
+    assert vols["min_variance"] <= vols["risk_parity"] + 1e-9
+
+
+def test_max_sharpe_mode_has_the_best_sharpe_of_the_three(cn):
+    cols = list(cn)
+    _, mu, cov, _ = moments_of_full(cn, cols)
+    best = {}
+    for mode in ("max_sharpe", "min_variance", "risk_parity"):
+        w = pb.weights_for(mode, mu, cov, target_return=None,
+                           max_weight=0.5, rf=0.03)
+        ret, vol = pb.performance(w, mu.to_numpy(), cov.to_numpy())
+        best[mode] = (ret - 0.03) / vol
+    assert best["max_sharpe"] >= best["min_variance"] - 1e-6
+    assert best["max_sharpe"] >= best["risk_parity"] - 1e-6
+
+
+def test_min_variance_mode_lands_on_the_frontier_left_end(cn):
+    cols = list(cn)
+    _, mu, cov, _ = moments_of_full(cn, cols)
+    w = pb.weights_for("min_variance", mu, cov,
+                       target_return=None, max_weight=0.5)
+    _, vol = pb.performance(w, mu.to_numpy(), cov.to_numpy())
+    pts = pb.efficient_frontier(mu, cov, points=20, max_weight=0.5)
+    assert vol * 100 == pytest.approx(min(p["vol_pct"] for p in pts), abs=0.1)
+
+
+def test_an_unknown_mode_is_refused(cn):
+    with pytest.raises(LookupError, match="没有这个模式"):
+        pb.build(list(cn), max_weight=0.5, mode="best_vibes")
+
+
+def test_a_target_return_still_means_target_mode_without_saying_so(cn):
+    out = pb.build(list(cn), target_return=0.10, max_weight=0.6)
+    assert out["mode"] == "target"
+
+
+def test_every_mode_reports_which_one_it_was(cn):
+    for mode in ("max_sharpe", "min_variance", "risk_parity"):
+        out = pb.build(list(cn), max_weight=0.5, mode=mode)
+        assert out["mode"] == mode
+        assert out["mode_label"] == pb.MODES[mode]
+        assert (out["parity"] is not None) == (mode == "risk_parity")
+
+
+def test_holdings_carry_a_risk_share_that_sums_to_a_hundred(cn):
+    out = pb.build(list(cn), max_weight=0.5, mode="max_sharpe")
+    total = sum(h["risk_pct"] for h in out["holdings"])
+    assert total == pytest.approx(100.0, abs=0.2)
+
+
+def test_marks_place_the_other_strategies_on_the_same_axes(cn):
+    out = pb.build(list(cn), max_weight=0.5, mode="max_sharpe")
+    modes = {m["mode"] for m in out["marks"]}
+    assert modes == {"min_variance", "risk_parity"}
+    for m in out["marks"]:
+        assert m["vol_pct"] > 0 and m["label"]

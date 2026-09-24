@@ -934,11 +934,14 @@ class BuildReq(BaseModel):
     """
     2-30 tickers from ONE market, and where on the frontier to sit.
 
-    `target_return_pct` null maximises Sharpe; a value asks for the least
-    variance that reaches that annualised return, which is how a point
-    clicked on the frontier becomes weights.
+    `mode` picks the objective: max_sharpe, min_variance, risk_parity, or
+    target. In target mode `target_return_pct` asks for the least variance
+    that reaches that annualised return, which is how a point clicked on the
+    frontier becomes weights.
     """
     symbols: list[str] = Field(..., min_length=2, max_length=30)
+    #: max_sharpe | min_variance | risk_parity | target
+    mode: str | None = None
     target_return_pct: float | None = Field(None, ge=-100.0, le=500.0)
     max_weight_pct: float = Field(30.0, ge=5.0, le=100.0)
     lookback: int = Field(242, ge=60, le=1000)
@@ -982,9 +985,9 @@ def portfolio_build_route(req: BuildReq, user: AppUser = Depends(current_user)):
                            else req.target_return_pct / 100.0),
             max_weight=req.max_weight_pct / 100.0,
             lookback=req.lookback, duration=req.duration,
-            rf=req.rf_pct / 100.0)
+            rf=req.rf_pct / 100.0, mode=req.mode)
 
-    key = (tuple(sorted(req.symbols)), req.target_return_pct,
+    key = (tuple(sorted(req.symbols)), req.mode, req.target_return_pct,
            req.max_weight_pct, req.lookback, req.duration, req.rf_pct)
     try:
         return _portfolio_cache.get_or_compute(key, run)

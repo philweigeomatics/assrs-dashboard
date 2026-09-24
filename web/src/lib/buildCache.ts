@@ -21,6 +21,8 @@ export type BuildInputs = {
   lookback: number;
   duration: number;
   rf: number;
+  /** Changing the objective changes the answer, so it belongs here. */
+  mode: string;
 };
 
 /**
@@ -34,5 +36,5 @@ export type BuildInputs = {
  */
 export function signature(i: BuildInputs): string {
   return `${[...i.symbols].sort().join(",")}|${i.maxWeight}|${i.lookback}`
-    + `|${i.duration}|${i.rf}`;
+    + `|${i.duration}|${i.rf}|${i.mode}`;
 }

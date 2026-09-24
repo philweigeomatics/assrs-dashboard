@@ -24,7 +24,7 @@ function watch(qc: QueryClient) {
 
 describe("signature", () => {
   const base = { symbols: ["600519", "000001"], maxWeight: 30,
-                 lookback: 242, duration: 1, rf: 3 };
+                 lookback: 242, duration: 1, rf: 3, mode: "max_sharpe" };
 
   it("does not change when the same names are picked in another order", () => {
     expect(signature({ ...base, symbols: ["000001", "600519"] }))
@@ -35,6 +35,8 @@ describe("signature", () => {
     for (const diff of [
       { symbols: ["600519"] }, { maxWeight: 25 },
       { lookback: 120 }, { duration: 5 }, { rf: 2 },
+      // Changing the objective changes the answer.
+      { mode: "risk_parity" }, { mode: "min_variance" },
     ]) {
       expect(signature({ ...base, ...diff })).not.toBe(signature(base));
     }

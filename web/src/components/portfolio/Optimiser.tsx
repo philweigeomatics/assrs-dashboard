@@ -14,7 +14,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../lib/api";
-import type { PortfolioBuild, StockRef } from "../../lib/types";
+import type { BuildMode, PortfolioBuild, StockRef } from "../../lib/types";
 import { useSymbolSearch } from "../../lib/useSymbolSearch";
 import { usePersistentState } from "../../lib/usePersistentState";
 import { BUILD_KEY, signature, type CachedBuild } from "../../lib/buildCache";
@@ -27,6 +27,24 @@ import { WeightEditor } from "./WeightEditor";
 import type { WeighResult } from "../../lib/types";
 
 const MAX_NAMES = 30;
+
+/**
+ * What "optimise" is being asked to mean.
+ *
+ * The three differ in which input they trust. Max Sharpe trusts the
+ * historical means, which are the least stable thing in the problem.
+ * Minimum variance ignores them entirely and minimises volatility. Risk
+ * parity also ignores them, and instead equalises how much risk each holding
+ * carries — which is not the same as equalising weights.
+ */
+const BUILD_MODES: { id: BuildMode; label: string; hint: string }[] = [
+  { id: "max_sharpe", label: "最大夏普",
+    hint: "每单位波动换来的超额收益最高。用到历史均值收益，而均值是最不稳定的那个输入。" },
+  { id: "min_variance", label: "最小方差",
+    hint: "只求波动最小，完全不看预期收益。前沿曲线最左端就是它。" },
+  { id: "risk_parity", label: "风险平价",
+    hint: "让每只股票承担同样多的风险，而不是同样多的仓位。也不预测收益，只用协方差。" },
+];
 
 export type Market = "CN" | "US";
 
@@ -42,6 +60,8 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
   const picked = market === "CN" ? cnPicks : usPicks;
   const setPicked = market === "CN" ? setCnPicks : setUsPicks;
 
+  const [mode, setMode] = usePersistentState<BuildMode>(
+    "assrs.pf.mode", "max_sharpe");
   const [maxWeight, setMaxWeight] = usePersistentState<number>("assrs.pf.cap", 30);
   const [lookback, setLookback] = usePersistentState<number>("assrs.pf.lb", 242);
   const [duration, setDuration] = usePersistentState<number>("assrs.pf.dur", 1);
@@ -49,12 +69,14 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
 
   const qc = useQueryClient();
   const sig = signature({ symbols: picked.map((p) => p.t),
-                          maxWeight, lookback, duration, rf });
+                          maxWeight, lookback, duration, rf, mode });
 
   const run = useMutation({
     mutationFn: (t: number | null) => api.portfolioBuild({
-      symbols: picked.map((p) => p.t), target_return_pct:
-        t === null ? null : Number((t * 100).toFixed(4)),
+      symbols: picked.map((p) => p.t),
+      // A frontier click always means target mode, whatever button is lit.
+      mode: t === null ? mode : "target",
+      target_return_pct: t === null ? null : Number((t * 100).toFixed(4)),
       max_weight_pct: maxWeight, lookback, duration, rf_pct: rf,
     }),
     onSuccess: (d) => qc.setQueryData<CachedBuild>(BUILD_KEY, { d, sig }),
@@ -94,6 +116,23 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
 
         <Picker market={market} picked={picked} onChange={setPicked} />
 
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="label">配置方法</span>
+          <div className="flex items-center gap-1 flex-wrap">
+            {BUILD_MODES.map((m) => (
+              <button key={m.id} onClick={() => setMode(m.id)} title={m.hint}
+                className={`h-8 px-3 rounded-lg text-[12.5px] font-medium transition-colors ${
+                  mode === m.id ? "bg-elevated text-ink" : "text-ink-mute hover:text-ink"
+                }`}>
+                {m.label}
+              </button>
+            ))}
+          </div>
+          <span className="label flex-1 min-w-[200px] leading-snug">
+            {BUILD_MODES.find((m) => m.id === mode)?.hint}
+          </span>
+        </div>
+
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <label className="label flex items-center gap-1.5"
             title="任何一只的最大权重">
@@ -128,7 +167,9 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
           <button onClick={() => go(null)} disabled={!ready || run.isPending}
             className="ml-auto h-8 px-4 rounded-lg bg-cyan text-white text-[13px]
               font-semibold disabled:opacity-60">
-            {run.isPending ? "计算中…" : ready ? "🚀 优化（最大夏普）" : "先选两只以上"}
+            {run.isPending ? "计算中…"
+              : ready ? `🚀 优化（${BUILD_MODES.find((m) => m.id === mode)?.label}）`
+              : "先选两只以上"}
           </button>
         </div>
 
@@ -271,7 +312,7 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
           <h3 className="text-[13.5px] font-semibold">
             🎯 {d.mode === "target"
               ? `目标年化 ${fixed(d.target_return_pct, 1)}% 的最小方差配置`
-              : "最大夏普配置"}
+              : `${d.mode_label}配置`}
           </h3>
           <span className="label">
             {d.from} → {d.to} · {d.lookback} 个交易日 · 上限 {d.max_weight_pct}%
@@ -284,24 +325,7 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
           <p className="text-[12px] text-up">读不到行情，已排除：{d.missing.join("、")}</p>
         )}
 
-        <div className="flex flex-col gap-1">
-          {d.holdings.map((h) => (
-            <div key={h.t} className="flex items-center gap-2 text-[12.5px]">
-              <span className="w-28 shrink-0 truncate">{h.n}</span>
-              <span className="w-16 shrink-0 font-mono tnum text-[11px] text-ink-mute">
-                {h.t}
-              </span>
-              <div className="flex-1 h-4 rounded-sm bg-sunken overflow-hidden">
-                <div className="h-full rounded-sm bg-cyan"
-                  style={{ width: `${Math.min(100, h.weight_pct)}%` }} />
-              </div>
-              <span className={`w-14 text-right tnum ${
-                h.weight_pct <= 0 ? "text-ink-mute" : "font-medium"}`}>
-                {fixed(h.weight_pct, 1)}%
-              </span>
-            </div>
-          ))}
-        </div>
+        <Weights d={d} />
 
         <table className="w-full text-[12.5px] border-collapse mt-1">
           <thead>
@@ -393,6 +417,95 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
         <Curves d={d} />
       </section>
     </div>
+  );
+}
+
+/**
+ * Weight against risk share, one row each.
+ *
+ * These come apart badly and the gap is the point. On six A-shares the
+ * max-Sharpe book put 30% into one semiconductor name and that single
+ * position carried 89% of the portfolio volatility — a number the weights
+ * bar alone gives you no way to see.
+ */
+function Weights({ d }: { d: PortfolioBuild }) {
+  const held = d.holdings.filter((h) => h.weight_pct > 0);
+  const worst = held.reduce(
+    (a, h) => (h.risk_pct > (a?.risk_pct ?? -1) ? h : a),
+    null as PortfolioBuild["holdings"][number] | null);
+  const lopsided = worst != null && worst.risk_pct - worst.weight_pct >= 15;
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-2 text-[11px] text-ink-mute">
+        <span className="w-28 shrink-0" />
+        <span className="hidden md:block w-16 shrink-0" />
+        <span className="flex-1">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="w-3 h-2 rounded-sm inline-block bg-cyan" />权重
+            <span className="w-3 h-2 rounded-sm inline-block ml-2"
+              style={{ background: "#f59e0b" }} />占风险
+          </span>
+        </span>
+        <span className="w-14 text-right">权重</span>
+        <span className="w-14 text-right">风险</span>
+      </div>
+
+      {d.holdings.map((h) => (
+        <div key={h.t} className="flex items-center gap-2 text-[12.5px]">
+          <span className="w-28 shrink-0 truncate" title={h.n}>{h.n}</span>
+          <span className="hidden md:block w-16 shrink-0 font-mono tnum
+            text-[11px] text-ink-mute">{h.t}</span>
+          <div className="flex-1 flex flex-col gap-0.5 min-w-[60px]">
+            <div className="h-2.5 rounded-sm bg-sunken overflow-hidden">
+              <div className="h-full rounded-sm bg-cyan"
+                style={{ width: `${Math.min(100, h.weight_pct)}%` }} />
+            </div>
+            <div className="h-2.5 rounded-sm bg-sunken overflow-hidden">
+              <div className="h-full rounded-sm"
+                style={{ width: `${Math.min(100, h.risk_pct)}%`,
+                         background: "#f59e0b" }} />
+            </div>
+          </div>
+          <span className={`w-14 text-right tnum ${
+            h.weight_pct <= 0 ? "text-ink-mute" : "font-medium"}`}>
+            {fixed(h.weight_pct, 1)}%
+          </span>
+          <span className={`w-14 text-right tnum ${
+            h.risk_pct - h.weight_pct >= 15 ? "text-up font-medium"
+              : "text-ink-dim"}`}>
+            {fixed(h.risk_pct, 1)}%
+          </span>
+        </div>
+      ))}
+
+      {d.parity ? <Parity p={d.parity} /> : lopsided && worst && (
+        <p className="text-[12px] text-brand-ink leading-snug">
+          ⚠️ {worst.n} 只占 {fixed(worst.weight_pct, 1)}% 的仓位，
+          却承担了 {fixed(worst.risk_pct, 1)}% 的组合波动 ——
+          仓位分散不等于风险分散。想让每只承担一样的风险，选「风险平价」。
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Whether risk parity actually got there — the cap can make it unreachable. */
+function Parity({ p }: { p: NonNullable<PortfolioBuild["parity"]> }) {
+  if (p.reached) {
+    return (
+      <p className="text-[12px] text-up leading-snug">
+        ✅ 每只都承担 {fixed(p.equal_pct, 1)}% 的组合波动，风险真的被均分了。
+        注意权重并不相等 —— 波动小的那只本来就该拿得多。
+      </p>
+    );
+  }
+  return (
+    <p className="text-[12px] text-brand-ink leading-snug">
+      ⚠️ 单只上限挡住了完全的风险平价：目标是每只 {fixed(p.equal_pct, 1)}%，
+      实际落在 {fixed(p.min_pct, 1)}%–{fixed(p.max_pct, 1)}%（相差 {fixed(p.spread_pp, 1)}pp）。
+      把上限放宽可以更接近。
+    </p>
   );
 }
 

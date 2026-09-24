@@ -24,6 +24,11 @@ const VH = 280;
 const PAD = 38;
 
 const EQUAL = "#a855f7";
+const MINVAR = "#0ea5e9";
+const PARITY = "#14b8a6";
+const MARK_COLOUR: Record<string, string> = {
+  min_variance: MINVAR, risk_parity: PARITY,
+};
 const CUSTOM = "#f59e0b";
 const SINGLE = "var(--color-ink-mute)";
 
@@ -45,6 +50,9 @@ export function Frontier({ d, onPick, busy, custom }: {
   const mine = { vol: d.opt.ann_vol_pct, ret: d.opt.ann_return_pct };
   const eq = { vol: d.equal_stats.ann_vol_pct, ret: d.equal_stats.ann_return_pct };
   const singles = d.singles ?? [];
+  // Where the other two strategies land. Minimum variance is on the curve by
+  // construction; risk parity is not, and the distance is the trade-off.
+  const marks = (d.marks ?? []).filter((m) => m.mode !== d.mode);
 
   // The axes are set by the things you are choosing between — the frontier
   // and the portfolio markers. A single runaway stock (one A-share here at
@@ -57,6 +65,7 @@ export function Frontier({ d, onPick, busy, custom }: {
   if (eq.vol != null) vols.push(eq.vol);
   if (eq.ret != null) rets.push(eq.ret);
   if (custom) { vols.push(custom.vol_pct); rets.push(custom.ann_return_pct); }
+  for (const m of marks) { vols.push(m.vol_pct); rets.push(m.ret_pct); }
 
   const vSpan = Math.max(...vols) - Math.min(...vols);
   const rSpan = Math.max(...rets) - Math.min(...rets);
@@ -147,16 +156,26 @@ export function Frontier({ d, onPick, busy, custom }: {
           );
         })}
 
+        {marks.map((m) => (
+          <circle key={m.mode} cx={x(m.vol_pct)} cy={y(m.ret_pct)} r={5}
+            fill="none" stroke={MARK_COLOUR[m.mode] ?? SINGLE} strokeWidth={2.5}
+            vectorEffect="non-scaling-stroke">
+            <title>{`${m.label} · 年化 ${fixed(m.ret_pct, 1)}%`
+              + ` · 波动 ${fixed(m.vol_pct, 1)}% · 夏普 ${fixed(m.sharpe, 2)}`}</title>
+          </circle>
+        ))}
+
         {eq.vol != null && eq.ret != null && (
           <circle cx={x(eq.vol)} cy={y(eq.ret)} r={5} fill={EQUAL}
             stroke="var(--color-panel)" strokeWidth={2}>
             <title>{`等权重 · 年化 ${fixed(eq.ret, 1)}% · 波动 ${fixed(eq.vol, 1)}%`}</title>
           </circle>
         )}
-        {d.mode === "max_sharpe" && (
+        {d.mode !== "target" && (
           <circle cx={x(mine.vol)} cy={y(mine.ret)} r={6}
             fill="var(--color-cyan)" stroke="var(--color-panel)" strokeWidth={2}>
-            <title>{`最大夏普 · 年化 ${fixed(mine.ret, 1)}% · 波动 ${fixed(mine.vol, 1)}%`}</title>
+            <title>{`${d.mode_label} · 年化 ${fixed(mine.ret, 1)}%`
+              + ` · 波动 ${fixed(mine.vol, 1)}%`}</title>
           </circle>
         )}
         {custom && (
@@ -178,7 +197,11 @@ export function Frontier({ d, onPick, busy, custom }: {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px]">
         <Key colour="var(--color-line-bright)" shape="line" label="有效前沿（可点选）" />
         <Key colour="var(--color-cyan)"
-          label={d.mode === "target" ? "当前目标" : "最大夏普"} />
+          label={d.mode === "target" ? "当前目标" : d.mode_label} />
+        {marks.map((m) => (
+          <Key key={m.mode} colour={MARK_COLOUR[m.mode] ?? SINGLE}
+            shape="ring" label={m.label} />
+        ))}
         <Key colour={EQUAL} label="等权重" />
         {custom && <Key colour={CUSTOM} label="你的权重" />}
         <Key colour={SINGLE} shape="ring" label="单只股票" />
@@ -193,6 +216,8 @@ export function Frontier({ d, onPick, busy, custom }: {
       <p className="label leading-snug">
         <b>点曲线上的任意一点</b>，就按那个年化收益重新求解 —— 得到的是达到它所需波动最小的权重。
         每只股票单独持有都落在曲线的右下方，中间那段距离就是分散化换来的。
+        最小方差就在曲线的最左端；风险平价通常落在曲线下方，
+        那段距离就是它放弃的历史最优 —— 换来的是不去赌历史均值会重演。
         纵轴是历史均值，而历史均值不重复。
       </p>
     </div>

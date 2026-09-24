@@ -572,15 +572,176 @@ def _names(symbols: list[str], market: str) -> dict:
         return bare
 
 
+# ── risk contribution, and the two allocations built on it ───────────────────
+def risk_contributions(w: np.ndarray, cov: np.ndarray) -> np.ndarray:
+    """
+    Each holding's share of total portfolio risk, summing to 1.
+
+    A weight is not a risk. Marginal contribution is (Σw)_i / σ_p, and
+    multiplying by the weight gives the absolute contribution — those sum to
+    σ_p exactly, which is what makes the shares comparable. A 30% position in
+    the most volatile, most correlated name routinely carries half the risk
+    of the book, and nothing in a bar chart of weights shows that.
+    """
+    var = float(w @ cov @ w)
+    if var <= 0:
+        return np.zeros_like(w)
+    contrib = w * (cov @ w)
+    total = contrib.sum()
+    return contrib / total if total else np.zeros_like(w)
+
+
+def inverse_vol(cov: pd.DataFrame, *, max_weight: float,
+                min_weight: float = 0.0) -> np.ndarray:
+    """
+    Naive risk parity: weight by 1/σ, ignoring correlation.
+
+    Wrong in principle — two names that move together are one bet however
+    little each is weighted — but close enough to serve as the solver's
+    starting point, and a sane fallback when the real problem will not
+    converge.
+    """
+    sd = np.sqrt(np.diag(cov.to_numpy()))
+    n = len(sd)
+    inv = np.divide(1.0, sd, out=np.zeros(n), where=sd > 0)
+    if inv.sum() <= 0:
+        return np.full(n, 1.0 / n)
+    w = np.clip(inv / inv.sum(), min_weight, max_weight)
+    return w / w.sum()
+
+
+def risk_parity(cov: pd.DataFrame, *, max_weight: float = 1.0,
+                min_weight: float = 0.0) -> np.ndarray:
+    """
+    Equal risk contribution — every holding carries the same share of risk.
+
+    Note what is NOT here: expected returns. Risk parity is a deliberate
+    refusal to forecast them, and that refusal is the whole argument for it.
+    Mean variance puts weight wherever the historical mean was highest, and
+    historical means are the least stable input in the problem; this uses
+    only the covariance, which is the most stable one.
+
+    Solved by driving the spread of risk shares to zero rather than through
+    the log-barrier form, because that form cannot honour a weight cap, and
+    the cap is usually what makes these portfolios holdable.
+    """
+    from scipy.optimize import minimize
+
+    n = cov.shape[0]
+    cov_v = cov.to_numpy()
+    target = 1.0 / n
+
+    def spread(w: np.ndarray) -> float:
+        return float(((risk_contributions(w, cov_v) - target) ** 2).sum())
+
+    # A hard zero has no risk share to equalise, so the floor is nudged off it.
+    lo = max(min_weight, 1e-6)
+    res = minimize(spread, inverse_vol(cov, max_weight=max_weight,
+                                       min_weight=min_weight),
+                   method="SLSQP",
+                   bounds=tuple((lo, max_weight) for _ in range(n)),
+                   constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1.0}],
+                   options={"maxiter": 500, "ftol": 1e-12})
+    if not res.success:
+        return inverse_vol(cov, max_weight=max_weight, min_weight=min_weight)
+
+    w = np.clip(res.x, 0.0, None)
+    return w / w.sum() if w.sum() > 0 else w
+
+
+#: How the weights were chosen. `target` is set by clicking the frontier.
+MODES = {
+    "max_sharpe": "最大夏普",
+    "min_variance": "最小方差",
+    "risk_parity": "风险平价",
+    "target": "目标收益",
+}
+
+
+def weights_for(mode: str, mu: pd.Series, cov: pd.DataFrame, *,
+                target_return: float | None, max_weight: float,
+                min_weight: float = 0.0, rf: float = 0.03) -> np.ndarray:
+    """One place that decides what "optimise" means."""
+    if mode == "min_variance":
+        return min_variance(mu, cov, max_weight=max_weight,
+                            min_weight=min_weight)
+    if mode == "risk_parity":
+        return risk_parity(cov, max_weight=max_weight, min_weight=min_weight)
+    if mode == "target":
+        if target_return is None:
+            raise LookupError("目标收益模式需要一个目标")
+        return optimise_weights(mu, cov, target_return=target_return,
+                                max_weight=max_weight, min_weight=min_weight,
+                                rf=rf)
+    return optimise_weights(mu, cov, target_return=None,
+                            max_weight=max_weight, min_weight=min_weight, rf=rf)
+
+
+def parity_quality(w: np.ndarray, cov: np.ndarray) -> dict:
+    """
+    How close to equal the risk shares actually came.
+
+    A weight cap can put true parity out of reach, and a page that says
+    风险平价 while one name quietly carries a third of the risk is lying.
+    So the spread is measured and reported rather than assumed away.
+    """
+    rc = risk_contributions(w, cov)
+    held = rc[w > 1e-9]
+    if not len(held):
+        return {"equal_pct": None, "max_pct": None, "min_pct": None,
+                "spread_pp": None, "reached": False}
+    hi, lo = float(held.max() * 100), float(held.min() * 100)
+    return {
+        "equal_pct": round(100.0 / len(held), 2),
+        "max_pct": round(hi, 2),
+        "min_pct": round(lo, 2),
+        "spread_pp": round(hi - lo, 2),
+        # Within a point of each other is parity in any practical sense.
+        "reached": bool(hi - lo <= 1.0),
+    }
+
+
+def reference_marks(mu: pd.Series, cov: pd.DataFrame, *,
+                    max_weight: float, rf: float = 0.03) -> list[dict]:
+    """
+    Where each strategy lands, so the three can be compared on one picture.
+
+    Minimum variance sits on the frontier by construction — it IS the
+    left-hand end. Risk parity does not, and that is the honest part: it
+    gives up mean-variance efficiency on this history in exchange for not
+    betting on the historical means being repeatable. Seeing how far below
+    the curve it falls is the trade-off stated in one distance.
+    """
+    out = []
+    for mode in ("min_variance", "risk_parity"):
+        try:
+            w = weights_for(mode, mu, cov, target_return=None,
+                            max_weight=max_weight, rf=rf)
+        except Exception:                                          # noqa: BLE001
+            continue
+        ret, vol = performance(w, mu.to_numpy(), cov.to_numpy())
+        out.append({
+            "mode": mode, "label": MODES[mode],
+            "ret_pct": round(ret * 100, 2), "vol_pct": round(vol * 100, 2),
+            "sharpe": round((ret - rf) / vol, 2) if vol else None,
+        })
+    return out
+
+
 def build(symbols: list[str], *, target_return: float | None = None,
           max_weight: float = 0.30, lookback: int = DEFAULT_LOOKBACK,
-          duration: int = 1, rf: float = 0.03) -> dict:
+          duration: int = 1, rf: float = 0.03,
+          mode: str | None = None) -> dict:
     """
     Weights, the frontier they came off, the risk metrics and the assessment.
 
-    `target_return` None means "maximise Sharpe"; a value means "the least
-    variance that reaches this return" — which is what makes the frontier a
-    menu rather than an illustration.
+    `mode` decides what "optimise" means: 最大夏普, 最小方差, 风险平价, or
+    目标收益 — the last set by clicking a point on the frontier, which asks
+    for the least variance that reaches that return and is what makes the
+    curve a menu rather than an illustration.
+
+    A `target_return` with no mode still means 目标收益, so the frontier
+    keeps working without the caller saying so twice.
     """
     import markets
 
@@ -594,21 +755,25 @@ def build(symbols: list[str], *, target_return: float | None = None,
     if rets.empty or len(mu) < 2:
         raise LookupError("可用收益率数据不足")
 
-    raw = optimise_weights(mu, cov, target_return=target_return,
-                           max_weight=max_weight, rf=rf)
+    mode = mode or ("target" if target_return is not None else "max_sharpe")
+    if mode not in MODES:
+        raise LookupError(f"没有这个模式：{mode}")
+    raw = weights_for(mode, mu, cov, target_return=target_return,
+                      max_weight=max_weight, rf=rf)
     w = prune(pd.Series(raw, index=px.columns))
     w_full = w.reindex(px.columns).fillna(0.0)
     ann_ret, ann_vol = performance(w_full.to_numpy(), mu.to_numpy(), cov.to_numpy())
     sharpe = (ann_ret - rf) / ann_vol if ann_vol else 0.0
 
     names = _names(list(px.columns), market)
+    rc = risk_contributions(w_full.to_numpy(), cov.to_numpy())
     equal = pd.Series(1.0 / px.shape[1], index=px.columns)
     bench, bench_label = benchmark_closes(market, px.index)
     metrics = risk_metrics(daily, w_full.to_numpy(), cov)
 
     out = {
         "market": market,
-        "mode": "target" if target_return is not None else "max_sharpe",
+        "mode": mode,
         "target_return_pct": (round(target_return * 100, 2)
                               if target_return is not None else None),
         "max_weight_pct": round(max_weight * 100, 1),
@@ -617,8 +782,11 @@ def build(symbols: list[str], *, target_return: float | None = None,
         "from": str(px.index[0].date()), "to": str(px.index[-1].date()),
         "missing": px.attrs.get("missing", []),
         "holdings": [{"t": t, "n": names.get(t, t),
-                      "weight_pct": round(float(w.get(t, 0.0)) * 100, 2)}
-                     for t in px.columns],
+                      "weight_pct": round(float(w.get(t, 0.0)) * 100, 2),
+                      # A weight is not a risk: this is the share of
+                      # portfolio volatility the position actually carries.
+                      "risk_pct": round(float(rc[i]) * 100, 2)}
+                     for i, t in enumerate(px.columns)],
         # From the annualised moments, so the dot sits exactly on the frontier.
         "opt": {"ann_return_pct": round(ann_ret * 100, 2),
                 "ann_vol_pct": round(ann_vol * 100, 2),
@@ -628,6 +796,10 @@ def build(symbols: list[str], *, target_return: float | None = None,
         "risk": metrics,
         "assessment": assess(sharpe, metrics, px.shape[1]),
         "frontier": efficient_frontier(mu, cov, max_weight=max_weight),
+        "mode_label": MODES[mode],
+        "parity": (parity_quality(w_full.to_numpy(), cov.to_numpy())
+                   if mode == "risk_parity" else None),
+        "marks": reference_marks(mu, cov, max_weight=max_weight, rf=rf),
         "singles": singles(mu, cov, names),
         "industries": industries(w_full, names, market),
         "correlation": correlation(rets),

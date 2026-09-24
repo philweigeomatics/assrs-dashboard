@@ -174,7 +174,7 @@ export const api = {
 
   // ── portfolio construction ────────────────────────────────────────────
   portfolioBuild: (body: {
-    symbols: string[]; target_return_pct: number | null;
+    symbols: string[]; mode: string; target_return_pct: number | null;
     max_weight_pct: number; lookback: number; duration: number; rf_pct: number;
   }) => call<PortfolioBuild>("/portfolio/build", {
     method: "POST", headers: { "Content-Type": "application/json" },
