@@ -542,3 +542,103 @@ def test_names_use_the_resolved_company_name(monkeypatch):
 
     monkeypatch.setattr(markets, "parse", lambda s: (Live(), s.split(":", 1)[-1]))
     assert pb._names(["US:AAPL"], "US") == {"US:AAPL": "AAPL Inc."}
+
+
+# ── industry exposure ────────────────────────────────────────────────────────
+def _sector_stub(monkeypatch, mapping):
+    monkeypatch.setattr(pb, "_sectors", lambda syms, market: mapping)
+
+
+def test_industries_collapse_tickers_into_sectors(monkeypatch):
+    _sector_stub(monkeypatch, {"a": "银行", "b": "银行", "c": "白酒"})
+    out = pb.industries(pd.Series({"a": 0.3, "b": 0.3, "c": 0.4}),
+                        {"a": "A", "b": "B", "c": "C"}, "CN")
+    top = out["by_industry"][0]
+    assert top["industry"] == "银行"
+    assert top["weight_pct"] == pytest.approx(60.0)
+    assert top["count"] == 2
+
+
+def test_industries_flag_a_sector_bet(monkeypatch):
+    """Six names at 16% each is not diversified if five are one sector."""
+    _sector_stub(monkeypatch, {"a": "银行", "b": "银行", "c": "白酒"})
+    out = pb.industries(pd.Series({"a": 0.4, "b": 0.3, "c": 0.3}),
+                        {}, "CN")
+    assert out["tone"] == "bad" and "银行" in out["note"]
+
+    _sector_stub(monkeypatch, {"a": "银行", "b": "白酒", "c": "半导体"})
+    ok = pb.industries(pd.Series({"a": 0.34, "b": 0.33, "c": 0.33}), {}, "CN")
+    assert ok["tone"] == "good"
+
+
+def test_unclassified_is_named_not_dropped(monkeypatch):
+    """Dropping it would make the weights stop summing to 100%."""
+    _sector_stub(monkeypatch, {"a": "银行", "b": None})
+    out = pb.industries(pd.Series({"a": 0.5, "b": 0.5}), {}, "CN")
+    assert sum(b["weight_pct"] for b in out["by_industry"]) == pytest.approx(100.0)
+    assert any(b["industry"] == pb.UNCLASSIFIED for b in out["by_industry"])
+
+
+def test_zero_weight_holdings_are_not_industry_exposure(monkeypatch):
+    _sector_stub(monkeypatch, {"a": "银行", "b": "白酒"})
+    out = pb.industries(pd.Series({"a": 1.0, "b": 0.0}), {}, "CN")
+    assert [b["industry"] for b in out["by_industry"]] == ["银行"]
+
+
+def test_cn_sectors_match_a_tushare_suffixed_code(monkeypatch):
+    """
+    A saved fund stores `601066.SH`; stock_basic is keyed `601066`. Matching
+    those literally put every holding of every fund into 未分类.
+    """
+    import types as _t
+
+    frame = pd.DataFrame({"symbol": ["601066", "600519"],
+                          "industry": ["证券", "白酒"]})
+    fake = _t.ModuleType("db_manager")
+    fake.db = _t.SimpleNamespace(read_table=lambda *a, **k: frame)
+    monkeypatch.setitem(sys.modules, "db_manager", fake)
+    got = pb._sectors(["601066.SH", "600519"], "CN")
+    assert got == {"601066.SH": "证券", "600519": "白酒"}
+
+
+# ── reference points and hand-set weights ────────────────────────────────────
+def test_singles_put_every_stock_in_risk_return_space(cn):
+    mu, cov = moments_of(cn, list(cn))[1:3]
+    pts = pb.singles(mu, cov, {t: f"名{t}" for t in cn})
+    assert len(pts) == len(cn)
+    one = pts[0]
+    assert one["vol_pct"] == pytest.approx(float(np.sqrt(cov.iloc[0, 0])) * 100, abs=0.01)
+    assert one["ret_pct"] == pytest.approx(float(mu.iloc[0]) * 100, abs=0.01)
+
+
+def test_hand_set_weights_land_where_the_maths_says(cn):
+    cols = list(cn)
+    _, mu, cov, daily = moments_of_full(cn, cols)
+    w = pd.Series({c: 1.0 / len(cols) for c in cols})
+    got = pb.evaluate(mu, cov, daily, w, rf=0.03)
+    ret, vol = pb.performance(w.to_numpy(), mu.to_numpy(), cov.to_numpy())
+    assert got["ann_return_pct"] == pytest.approx(ret * 100, abs=0.01)
+    assert got["ann_vol_pct"] == pytest.approx(vol * 100, abs=0.01)
+    assert got["sharpe"] == pytest.approx((ret - 0.03) / vol, abs=0.01)
+
+
+def test_an_unbalanced_allocation_is_reported_not_normalised(cn):
+    """A user 3% short must see that, not a silently corrected answer."""
+    cols = list(cn)
+    short = {c: 20.0 for c in cols}          # 4 names × 20% = 80%
+    out = pb.weigh(cols, short, lookback=200)
+    assert out["sum_pct"] == pytest.approx(80.0, abs=0.01)
+    assert out["balanced"] is False
+
+    whole = {c: 25.0 for c in cols}
+    assert pb.weigh(cols, whole, lookback=200)["balanced"] is True
+
+
+def test_weighing_rejects_an_empty_allocation(cn):
+    with pytest.raises(LookupError, match="大于 0"):
+        pb.weigh(list(cn), {c: 0.0 for c in cn}, lookback=200)
+
+
+def moments_of_full(frames, cols, duration=1):
+    px = pd.concat([frames[c].rename(c) for c in cols], axis=1).dropna()
+    return pb.moments(px, duration)

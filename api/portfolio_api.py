@@ -92,7 +92,10 @@ def _active_positions(fund_id: int) -> list[dict]:
         out.append({"t": str(r["ts_code"]),
                     "weight_pct": round(float(r["weight"]) * 100, 2),
                     "since": str(r.get("effective_date") or "")[:10]})
-    return out
+    names = _cn_names()
+    for p in out:
+        p["n"] = names.get(p["t"].split(".", 1)[0], p["t"])
+    return sorted(out, key=lambda p: -p["weight_pct"])
 
 
 def create_fund(user_id: int, name: str, holdings: list[dict],
@@ -292,30 +295,39 @@ def _drift(fund_id: int, positions: list[dict]) -> list[dict]:
     return out
 
 
+def _own(user_id: int, fund_id: int) -> dict:
+    """
+    The fund row, or the same refusal for "not yours" and "not there".
+
+    Server-side, every time. A hidden button in the browser stops nobody.
+    """
+    _ensure()
+    df = _db().read_table("funds", filters={"id": int(fund_id),
+                                            "user_id": int(user_id)}, limit=1)
+    if df is None or df.empty:
+        raise LookupError("找不到这个组合")
+    return df.iloc[0].to_dict()
+
+
 def fund_detail(user_id: int, fund_id: int) -> dict:
     """
     One portfolio: what it targets, what it now holds, and how it is doing.
     """
-    _ensure()
-    db = _db()
-    df = db.read_table("funds", filters={"id": int(fund_id),
-                                         "user_id": int(user_id)}, limit=1)
-    if df is None or df.empty:
-        # Same answer whether it does not exist or belongs to someone else:
-        # "not yours" and "not there" should not be distinguishable.
-        raise LookupError("找不到这个组合")
-
-    row = df.iloc[0].to_dict()
+    row = _own(user_id, fund_id)
     positions = _active_positions(fund_id)
     benchmark = str(row.get("benchmark") or "") or None
+    tracking = _track(fund_id, benchmark)
     return {
         "id": int(fund_id),
         "name": str(row.get("fund_name") or ""),
         "benchmark": bench_label(benchmark),
         "inception": str(row.get("inception_date") or "")[:10] or None,
         "holdings": positions,
-        "tracking": _track(fund_id, benchmark),
+        "tracking": tracking,
         "drift": _drift(fund_id, positions),
+        "drift_history": _drift_series(fund_id),
+        "risk": _risk_strip(fund_id, tracking.get("total_return_pct")),
+        "industries": _fund_industries(positions),
     }
 
 
@@ -336,13 +348,209 @@ def revalue(fund_id: int) -> dict:
 
 def delete_fund(user_id: int, fund_id: int) -> dict:
     """Remove a portfolio and its positions. Scoped to the owner."""
-    _ensure()
+    _own(user_id, fund_id)
     db = _db()
-    owned = db.read_table("funds", filters={"id": int(fund_id),
-                                            "user_id": int(user_id)}, limit=1)
-    if owned is None or owned.empty:
-        raise LookupError("找不到这个组合")
-
     db.delete_records("fund_positions", {"fund_id": int(fund_id)})
     db.delete_records("funds", {"id": int(fund_id), "user_id": int(user_id)})
     return {"id": int(fund_id), "deleted": True}
+
+# ── the drift history, not just today's snapshot ─────────────────────────────
+#: Past this the position is meaningfully off its mandate.
+DRIFT_ALERT_PP = 5.0
+
+
+def _drift_series(fund_id: int) -> dict:
+    """
+    Every recorded drift, per holding, as a series.
+
+    `_drift` answers "where are the weights now"; this answers "how did they
+    get there", which is the question that tells you whether a position is
+    quietly compounding into a concentration or just noisy. The rollup has
+    been writing these rows nightly — 475 of them for the oldest fund — and
+    reading only the last date threw all of it away.
+
+    Real and simulated are kept apart and never mixed. Simulated rows are a
+    retroactive "what this mandate would have done", and letting them sit on
+    the same line as measured history would be inventing a track record.
+    """
+    df = _db().read_table("fund_daily_weights", filters={"fund_id": int(fund_id)})
+    if df is None or df.empty:
+        return {"real": None, "simulated": None}
+
+    import pandas as pd
+
+    df = df.copy()
+    df["trade_date"] = df["trade_date"].astype(str).str[:10]
+    if "is_simulated" not in df.columns:
+        df["is_simulated"] = 0
+    df["is_simulated"] = (df["is_simulated"].fillna(0)
+                          .astype(str).str.lower()
+                          .isin(["1", "true", "t", "yes"]).astype(int))
+
+    def shape(part: pd.DataFrame) -> dict | None:
+        if part.empty:
+            return None
+        dates = sorted(part["trade_date"].unique())
+        out = []
+        names = _cn_names()
+        for code, grp in part.groupby("ts_code"):
+            by_date = grp.set_index("trade_date")
+            pts, last = [], None
+            for d in dates:
+                if d in by_date.index:
+                    row = by_date.loc[d]
+                    if hasattr(row, "iloc") and getattr(row, "ndim", 1) > 1:
+                        row = row.iloc[0]
+                    tgt = _pct(row.get("target_weight"))
+                    act = _pct(row.get("actual_weight"))
+                    last = (None if tgt is None or act is None
+                            else round(act - tgt, 3))
+                pts.append(last)
+            out.append({"t": str(code), "n": _stock_name(str(code), names),
+                        "drift_pp": pts})
+        out.sort(key=lambda r: -max((abs(v) for v in r["drift_pp"]
+                                     if v is not None), default=0.0))
+        return {"dates": dates, "holdings": out,
+                "alert_pp": DRIFT_ALERT_PP}
+
+    return {"real": shape(df[df["is_simulated"] == 0]),
+            "simulated": shape(df[df["is_simulated"] == 1])}
+
+
+def _pct(v) -> float | None:
+    """Weights are stored as fractions; a few rows arrived as percents."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f:
+        return None
+    return f * 100 if abs(f) <= 1.5 else f
+
+
+def _cn_names() -> dict:
+    """
+    Every A-share name in one read, keyed on the bare code.
+
+    A lookup per holding is a query per holding, and this map is wanted by
+    positions, drift rows and the rebalance validator on the same request.
+    """
+    try:
+        import data_manager
+        return {r["ticker"]: r["name"]
+                for r in (data_manager.get_all_stock_basic() or [])}
+    except Exception:                                              # noqa: BLE001
+        return {}
+
+
+def _stock_name(code: str, names: dict | None = None) -> str:
+    table = _cn_names() if names is None else names
+    return table.get(code.split(".", 1)[0], code)
+
+
+def _risk_strip(fund_id: int, total_return_pct: float | None) -> dict | None:
+    """
+    The five numbers the nightly rollup already computes, which nothing read.
+
+    Volatility, beta and VaR come straight out of fund_daily_metrics. Max
+    drawdown and Sharpe are derived here from the AUM series, exactly as the
+    Streamlit page derived them — including its 3% risk-free assumption and
+    the 242-day year.
+    """
+    df = _db().read_table("fund_daily_metrics", filters={"fund_id": int(fund_id)})
+    if df is None or df.empty or len(df) < 2:
+        return None
+
+    df = df.sort_values("trade_date")
+    last = df.iloc[-1]
+    aum = df["total_aum"].astype(float)
+    drawdown = float((aum / aum.cummax() - 1).min())
+
+    def num(key):
+        try:
+            v = float(last.get(key))
+        except (TypeError, ValueError):
+            return None
+        return None if v != v else v
+
+    vol = num("volatility_annualized")
+    sharpe = None
+    if vol and vol > 0 and total_return_pct is not None and len(df) > 0:
+        ann = (1 + total_return_pct / 100) ** (242 / len(df)) - 1
+        sharpe = round((ann - 0.03) / vol, 2)
+
+    return {
+        "days": int(len(df)),
+        "ann_vol_pct": None if vol is None else round(vol * 100, 2),
+        "beta_30d": None if num("beta_30d") is None else round(num("beta_30d"), 2),
+        "var_95_pct": None if num("var_95") is None
+                      else round(num("var_95") * 100, 2),
+        "max_drawdown_pct": round(drawdown * 100, 2),
+        "sharpe": sharpe,
+    }
+
+
+def rebalance(user_id: int, fund_id: int, positions: list[dict]) -> dict:
+    """
+    Replace the mandate: close today's positions, start the new ones tomorrow.
+
+    Weights must sum to 100% and every ticker must exist, both checked here —
+    the button being disabled in the browser is a courtesy, not a control.
+    """
+    _own(user_id, fund_id)
+
+    if not positions:
+        raise LookupError("至少需要一只股票")
+
+    import data_manager
+
+    cleaned: dict[str, float] = {}
+    unknown: list[str] = []
+    total = 0.0
+    for p in positions:
+        raw = str(p.get("t") or "").strip()
+        try:
+            weight = float(p.get("weight_pct") or 0.0)
+        except (TypeError, ValueError):
+            weight = 0.0
+        if not raw or weight <= 0:
+            continue
+        code = data_manager.get_tushare_ticker(raw)
+        if not data_manager.get_stock_name_from_db(code):
+            unknown.append(raw)
+            continue
+        cleaned[code] = cleaned.get(code, 0.0) + weight / 100
+        total += weight
+
+    if unknown:
+        raise LookupError(f"找不到这些代码：{'、'.join(unknown)}")
+    if not cleaned:
+        raise LookupError("至少需要一只权重大于 0 的股票")
+    if abs(total - 100.0) > 0.1:
+        raise LookupError(f"权重合计 {total:.2f}%，必须正好是 100%")
+
+    ok, msg = data_manager.execute_fund_rebalance(int(fund_id), cleaned)
+    if not ok:
+        raise RuntimeError(str(msg))
+    return {"ok": True, "message": str(msg), "holdings": len(cleaned)}
+
+
+def _fund_industries(positions: list[dict]) -> dict:
+    """Sector exposure for a saved fund, on its target weights."""
+    if not positions:
+        return {"rows": [], "by_industry": [], "top_pct": 0.0,
+                "tone": "good", "note": "没有持仓"}
+
+    import pandas as pd
+
+    import portfolio_build as pb
+
+    w = pd.Series({p["t"]: float(p["weight_pct"]) / 100 for p in positions})
+    names = {p["t"]: p.get("n") or p["t"] for p in positions}
+    market = "CN"
+    try:
+        import markets
+        market = markets.split(positions[0]["t"])[0]
+    except Exception:                                              # noqa: BLE001
+        pass
+    return pb.industries(w, names, market)

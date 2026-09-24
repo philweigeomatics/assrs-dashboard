@@ -6,6 +6,7 @@ import type {
   RebuildJobs,
   FundDetail,
   PortfolioBuild,
+  WeighResult,
   SavedFund,
   WorldIndices,
   FollowThrough,
@@ -173,6 +174,20 @@ export const api = {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   }),
+  portfolioWeigh: (body: {
+    symbols: string[]; weights: Record<string, number>;
+    max_weight_pct: number; lookback: number; duration: number; rf_pct: number;
+  }) => call<WeighResult>("/portfolio/weigh", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }),
+  rebalanceFund: (fundId: number,
+                  positions: { t: string; weight_pct: number }[]) =>
+    call<{ ok: boolean; message: string; holdings: number }>(
+      `/portfolio/funds/${fundId}/rebalance`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ positions }),
+      }),
   funds: () => call<{ funds: SavedFund[] }>("/portfolio/funds"),
   saveFund: (body: { name: string; benchmark: string | null;
                      holdings: { t: string; weight_pct: number }[] }) =>

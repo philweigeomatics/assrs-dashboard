@@ -551,11 +551,59 @@ export type PortfolioBuild = {
   };
   /** `target` is fed back to re-solve at that point. */
   frontier: { vol_pct: number; ret_pct: number; target: number }[];
+  /** Each stock alone — what the frontier is being compared against. */
+  singles: { t: string; n: string; ret_pct: number; vol_pct: number }[];
+  industries: IndustryExposure;
   correlation: { labels: string[]; rows: (number | null)[][] };
   dates: string[];
   curve: number[];
   equal_curve: number[];
   benchmark: { label: string; curve: (number | null)[] } | null;
+};
+
+/** Where the money is once tickers are collapsed into sectors. */
+export type IndustryExposure = {
+  rows: { t: string; n: string; industry: string; weight_pct: number }[];
+  by_industry: { industry: string; weight_pct: number; count: number;
+                 holdings: string[] }[];
+  top_pct: number;
+  tone: "good" | "warn" | "bad";
+  note: string;
+};
+
+/** POST /portfolio/weigh — where a hand-set allocation lands. */
+export type WeighResult = {
+  market: string;
+  sum_pct: number;
+  /** Reported, never silently corrected. */
+  balanced: boolean;
+  ann_return_pct: number;
+  ann_vol_pct: number;
+  sharpe: Num;
+  realised: { ann_return_pct: Num; ann_vol_pct: Num; sharpe: Num;
+              max_drawdown_pct: Num };
+  risk: PortfolioBuild["risk"];
+  curve: number[];
+  holdings: { t: string; n: string; weight_pct: number }[];
+  industries: IndustryExposure;
+  dates: string[];
+};
+
+/** One holding's drift, one point per recorded session. */
+export type DriftSeries = {
+  dates: string[];
+  holdings: { t: string; n: string; drift_pp: (number | null)[] }[];
+  alert_pp: number;
+};
+
+/** The five numbers the nightly rollup computes for a live fund. */
+export type FundRisk = {
+  days: number;
+  ann_vol_pct: Num;
+  beta_30d: Num;
+  var_95_pct: Num;
+  max_drawdown_pct: number;
+  sharpe: Num;
 };
 
 /** GET /portfolio/funds — saved allocations. */
@@ -579,11 +627,19 @@ export type FundTracking = {
 
 export type FundDetail = {
   id: number; name: string; benchmark: string | null; inception: string | null;
-  holdings: { t: string; weight_pct: number; since: string }[];
+  holdings: { t: string; n: string; weight_pct: number; since: string }[];
   tracking: FundTracking;
-  /** Target weight against what the market has made it. */
+  /** Target weight against what the market has made it, latest session. */
   drift: { t: string; target_pct: number; actual_pct: number;
            drift_pct: number; as_of: string }[];
+  /**
+   * How the weights got there. Real and simulated are never mixed —
+   * simulated is a retroactive "what this mandate would have done", and
+   * putting it on the same line as measured history invents a track record.
+   */
+  drift_history: { real: DriftSeries | null; simulated: DriftSeries | null };
+  risk: FundRisk | null;
+  industries: IndustryExposure;
 };
 
 /**

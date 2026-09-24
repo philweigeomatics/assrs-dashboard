@@ -946,6 +946,21 @@ class BuildReq(BaseModel):
     rf_pct: float = Field(3.0, ge=0.0, le=10.0)
 
 
+class WeighReq(BaseModel):
+    """Hand-set weights for the same universe, as percentages."""
+    symbols: list[str] = Field(..., min_length=2, max_length=30)
+    weights: dict[str, float] = Field(..., min_length=1)
+    max_weight_pct: float = Field(30.0, ge=5.0, le=100.0)
+    lookback: int = Field(242, ge=60, le=1000)
+    duration: int = Field(1, ge=1, le=30)
+    rf_pct: float = Field(3.0, ge=0.0, le=10.0)
+
+
+class RebalanceReq(BaseModel):
+    """The new mandate. Must sum to 100% — checked again on the server."""
+    positions: list[dict] = Field(..., min_length=1, max_length=60)
+
+
 class SaveFundReq(BaseModel):
     name: str = Field(..., min_length=1, max_length=60)
     holdings: list[dict] = Field(..., min_length=2, max_length=60)
@@ -970,6 +985,33 @@ def portfolio_build_route(req: BuildReq, user: AppUser = Depends(current_user)):
             rf=req.rf_pct / 100.0)
 
     key = (tuple(sorted(req.symbols)), req.target_return_pct,
+           req.max_weight_pct, req.lookback, req.duration, req.rf_pct)
+    try:
+        return _portfolio_cache.get_or_compute(key, run)
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.post("/portfolio/weigh")
+def portfolio_weigh_route(req: WeighReq, user: AppUser = Depends(current_user)):
+    """
+    Where a hand-set allocation lands against the frontier it came from.
+
+    Separate from /portfolio/build because nothing is being optimised: the
+    weights are the input, and the answer is what they cost in risk.
+    """
+    import portfolio_build
+
+    def run():
+        return portfolio_build.weigh(
+            req.symbols, req.weights, lookback=req.lookback,
+            duration=req.duration, rf=req.rf_pct / 100.0,
+            max_weight=req.max_weight_pct / 100.0)
+
+    key = (tuple(sorted(req.symbols)),
+           tuple(sorted((k, round(v, 4)) for k, v in req.weights.items())),
            req.max_weight_pct, req.lookback, req.duration, req.rf_pct)
     try:
         return _portfolio_cache.get_or_compute(key, run)
@@ -1018,6 +1060,26 @@ def portfolio_revalue(fund_id: int, user: AppUser = Depends(current_user)):
             return portfolio_api.revalue(fund_id)
         except LookupError as exc:
             raise HTTPException(404, str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc))
+
+
+@app.post("/portfolio/funds/{fund_id}/rebalance")
+def portfolio_rebalance(fund_id: int, req: RebalanceReq,
+                        user: AppUser = Depends(current_user)):
+    """
+    Replace a fund's mandate: today's positions close, tomorrow's open.
+
+    Every check the browser does is redone here. The disabled button is a
+    courtesy to the user, not a control on the request.
+    """
+    from api import portfolio_api
+
+    with _as_user(user):
+        try:
+            return portfolio_api.rebalance(user.id, fund_id, req.positions)
+        except LookupError as exc:
+            raise HTTPException(422, str(exc))
         except RuntimeError as exc:
             raise HTTPException(503, str(exc))
 

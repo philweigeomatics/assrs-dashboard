@@ -22,6 +22,9 @@ import { fixed, signed } from "../../lib/format";
 import { Curves } from "./Curves";
 import { Frontier } from "./Frontier";
 import { CorrMatrix } from "./CorrMatrix";
+import { Industries } from "./Industries";
+import { WeightEditor } from "./WeightEditor";
+import type { WeighResult } from "../../lib/types";
 
 const MAX_NAMES = 30;
 
@@ -136,7 +139,13 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
 
       {kept && (
         <Result d={kept.d} market={market} busy={run.isPending}
-          stale={kept.sig !== sig} onPick={go} onSaved={onSaved} />
+          stale={kept.sig !== sig} onPick={go} onSaved={onSaved}
+          onSaveWeights={() => {
+            // Scroll the save box into view: it lives in the assessment
+            // card at the top, a long way from the editor.
+            document.querySelector("[data-save-fund]")
+              ?.scrollIntoView({ behavior: "smooth", block: "center" });
+          }} />
       )}
     </div>
   );
@@ -204,12 +213,19 @@ const TONE: Record<string, string> = {
   bad: "text-up border-up/50 bg-up/10",
 };
 
-function Result({ d, market, busy, stale, onPick, onSaved }: {
+function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
   d: PortfolioBuild; market: Market; busy: boolean; stale: boolean;
   onPick: (t: number | null) => void; onSaved: () => void;
+  onSaveWeights: (h: { t: string; n: string; weight_pct: number }[]) => void;
 }) {
   const a = d.assessment;
   const r = d.risk;
+  const [tweak, setTweak] = useState<WeighResult | null>(null);
+  // What "存为组合" writes: the optimiser's weights until the editor hands
+  // over its own.
+  const [edited, setEdited] = useState<
+    { t: string; n: string; weight_pct: number }[] | null>(null);
+  const [saving, setSaving] = useState(false);
   return (
     <div className={`flex flex-col gap-3 transition-opacity ${
       busy ? "opacity-50" : ""}`}>
@@ -221,14 +237,20 @@ function Result({ d, market, busy, stale, onPick, onSaved }: {
       )}
       {/* The assessment leads, as it did on the page. */}
       <section className={`card p-3 flex flex-col gap-2 border ${TONE[a.tone] ?? ""}`}>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1"
+          data-save-fund>
           <span className="text-[15px] font-semibold">{a.verdict}</span>
           <span className="text-[13px] tnum font-semibold">{a.score}/{a.max}</span>
           <div className="flex-1 min-w-[120px] h-2 rounded-full bg-sunken overflow-hidden">
             <div className="h-full rounded-full bg-current"
               style={{ width: `${a.score}%` }} />
           </div>
-          <SaveFund d={d} market={market} onSaved={onSaved} />
+          <SaveFund d={d} market={market} onSaved={onSaved}
+            holdings={edited ?? d.holdings}
+            open={saving} setOpen={(v) => {
+              setSaving(v);
+              if (!v) setEdited(null);
+            }} />
         </div>
         <p className="text-[12.5px] text-ink leading-snug">{a.summary}</p>
         <div className="grid gap-1 sm:grid-cols-2 lg:grid-cols-3 text-[12px]">
@@ -293,21 +315,21 @@ function Result({ d, market, busy, stale, onPick, onSaved }: {
           </thead>
           <tbody>
             <tr className="border-t border-line font-medium">
-              <td className="py-1 pr-3">本组合（按预期）</td>
+              <td className="py-1 pr-3" title="优化器算出来的：把各股年化均值按权重加权，再用协方差矩阵算波动。假设每天都调回目标权重。">优化器预期（按权重加权）</td>
               <td className="py-1 px-2 text-right tnum">{signed(d.opt.ann_return_pct, 1, "%")}</td>
               <td className="py-1 px-2 text-right tnum">{fixed(d.opt.ann_vol_pct, 1)}%</td>
               <td className="py-1 px-2 text-right tnum">{fixed(d.opt.sharpe, 2)}</td>
               <td className="py-1 pl-2 text-right tnum text-ink-mute">—</td>
             </tr>
             <tr className="border-t border-line text-ink-dim">
-              <td className="py-1 pr-3">本组合（按实际走势）</td>
+              <td className="py-1 pr-3" title="同一组权重买入后一直持有，在这段真实行情上滚出来的结果。会复利，权重也会随涨跌漂移，所以和上面那行不一样 —— 只有这一行能算出最大回撤。">买入持有实测（同一段行情）</td>
               <td className="py-1 px-2 text-right tnum">{signed(d.stats.ann_return_pct, 1, "%")}</td>
               <td className="py-1 px-2 text-right tnum">{fixed(d.stats.ann_vol_pct, 1)}%</td>
               <td className="py-1 px-2 text-right tnum">{fixed(d.stats.sharpe, 2)}</td>
               <td className="py-1 pl-2 text-right tnum">{fixed(d.stats.max_drawdown_pct, 1)}%</td>
             </tr>
             <tr className="border-t border-line text-ink-dim">
-              <td className="py-1 pr-3">等权重（基准线）</td>
+              <td className="py-1 pr-3" title="每只一样多，同样买入持有。优化如果赢不过这一行，就没有产生价值。">等权买入持有（对照）</td>
               <td className="py-1 px-2 text-right tnum">{signed(d.equal_stats.ann_return_pct, 1, "%")}</td>
               <td className="py-1 px-2 text-right tnum">{fixed(d.equal_stats.ann_vol_pct, 1)}%</td>
               <td className="py-1 px-2 text-right tnum">{fixed(d.equal_stats.sharpe, 2)}</td>
@@ -337,8 +359,24 @@ function Result({ d, market, busy, stale, onPick, onSaved }: {
 
       <div className="grid gap-3 lg:grid-cols-2 items-start">
         <section className="card p-3 flex flex-col gap-2">
+          <h3 className="text-[13.5px] font-semibold">🏭 行业分布</h3>
+          <Industries d={d.industries} />
+        </section>
+        <section className="card p-3 flex flex-col gap-2">
+          <h3 className="text-[13.5px] font-semibold">⚖️ 调整权重</h3>
+          <WeightEditor d={d} onResult={setTweak}
+            onSave={(h) => { setEdited(h); setSaving(true); onSaveWeights(h); }} />
+        </section>
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2 items-start">
+        <section className="card p-3 flex flex-col gap-2">
           <h3 className="text-[13.5px] font-semibold">📉 有效前沿 · 点选目标</h3>
-          <Frontier d={d} onPick={onPick} busy={busy} />
+          <Frontier d={d} onPick={onPick} busy={busy}
+            custom={tweak && {
+              vol_pct: tweak.ann_vol_pct,
+              ann_return_pct: tweak.ann_return_pct,
+            }} />
         </section>
         <section className="card p-3 flex flex-col gap-2">
           <h3 className="text-[13.5px] font-semibold">🔥 相关性矩阵</h3>
@@ -368,16 +406,25 @@ function Metric({ label, v, hint }: { label: string; v: string; hint?: string })
   );
 }
 
-function SaveFund({ d, market, onSaved }: {
+/**
+ * Saving, either the optimiser's weights or the ones you edited by hand.
+ *
+ * `holdings` is what actually gets written — the editor passes its own, so
+ * "存为组合" down there saves what is on screen rather than silently
+ * reverting to the optimiser's answer.
+ */
+function SaveFund({ d, market, onSaved, holdings, open, setOpen }: {
   d: PortfolioBuild; market: Market; onSaved: () => void;
+  holdings: { t: string; n: string; weight_pct: number }[];
+  open: boolean; setOpen: (v: boolean) => void;
 }) {
   const [name, setName] = useState("");
-  const [open, setOpen] = useState(false);
+  const edited = holdings !== d.holdings;
   const save = useMutation({
     mutationFn: () => api.saveFund({
       name: name.trim(),
       benchmark: d.benchmark?.label ?? null,
-      holdings: d.holdings.filter((h) => h.weight_pct > 0)
+      holdings: holdings.filter((h) => h.weight_pct > 0)
         .map((h) => ({ t: h.t, weight_pct: h.weight_pct })),
     }),
     onSuccess: () => { setOpen(false); setName(""); onSaved(); },
@@ -393,6 +440,9 @@ function SaveFund({ d, market, onSaved }: {
   }
   return (
     <div className="ml-auto flex items-center gap-1.5">
+      {edited && (
+        <span className="text-[12px] text-brand-ink">存你改过的权重</span>
+      )}
       <input value={name} onChange={(e) => setName(e.target.value)}
         placeholder={`${market === "CN" ? "A股" : "美股"}组合名…`} autoFocus
         className="h-8 w-40 px-2 rounded-md bg-sunken text-[12.5px] text-ink outline-none

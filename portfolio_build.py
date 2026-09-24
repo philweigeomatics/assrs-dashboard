@@ -628,6 +628,8 @@ def build(symbols: list[str], *, target_return: float | None = None,
         "risk": metrics,
         "assessment": assess(sharpe, metrics, px.shape[1]),
         "frontier": efficient_frontier(mu, cov, max_weight=max_weight),
+        "singles": singles(mu, cov, names),
+        "industries": industries(w_full, names, market),
         "correlation": correlation(rets),
         # One more date than there are returns — the base day the curves
         # start from, so all three lines share an origin.
@@ -644,4 +646,181 @@ def build(symbols: list[str], *, target_return: float | None = None,
             "curve": [None if v != v else round(float(v), 3) for v in rebased]}
     else:
         out["benchmark"] = None
+    return out
+
+
+# ── industry exposure ────────────────────────────────────────────────────────
+#: Above this in one industry the portfolio is a sector bet wearing six tickers.
+CONCENTRATED = 0.50
+CROWDED = 0.35
+UNCLASSIFIED = "未分类"
+
+
+def industries(weights: pd.Series, names: dict, market: str) -> dict:
+    """
+    Where the money actually is, once the tickers are collapsed into sectors.
+
+    Six names at 16% each looks diversified in the allocation bars and is not
+    diversified at all if five of them are 白酒. Effective bets counts
+    positions; this counts the thing positions are a proxy for.
+
+    A-share industries come from stock_basic. US names carry a sector on the
+    Yahoo profile, fetched together rather than in series. Anything without
+    one is `未分类` — named as such rather than dropped, because a silent
+    omission would make the weights stop summing to 100%.
+    """
+    held = weights[weights > 0]
+    if held.empty:
+        return {"rows": [], "by_industry": [], "top_pct": 0.0, "tone": "good",
+                "note": "没有持仓"}
+
+    sector = _sectors(list(held.index), market)
+    rows = [{"t": t, "n": names.get(t, t),
+             "industry": sector.get(t) or UNCLASSIFIED,
+             "weight_pct": round(float(w) * 100, 2)}
+            for t, w in held.items()]
+
+    buckets: dict[str, list] = {}
+    for r in rows:
+        buckets.setdefault(r["industry"], []).append(r)
+
+    by_industry = sorted(
+        ({"industry": k,
+          "weight_pct": round(sum(x["weight_pct"] for x in v), 2),
+          "count": len(v),
+          "holdings": [x["n"] for x in sorted(
+              v, key=lambda x: -x["weight_pct"])]}
+         for k, v in buckets.items()),
+        key=lambda x: -x["weight_pct"])
+
+    top = by_industry[0]
+    top_frac = top["weight_pct"] / 100
+    if top_frac > CONCENTRATED:
+        tone, note = "bad", (
+            f"{top['industry']} 一个行业占 {top['weight_pct']:.1f}% —— "
+            f"这是一笔行业押注，不是一个分散组合")
+    elif top_frac > CROWDED:
+        tone, note = "warn", (
+            f"{top['industry']} 占 {top['weight_pct']:.1f}%，偏重")
+    else:
+        tone, note = "good", f"分散在 {len(by_industry)} 个行业"
+
+    return {"rows": sorted(rows, key=lambda r: -r["weight_pct"]),
+            "by_industry": by_industry,
+            "top_pct": top["weight_pct"], "tone": tone, "note": note}
+
+
+def _sectors(symbols: list[str], market: str) -> dict:
+    if market == "CN":
+        try:
+            from db_manager import db
+            df = db.read_table("stock_basic", columns="symbol,industry")
+            if df is None or df.empty:
+                return {}
+            table = {str(r["symbol"]).strip(): (
+                         str(r["industry"]).strip()
+                         if r.get("industry") and str(r["industry"]) != "nan"
+                         else None)
+                     for _, r in df.iterrows()}
+            # stock_basic is keyed on the bare code, but a saved fund stores
+            # the Tushare form — `601066.SH`. Matching those literally put
+            # every holding of every fund into 未分类.
+            return {s: table.get(s.split(".", 1)[0]) for s in symbols}
+        except Exception:                                          # noqa: BLE001
+            return {}
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    import markets
+
+    def one(sym: str):
+        try:
+            adapter, code = markets.parse(sym)
+            prof = adapter.profile(code) or {}
+            return sym, prof.get("sector") or None
+        except Exception:                                          # noqa: BLE001
+            return sym, None
+
+    try:
+        with ThreadPoolExecutor(max_workers=min(8, len(symbols))) as pool:
+            return dict(pool.map(one, symbols, timeout=NAME_TIMEOUT_S))
+    except Exception:                                              # noqa: BLE001
+        return {}
+
+
+# ── reference points on the frontier ─────────────────────────────────────────
+def singles(mu: pd.Series, cov: pd.DataFrame, names: dict) -> list[dict]:
+    """
+    Each stock on its own, in risk/return space.
+
+    The frontier means nothing without them. They are what the portfolio is
+    being compared against — every one of them sits below and to the right of
+    the curve, and that gap IS the diversification benefit.
+    """
+    sd = np.sqrt(np.diag(cov.to_numpy()))
+    return [{"t": t, "n": names.get(t, t),
+             "ret_pct": round(float(mu[t]) * 100, 2),
+             "vol_pct": round(float(s) * 100, 2)}
+            for t, s in zip(mu.index, sd)]
+
+
+def evaluate(mu: pd.Series, cov: pd.DataFrame, daily: pd.DataFrame,
+             w: pd.Series, rf: float = 0.03) -> dict:
+    """Where an arbitrary set of weights lands — the weight editor's answer."""
+    v = w.reindex(mu.index).fillna(0.0).to_numpy()
+    ret, vol = performance(v, mu.to_numpy(), cov.to_numpy())
+    return {
+        "ann_return_pct": round(ret * 100, 2),
+        "ann_vol_pct": round(vol * 100, 2),
+        "sharpe": round((ret - rf) / vol, 3) if vol > 0 else None,
+        "realised": stats_of(daily, pd.Series(v, index=mu.index), rf),
+        "risk": risk_metrics(daily, v, cov),
+        "curve": curve(daily, pd.Series(v, index=mu.index)),
+    }
+
+
+def weigh(symbols: list[str], weights: dict, *, lookback: int = DEFAULT_LOOKBACK,
+          duration: int = 1, rf: float = 0.03, max_weight: float = 0.30) -> dict:
+    """
+    Hand-set weights, priced on the same history the optimiser used.
+
+    This is what makes the frontier something you can argue with: move a
+    weight, see where the portfolio moves in risk/return space and how far
+    off the curve it lands. The frontier and the reference points come back
+    too, so the caller plots the answer against the same axes rather than
+    rescaling underneath it.
+    """
+    import markets
+
+    syms = list(dict.fromkeys(markets.canonical(s) for s in symbols))
+    if len(syms) < 2:
+        raise LookupError("至少需要两只股票")
+    market = market_of(syms)
+
+    px = load_closes(syms, lookback)
+    rets, mu, cov, daily = moments(px, duration)
+    if rets.empty or len(mu) < 2:
+        raise LookupError("可用收益率数据不足")
+
+    w = pd.Series({markets.canonical(k): float(v) / 100.0
+                   for k, v in weights.items()})
+    w = w.reindex(px.columns).fillna(0.0)
+    total = float(w.sum())
+    if total <= 0:
+        raise LookupError("权重合计必须大于 0")
+
+    names = _names(list(px.columns), market)
+    out = evaluate(mu, cov, daily, w, rf)
+    out.update({
+        "market": market,
+        "sum_pct": round(total * 100, 2),
+        # Reported, never silently corrected: a caller that is 3% short
+        # should see that, not a normalised answer that hides it.
+        "balanced": abs(total - 1.0) <= 0.001,
+        "holdings": [{"t": t, "n": names.get(t, t),
+                      "weight_pct": round(float(w[t]) * 100, 2)}
+                     for t in px.columns if w[t] > 0],
+        "industries": industries(w, names, market),
+        "dates": [str(d.date()) for d in px.index],
+    })
     return out
