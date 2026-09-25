@@ -514,3 +514,206 @@ def keepalive() -> dict:
     return {"checked": len(results),
             "refreshed": sum(1 for r in results if r["ok"]),
             "results": results}
+
+# ── the activity ledger ──────────────────────────────────────────────────────
+#: Questrade's own activity types, in the order a statement reads.
+ACTIVITY_TYPES = [
+    ("Trades", "买卖"),
+    ("Dividends", "股息"),
+    ("Interest", "利息"),
+    ("Deposits", "存入"),
+    ("Withdrawals", "转出"),
+    ("Fees and rebates", "费用与返还"),
+    ("Corporate actions", "公司行动"),
+    ("Other", "其他"),
+]
+TYPE_LABEL = dict(ACTIVITY_TYPES)
+
+#: Two legs of one internal transfer can settle a day or two apart.
+TRANSFER_DAYS = 3
+
+
+def _day(value) -> str:
+    return str(value or "")[:10]
+
+
+def _num(value):
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f
+
+
+def _row(raw: dict) -> dict:
+    """One activity, flattened to what a ledger actually shows."""
+    return {
+        # Trade date is the date of disposition, which is the one that
+        # decides which tax year a gain falls in. Settlement is kept
+        # alongside because cash movements are dated by it.
+        "date": _day(raw.get("tradeDate")),
+        "settled": _day(raw.get("settlementDate")),
+        "type": str(raw.get("type") or "Other"),
+        "type_label": TYPE_LABEL.get(str(raw.get("type") or ""), "其他"),
+        "action": str(raw.get("action") or "").strip(),
+        "symbol": str(raw.get("symbol") or "").strip(),
+        "description": str(raw.get("description") or "").strip(),
+        "quantity": _num(raw.get("quantity")),
+        "price": _num(raw.get("price")),
+        "gross": _num(raw.get("grossAmount")),
+        "commission": _num(raw.get("commission")),
+        "net": _num(raw.get("netAmount")),
+        "currency": str(raw.get("currency") or "").strip() or "CAD",
+        "internal": False,
+    }
+
+
+def _mark_internal(accounts: list[dict]) -> list[dict]:
+    """
+    Pair the two legs of a move between the user's own accounts.
+
+    Money going from the margin account into the TFSA shows up twice: a
+    Withdrawal in one and a Deposit in the other, same amount, same currency,
+    a day or two apart. Adding the Deposits column across accounts therefore
+    counts it as new money arriving, which it is not. On one real year the
+    accounts showed USD 16,588.56 of deposits between them and USD 15,788.56
+    of it had simply come from the margin account — 800 dollars actually
+    arrived.
+
+    Each leg is consumed once, so two genuinely separate 1,000-dollar moves
+    on the same day pair up one-to-one rather than collapsing into one.
+    """
+    outs, ins = [], []
+    for acct in accounts:
+        for row in acct["rows"]:
+            if row["type"] == "Withdrawals" and (row["net"] or 0) < 0:
+                outs.append((acct, row))
+            elif row["type"] == "Deposits" and (row["net"] or 0) > 0:
+                ins.append((acct, row))
+
+    pairs = []
+    taken = set()
+    for out_acct, out_row in outs:
+        for i, (in_acct, in_row) in enumerate(ins):
+            if i in taken or in_acct is out_acct:
+                continue
+            if in_row["currency"] != out_row["currency"]:
+                continue
+            if abs(abs(out_row["net"]) - in_row["net"]) > 0.005:
+                continue
+            if abs(_days_between(out_row["date"], in_row["date"])) > TRANSFER_DAYS:
+                continue
+            taken.add(i)
+            out_row["internal"] = True
+            in_row["internal"] = True
+            pairs.append({
+                "amount": round(in_row["net"], 2),
+                "currency": in_row["currency"],
+                "date": in_row["date"],
+                "from": out_acct["label"], "to": in_acct["label"],
+            })
+            break
+    return pairs
+
+
+def _days_between(a: str, b: str) -> int:
+    from datetime import date
+    try:
+        d1 = date.fromisoformat(a)
+        d2 = date.fromisoformat(b)
+    except ValueError:
+        return 999
+    return (d2 - d1).days
+
+
+def _summarise(rows: list[dict]) -> dict:
+    """
+    Totals per type, per currency — never across them.
+
+    CAD and USD are different money and one real year held both. A single
+    summed column would be a number that does not exist.
+    """
+    by_type: dict[str, dict] = {}
+    for r in rows:
+        bucket = by_type.setdefault(r["type"], {
+            "type": r["type"], "type_label": r["type_label"],
+            "count": 0, "by_currency": {}})
+        bucket["count"] += 1
+        ccy = bucket["by_currency"].setdefault(
+            r["currency"], {"currency": r["currency"], "net": 0.0,
+                            "internal_net": 0.0, "count": 0})
+        ccy["count"] += 1
+        ccy["net"] += r["net"] or 0.0
+        if r["internal"]:
+            ccy["internal_net"] += r["net"] or 0.0
+
+    order = [t for t, _ in ACTIVITY_TYPES]
+    out = []
+    for t in order:
+        if t not in by_type:
+            continue
+        b = by_type.pop(t)
+        for c in b["by_currency"].values():
+            c["net"] = round(c["net"], 2)
+            c["internal_net"] = round(c["internal_net"], 2)
+            # What actually crossed the household boundary.
+            c["external_net"] = round(c["net"] - c["internal_net"], 2)
+        b["by_currency"] = sorted(b["by_currency"].values(),
+                                  key=lambda c: c["currency"])
+        out.append(b)
+    out.extend(by_type.values())      # any type Questrade adds later
+    return {"by_type": out, "count": len(rows)}
+
+
+def transactions(app_user_id: int, year: int) -> dict:
+    """
+    One calendar year of activity, per account, for putting a return together.
+
+    Deliberately NOT computed here: adjusted cost base, capital gains, or
+    anything else that belongs on a tax form. Superficial-loss rules,
+    identical property held across accounts, and the exchange rate that
+    applies to each leg all change the answer, and a plausible wrong number
+    on a tax return is worse than no number. This assembles the records; a
+    person or their accountant does the rest.
+    """
+    from datetime import datetime, timezone
+
+    c = client(app_user_id)
+    start = datetime(int(year), 1, 1, tzinfo=timezone.utc)
+    end = datetime(int(year) + 1, 1, 1, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    if end > now:
+        end = now
+
+    accounts = []
+    for a in c.accounts():
+        raw = c.activities(a["id"], start, end)
+        rows = sorted((_row(r) for r in raw),
+                      key=lambda r: (r["date"], r["type"], r["symbol"]))
+        accounts.append({
+            "id": a["id"],
+            # Only the tail reaches the browser: enough to tell two accounts
+            # of the same type apart, not enough to be an account number.
+            "tail": a["id"][-4:],
+            "type": a["type"],
+            "label": a["label"],
+            "registered": a["type"] in qt.REGISTERED,
+            "rows": rows,
+            "summary": _summarise(rows),
+        })
+
+    transfers = _mark_internal(accounts)
+    for acct in accounts:
+        acct["summary"] = _summarise(acct["rows"])
+
+    every = [r for a in accounts for r in a["rows"]]
+    return {
+        "year": int(year),
+        "partial": end < datetime(int(year) + 1, 1, 1, tzinfo=timezone.utc),
+        "through": end.date().isoformat(),
+        "accounts": accounts,
+        "internal_transfers": transfers,
+        "summary": _summarise(every),
+        "types": [{"type": t, "label": lab} for t, lab in ACTIVITY_TYPES],
+    }
+

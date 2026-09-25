@@ -26,8 +26,28 @@ import { Holdings } from "../components/questrade/Holdings";
 import { RiskPanel } from "../components/questrade/RiskPanel";
 import { ExposurePanel } from "../components/questrade/ExposurePanel";
 import { OptimisePanel } from "../components/questrade/OptimisePanel";
+import { Transactions } from "../components/questrade/Transactions";
 import { usePersistentState } from "../lib/usePersistentState";
 import { fixed, signed } from "../lib/format";
+
+/**
+ * Two views of the same connection. 组合 is everything as it stands today;
+ * 流水 is what happened over a year, which is a different question and a
+ * different shape, and stacking it under five more sections would have
+ * buried it.
+ */
+const VIEWS = [
+  { id: "book", label: "💼 组合" },
+  { id: "ledger", label: "📒 交易流水" },
+] as const;
+
+type View = typeof VIEWS[number]["id"];
+
+//: Questrade served activity for 2023 on a live account; there is no
+//: endpoint that reports how far back a connection goes, so the picker
+//: offers a window and an empty year simply comes back empty.
+const YEARS = Array.from({ length: 6 },
+  (_, i) => new Date().getFullYear() - i);
 
 const BENCHMARKS = [
   { id: "^GSPC", name: "S&P 500" },
@@ -54,6 +74,10 @@ export function MyQuestrade() {
   const [scope, setScope] = usePersistentState<QtScope>("assrs.qt.scope", "all");
   const [method, setMethod] = usePersistentState<string>("assrs.qt.method", "min_var");
   const [cap, setCap] = usePersistentState<number>("assrs.qt.cap", 0.25);
+
+  const [view, setView] = usePersistentState<View>("assrs.qt.view", "book");
+  const [year, setYear] = usePersistentState<number>(
+    "assrs.qt.year", new Date().getFullYear());
 
   const status = useQuery({ queryKey: ["qt", "status"], queryFn: api.qtStatus,
     staleTime: 60_000, retry: false });
@@ -87,6 +111,15 @@ export function MyQuestrade() {
 
   // A broken token chain comes back as 409, deliberately not 401 — the app
   // must not sign you out of Supabase because a brokerage link expired.
+  const ledger = useQuery({
+    queryKey: ["qt", "txn", year],
+    queryFn: () => api.qtTransactions(year),
+    enabled: connected && view === "ledger",
+    // Thirteen requests per account per year on the server; a closed year
+    // never changes, so never refetch it on a remount.
+    staleTime: 6 * 3600_000,
+  });
+
   const needsReconnect = [book.error, risk.error, status.error]
     .some((e) => e instanceof ApiError && e.status === 409);
 
@@ -117,6 +150,37 @@ export function MyQuestrade() {
         )}
 
         {connected && !needsReconnect && (
+          <>
+            <section className="card p-2 flex flex-wrap items-center gap-1">
+              {VIEWS.map((v) => (
+                <button key={v.id} onClick={() => setView(v.id)}
+                  className={`h-8 px-3 rounded-lg text-[13px] font-medium transition-colors ${
+                    view === v.id ? "bg-elevated text-ink" : "text-ink-mute hover:text-ink"
+                  }`}>
+                  {v.label}
+                </button>
+              ))}
+            </section>
+          </>
+        )}
+
+        {connected && !needsReconnect && view === "ledger" && (
+          <section className="card p-3 flex flex-col gap-2">
+            <h2 className="text-[14.5px] font-semibold">📒 交易流水</h2>
+            <p className="label">
+              买卖、股息、利息、存取、费用，全部按账户分开。为报税整理，
+              所以注册账户与非注册账户分得很清楚，CAD 与 USD 从不相加。
+            </p>
+            <Body q={ledger}>
+              {ledger.data && (
+                <Transactions d={ledger.data} year={year} onYear={setYear}
+                  years={YEARS} />
+              )}
+            </Body>
+          </section>
+        )}
+
+        {connected && !needsReconnect && view === "book" && (
           <>
             <section className="card p-3 flex flex-col gap-3">
               <div className="flex flex-wrap items-center gap-2">

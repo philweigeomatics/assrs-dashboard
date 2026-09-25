@@ -1316,3 +1316,55 @@ export type CommodityBoard = {
   }) | null;
   products: FuturesProduct[];
 };
+
+
+/** GET /questrade/transactions — one calendar year of account activity. */
+export type QtActivity = {
+  /** Trade date: the date of disposition, which fixes the tax year. */
+  date: string;
+  settled: string;
+  type: string;
+  type_label: string;
+  action: string;
+  symbol: string;
+  description: string;
+  quantity: Num;
+  price: Num;
+  gross: Num;
+  commission: Num;
+  net: Num;
+  currency: string;
+  /** Matched against the opposite leg in another of the user's accounts. */
+  internal: boolean;
+};
+
+export type QtAccountLedger = {
+  id: string;
+  /** Last four only — enough to tell two accounts apart, not an account number. */
+  tail: string;
+  type: string;
+  label: string;
+  /** Tax-sheltered: gains not reportable, losses not claimable. */
+  registered: boolean;
+  rows: QtActivity[];
+  summary: {
+    count: number;
+    by_type: {
+      type: string; type_label: string; count: number;
+      by_currency: { currency: string; net: number; count: number;
+                     internal_net: number; external_net: number }[];
+    }[];
+  };
+};
+
+export type QtTransactions = {
+  year: number;
+  /** True when the year is still running, so totals are not final. */
+  partial: boolean;
+  through: string;
+  accounts: QtAccountLedger[];
+  internal_transfers: { amount: number; currency: string; date: string;
+                        from: string; to: string }[];
+  summary: QtAccountLedger["summary"];
+  types: { type: string; label: string }[];
+};

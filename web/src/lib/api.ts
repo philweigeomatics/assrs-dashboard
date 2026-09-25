@@ -8,6 +8,7 @@ import type {
   CommodityBoard,
   MacroBoard,
   PortfolioBuild,
+  QtTransactions,
   WeighResult,
   SavedFund,
   WorldIndices,
@@ -222,6 +223,8 @@ export const api = {
   compareStats: (t: string, other: string, window: string) =>
     call<PairStats>(`/compare-stats/${t}?with=${other}&window=${window}`),
   sectors: (t: string, window: number) => call<SectorAnalysis>(`/sectors/${t}?window=${window}`),
+  qtTransactions: (year: number) =>
+    call<QtTransactions>(`/questrade/transactions?year=${year}`),
   qtStatus: () => call<QtStatus>("/questrade/status"),
   // The token is POSTed and never returned, logged or stored client-side.
   qtConnect: (refresh_token: string) =>

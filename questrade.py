@@ -71,6 +71,19 @@ ACCOUNT_TYPES = {
     "FHSA": "首次购房 FHSA",
 }
 
+#: Tax-sheltered account types. Gains inside these are not reportable and
+#: losses inside them are not claimable, which is the first thing anyone
+#: sorting a year of activity needs to know about a row.
+REGISTERED = frozenset({
+    "TFSA", "RRSP", "SRRSP", "LRRSP", "LIRA", "LIF", "RIF", "SRIF",
+    "RESP", "FRESP", "FHSA",
+})
+
+#: Questrade rejects an activities window longer than this. The documentation
+#: says 31 days; the API returns 400 at 31, so the real limit is 30 and a
+#: year has to be walked in chunks.
+ACTIVITY_WINDOW_DAYS = 30
+
 
 class QuestradeError(Exception):
     """Anything that went wrong talking to Questrade."""
@@ -360,6 +373,30 @@ class Questrade:
             "primary": bool(a.get("isPrimary")),
             "client_type": str(a.get("clientAccountType") or ""),
         } for a in rows if a.get("number")]
+
+    def activities(self, account_id: str, start: datetime,
+                   end: datetime) -> list[dict]:
+        """
+        Every activity in a window — trades, cash, dividends, fees, the lot.
+
+        Questrade refuses a window longer than 30 days, so a tax year is
+        walked in chunks and stitched back together. Verified against the
+        live API: 30 days returns rows, 31 returns 400.
+
+        Chunks are half-open on the left after the first, so an activity
+        falling exactly on a boundary is not counted twice.
+        """
+        out: list[dict] = []
+        cursor = start
+        step = timedelta(days=ACTIVITY_WINDOW_DAYS)
+        while cursor < end:
+            stop = min(cursor + step, end)
+            got = self._get(f"v1/accounts/{account_id}/activities", {
+                "startTime": _qt_time(cursor), "endTime": _qt_time(stop),
+            })
+            out.extend(got.get("activities") or [])
+            cursor = stop + timedelta(seconds=1)
+        return out
 
     def positions(self, account_id: str) -> list[dict]:
         return self._get(f"v1/accounts/{account_id}/positions").get("positions") or []

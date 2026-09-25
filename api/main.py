@@ -1613,6 +1613,8 @@ _qt_risk_cache = TTLCache(maxsize=24, ttl_s=30 * 60)
 # Exposure costs a Yahoo profile read per holding, so it is held longest —
 # a company does not change sector between page loads.
 _qt_exposure_cache = TTLCache(maxsize=8, ttl_s=6 * 3600)
+#: Thirteen requests per account per year, and a closed year never changes.
+_qt_txn_cache = TTLCache(maxsize=12, ttl_s=6 * 3600)
 _qt_opt_cache = TTLCache(maxsize=32, ttl_s=30 * 60)
 
 
@@ -1687,6 +1689,12 @@ def _forget_questrade(user_id: int) -> None:
     """
     from api import questrade_api
     questrade_api.forget(user_id)
+    # Activity ledgers too: reconnecting to a different Questrade login must
+    # not leave someone else's transactions readable for six hours.
+    import datetime as _dt
+    this_year = _dt.datetime.now(_dt.timezone.utc).year
+    for year in range(this_year - 10, this_year + 1):
+        _qt_txn_cache.put(("txn", user_id, year), None)
     for base in ("CAD", "USD"):
         _qt_book_cache.put(("book", user_id, base), None)
         _qt_exposure_cache.put(("exposure", user_id, base), None)
@@ -1718,6 +1726,30 @@ def questrade_portfolio(base: str = Query("CAD", pattern="^(CAD|USD)$"),
         _questrade(exc)
     _qt_book_cache.put(key, book)
     return book
+
+
+@app.get("/questrade/transactions")
+def questrade_transactions(year: int = Query(..., ge=2000, le=2100),
+                           user: AppUser = Depends(current_user)):
+    """
+    One calendar year of account activity, for putting a return together.
+
+    Slow on a first call — Questrade caps an activities window at 30 days, so
+    a year is thirteen requests per account — and then cached, because a
+    closed year never changes.
+    """
+    from api import questrade_api
+
+    key = ("txn", user.id, int(year))
+    cached = _qt_txn_cache.peek(key)
+    if cached:
+        return cached
+    try:
+        out = questrade_api.transactions(user.id, int(year))
+    except Exception as exc:                                    # noqa: BLE001
+        _questrade(exc)
+    _qt_txn_cache.put(key, out)
+    return out
 
 
 @app.get("/questrade/risk")
