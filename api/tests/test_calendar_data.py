@@ -276,3 +276,30 @@ def test_an_empty_watchlist_is_not_a_tushare_call(monkeypatch, no_db):
     monkeypatch.setattr(cal, "_disclosures", boom)
     got = cal.earnings("20260930", [{"t": "US:AAPL", "n": "Apple"}], ref=TODAY)
     assert got["rows"] == [] and got["watched"] == 0
+
+
+# ── the month the grid opens on ──────────────────────────────────────────────
+def test_the_calendar_opens_on_the_month_that_holds_the_disclosures(monkeypatch, no_db):
+    """
+    H1 2026 put 80 of 81 watchlist disclosures in August and one in July.
+    Opening on today's month would show an empty grid a page away from
+    everything, which is why the Streamlit page picked the busiest month too.
+    """
+    monkeypatch.setattr(cal, "_disclosures", lambda p: _frame([
+        ["600519.SH", "20260801", "20260630", "20260731", None],
+        ["000001.SZ", "20260801", "20260630", "20260826", None],
+        ["600036.SH", "20260801", "20260630", "20260826", None]]))
+    got = cal.earnings("20260630", [
+        {"t": "600519", "n": "贵州茅台"}, {"t": "000001", "n": "平安银行"},
+        {"t": "600036", "n": "招商银行"}], ref=date(2026, 10, 20))
+    assert got["focus"] == "2026-08"
+    assert got["months"] == [{"ym": "2026-08", "count": 2},
+                             {"ym": "2026-07", "count": 1}]
+
+
+def test_a_period_with_no_dates_still_names_a_month_to_open_on(monkeypatch, no_db):
+    monkeypatch.setattr(cal, "_disclosures", lambda p: _frame([]))
+    got = cal.earnings("20260930", [{"t": "600519", "n": "贵州茅台"}],
+                       ref=date(2026, 10, 20))
+    assert got["months"] == []
+    assert got["focus"] == "2026-10"      # falls back to the reference month

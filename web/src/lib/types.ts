@@ -1401,6 +1401,10 @@ export type EarningsCalendar = {
   period: string;
   rows: EarningsRow[];
   by_date: { date: string; rows: EarningsRow[] }[];
+  /** Months holding a disclosure, busiest first. */
+  months: { ym: string; count: number }[];
+  /** Which month the grid should open on — the busiest, not today's. */
+  focus: string;
   /** Watched A-shares with no disclosure row for this period yet. */
   missing: string[];
   counts: Partial<Record<EarningsRow["status"], number>>;

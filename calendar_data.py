@@ -281,11 +281,26 @@ def earnings(period_end: str, watchlist: list[dict],
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
 
+    months = _months(by_date)
     return {
         "period": period_end,
         "rows": rows,
         "by_date": [{"date": d, "rows": v} for d, v in sorted(by_date.items())],
+        "months": months,
+        # The month the calendar should open on. Disclosure dates for one
+        # quarter cluster into a few weeks, so landing on today's month would
+        # usually show an empty grid a page away from everything.
+        "focus": months[0]["ym"] if months else ref.strftime("%Y-%m"),
         "missing": [names[c] for c in wanted if c not in seen],
         "counts": counts,
         "watched": len(wanted),
     }
+
+
+def _months(by_date: dict[str, list]) -> list[dict]:
+    """Every month holding a disclosure, busiest first."""
+    tally: dict[str, int] = {}
+    for day, rows in by_date.items():
+        tally[day[:7]] = tally.get(day[:7], 0) + len(rows)
+    return [{"ym": ym, "count": n}
+            for ym, n in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))]

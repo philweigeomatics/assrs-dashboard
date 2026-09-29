@@ -17,6 +17,7 @@ import { api, ApiError } from "../lib/api";
 import type { EarningsCalendar, EarningsRow, EcoWeek } from "../lib/types";
 import { NavBar } from "../components/NavBar";
 import { usePersistentState } from "../lib/usePersistentState";
+import { cellDate, monthGrid, shiftMonth } from "../lib/monthGrid";
 
 const VIEWS = [
   { id: "eco", label: "🌍 经济数据" },
@@ -250,15 +251,30 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
 }
 
 const STATUS: Record<EarningsRow["status"],
-                     { label: string; cls: string; dot: string }> = {
-  reported: { label: "已披露", cls: "text-ink-mute", dot: "var(--color-ink-mute)" },
-  scheduled: { label: "待披露", cls: "text-cyan", dot: "var(--color-cyan)" },
-  overdue: { label: "已过预约日", cls: "text-up font-medium", dot: "var(--color-up)" },
-  unknown: { label: "无日期", cls: "text-ink-mute", dot: "var(--color-line-bright)" },
+                     { label: string; dot: string; chip: string; icon: string }> = {
+  reported: { label: "已披露", dot: "var(--color-ink-mute)",
+              chip: "bg-sunken text-ink-dim", icon: "✅" },
+  scheduled: { label: "待披露", dot: "var(--color-cyan)",
+               chip: "bg-cyan/10 text-ink", icon: "📋" },
+  overdue: { label: "已过预约日", dot: "var(--color-up)",
+             chip: "bg-up/10 text-up font-medium", icon: "⚠️" },
+  unknown: { label: "无日期", dot: "var(--color-line-bright)",
+             chip: "bg-sunken text-ink-mute", icon: "—" },
 };
+
+const DOW = ["一", "二", "三", "四", "五", "六", "日"];
 
 function EarningsView({ d }: { d: EarningsCalendar }) {
   const today = iso(new Date());
+
+  // Open on the month that actually holds the disclosures. For H1 2026 that
+  // is August, with 80 of 81 — landing on today's month would show an empty
+  // grid a page away from everything.
+  const [ym, setYm] = useState(d.focus);
+  useEffect(() => { setYm(d.focus); }, [d.focus]);
+
+  const byDate = useMemo(
+    () => new Map(d.by_date.map((b) => [b.date, b.rows])), [d.by_date]);
 
   if (d.watched === 0) {
     return (
@@ -268,94 +284,150 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
     );
   }
 
+  const [y, m] = ym.split("-").map(Number);
+  const year = y ?? new Date().getFullYear();
+  const month = m ?? 1;
+  const weeks = monthGrid(year, month);
+  const shift = (by: number) => setYm(shiftMonth(ym, by));
+  const inMonth = d.rows.filter((r) => r.date?.startsWith(ym)).length;
+
   return (
     <div className="flex flex-col gap-2.5">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        {(Object.keys(STATUS) as EarningsRow["status"][])
-          .filter((k) => d.counts[k])
-          .map((k) => (
-            <span key={k} className="flex items-center gap-1.5 text-[12px]">
-              <span className="w-2.5 h-2.5 rounded-full"
-                style={{ background: STATUS[k].dot }} />
-              {STATUS[k].label}
-              <span className="tnum font-medium">{d.counts[k]}</span>
-            </span>
-          ))}
-        <span className="label tnum">共 {d.watched} 只 A 股自选</span>
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-1">
+          <Step onClick={() => shift(-1)}>◀</Step>
+          <span className="text-[13.5px] font-semibold tnum w-[104px] text-center">
+            {year} 年 {month} 月
+          </span>
+          <Step onClick={() => shift(1)}>▶</Step>
+        </div>
+        <span className="label tnum">本月 {inMonth} 只</span>
+        {d.months.length > 0 && ym !== d.focus && (
+          <button onClick={() => setYm(d.focus)} className="text-[12px] text-cyan">
+            回到 {d.focus.replace("-", " 年 ")} 月（{d.months[0]?.count} 只）
+          </button>
+        )}
+        <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-1">
+          {(Object.keys(STATUS) as EarningsRow["status"][])
+            .filter((k) => d.counts[k])
+            .map((k) => (
+              <span key={k} className="flex items-center gap-1.5 text-[12px]">
+                <span className="w-2.5 h-2.5 rounded-full"
+                  style={{ background: STATUS[k].dot }} />
+                {STATUS[k].label}
+                <span className="tnum font-medium">{d.counts[k]}</span>
+              </span>
+            ))}
+        </div>
       </div>
 
-      {d.by_date.length === 0 ? (
-        <p className="label py-6 text-center">这个报告期还没有披露日期。</p>
-      ) : (
-        <div className="grid gap-2 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3
-          xl:grid-cols-5 items-start">
-          {d.by_date.map((bucket) => {
-            const past = bucket.date < today;
-            return (
-              <div key={bucket.date}
-                className={`rounded-lg p-2 flex flex-col gap-1 min-w-0 ${
-                  bucket.date === today ? "bg-cyan/10 ring-1 ring-cyan/40"
-                    : "bg-sunken"}`}>
-                <div className="flex items-baseline gap-1.5">
-                  <span className={`text-[12.5px] font-semibold font-mono tnum ${
-                    past ? "text-ink-mute" : ""}`}>
-                    {bucket.date}
-                  </span>
-                  <span className="ml-auto label tnum">{bucket.rows.length}</span>
-                </div>
-                {bucket.rows.map((r) => (
-                  <div key={r.code} className="flex items-baseline gap-1.5 text-[12px]">
-                    <span className="w-1.5 h-1.5 rounded-full shrink-0 mt-1.5"
-                      style={{ background: STATUS[r.status].dot }} />
-                    <span className="truncate" title={`${r.n} ${r.t}`}>{r.n}</span>
-                    {r.moved && (
-                      <span className="text-brand-ink shrink-0"
-                        title={`预约 ${r.pre_date} → 实际 ${r.actual_date}`}>
-                        ⚑
+      {/* A seven-column month never collapses to one column and stay a
+          calendar, so on a narrow screen it scrolls sideways instead. */}
+      <div className="overflow-x-auto">
+        <div className="min-w-[680px]">
+          <div className="grid grid-cols-7 gap-px bg-line rounded-lg overflow-hidden">
+            {DOW.map((day, i) => (
+              <div key={day}
+                className={`bg-elevated px-2 py-1 text-[12px] font-medium text-center ${
+                  i >= 5 ? "text-ink-mute" : "text-ink-dim"}`}>
+                {day}
+              </div>
+            ))}
+
+            {weeks.flat().map((day, i) => {
+              if (day === 0) {
+                return <div key={`p${i}`} className="bg-canvas min-h-[92px]" />;
+              }
+              const key = cellDate(ym, day);
+              const rows = byDate.get(key) ?? [];
+              const isToday = key === today;
+              return (
+                <div key={key}
+                  className={`bg-panel min-h-[92px] p-1.5 flex flex-col gap-1 ${
+                    isToday ? "ring-2 ring-inset ring-cyan" : ""}`}>
+                  <div className="flex items-baseline gap-1">
+                    <span className={`text-[12px] tnum ${
+                      isToday ? "text-cyan font-bold" : "text-ink-mute"}`}>
+                      {day}
+                    </span>
+                    {rows.length > 0 && (
+                      <span className="ml-auto text-[10.5px] tnum text-ink-mute">
+                        {rows.length}
                       </span>
                     )}
                   </div>
-                ))}
-              </div>
-            );
-          })}
+                  <div className="flex flex-col gap-0.5 max-h-[150px] overflow-y-auto">
+                    {rows.map((r) => (
+                      <span key={r.code}
+                        title={`${r.n} ${r.t}${
+                          r.moved ? ` · 预约 ${r.pre_date} → 实际 ${r.actual_date}` : ""}`}
+                        // shrink-0: without it a flex column squashes eleven
+                        // chips into the 150px cap and clips the glyphs
+                        // rather than letting the cell scroll.
+                        className={`px-1 py-0.5 rounded text-[11px] leading-[15px]
+                          truncate shrink-0 ${STATUS[r.status].chip}`}>
+                        {r.n}{r.moved && " ⚑"}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {d.months.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="label">这个报告期还有：</span>
+          {d.months.filter((mm) => mm.ym !== ym).map((mm) => (
+            <button key={mm.ym} onClick={() => setYm(mm.ym)}
+              className="h-6 px-2 rounded-md bg-sunken text-[12px]">
+              {mm.ym.replace("-", " 年 ")} 月 · {mm.count} 只
+            </button>
+          ))}
         </div>
       )}
 
-      <div className="overflow-x-auto">
-        <table className="w-full text-[12px] border-collapse">
-          <thead>
-            <tr className="text-ink-mute">
-              <th className="text-left font-normal pb-1 pr-2">股票</th>
-              <th className="text-left font-normal pb-1 px-2">代码</th>
-              <th className="text-left font-normal pb-1 px-2">披露日</th>
-              <th className="text-left font-normal pb-1 px-2">预约日</th>
-              <th className="text-left font-normal pb-1 px-2">实际日</th>
-              <th className="text-left font-normal pb-1 pl-2">状态</th>
-            </tr>
-          </thead>
-          <tbody>
-            {d.rows.map((r) => (
-              <tr key={r.code} className="border-t border-line">
-                <td className="py-1 pr-2 truncate max-w-[140px]">{r.n}</td>
-                <td className="py-1 px-2 font-mono tnum text-ink-mute">{r.t}</td>
-                <td className="py-1 px-2 font-mono tnum">{r.date ?? "—"}</td>
-                <td className="py-1 px-2 font-mono tnum text-ink-mute">
-                  {r.pre_date ?? "—"}
-                </td>
-                <td className={`py-1 px-2 font-mono tnum ${
-                  r.moved ? "text-brand-ink font-medium" : "text-ink-mute"}`}>
-                  {r.actual_date ?? "—"}
-                </td>
-                <td className={`py-1 pl-2 ${STATUS[r.status].cls}`}>
-                  {STATUS[r.status].label}
-                  {r.moved && <span className="text-brand-ink"> · 改期</span>}
-                </td>
+      <details className="mt-1">
+        <summary className="text-[12.5px] cursor-pointer text-ink-dim">
+          披露详情（{d.rows.length} 只，按日期排序）
+        </summary>
+        <div className="overflow-x-auto mt-1.5">
+          <table className="w-full text-[12px] border-collapse">
+            <thead>
+              <tr className="text-ink-mute">
+                <th className="text-left font-normal pb-1 pr-2">股票</th>
+                <th className="text-left font-normal pb-1 px-2">代码</th>
+                <th className="text-left font-normal pb-1 px-2">披露日</th>
+                <th className="text-left font-normal pb-1 px-2">预约日</th>
+                <th className="text-left font-normal pb-1 px-2">实际日</th>
+                <th className="text-left font-normal pb-1 pl-2">状态</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {d.rows.map((r) => (
+                <tr key={r.code} className="border-t border-line">
+                  <td className="py-1 pr-2 truncate max-w-[140px]">{r.n}</td>
+                  <td className="py-1 px-2 font-mono tnum text-ink-mute">{r.t}</td>
+                  <td className="py-1 px-2 font-mono tnum">{r.date ?? "—"}</td>
+                  <td className="py-1 px-2 font-mono tnum text-ink-mute">
+                    {r.pre_date ?? "—"}
+                  </td>
+                  <td className={`py-1 px-2 font-mono tnum ${
+                    r.moved ? "text-brand-ink font-medium" : "text-ink-mute"}`}>
+                    {r.actual_date ?? "—"}
+                  </td>
+                  <td className="py-1 pl-2">
+                    {STATUS[r.status].label}
+                    {r.moved && <span className="text-brand-ink"> · 改期</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </details>
 
       {d.missing.length > 0 && (
         <p className="label leading-snug">
@@ -365,7 +437,7 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
         </p>
       )}
       <p className="label leading-snug">
-        「披露日」优先取实际披露日，没有就取交易所预约日。⚑ 表示公司实际披露的日子
+        格子里的日期优先取实际披露日，没有就取交易所预约日。⚑ 表示公司实际披露的日子
         和自己预约的不是同一天。
       </p>
     </div>
