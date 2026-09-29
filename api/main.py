@@ -1478,6 +1478,72 @@ def _market_panel(cache, key, build):
         raise HTTPException(503, f"{type(exc).__name__}: {exc}"[:200])
 
 
+# ── 日历 ─────────────────────────────────────────────────────────────────────
+#: calendar_data caches each economic day itself, so this only spares the
+#: assembly. Earnings is one bulk Tushare call per reporting period.
+_cal_earn_cache = TTLCache(maxsize=8, ttl_s=3600)
+
+
+@app.get("/calendar/economic")
+def calendar_economic(start: str | None = None,
+                      user: AppUser = Depends(current_user)):
+    """
+    A week of global macro releases.
+
+    A week rather than a month because eco_cal allows 20 calls a minute and
+    complete data needs one call per day — see calendar_data for why a
+    multi-day request silently drops events.
+    """
+    import calendar_data
+    from datetime import date
+
+    try:
+        begin = date.fromisoformat(start) if start else date.today()
+    except ValueError:
+        raise HTTPException(422, f"start 应是 YYYY-MM-DD：{start}")
+
+    try:
+        return calendar_data.economic(begin)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.get("/calendar/earnings")
+def calendar_earnings(period: str | None = None,
+                      user: AppUser = Depends(current_user)):
+    """
+    Watchlist disclosure dates for one reporting period.
+
+    Scoped to the caller's watchlist, so the cache key carries the user: two
+    people asking for the same quarter do not get each other's holdings.
+    """
+    import calendar_data
+    import data_manager
+
+    choices = calendar_data.periods()
+    valid = {p["end"] for p in choices}
+    chosen = period or choices[-1]["end"]
+    if chosen not in valid:
+        raise HTTPException(422, f"没有这个报告期：{period}")
+
+    with _as_user(user):
+        watchlist = [{"t": str(r.get("ticker") or ""),
+                      "n": str(r.get("stock_name") or "")}
+                     for r in (data_manager.get_watchlist() or [])]
+
+    key = ("earn", user.id, chosen)
+    cached = _cal_earn_cache.peek(key)
+    if cached:
+        return {**cached, "periods": choices}
+
+    try:
+        out = calendar_data.earnings(chosen, watchlist)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    _cal_earn_cache.put(key, out)
+    return {**out, "periods": choices}
+
+
 @app.get("/market/macro")
 def market_macro(user: AppUser = Depends(current_user)):
     """

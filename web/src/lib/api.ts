@@ -6,6 +6,8 @@ import type {
   RebuildJobs,
   FundDetail,
   CommodityBoard,
+  EarningsCalendar,
+  EcoWeek,
   MacroBoard,
   PortfolioBuild,
   QtTransactions,
@@ -167,6 +169,11 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, tickers }),
     }),
+  ecoCalendar: (start: string) =>
+    call<EcoWeek>(`/calendar/economic?start=${start}`),
+  earningsCalendar: (period: string | null) =>
+    call<EarningsCalendar>(
+      `/calendar/earnings${period ? `?period=${period}` : ""}`),
   macro: () => call<MacroBoard>("/market/macro"),
   commodities: (code: string | null, liquid: boolean) =>
     call<CommodityBoard>(

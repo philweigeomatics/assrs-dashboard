@@ -10,6 +10,7 @@ import { Watchlist } from "./routes/Watchlist";
 import { TechnicalAnalysis } from "./routes/TechnicalAnalysis";
 import { Alerts } from "./routes/Alerts";
 import { Basket } from "./routes/Basket";
+import { Calendar } from "./routes/Calendar";
 import { Strategies } from "./routes/Strategies";
 import { Admin } from "./routes/Admin";
 import { Portfolio } from "./routes/Portfolio";
@@ -103,6 +104,14 @@ export function App() {
               element={
                 <RequireAuth>
                   <Admin />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/calendar"
+              element={
+                <RequireAuth>
+                  <Calendar />
                 </RequireAuth>
               }
             />

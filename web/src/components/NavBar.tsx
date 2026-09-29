@@ -18,6 +18,7 @@ const PAGES = [
   { to: "/", label: "📈 个股分析" },
   { to: "/watchlist", label: "⭐ 自选股" },
   { to: "/alerts", label: "🔔 今日提醒" },
+  { to: "/calendar", label: "🗓️ 日历" },
   { to: "/basket", label: "🧺 多股对比" },
   { to: "/strategies", label: "⚡ 策略" },
   { to: "/portfolio", label: "💼 组合" },
@@ -37,11 +38,16 @@ export function NavBar({ children }: { children?: ReactNode }) {
   return (
     <header className="sticky top-0 z-40 bg-canvas/90 backdrop-blur border-b border-line">
       <div className="max-w-[1800px] mx-auto px-3 h-14 flex items-center gap-3">
-        <nav className="flex items-center gap-1 shrink-0">
+        {/* Scrolls itself rather than pushing the page. With nine links the
+            bar is 819px, which fits a desktop and does not fit a phone, and
+            an overflowing sticky header made every page scroll sideways. */}
+        <nav className="flex items-center gap-1 min-w-0 overflow-x-auto
+          [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {(isAdmin ? [...PAGES, ADMIN_PAGE] : PAGES).map((p) => (
             <NavLink key={p.to} to={p.to} end={p.to === "/"}
               className={({ isActive }) =>
-                `px-2 h-8 flex items-center rounded-lg text-[14px] font-semibold transition-colors ${
+                `px-2 h-8 flex items-center shrink-0 whitespace-nowrap rounded-lg
+                 text-[14px] font-semibold transition-colors ${
                   isActive ? "bg-elevated text-ink" : "text-ink-mute hover:text-ink"
                 }`}>
               {p.label}

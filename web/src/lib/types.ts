@@ -1368,3 +1368,42 @@ export type QtTransactions = {
   summary: QtAccountLedger["summary"];
   types: { type: string; label: string }[];
 };
+
+
+/** GET /calendar/economic — a week of global macro releases. */
+export type EcoEvent = {
+  date: string; time: string; country: string; currency: string;
+  event: string;
+  /** Strings, not numbers: Tushare bakes the unit in ("4.9%", "6.58%"). */
+  value: string | null; prev: string | null; forecast: string | null;
+};
+
+export type EcoWeek = {
+  from: string; to: string;
+  days: { date: string; weekday: number; events: EcoEvent[] }[];
+  countries: { country: string; count: number }[];
+  total: number;
+};
+
+/** GET /calendar/earnings — watchlist disclosure dates for one period. */
+export type EarningsRow = {
+  t: string; code: string; n: string;
+  date: string | null;
+  pre_date: string | null;
+  actual_date: string | null;
+  ann_date: string;
+  status: "reported" | "scheduled" | "overdue" | "unknown";
+  /** The company filed on a different day than it had estimated. */
+  moved: boolean;
+};
+
+export type EarningsCalendar = {
+  period: string;
+  rows: EarningsRow[];
+  by_date: { date: string; rows: EarningsRow[] }[];
+  /** Watched A-shares with no disclosure row for this period yet. */
+  missing: string[];
+  counts: Partial<Record<EarningsRow["status"], number>>;
+  watched: number;
+  periods: { label: string; end: string }[];
+};
