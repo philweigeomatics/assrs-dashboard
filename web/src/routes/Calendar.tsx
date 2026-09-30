@@ -17,7 +17,8 @@ import { api, ApiError } from "../lib/api";
 import type { EarningsCalendar, EarningsRow, EcoWeek } from "../lib/types";
 import { NavBar } from "../components/NavBar";
 import { usePersistentState } from "../lib/usePersistentState";
-import { cellDate, monthGrid, shiftMonth } from "../lib/monthGrid";
+import { cellDate, monthGrid, parseMonth, safeMonth, shiftMonth }
+  from "../lib/monthGrid";
 
 const VIEWS = [
   { id: "eco", label: "🌍 经济数据" },
@@ -270,11 +271,17 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
   // Open on the month that actually holds the disclosures. For H1 2026 that
   // is August, with 80 of 81 — landing on today's month would show an empty
   // grid a page away from everything.
-  const [ym, setYm] = useState(d.focus);
-  useEffect(() => { setYm(d.focus); }, [d.focus]);
+  // An API that does not send `focus` is not hypothetical: Pages deploys in
+  // seconds and Cloud Run takes minutes, so the new page runs against the old
+  // API every time. It used to take the route down.
+  const focus = safeMonth(d.focus);
+  const months = d.months ?? [];
+  const [ym, setYm] = useState(focus);
+  useEffect(() => { setYm(focus); }, [focus]);
 
   const byDate = useMemo(
-    () => new Map(d.by_date.map((b) => [b.date, b.rows])), [d.by_date]);
+    () => new Map((d.by_date ?? []).map((b) => [b.date, b.rows])),
+    [d.by_date]);
 
   if (d.watched === 0) {
     return (
@@ -284,12 +291,10 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
     );
   }
 
-  const [y, m] = ym.split("-").map(Number);
-  const year = y ?? new Date().getFullYear();
-  const month = m ?? 1;
-  const weeks = monthGrid(year, month);
+  const { year, month } = parseMonth(ym) ?? parseMonth(focus)!;
+  const weeks = monthGrid(ym);
   const shift = (by: number) => setYm(shiftMonth(ym, by));
-  const inMonth = d.rows.filter((r) => r.date?.startsWith(ym)).length;
+  const inMonth = (d.rows ?? []).filter((r) => r.date?.startsWith(ym)).length;
 
   return (
     <div className="flex flex-col gap-2.5">
@@ -302,9 +307,9 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
           <Step onClick={() => shift(1)}>▶</Step>
         </div>
         <span className="label tnum">本月 {inMonth} 只</span>
-        {d.months.length > 0 && ym !== d.focus && (
-          <button onClick={() => setYm(d.focus)} className="text-[12px] text-cyan">
-            回到 {d.focus.replace("-", " 年 ")} 月（{d.months[0]?.count} 只）
+        {months.length > 0 && ym !== focus && (
+          <button onClick={() => setYm(focus)} className="text-[12px] text-cyan">
+            回到 {focus.replace("-", " 年 ")} 月（{months[0]?.count} 只）
           </button>
         )}
         <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -377,10 +382,10 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
         </div>
       </div>
 
-      {d.months.length > 1 && (
+      {months.length > 1 && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="label">这个报告期还有：</span>
-          {d.months.filter((mm) => mm.ym !== ym).map((mm) => (
+          {months.filter((mm) => mm.ym !== ym).map((mm) => (
             <button key={mm.ym} onClick={() => setYm(mm.ym)}
               className="h-6 px-2 rounded-md bg-sunken text-[12px]">
               {mm.ym.replace("-", " 年 ")} 月 · {mm.count} 只
@@ -391,7 +396,7 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
 
       <details className="mt-1">
         <summary className="text-[12.5px] cursor-pointer text-ink-dim">
-          披露详情（{d.rows.length} 只，按日期排序）
+          披露详情（{(d.rows ?? []).length} 只，按日期排序）
         </summary>
         <div className="overflow-x-auto mt-1.5">
           <table className="w-full text-[12px] border-collapse">
@@ -406,7 +411,7 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
               </tr>
             </thead>
             <tbody>
-              {d.rows.map((r) => (
+              {(d.rows ?? []).map((r) => (
                 <tr key={r.code} className="border-t border-line">
                   <td className="py-1 pr-2 truncate max-w-[140px]">{r.n}</td>
                   <td className="py-1 px-2 font-mono tnum text-ink-mute">{r.t}</td>
@@ -429,7 +434,7 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
         </div>
       </details>
 
-      {d.missing.length > 0 && (
+      {(d.missing ?? []).length > 0 && (
         <p className="label leading-snug">
           这个报告期还没有披露日期的自选股（{d.missing.length} 只）：
           {d.missing.slice(0, 12).join("、")}
