@@ -43,6 +43,7 @@ import pandas as pd
 # bars carry the reach out to RANGE_WINDOW at about a fifth of the tokens.
 TIMELINE_BARS = 20          # detailed daily sessions
 RANGE_WINDOW = 120          # window for "where in its range" position
+VOL_Z_WINDOW = 100          # baseline for the volume Z-score
 WEEKLY_REACH = 120          # total sessions of context, daily + weekly combined
 
 
@@ -429,7 +430,7 @@ def build_brief(df: pd.DataFrame, sim: dict, *,
                 ticker: str | None = None, name: str | None = None,
                 ad_today: dict | None = None, ad_tomorrow: dict | None = None,
                 ad_window: int = 20, mode: str = "simulated",
-                bar_date: str | None = None,
+                bar_date: str | None = None, bar=None,
                 timeline_bars: int = TIMELINE_BARS) -> dict:
     """
     Package the tape leading in, the bar under the microscope, and every state
@@ -442,6 +443,10 @@ def build_brief(df: pd.DataFrame, sim: dict, *,
            Only changes how the bar is described; the maths is identical.
     ad_* : optional accumulation_signals.summarise() results for today and for
            the bar being read, so the 吸筹/出货 read travels with the rest.
+    bar  : session_state.BarState for the bar being read. When it describes a
+           session still in progress, every volume comparison in here is
+           scaled to a full day before being set against a history of full
+           days — see the session block below.
     """
     if df is None or len(df) < 30 or not sim:
         return {"ok": False, "reason": "not enough history or no simulation"}
@@ -471,7 +476,20 @@ def build_brief(df: pd.DataFrame, sim: dict, *,
 
     v_m = _f(sim.get("volume_tomorrow"))
     v10 = _f(sim.get("volume_10d_avg"))
+    # On a finished bar the projection IS the volume; on a live one it is an
+    # estimate of where the day ends at the pace seen so far.
+    v_proj = bar.project(v_m) if bar is not None else v_m
+    v_cmp = v_proj if v_proj is not None else v_m
     mu, sd = _f(last.get("Vol_Mean_100d")), _f(last.get("Vol_Std_100d"))
+    if mu is None or sd is None:
+        # The A-share path writes these columns; the Yahoo one does not, so a
+        # US name had no volume Z in the brief at all — the one number that
+        # says whether today's turnout is unusual. Derived from the same
+        # window rather than left blank.
+        tail = df["Volume"].tail(VOL_Z_WINDOW)
+        if len(tail) >= 20:
+            mu, sd = float(tail.mean()), float(tail.std(ddof=1))
+            sd = sd if sd and sd == sd else None
 
     tl = [_bar_line(r) for _, r in df.tail(timeline_bars).iterrows()]
 
@@ -503,6 +521,14 @@ def build_brief(df: pd.DataFrame, sim: dict, *,
                  "sim_session": (bar_date or
                                  str((df.index[-1] + pd.Timedelta(days=1)).date())),
                  "bars_of_history": len(df)},
+        # Absent for a simulated bar, which is complete by construction.
+        "session": (None if bar is None else {
+            "market": bar.market,
+            "complete": bar.complete,
+            "elapsed_pct": bar.elapsed_pct,
+            "local_time": bar.local_time,
+            "projectable": bar.projectable,
+        }),
         "timeline": tl,
         "today": {
             "close": c_t,
@@ -534,8 +560,15 @@ def build_brief(df: pd.DataFrame, sim: dict, *,
             "body": body, "upper_shadow": up_shadow, "lower_shadow": dn_shadow,
             "ohl_supplied": bool(sim.get("ohl_supplied")),
             "volume": v_m,
-            "volume_vs_10d": (v_m / v10) if (v_m and v10) else None,
-            "volume_z": ((v_m - mu) / sd) if (v_m is not None and mu is not None and sd) else None,
+            # A session in progress has traded part of a day. Comparing that
+            # against an average of whole days is what made AAPL read 0.32x
+            # normal at 11:52 in New York when its real pace was 0.87x, so
+            # the ratios below are computed on the projection and flagged.
+            "volume_projected": v_proj if v_proj != v_m else None,
+            "volume_partial": bool(bar is not None and not bar.complete),
+            "volume_vs_10d": (v_cmp / v10) if (v_cmp and v10) else None,
+            "volume_z": ((v_cmp - mu) / sd)
+                        if (v_cmp is not None and mu is not None and sd) else None,
             "ma": {w: _f((sim.get("ma_tomorrow") or {}).get(f"MA{w}")) for w in (5, 10, 20, 60)},
             "ma_stack": _ma_stack(c_m, {w: (sim.get("ma_tomorrow") or {}).get(f"MA{w}")
                                         for w in (5, 10, 20, 60)}),
@@ -562,13 +595,23 @@ def build_brief(df: pd.DataFrame, sim: dict, *,
 
 _INTRO = {
     "simulated": (
-        '你是一位资深的A股技术分析教练。学员在"明日指标模拟器"里假设了一根K线，\n'
+        '你是一位资深的技术分析教练。学员在"明日指标模拟器"里假设了一根K线，\n'
         '现在的场景是：**这根K线已经基本走完，还有几分钟收盘（尾盘）**，\n'
         '盘面就是数据里那根K线的样子。'),
     "actual": (
-        '你是一位资深的A股技术分析教练。下面是该股**最新一个真实交易日**的盘面，\n'
+        '你是一位资深的技术分析教练。下面是该股**最新一个真实交易日**的盘面，\n'
         '现在的场景是：**这根K线已经基本走完，还有几分钟收盘（尾盘）**。\n'
         '注意：这是真实成交出来的K线，不是假设——O/H/L/收盘/成交量都是实际数据。'),
+    # The one that matters for US and Canadian names: Yahoo serves a running
+    # bar while the session is open, so "尾盘，盘面已成型" would be a lie and
+    # the model would read a third of a day's volume as a full day's.
+    "live": (
+        '你是一位资深的技术分析教练。下面是该股**当前这个交易日的盘中盘面**，\n'
+        '现在的场景是：**这根K线还没走完，盘还在交易中**。\n'
+        '这一点非常重要：最高价、最低价、收盘价、成交量都还会变，\n'
+        '尤其是尾盘往往是全天量最大的一段。\n'
+        '所以你的结论要分两层说清楚：**现在这个时点能做什么**，\n'
+        '以及**收盘前还需要看到什么才能确认**。'),
 }
 
 _PROMPT = """\
@@ -720,6 +763,8 @@ def explain(brief: dict) -> dict:
 
     sig_on = [k for k, v in (s.get("signals") or {}).items() if v is True]
     actual = brief.get("mode") == "actual"
+    sess = brief.get("session") or {}
+    live = actual and sess and not sess.get("complete")
     ohl_note = ("O/H/L 为真实成交数据" if actual
                 else "O/H/L 由用户明确指定" if s["ohl_supplied"]
                 else "O/H/L 为估算值（用户只给了收盘涨跌幅），形态解读需留余地")
@@ -728,16 +773,41 @@ def explain(brief: dict) -> dict:
             if actual else
             f"最后一个真实交易日：{a['last_real_session']} · 模拟的这根K线：{a['sim_session']}")
 
+    bar_moment = ("尾盘时点，盘面已成型" if not live
+                  else f"盘中，这根K线只走完了 {sess.get('elapsed_pct', 0):.0f}%")
+
+    if not live:
+        vol_line = (f"成交量 {_n(s['volume'], '{:,.0f}')} · "
+                    f"10日均量的 {_n(s['volume_vs_10d'], '{:.2f}')} 倍 · "
+                    f"量能Z {_n(s['volume_z'], '{:+.2f}')}")
+    elif s.get("volume_projected"):
+        # Raw first so the model sees what has actually traded, then the
+        # projection, which is the only figure comparable to a history of
+        # whole sessions — and it is labelled as an estimate both times.
+        vol_line = (
+            f"已成交 {_n(s['volume'], '{:,.0f}')}"
+            f"（全天走完 {sess.get('elapsed_pct', 0):.0f}%）· "
+            f"按当前节奏推算全天约 {_n(s['volume_projected'], '{:,.0f}')} · "
+            f"推算量为10日均量的 {_n(s['volume_vs_10d'], '{:.2f}')} 倍 · "
+            f"推算量能Z {_n(s['volume_z'], '{:+.2f}')}\n"
+            f"  ⚠️ 后两个数字是**按当前成交节奏外推的估计**，不是已成交事实。"
+            f"尾盘通常放量，所以这个推算偏保守。")
+    else:
+        vol_line = (
+            f"已成交 {_n(s['volume'], '{:,.0f}')}"
+            f"（全天才走完 {sess.get('elapsed_pct', 0):.0f}%）\n"
+            f"  ⚠️ 开盘不久，样本太小，**不要对量能下任何判断**。")
+
     user = f"""\
 标的：{who}（只做技术面推演）
 {when}
 
-【{bar_label} —— 尾盘时点，盘面已成型】
+【{bar_label} —— {bar_moment}】
   开 {_n(s['open'])} 高 {_n(s['high'])} 低 {_n(s['low'])} 收 {_n(s['close'])}
   涨跌 {_n(s['pct_change'], '{:+.2f}')}% · 振幅 {_n(s['amplitude_pct'])}% · 跳空 {_n(s['gap_pct'], '{:+.2f}')}%
   收盘位于当日振幅的 {_n(s['close_position_in_bar'], '{:.0%}')} 处
   （实体 {_n(s['body'])} · 上影 {_n(s['upper_shadow'])} · 下影 {_n(s['lower_shadow'])}）
-  成交量 {_n(s['volume'], '{:,.0f}')} · 10日均量的 {_n(s['volume_vs_10d'], '{:.2f}')} 倍 · 量能Z {_n(s['volume_z'], '{:+.2f}')}
+  {vol_line}
   {ohl_note}
 
 【指标对照：今日收盘 → 这根K线收盘】
@@ -784,7 +854,8 @@ def explain(brief: dict) -> dict:
 
     return ai_client.call_json(
         _PROMPT.format(rw=RANGE_WINDOW, tl=len(brief.get("timeline") or []),
-                       intro=_INTRO.get(brief.get("mode", "simulated"),
-                                        _INTRO["simulated"])), user,
+                       intro=_INTRO.get(
+                           "live" if live else brief.get("mode", "simulated"),
+                           _INTRO["simulated"])), user,
         max_tokens=budget, temperature=0.4,
         reasoning_effort="low", timeout=timeout)

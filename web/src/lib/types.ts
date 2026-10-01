@@ -177,6 +177,18 @@ export type WhatIfAi = {
   cached?: boolean;
   /** When the cached read was made. Absent on a fresh one. */
   generated_at?: string | null;
+  /**
+   * How formed the bar was. Null for a ghost bar, which is complete by
+   * construction. `complete: false` means the volume figures in the read are
+   * projections from a part-finished session.
+   */
+  session?: {
+    market: string;
+    complete: boolean;
+    elapsed_pct: number;
+    local_time: string;
+    projectable: boolean;
+  } | null;
   crossings: { what: string; dir: "up" | "down"; detail: string }[];
   read: {
     headline?: string;

@@ -106,6 +106,8 @@ def whatif_ai(analysis_df: pd.DataFrame, ticker: str, name: str, *,
     read using the same detector path.
     """
     import accumulation_signals as acsig
+    import markets
+    import session_state
     import whatif_advisor as wadv
     from analysis_engine import run_single_stock_analysis, simulate_next_day_indicators
 
@@ -114,11 +116,16 @@ def whatif_ai(analysis_df: pd.DataFrame, ticker: str, name: str, *,
         sim = wadv.sim_from_real_bar(analysis_df)
         if sim is None:
             raise LookupError("not enough history")
+        # Tushare publishes a daily bar after the close, so an A-share bar is
+        # always finished. Yahoo serves a running bar, so a US or Canadian one
+        # may be a third of a day pretending to be a whole one.
+        bar = session_state.of_frame(markets.split(ticker)[0],
+                                     analysis_df.index[-1])
         ad_today = acsig.summarise(acsig.detect(hist, None, window=window))
         ad_bar = acsig.summarise(acsig.detect(analysis_df, None, window=window))
         brief = wadv.build_brief(hist, sim, ticker=ticker, name=name,
                                  ad_today=ad_today, ad_tomorrow=ad_bar,
-                                 ad_window=window, mode="actual",
+                                 ad_window=window, mode="actual", bar=bar,
                                  bar_date=str(analysis_df.index[-1].date()))
     else:
         if volume is None:
@@ -147,7 +154,8 @@ def whatif_ai(analysis_df: pd.DataFrame, ticker: str, name: str, *,
 
     out = wadv.explain(brief)
     return {"mode": mode, "read": out, "crossings": brief.get("crossings", []),
-            "bar_date": brief["asof"]["sim_session"]}
+            "bar_date": brief["asof"]["sim_session"],
+            "session": brief.get("session")}
 
 
 def compare(main_df: pd.DataFrame, other: str, dates: list[str]) -> dict:

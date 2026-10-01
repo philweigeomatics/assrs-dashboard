@@ -156,6 +156,7 @@ export function WhatIfPanel({
         <p className="mt-1 text-[11px] text-ink-mute">
           读取{ghost ? "上面这根幻影K线" : "最后一个真实交易日"}。技术推演，非投资建议。
         </p>
+        {!ghost && ai?.session && !ai.session.complete && <LiveBar s={ai.session} />}
         {aiCall.isError && (
           <p className="text-[12px] text-up mt-1">{(aiCall.error as Error).message}</p>
         )}
@@ -172,6 +173,27 @@ export function WhatIfPanel({
  * another is a new type on every render, so React unmounts and remounts it —
  * which drops focus after every keystroke and leaves stale DOM values behind.
  */
+/**
+ * The bar is still being written.
+ *
+ * Yahoo serves a running daily bar while a US or Canadian session is open, so
+ * 尾盘推演 — which is explicitly a read taken AT the close — is being asked
+ * about a bar that is part finished. The read handles it: volume is projected
+ * to a full day before being compared with a history of full days, and the
+ * model is told. This says so on screen too, because the number on the chart
+ * is still the part-finished one.
+ */
+function LiveBar({ s }: { s: NonNullable<WhatIfAi["session"]> }) {
+  return (
+    <p className="mt-1.5 text-[11px] text-brand-ink leading-snug">
+      ⏳ 这根K线还在走 —— 当地时间 {s.local_time}，只完成了 {Math.round(s.elapsed_pct)}%。
+      {s.projectable
+        ? "推演里的成交量已按当前节奏折算成全天估计，才能和历史的整日均量比较；最高/最低/收盘都还会变。"
+        : "开盘不久，量能样本太小，推演不会对成交量下判断。"}
+    </p>
+  );
+}
+
 function NumField({ label, value, set, after, step = 0.01 }: {
   label: string;
   value: number;

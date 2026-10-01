@@ -443,7 +443,15 @@ def whatif_ai(req: AiReq, ticker: str = TICKER, force: bool = Query(False),
 
     # The bar the read will describe. Known before the call, which is what
     # makes a cache lookup possible at all.
-    cacheable = req.mode == "actual"
+    #
+    # Only once that bar has stopped moving. The key is the bar's DATE, which
+    # identifies a finished A-share session exactly — and identifies nothing
+    # at all for a US name while its session is open, where a read taken at
+    # 10:00 would be served until the close describing a bar that has since
+    # gained five hours of tape.
+    import session_state
+    live_bar = session_state.of_frame(market.conv.code, adf.index[-1])
+    cacheable = req.mode == "actual" and live_bar.complete
     bar_date = str(adf.index[-1].date()) if cacheable else None
     if cacheable and not force:
         hit = whatif_cache.load(ticker, bar_date, req.window)
