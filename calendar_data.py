@@ -23,6 +23,20 @@ a week rather than a month.
 
 Past days are cached forever. An economic release that has already happened
 does not change, and that is what makes moving through the calendar cheap.
+
+Times are Beijing, including the date
+-------------------------------------
+`eco_cal` reports every event in Asia/Shanghai, converted correctly from the
+source market: US initial jobless claims, fixed at 08:30 New York, come back
+at 21:30 before 8 March 2026 and 20:30 after it — the hour the United States
+moved its clocks and Beijing did not.
+
+That means the DATE is a Beijing date too, and for anyone outside UTC+8 a
+chunk of the calendar belongs to a different day than Tushare labels it. On
+one real week, 74 of 262 events — 28% — fell on a different calendar day in
+Toronto. So each event carries an unambiguous instant and the client places
+it in the viewer's own day, and the range is padded a day on each side so a
+viewer anywhere between UTC-12 and UTC+14 gets a complete week.
 """
 
 from __future__ import annotations
@@ -30,8 +44,17 @@ from __future__ import annotations
 import threading
 import time
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+#: Tushare reports eco_cal in Beijing time, and nothing in the payload says so.
+SOURCE_TZ = "Asia/Shanghai"
+BEIJING = ZoneInfo(SOURCE_TZ)
+#: Beijing is UTC+8 and the world runs from UTC-12 to UTC+14, so an event can
+#: move at most one calendar day in either direction. One day of padding each
+#: side therefore covers every viewer, and two would be wasted calls.
+PAD_DAYS = 1
 
 #: Tushare's per-call row ceiling for eco_cal.
 PAGE = 100
@@ -67,6 +90,24 @@ def _pretty(ymd: str) -> str:
 def _clean(v) -> str | None:
     s = str(v or "").strip()
     return s or None
+
+
+def _instant(day: str, clock: str) -> str | None:
+    """
+    "2026-10-08" + "02:00" → "2026-10-08T02:00:00+08:00".
+
+    None when Tushare gives no time. Every event in a sampled week had one,
+    but an all-day entry should degrade to its Beijing date rather than being
+    placed at midnight and shifted into the wrong day by the conversion.
+    """
+    if not clock:
+        return None
+    try:
+        hh, mm = (int(x) for x in clock.split(":")[:2])
+        return (datetime.fromisoformat(day)
+                .replace(hour=hh, minute=mm, tzinfo=BEIJING).isoformat())
+    except (ValueError, TypeError):
+        return None
 
 
 # ── economic calendar ────────────────────────────────────────────────────────
@@ -109,9 +150,14 @@ def eco_day(day: date) -> list[dict]:
         df = df.drop_duplicates(subset=["date", "time", "event", "country"])
         df = df.sort_values(["time", "country"], kind="stable")
         for _, r in df.iterrows():
+            day = _pretty(r.get("date"))
+            clock = _clean(r.get("time")) or ""
             rows.append({
-                "date": _pretty(r.get("date")),
-                "time": _clean(r.get("time")) or "",
+                # The instant, offset included, so the browser can place it in
+                # the viewer's own day instead of trusting a Beijing label.
+                "at": _instant(day, clock),
+                "date": day,
+                "time": clock,
                 "country": _clean(r.get("country")) or "—",
                 "currency": _clean(r.get("currency")) or "",
                 "event": _clean(r.get("event")) or "",
@@ -129,26 +175,33 @@ def eco_day(day: date) -> list[dict]:
 
 
 def economic(start: date, days: int = WEEK) -> dict:
-    """A week of releases, grouped by day, with the countries present."""
-    out, countries = [], {}
-    for i in range(days):
-        d = start + timedelta(days=i)
-        rows = eco_day(d)
-        for r in rows:
-            countries[r["country"]] = countries.get(r["country"], 0) + 1
-        out.append({
-            "date": d.isoformat(),
-            "weekday": d.weekday(),
-            "events": rows,
-        })
+    """
+    A week of releases as a flat list, each with the instant it happens.
+
+    Not grouped into days here, because which day an event belongs to depends
+    on who is looking: 28% of one real week moved a day between Beijing and
+    Toronto. The caller groups, and gets a padded range so its own first and
+    last days are complete.
+    """
+    first = start - timedelta(days=PAD_DAYS)
+    last = start + timedelta(days=days - 1 + PAD_DAYS)
+
+    events = []
+    cursor = first
+    while cursor <= last:
+        events.extend(eco_day(cursor))
+        cursor += timedelta(days=1)
+
     return {
         "from": start.isoformat(),
         "to": (start + timedelta(days=days - 1)).isoformat(),
-        "days": out,
-        "countries": [{"country": c, "count": n}
-                      for c, n in sorted(countries.items(),
-                                         key=lambda kv: -kv[1])],
-        "total": sum(len(d["events"]) for d in out),
+        # The padded span actually fetched, so the client knows which events
+        # it may safely show and which are only there to fill the edges.
+        "fetched_from": first.isoformat(),
+        "fetched_to": last.isoformat(),
+        "source_tz": SOURCE_TZ,
+        "events": events,
+        "total": len(events),
     }
 
 

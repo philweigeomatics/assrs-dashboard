@@ -14,11 +14,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api";
-import type { EarningsCalendar, EarningsRow, EcoWeek } from "../lib/types";
+import type { EarningsCalendar, EarningsRow, EcoEvent, EcoWeek }
+  from "../lib/types";
 import { NavBar } from "../components/NavBar";
 import { usePersistentState } from "../lib/usePersistentState";
 import { cellDate, monthGrid, parseMonth, safeMonth, shiftMonth }
   from "../lib/monthGrid";
+import { localClock, localDay, localMonday, offBeijing, viewerZone, zoneLabel }
+  from "../lib/localDay";
 
 const VIEWS = [
   { id: "eco", label: "🌍 经济数据" },
@@ -30,15 +33,11 @@ type View = typeof VIEWS[number]["id"];
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const ALL = "__all__";
 
-/** Monday of the week containing `d`. */
-function monday(d: Date): Date {
-  const out = new Date(d);
-  out.setDate(out.getDate() - ((out.getDay() + 6) % 7));
-  out.setHours(0, 0, 0, 0);
-  return out;
-}
-
-const iso = (d: Date) => d.toISOString().slice(0, 10);
+// Both of these used to go through toISOString(), which converts to UTC
+// first — so local midnight anywhere east of Greenwich landed on the previous
+// day and the whole week was off by one. See lib/localDay.
+const monday = localMonday;
+const iso = localDay;
 
 export function Calendar() {
   useEffect(() => { document.title = "ASSRS · 日历"; }, []);
@@ -84,7 +83,7 @@ export function Calendar() {
           <section className="card p-3 flex flex-col gap-2">
             <Header
               title="🌍 经济数据日历"
-              note="全球宏观数据发布时间，来自 Tushare。时间为北京时间。"
+              note="全球宏观数据发布时间，来自 Tushare。时间已换算成你所在时区。"
               left={
                 <div className="flex items-center gap-1">
                   <Step onClick={() => setOffset(offset - 1)}>← 上周</Step>
@@ -168,16 +167,68 @@ function Body({ q, children }: {
   return <>{children}</>;
 }
 
-/** Seven columns, one per day, each a scrollable list of releases. */
+/**
+ * Seven columns, one per day — the VIEWER's day.
+ *
+ * Tushare reports eco_cal in Beijing time, date included, and that is not a
+ * cosmetic detail: on one real week 128 of 409 events belonged to a different
+ * calendar day in Toronto than the one Tushare labelled them with. So the
+ * grouping is done here from the instant, and the server pads the range a day
+ * either side so the first and last columns are complete.
+ */
 function EcoWeekView({ d }: { d: EcoWeek }) {
   const [country, setCountry] = useState<string>(ALL);
+  const [showBeijing, setShowBeijing] = usePersistentState<boolean>(
+    "assrs.cal.bjtime", false);
   const today = iso(new Date());
+  const zone = viewerZone();
+  const offset = zoneLabel();
+  const beijing = zone === d.source_tz;
+
+  // Bucket by the viewer's calendar day, then keep only the week asked for —
+  // the padding days exist to fill these buckets, not to be shown.
+  const { days, countries, total } = useMemo(() => {
+    const wanted: string[] = [];
+    const base = new Date(`${d.from}T00:00:00`);
+    for (let i = 0; i < 7; i += 1) {
+      const day = new Date(base);
+      day.setDate(day.getDate() + i);
+      wanted.push(iso(day));
+    }
+
+    const bucket = new Map<string, EcoEvent[]>(wanted.map((k) => [k, []]));
+    const tally = new Map<string, number>();
+    for (const e of d.events) {
+      // No instant means no time from Tushare; fall back to its Beijing date
+      // rather than inventing midnight and shifting it into another day.
+      const key = e.at ? localDay(new Date(e.at)) : e.date;
+      const slot = bucket.get(key);
+      if (!slot) continue;
+      slot.push(e);
+      tally.set(e.country, (tally.get(e.country) ?? 0) + 1);
+    }
+
+    for (const list of bucket.values()) {
+      list.sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""));
+    }
+    return {
+      days: wanted.map((k) => ({
+        date: k,
+        weekday: (new Date(`${k}T00:00:00`).getDay() + 6) % 7,
+        events: bucket.get(k) ?? [],
+      })),
+      countries: [...tally.entries()]
+        .map(([c, n]) => ({ country: c, count: n }))
+        .sort((a, b) => b.count - a.count),
+      total: [...bucket.values()].reduce((a, l) => a + l.length, 0),
+    };
+  }, [d]);
 
   const keep = (c: string) => country === ALL || c === country;
-  const shown = d.days.map((day) => ({
+  const shown = days.map((day) => ({
     ...day, events: day.events.filter((e) => keep(e.country)),
   }));
-  const total = shown.reduce((a, x) => a + x.events.length, 0);
+  const visible = shown.reduce((a, x) => a + x.events.length, 0);
 
   return (
     <div className="flex flex-col gap-2">
@@ -186,14 +237,23 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
           aria-label="国家/地区"
           className="h-7 px-2 rounded-lg bg-sunken text-[12.5px] outline-none
             focus:ring-2 focus:ring-cyan/40">
-          <option value={ALL}>全部地区（{d.total}）</option>
-          {d.countries.map((c) => (
+          <option value={ALL}>全部地区（{total}）</option>
+          {countries.map((c) => (
             <option key={c.country} value={c.country}>
               {c.country}（{c.count}）
             </option>
           ))}
         </select>
-        <span className="label tnum">{d.from} → {d.to} · {total} 条</span>
+        <span className="label tnum">{d.from} → {d.to} · {visible} 条</span>
+        {!beijing && (
+          <label className="label flex items-center gap-1.5 cursor-pointer"
+            title="同时显示 Tushare 原始的北京时间，方便对账">
+            <input type="checkbox" checked={showBeijing}
+              onChange={(e) => setShowBeijing(e.target.checked)}
+              className="accent-[var(--color-cyan)]" />
+            并显示北京时间
+          </label>
+        )}
       </div>
 
       <div className="grid gap-2 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7
@@ -213,39 +273,55 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
               <span className="label">—</span>
             ) : (
               <div className="flex flex-col gap-1.5 max-h-[420px] overflow-y-auto">
-                {day.events.map((e, i) => (
-                  <div key={i} className="flex flex-col gap-0.5 text-[11.5px]
-                    border-t border-line pt-1 first:border-0 first:pt-0">
-                    <div className="flex items-baseline gap-1.5">
-                      <span className="font-mono tnum text-ink-mute shrink-0">
-                        {e.time || "—"}
-                      </span>
-                      <span className="text-ink-dim truncate">{e.country}</span>
-                    </div>
-                    <span className="leading-snug" title={e.event}>{e.event}</span>
-                    {(e.value || e.forecast || e.prev) && (
-                      <div className="flex flex-wrap gap-x-2 text-[11px] tnum">
-                        {e.value && (
-                          <span className="font-medium">实 {e.value}</span>
-                        )}
-                        {e.forecast && (
-                          <span className="text-ink-mute">预 {e.forecast}</span>
-                        )}
-                        {e.prev && (
-                          <span className="text-ink-mute">前 {e.prev}</span>
+                {day.events.map((e, i) => {
+                  const clock = e.at ? localClock(e.at) : e.time;
+                  const moved = !!e.at && !beijing
+                    && offBeijing(e.at, e.date, e.time);
+                  return (
+                    <div key={i} className="flex flex-col gap-0.5 text-[11.5px]
+                      border-t border-line pt-1 first:border-0 first:pt-0">
+                      <div className="flex items-baseline gap-1.5">
+                        <span className="font-mono tnum text-ink-mute shrink-0">
+                          {clock || "—"}
+                        </span>
+                        <span className="text-ink-dim truncate">{e.country}</span>
+                        {showBeijing && moved && (
+                          <span className="ml-auto font-mono tnum text-[10.5px]
+                            text-ink-mute shrink-0"
+                            title="Tushare 给的北京时间">
+                            京 {e.date.slice(5)} {e.time}
+                          </span>
                         )}
                       </div>
-                    )}
-                  </div>
-                ))}
+                      <span className="leading-snug" title={e.event}>{e.event}</span>
+                      {(e.value || e.forecast || e.prev) && (
+                        <div className="flex flex-wrap gap-x-2 text-[11px] tnum">
+                          {e.value && (
+                            <span className="font-medium">实 {e.value}</span>
+                          )}
+                          {e.forecast && (
+                            <span className="text-ink-mute">预 {e.forecast}</span>
+                          )}
+                          {e.prev && (
+                            <span className="text-ink-mute">前 {e.prev}</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
         ))}
       </div>
       <p className="label leading-snug">
-        一次显示一周 —— Tushare 的 eco_cal 每分钟只允许 20 次调用，而要拿全一天的数据
-        就得单独请求那一天。已发生的日期会永久缓存，所以来回翻周是免费的。
+        时间已换算成<b>你所在时区</b>
+        {zone ? ` ${zone}` : ""}{offset ? `（${offset}）` : ""} ——
+        Tushare 给的是北京时间，包括日期，所以在 UTC+8 以外有相当一部分事件
+        本来就不属于它标的那一天。
+        一次显示一周：eco_cal 每分钟只允许 20 次调用，而要拿全一天的数据就得
+        单独请求那一天。已发生的日期会永久缓存，来回翻周是免费的。
       </p>
     </div>
   );

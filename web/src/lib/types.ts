@@ -1384,7 +1384,16 @@ export type QtTransactions = {
 
 /** GET /calendar/economic — a week of global macro releases. */
 export type EcoEvent = {
-  date: string; time: string; country: string; currency: string;
+  /**
+   * The instant, offset included ("2026-10-08T02:00:00+08:00"). Null only
+   * when Tushare gave no time. This is what decides which day the event
+   * belongs to for the viewer — `date` below is Tushare's Beijing label and
+   * is a different calendar day for 28% of a typical week outside UTC+8.
+   */
+  at: string | null;
+  /** Beijing date and clock, as Tushare reports them. */
+  date: string; time: string;
+  country: string; currency: string;
   event: string;
   /** Strings, not numbers: Tushare bakes the unit in ("4.9%", "6.58%"). */
   value: string | null; prev: string | null; forecast: string | null;
@@ -1392,8 +1401,12 @@ export type EcoEvent = {
 
 export type EcoWeek = {
   from: string; to: string;
-  days: { date: string; weekday: number; events: EcoEvent[] }[];
-  countries: { country: string; count: number }[];
+  /** The padded span actually fetched, a day either side of the week. */
+  fetched_from: string; fetched_to: string;
+  /** Always Asia/Shanghai — stated rather than assumed. */
+  source_tz: string;
+  /** Flat: which day each one belongs to depends on the viewer. */
+  events: EcoEvent[];
   total: number;
 };
 

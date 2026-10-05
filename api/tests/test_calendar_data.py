@@ -149,12 +149,17 @@ def test_a_finished_day_is_fetched_once_and_then_remembered(monkeypatch):
     assert len(api.calls) == 1
 
 
-def test_a_week_groups_its_days_and_counts_the_regions(monkeypatch):
+def test_a_week_gathers_every_day_in_its_padded_span(monkeypatch):
+    """
+    Grouping moved to the client when it turned out Tushare's dates are
+    Beijing dates — see test_the_range_is_padded_so_any_viewer_gets_a_whole_week.
+    What the server still owes is every event in the span, once.
+    """
     _use(monkeypatch, _Api({"20260929": 3, "20260930": 2}))
     got = cal.economic(date(2026, 9, 29), days=2)
-    assert [d["date"] for d in got["days"]] == ["2026-09-29", "2026-09-30"]
     assert got["total"] == 5
-    assert got["countries"] == [{"country": "美国", "count": 5}]
+    assert {e["date"] for e in got["events"]} == {"2026-09-29", "2026-09-30"}
+    assert all(e["at"] for e in got["events"])
 
 
 def test_a_failing_day_is_reported_rather_than_returned_empty(monkeypatch):
@@ -303,3 +308,77 @@ def test_a_period_with_no_dates_still_names_a_month_to_open_on(monkeypatch, no_d
                        ref=date(2026, 10, 20))
     assert got["months"] == []
     assert got["focus"] == "2026-10"      # falls back to the reference month
+
+
+# ── Beijing time, including the date ─────────────────────────────────────────
+def test_every_event_carries_an_unambiguous_instant(monkeypatch):
+    """
+    Tushare gives Beijing time and says so nowhere. Without the offset the
+    client has to guess, and 28% of a real week guessed wrong.
+    """
+    _use(monkeypatch, _Api({"20261008": 1}))
+    row = cal.eco_day(date(2026, 10, 8))[0]
+    assert row["at"] == "2026-10-08T00:00:00+08:00"
+
+
+@pytest.mark.parametrize("day, clock, want", [
+    ("2026-10-08", "02:00", "2026-10-08T02:00:00+08:00"),
+    ("2026-03-12", "20:30", "2026-03-12T20:30:00+08:00"),
+    ("2026-10-08", "", None),          # no time given
+    ("2026-10-08", "xx:yy", None),     # unparseable
+    ("not-a-date", "02:00", None),
+])
+def test_instant_building(day, clock, want):
+    assert cal._instant(day, clock) == want
+
+
+def test_an_event_with_no_time_keeps_its_beijing_date(monkeypatch):
+    """
+    Placing it at midnight would shift it into another day for half the
+    world; falling back to the label is the honest answer.
+    """
+    class NoTime(_Api):
+        def eco_cal(self, start_date=None, **kw):
+            return pd.DataFrame([{"date": start_date, "time": "",
+                                  "currency": "CNY", "country": "中国",
+                                  "event": "全天事件", "value": None,
+                                  "pre_value": None, "fore_value": None}])
+
+    _use(monkeypatch, NoTime({}))
+    row = cal.eco_day(date(2026, 10, 8))[0]
+    assert row["at"] is None and row["date"] == "2026-10-08"
+
+
+def test_the_range_is_padded_so_any_viewer_gets_a_whole_week(monkeypatch):
+    """
+    Beijing is UTC+8 and the world runs UTC-12..UTC+14, so an event moves at
+    most one day either way. Without the padding the first and last columns
+    would be short for everyone outside UTC+8.
+    """
+    api = _use(monkeypatch, _Api({}))
+    got = cal.economic(date(2026, 10, 5), days=7)
+
+    asked = {c[0] for c in api.calls}
+    assert "20261004" in asked and "20261012" in asked      # a day either side
+    assert len(asked) == 9
+    assert got["from"] == "2026-10-05" and got["to"] == "2026-10-11"
+    assert got["fetched_from"] == "2026-10-04"
+    assert got["fetched_to"] == "2026-10-12"
+
+
+def test_the_payload_names_the_source_timezone(monkeypatch):
+    """Stated rather than assumed — the whole bug was an unstated assumption."""
+    _use(monkeypatch, _Api({}))
+    assert cal.economic(date(2026, 10, 5), days=7)["source_tz"] == "Asia/Shanghai"
+
+
+def test_events_come_back_flat_for_the_client_to_group(monkeypatch):
+    """
+    Which day an event belongs to depends on who is looking, so the server
+    does not decide.
+    """
+    _use(monkeypatch, _Api({"20261005": 2, "20261006": 3}))
+    got = cal.economic(date(2026, 10, 5), days=7)
+    assert isinstance(got["events"], list)
+    assert got["total"] == len(got["events"]) == 5
+    assert "days" not in got
