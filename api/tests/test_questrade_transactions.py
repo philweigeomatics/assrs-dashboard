@@ -239,3 +239,137 @@ def test_the_registered_set_covers_every_sheltered_type_the_app_names():
     assert "Cash" not in qt.REGISTERED
     assert "Margin" not in qt.REGISTERED
     assert qt.REGISTERED <= set(qt.ACCOUNT_TYPES)
+
+
+# ── searching one symbol across years ────────────────────────────────────────
+def _ledger(rows_by_year):
+    """Stand in for the cached per-year payloads the search is built on."""
+    def fake(user_id, year):
+        return {"year": year, "accounts": [
+            {"id": "A1", "tail": "0001", "type": "TFSA", "label": "免税账户 TFSA",
+             "registered": True, "rows": rows_by_year.get(year, []),
+             "summary": {"count": 0, "by_type": []}}]}
+    return fake
+
+
+def _trade(date, symbol, qty, price, kind="Trades"):
+    return qa._row({
+        "type": kind, "action": "Buy" if qty > 0 else "Sell", "symbol": symbol,
+        "quantity": qty, "price": price, "netAmount": -qty * price,
+        "currency": "USD", "tradeDate": f"{date}T00:00:00.000000-05:00",
+        "settlementDate": f"{date}T00:00:00.000000-05:00"})
+
+
+def test_a_symbol_you_no_longer_hold_is_still_findable(monkeypatch):
+    """
+    The whole point. On a real account 27 symbols had been traded in three
+    years and only 12 were still held, so a picker built from holdings would
+    have hidden ALGM — bought and sold out completely.
+    """
+    monkeypatch.setattr(qa, "transactions", _ledger({
+        2026: [_trade("2026-01-29", "ALGM", -130, 38.5)],
+        2025: [_trade("2025-05-21", "ALGM", 130, 29.0)],
+        2024: [],
+    }))
+    got = qa.traded_symbols(1, span=3)
+    assert [s["symbol"] for s in got["symbols"]] == ["ALGM"]
+    assert got["symbols"][0]["trades"] == 2
+
+
+def test_the_search_spans_years_rather_than_one(monkeypatch):
+    monkeypatch.setattr(qa, "transactions", _ledger({
+        2026: [_trade("2026-01-29", "ALGM", -10, 38.5)],
+        2025: [_trade("2025-05-21", "ALGM", 10, 29.0)],
+    }))
+    got = qa.symbol_activity(1, "ALGM", span=3)
+    assert len(got["rows"]) == 2
+    assert got["first"] == "2025-05-21" and got["last"] == "2026-01-29"
+
+
+def test_rows_come_back_newest_first(monkeypatch):
+    monkeypatch.setattr(qa, "transactions", _ledger({
+        2026: [_trade("2026-01-29", "X", -10, 2.0),
+               _trade("2026-03-01", "X", -10, 3.0)],
+    }))
+    dates = [r["date"] for r in qa.symbol_activity(1, "X", span=1)["rows"]]
+    assert dates == sorted(dates, reverse=True)
+
+
+def test_a_canadian_listing_is_not_the_same_symbol(monkeypatch):
+    """
+    META and META.TO are two listings of one company and were both traded on
+    the real account. Collapsing them would merge two different books.
+    """
+    monkeypatch.setattr(qa, "transactions", _ledger({
+        2026: [_trade("2026-01-05", "META", 1, 600.0),
+               _trade("2026-01-06", "META.TO", 1, 820.0)],
+    }))
+    assert len(qa.symbol_activity(1, "META", span=1)["rows"]) == 1
+    assert len(qa.symbol_activity(1, "META.TO", span=1)["rows"]) == 1
+
+
+def test_the_search_is_case_insensitive(monkeypatch):
+    monkeypatch.setattr(qa, "transactions", _ledger({
+        2026: [_trade("2026-01-05", "ALGM", 1, 30.0)]}))
+    assert len(qa.symbol_activity(1, "algm", span=1)["rows"]) == 1
+
+
+def test_an_empty_symbol_is_refused():
+    with pytest.raises(LookupError, match="代码"):
+        qa.symbol_activity(1, "  ", span=1)
+
+
+# ── the buy/sell arithmetic ──────────────────────────────────────────────────
+def test_position_is_quantity_weighted_per_currency(monkeypatch):
+    monkeypatch.setattr(qa, "transactions", _ledger({
+        2026: [_trade("2026-01-02", "X", 100, 10.0),
+               _trade("2026-01-03", "X", 100, 20.0),
+               _trade("2026-01-04", "X", -50, 30.0)]}))
+    p = qa.symbol_activity(1, "X", span=1)["position"]["by_currency"][0]
+    assert p["bought"] == 200 and p["avg_buy"] == pytest.approx(15.0)
+    assert p["sold"] == 50 and p["avg_sell"] == pytest.approx(30.0)
+    assert p["net"] == 150
+
+
+def test_currencies_stay_apart_in_the_position_too():
+    rows = [qa._row({"type": "Trades", "symbol": "X", "quantity": 10,
+                     "price": 2.0, "currency": "USD",
+                     "tradeDate": "2026-01-02T00:00:00.000000-05:00"}),
+            qa._row({"type": "Trades", "symbol": "X", "quantity": 10,
+                     "price": 3.0, "currency": "CAD",
+                     "tradeDate": "2026-01-02T00:00:00.000000-05:00"})]
+    got = qa._position(rows)["by_currency"]
+    assert [c["currency"] for c in got] == ["CAD", "USD"]
+    assert got[0]["avg_buy"] == 3.0 and got[1]["avg_buy"] == 2.0
+
+
+def test_dividends_do_not_move_the_position(monkeypatch):
+    """Only fills are a position; a dividend is cash."""
+    monkeypatch.setattr(qa, "transactions", _ledger({
+        2026: [_trade("2026-01-02", "X", 100, 10.0),
+               _trade("2026-01-03", "X", 0, 0.0, kind="Dividends")]}))
+    p = qa.symbol_activity(1, "X", span=1)["position"]["by_currency"][0]
+    assert p["bought"] == 100 and p["net"] == 100
+
+
+# ── the chart marks ──────────────────────────────────────────────────────────
+def test_marks_carry_a_side_and_come_back_oldest_first(monkeypatch):
+    """
+    lightweight-charts asserts markers are time-ascending, so an unsorted
+    list does not render wrong — it throws and takes the chart with it.
+    """
+    monkeypatch.setattr(qa, "transactions", _ledger({
+        2026: [_trade("2026-03-01", "X", -10, 3.0),
+               _trade("2026-01-02", "X", 10, 2.0)]}))
+    marks = qa.trade_marks(1, "X", span=1)["marks"]
+    assert [m["date"] for m in marks] == ["2026-01-02", "2026-03-01"]
+    assert [m["side"] for m in marks] == ["buy", "sell"]
+    assert marks[0]["quantity"] == 10      # absolute, not signed
+
+
+def test_marks_leave_out_everything_that_is_not_a_fill(monkeypatch):
+    monkeypatch.setattr(qa, "transactions", _ledger({
+        2026: [_trade("2026-01-02", "X", 10, 2.0),
+               _trade("2026-01-03", "X", 0, 0.0, kind="Dividends"),
+               _trade("2026-01-04", "X", 0, 0.0, kind="Fees and rebates")]}))
+    assert len(qa.trade_marks(1, "X", span=1)["marks"]) == 1

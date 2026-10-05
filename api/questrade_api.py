@@ -717,3 +717,160 @@ def transactions(app_user_id: int, year: int) -> dict:
         "types": [{"type": t, "label": lab} for t, lab in ACTIVITY_TYPES],
     }
 
+# ── one symbol, across years ─────────────────────────────────────────────────
+#: How far back a symbol search reaches by default. Each year is one cached
+#: `transactions` payload, so the first call is slow and the rest are free.
+SEARCH_YEARS = 3
+
+
+def _years(latest: int | None = None, span: int = SEARCH_YEARS) -> list[int]:
+    from datetime import datetime, timezone
+    end = latest or datetime.now(timezone.utc).year
+    return list(range(end, end - span, -1))
+
+
+def traded_symbols(app_user_id: int, span: int = SEARCH_YEARS) -> dict:
+    """
+    Every symbol with activity in the window, held or not.
+
+    The point of the search is the ones you no longer own: on a real account
+    27 symbols had been traded in three years and only 12 were still held, so
+    a picker built from current holdings would hide most of the history.
+    """
+    seen: dict[str, dict] = {}
+    for year in _years(span=span):
+        for acct in transactions(app_user_id, year)["accounts"]:
+            for row in acct["rows"]:
+                sym = row["symbol"]
+                if not sym:
+                    continue
+                at = seen.setdefault(sym, {
+                    "symbol": sym, "trades": 0, "activity": 0,
+                    "first": row["date"], "last": row["date"],
+                    "accounts": set(),
+                })
+                at["activity"] += 1
+                if row["type"] == "Trades":
+                    at["trades"] += 1
+                at["first"] = min(at["first"], row["date"] or at["first"])
+                at["last"] = max(at["last"], row["date"] or at["last"])
+                at["accounts"].add(acct["label"])
+
+    out = []
+    for v in seen.values():
+        v["accounts"] = sorted(v["accounts"])
+        out.append(v)
+    out.sort(key=lambda v: (-v["trades"], v["symbol"]))
+    return {"symbols": out, "years": _years(span=span)}
+
+
+def _position(rows: list[dict]) -> dict:
+    """
+    What was bought and what was sold, as plain arithmetic on the records.
+
+    Deliberately NOT an adjusted cost base. These are simple quantity-weighted
+    averages per currency; ACB has to survive superficial-loss rules, the same
+    security held across accounts, and the rate applying to each leg, and a
+    plausible wrong number on a tax return is worse than no number.
+    """
+    buckets: dict[str, dict] = {}
+    for r in rows:
+        if r["type"] != "Trades":
+            continue
+        qty = r.get("quantity") or 0
+        price = r.get("price") or 0
+        if not qty or not price:
+            continue
+        b = buckets.setdefault(r["currency"], {
+            "currency": r["currency"],
+            "bought": 0.0, "buy_cost": 0.0,
+            "sold": 0.0, "sell_proceeds": 0.0,
+        })
+        if qty > 0:
+            b["bought"] += qty
+            b["buy_cost"] += qty * price
+        else:
+            b["sold"] += -qty
+            b["sell_proceeds"] += -qty * price
+
+    out = []
+    for b in buckets.values():
+        out.append({
+            "currency": b["currency"],
+            "bought": round(b["bought"], 4),
+            "sold": round(b["sold"], 4),
+            "net": round(b["bought"] - b["sold"], 4),
+            "avg_buy": round(b["buy_cost"] / b["bought"], 4) if b["bought"] else None,
+            "avg_sell": round(b["sell_proceeds"] / b["sold"], 4) if b["sold"] else None,
+        })
+    return {"by_currency": sorted(out, key=lambda x: x["currency"])}
+
+
+def symbol_activity(app_user_id: int, symbol: str,
+                    span: int = SEARCH_YEARS) -> dict:
+    """
+    Every record for one symbol, newest first, with which account it was in.
+
+    Matched on Questrade's own spelling, which is the bare code with the
+    exchange suffix Canadian listings carry — `META` and `META.TO` are two
+    different listings and must not collapse into one.
+    """
+    want = str(symbol or "").strip().upper()
+    if not want:
+        raise LookupError("请给一个代码")
+
+    rows: list[dict] = []
+    years: list[int] = []
+    for year in _years(span=span):
+        years.append(year)
+        for acct in transactions(app_user_id, year)["accounts"]:
+            for row in acct["rows"]:
+                if (row["symbol"] or "").upper() != want:
+                    continue
+                rows.append({**row, "account": acct["label"],
+                             "account_id": acct["id"],
+                             "registered": acct["registered"]})
+
+    rows.sort(key=lambda r: (r["date"], r["type"]), reverse=True)
+    trades = [r for r in rows if r["type"] == "Trades"]
+    return {
+        "symbol": want,
+        "years": years,
+        "rows": rows,
+        "summary": _summarise(rows),
+        "position": _position(rows),
+        "trade_count": len(trades),
+        "accounts": sorted({r["account"] for r in rows}),
+        "first": rows[-1]["date"] if rows else None,
+        "last": rows[0]["date"] if rows else None,
+    }
+
+
+def trade_marks(app_user_id: int, symbol: str,
+                span: int = SEARCH_YEARS) -> dict:
+    """
+    Just the fills, shaped for a price chart.
+
+    One entry per trade with its side, so the chart can put an arrow under a
+    buy and over a sell on the day it happened.
+    """
+    got = symbol_activity(app_user_id, symbol, span)
+    marks = []
+    for r in got["rows"]:
+        if r["type"] != "Trades":
+            continue
+        qty = r.get("quantity") or 0
+        if not qty:
+            continue
+        marks.append({
+            "date": r["date"],
+            "side": "buy" if qty > 0 else "sell",
+            "quantity": abs(qty),
+            "price": r.get("price"),
+            "currency": r["currency"],
+            "account": r["account"],
+        })
+    marks.sort(key=lambda m: m["date"])
+    return {"symbol": got["symbol"], "marks": marks,
+            "years": got["years"], "accounts": got["accounts"]}
+

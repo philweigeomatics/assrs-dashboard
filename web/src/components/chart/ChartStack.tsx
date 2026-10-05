@@ -142,6 +142,7 @@ function markerList(d: Analysis, specs: MarkerSpec[]): SeriesMarker<Time>[] {
 
 export function ChartStack({
   data,
+  trades,
   ghost,
   compare,
   compareMode,
@@ -168,6 +169,13 @@ export function ChartStack({
    */
   drawings: Drawing[];
   setDrawings: (fn: (d: Drawing[]) => Drawing[]) => void;
+  /**
+   * The viewer's own fills from Questrade. Separate from the markers inside
+   * `data` because they come from a different source with different auth, and
+   * belong to the person rather than to the instrument.
+   */
+  trades?: { date: string; side: "buy" | "sell"; quantity: number;
+             price: number | null; currency: string; account: string }[];
 }) {
   const { main, subs } = useMemo(() => buildPanes(data), [data]);
   const panes = useMemo(() => [main, ...subs], [main, subs]);
@@ -311,6 +319,36 @@ export function ChartStack({
       plugin.setMarkers(markerList(data, specs.filter((m) => !off.has(`${pane}:${m.key}`))));
     }
   }, [hidden, data, panes]);
+
+  // ── the viewer's own fills ────────────────────────────────────────────
+  // Their own plugin rather than a MarkerSpec: those are built from the
+  // analysis payload and keyed on bar INDEX, while these arrive separately
+  // and are matched on the DATE — so a fill on a day the chart does not hold
+  // (a holiday, or outside the loaded range) is dropped rather than shifting
+  // every later marker by one bar.
+  const tradePlugin = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  useEffect(() => {
+    const candles = handles.current.series.get("main:__candles");
+    if (!candles) return;
+    if (!tradePlugin.current) {
+      tradePlugin.current = createSeriesMarkers(candles, []);
+    }
+    const onChart = new Set(data.dates);
+    const marks: SeriesMarker<Time>[] = (trades ?? [])
+      .filter((t) => onChart.has(t.date))
+      .map((t) => ({
+        time: t.date as Time,
+        position: t.side === "buy" ? "belowBar" : "aboveBar",
+        shape: t.side === "buy" ? "arrowUp" : "arrowDown",
+        // Not the market's up/down palette. These are not price moves, they
+        // are the viewer's own actions, so they keep one colour in Shanghai
+        // and New York alike.
+        color: t.side === "buy" ? "#2563eb" : "#f59e0b",
+        text: `${t.side === "buy" ? "买" : "卖"} ${compact(t.quantity)}`
+              + (t.price ? ` @${t.price}` : ""),
+      }));
+    tradePlugin.current.setMarkers(marks);
+  }, [trades, data.dates]);
 
   // ── the ghost bar ─────────────────────────────────────────────────────
   // Its own series, added and removed on their own, so a What-If edit never

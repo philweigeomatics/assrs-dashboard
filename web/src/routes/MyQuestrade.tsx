@@ -27,6 +27,7 @@ import { RiskPanel } from "../components/questrade/RiskPanel";
 import { ExposurePanel } from "../components/questrade/ExposurePanel";
 import { OptimisePanel } from "../components/questrade/OptimisePanel";
 import { Transactions } from "../components/questrade/Transactions";
+import { SymbolHistory } from "../components/questrade/SymbolHistory";
 import { usePersistentState } from "../lib/usePersistentState";
 import { fixed, signed } from "../lib/format";
 
@@ -39,6 +40,7 @@ import { fixed, signed } from "../lib/format";
 const VIEWS = [
   { id: "book", label: "💼 组合" },
   { id: "ledger", label: "📒 交易流水" },
+  { id: "symbol", label: "🔎 按代码查找" },
 ] as const;
 
 type View = typeof VIEWS[number]["id"];
@@ -177,6 +179,17 @@ export function MyQuestrade() {
                   years={YEARS} />
               )}
             </Body>
+          </section>
+        )}
+
+        {connected && !needsReconnect && view === "symbol" && (
+          <section className="card p-3 flex flex-col gap-2">
+            <h2 className="text-[14.5px] font-semibold">🔎 按代码查找</h2>
+            <p className="label">
+              某一只的全部记录，<b>不管现在还持不持有</b>。近三年交易过的代码都在，
+              买卖、股息、费用一起列。
+            </p>
+            <SymbolHistory years={3} />
           </section>
         )}
 

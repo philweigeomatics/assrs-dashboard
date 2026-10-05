@@ -1689,6 +1689,19 @@ _qt_risk_cache = TTLCache(maxsize=24, ttl_s=30 * 60)
 _qt_exposure_cache = TTLCache(maxsize=8, ttl_s=6 * 3600)
 #: Thirteen requests per account per year, and a closed year never changes.
 _qt_txn_cache = TTLCache(maxsize=12, ttl_s=6 * 3600)
+#: Symbol searches, built on top of those year payloads.
+_qt_sym_cache = TTLCache(maxsize=120, ttl_s=6 * 3600)
+#: Bumped whenever a user connects or disconnects Questrade, and carried in
+#: every symbol-cache key. The symbol key space is every ticker a person has
+#: ever traded, so it cannot be enumerated and overwritten the way the
+#: year-keyed caches are — a generation retires the whole set at once, which
+#: is what stops a reconnect to a different login from serving the previous
+#: one's trades.
+_qt_generation: dict[int, int] = {}
+
+
+def _qt_gen(user_id: int) -> int:
+    return _qt_generation.get(int(user_id), 0)
 _qt_opt_cache = TTLCache(maxsize=32, ttl_s=30 * 60)
 
 
@@ -1769,6 +1782,10 @@ def _forget_questrade(user_id: int) -> None:
     this_year = _dt.datetime.now(_dt.timezone.utc).year
     for year in range(this_year - 10, this_year + 1):
         _qt_txn_cache.put(("txn", user_id, year), None)
+    # Symbol searches are derived from those payloads and carry the same risk,
+    # but their keys include every ticker ever traded and so cannot be listed.
+    # Bumping the generation retires all of them at once.
+    _qt_generation[int(user_id)] = _qt_gen(user_id) + 1
     for base in ("CAD", "USD"):
         _qt_book_cache.put(("book", user_id, base), None)
         _qt_exposure_cache.put(("exposure", user_id, base), None)
@@ -1800,6 +1817,92 @@ def questrade_portfolio(base: str = Query("CAD", pattern="^(CAD|USD)$"),
         _questrade(exc)
     _qt_book_cache.put(key, book)
     return book
+
+
+@app.get("/questrade/symbols")
+def questrade_symbols(years: int = Query(3, ge=1, le=10),
+                      user: AppUser = Depends(current_user)):
+    """
+    Every symbol traded in the window, whether or not it is still held.
+
+    A picker built from current holdings would hide most of the history: on a
+    real account 27 symbols had been traded in three years and 12 were still
+    held.
+    """
+    from api import questrade_api
+
+    key = ("syms", user.id, _qt_gen(user.id), int(years))
+    cached = _qt_sym_cache.peek(key)
+    if cached:
+        return cached
+    try:
+        out = questrade_api.traded_symbols(user.id, int(years))
+    except Exception as exc:                                    # noqa: BLE001
+        _questrade(exc)
+    _qt_sym_cache.put(key, out)
+    return out
+
+
+@app.get("/questrade/activity")
+def questrade_activity(symbol: str = Query(..., min_length=1, max_length=24),
+                       years: int = Query(3, ge=1, le=10),
+                       user: AppUser = Depends(current_user)):
+    """
+    Every record for one symbol across the window, with a buy/sell summary.
+
+    Built on the per-year activity payloads, which are already cached, so the
+    first search of a year is slow and every later one is free.
+    """
+    from api import questrade_api
+
+    key = ("act", user.id, _qt_gen(user.id), symbol.upper(), int(years))
+    cached = _qt_sym_cache.peek(key)
+    if cached:
+        return cached
+    try:
+        out = questrade_api.symbol_activity(user.id, symbol, int(years))
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+    except Exception as exc:                                    # noqa: BLE001
+        _questrade(exc)
+    _qt_sym_cache.put(key, out)
+    return out
+
+
+@app.get("/questrade/trade-marks/{ticker}")
+def questrade_trade_marks(ticker: str = TICKER,
+                          years: int = Query(3, ge=1, le=10),
+                          user: AppUser = Depends(current_user)):
+    """
+    The user's own fills for a ticker, shaped for the price chart.
+
+    Takes an app symbol (`US:META`, `CA:SHOP.TO`) and matches on the bare code,
+    which is Questrade's own spelling — `META` and `META.TO` are two listings
+    of one company and must not collapse into one.
+
+    A-shares never match: Questrade is a North American broker, so the empty
+    answer is correct rather than a failure, and the route says so by
+    returning no marks instead of an error.
+    """
+    from api import questrade_api
+
+    try:
+        market, code = markets.parse(ticker)
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+    if market.conv.code == "CN":
+        return {"symbol": code, "marks": [], "years": [], "accounts": []}
+
+    key = ("marks", user.id, _qt_gen(user.id), code.upper(), int(years))
+    cached = _qt_sym_cache.peek(key)
+    if cached:
+        return cached
+    try:
+        out = questrade_api.trade_marks(user.id, code, int(years))
+    except Exception as exc:                                    # noqa: BLE001
+        _questrade(exc)
+    _qt_sym_cache.put(key, out)
+    return out
 
 
 @app.get("/questrade/transactions")

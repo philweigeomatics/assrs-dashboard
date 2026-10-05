@@ -10,6 +10,9 @@ import type {
   EcoWeek,
   MacroBoard,
   PortfolioBuild,
+  QtSymbolActivity,
+  QtTradedSymbols,
+  QtTradeMarks,
   QtTransactions,
   WeighResult,
   SavedFund,
@@ -230,6 +233,14 @@ export const api = {
   compareStats: (t: string, other: string, window: string) =>
     call<PairStats>(`/compare-stats/${t}?with=${other}&window=${window}`),
   sectors: (t: string, window: number) => call<SectorAnalysis>(`/sectors/${t}?window=${window}`),
+  qtSymbols: (years: number) =>
+    call<QtTradedSymbols>(`/questrade/symbols?years=${years}`),
+  qtActivity: (symbol: string, years: number) =>
+    call<QtSymbolActivity>(
+      `/questrade/activity?symbol=${encodeURIComponent(symbol)}&years=${years}`),
+  qtTradeMarks: (ticker: string, years: number) =>
+    call<QtTradeMarks>(
+      `/questrade/trade-marks/${encodeURIComponent(ticker)}?years=${years}`),
   qtTransactions: (year: number) =>
     call<QtTransactions>(`/questrade/transactions?year=${year}`),
   qtStatus: () => call<QtStatus>("/questrade/status"),

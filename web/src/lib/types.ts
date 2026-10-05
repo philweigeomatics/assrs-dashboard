@@ -1436,3 +1436,45 @@ export type EarningsCalendar = {
   watched: number;
   periods: { label: string; end: string }[];
 };
+
+
+/** GET /questrade/symbols — everything traded in the window, held or not. */
+export type QtTradedSymbols = {
+  symbols: {
+    symbol: string; trades: number; activity: number;
+    first: string; last: string; accounts: string[];
+  }[];
+  years: number[];
+};
+
+/** GET /questrade/activity — every record for one symbol. */
+export type QtSymbolActivity = {
+  symbol: string;
+  years: number[];
+  rows: (QtActivity & { account: string; account_id: string;
+                        registered: boolean })[];
+  summary: QtAccountLedger["summary"];
+  /**
+   * Quantity-weighted simple averages, per currency. NOT an adjusted cost
+   * base and not a profit figure — see questrade_api._position.
+   */
+  position: {
+    by_currency: { currency: string; bought: number; sold: number;
+                   net: number; avg_buy: Num; avg_sell: Num }[];
+  };
+  trade_count: number;
+  accounts: string[];
+  first: string | null;
+  last: string | null;
+};
+
+/** GET /questrade/trade-marks/{ticker} — your own fills, for the price chart. */
+export type QtTradeMarks = {
+  symbol: string;
+  marks: {
+    date: string; side: "buy" | "sell"; quantity: number;
+    price: Num; currency: string; account: string;
+  }[];
+  years: number[];
+  accounts: string[];
+};

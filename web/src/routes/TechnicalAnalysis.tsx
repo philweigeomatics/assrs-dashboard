@@ -32,6 +32,19 @@ export function TechnicalAnalysis() {
     retry: (n, err) => !(err instanceof ApiError && err.status < 500) && n < 1,
   });
 
+  // The viewer's own fills, drawn on the candles. Questrade is a North
+  // American broker, so an A-share ticker returns nothing and the route says
+  // so with an empty list rather than an error — no need to gate on market
+  // here. A failure is swallowed on purpose: not having Questrade connected
+  // must not take the chart down.
+  const myTrades = useQuery({
+    queryKey: ["qt", "marks", ticker],
+    queryFn: () => api.qtTradeMarks(ticker!, 3),
+    enabled: Boolean(ticker),
+    staleTime: 6 * 3600_000,
+    retry: false,
+  });
+
   const [ghost, setGhost] = useState<SimResult | null>(null);
   const [compare, setCompare] = useState<CompareResult | null>(null);
   const [compareMode, setCompareMode] = useState<"pct" | "price">("pct");
@@ -123,6 +136,7 @@ export function TechnicalAnalysis() {
                 onCompareMode={setCompareMode}
               />
               <ChartStack
+                trades={myTrades.data?.marks}
                 data={analysis.data}
                 ghost={ghost}
                 compare={compare}
