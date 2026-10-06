@@ -1413,27 +1413,42 @@ export type EcoWeek = {
 /** GET /calendar/earnings — watchlist disclosure dates for one period. */
 export type EarningsRow = {
   t: string; code: string; n: string;
+  /** CN comes from Tushare's filing calendar, NA from Yahoo's estimates. */
+  market: "CN" | "NA";
   date: string | null;
-  pre_date: string | null;
-  actual_date: string | null;
-  ann_date: string;
   status: "reported" | "scheduled" | "overdue" | "unknown";
+
+  /** A-shares only. */
+  pre_date?: string | null;
+  actual_date?: string | null;
+  ann_date?: string;
   /** The company filed on a different day than it had estimated. */
-  moved: boolean;
+  moved?: boolean;
+
+  /** US and Canada only. 盘前 / 盘后 / 盘中 — the hour a date alone loses. */
+  when?: string;
+  eps_estimate?: number | null;
+  eps_reported?: number | null;
+  surprise_pct?: number | null;
+  /** Yahoo does not say whether a future date is confirmed. */
+  estimated?: boolean;
 };
 
 export type EarningsCalendar = {
   period: string;
+  /** Both markets, merged and sorted by date. */
   rows: EarningsRow[];
+  cn_rows: EarningsRow[];
+  na_rows: EarningsRow[];
   by_date: { date: string; rows: EarningsRow[] }[];
-  /** Months holding a disclosure, busiest first. */
+  /** Months holding anything, busiest first. */
   months: { ym: string; count: number }[];
   /** Which month the grid should open on — the busiest, not today's. */
   focus: string;
-  /** Watched A-shares with no disclosure row for this period yet. */
-  missing: string[];
+  /** Watched names with nothing scheduled, per market. */
+  missing: { cn: string[]; na: string[] };
   counts: Partial<Record<EarningsRow["status"], number>>;
-  watched: number;
+  watched: { cn: number; na: number; total: number };
   periods: { label: string; end: string }[];
 };
 

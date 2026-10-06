@@ -228,19 +228,21 @@ def test_only_a_shares_are_looked_up(monkeypatch, no_db):
     """A US holding has no A-share disclosure date; saying so would be noise."""
     monkeypatch.setattr(cal, "_disclosures", lambda p: _frame([
         ["600519.SH", "20261001", "20260930", "20261025", None]]))
+    # with_na=False keeps this about the Tushare join; the Yahoo side has its
+    # own tests and would otherwise put this one on the network.
     got = cal.earnings("20260930", [
         {"t": "600519", "n": "贵州茅台"},
         {"t": "US:AAPL", "n": "Apple"},
-    ], ref=TODAY)
-    assert got["watched"] == 1
-    assert [r["n"] for r in got["rows"]] == ["贵州茅台"]
+    ], ref=TODAY, with_na=False)
+    assert got["watched"]["cn"] == 1
+    assert [r["n"] for r in got["cn_rows"]] == ["贵州茅台"]
 
 
 def test_the_shown_date_prefers_what_actually_happened(monkeypatch, no_db):
     monkeypatch.setattr(cal, "_disclosures", lambda p: _frame([
         ["600519.SH", "20261001", "20260930", "20261025", "20261022"]]))
     row = cal.earnings("20260930", [{"t": "600519", "n": "贵州茅台"}],
-                       ref=TODAY)["rows"][0]
+                       ref=TODAY, with_na=False)["rows"][0]
     assert row["date"] == "2026-10-22"
     assert row["status"] == "reported"
     assert row["moved"] is True          # filed early, against its own estimate
@@ -250,7 +252,7 @@ def test_a_company_that_kept_its_date_is_not_flagged(monkeypatch, no_db):
     monkeypatch.setattr(cal, "_disclosures", lambda p: _frame([
         ["600519.SH", "20261001", "20260930", "20261025", "20261025"]]))
     assert cal.earnings("20260930", [{"t": "600519", "n": "贵州茅台"}],
-                        ref=TODAY)["rows"][0]["moved"] is False
+                        ref=TODAY, with_na=False)["rows"][0]["moved"] is False
 
 
 def test_a_watched_stock_with_no_row_is_named_not_silently_absent(monkeypatch, no_db):
@@ -258,8 +260,8 @@ def test_a_watched_stock_with_no_row_is_named_not_silently_absent(monkeypatch, n
         ["600519.SH", "20261001", "20260930", "20261025", None]]))
     got = cal.earnings("20260930", [
         {"t": "600519", "n": "贵州茅台"}, {"t": "000001", "n": "平安银行"},
-    ], ref=TODAY)
-    assert got["missing"] == ["平安银行"]
+    ], ref=TODAY, with_na=False)
+    assert got["missing"]["cn"] == ["平安银行"]
 
 
 def test_rows_are_bucketed_by_date_for_the_grid(monkeypatch, no_db):
@@ -269,7 +271,7 @@ def test_rows_are_bucketed_by_date_for_the_grid(monkeypatch, no_db):
         ["600036.SH", "20261001", "20260930", "20261026", None]]))
     got = cal.earnings("20260930", [
         {"t": "600519", "n": "贵州茅台"}, {"t": "000001", "n": "平安银行"},
-        {"t": "600036", "n": "招商银行"}], ref=TODAY)
+        {"t": "600036", "n": "招商银行"}], ref=TODAY, with_na=False)
     assert [(b["date"], len(b["rows"])) for b in got["by_date"]] == [
         ("2026-10-25", 2), ("2026-10-26", 1)]
 
@@ -279,8 +281,9 @@ def test_an_empty_watchlist_is_not_a_tushare_call(monkeypatch, no_db):
         raise AssertionError("should not have been called")
 
     monkeypatch.setattr(cal, "_disclosures", boom)
-    got = cal.earnings("20260930", [{"t": "US:AAPL", "n": "Apple"}], ref=TODAY)
-    assert got["rows"] == [] and got["watched"] == 0
+    got = cal.earnings("20260930", [{"t": "US:AAPL", "n": "Apple"}],
+                       ref=TODAY, with_na=False)
+    assert got["cn_rows"] == [] and got["watched"]["cn"] == 0
 
 
 # ── the month the grid opens on ──────────────────────────────────────────────
@@ -296,7 +299,7 @@ def test_the_calendar_opens_on_the_month_that_holds_the_disclosures(monkeypatch,
         ["600036.SH", "20260801", "20260630", "20260826", None]]))
     got = cal.earnings("20260630", [
         {"t": "600519", "n": "贵州茅台"}, {"t": "000001", "n": "平安银行"},
-        {"t": "600036", "n": "招商银行"}], ref=date(2026, 10, 20))
+        {"t": "600036", "n": "招商银行"}], ref=date(2026, 10, 20), with_na=False)
     assert got["focus"] == "2026-08"
     assert got["months"] == [{"ym": "2026-08", "count": 2},
                              {"ym": "2026-07", "count": 1}]
@@ -305,7 +308,7 @@ def test_the_calendar_opens_on_the_month_that_holds_the_disclosures(monkeypatch,
 def test_a_period_with_no_dates_still_names_a_month_to_open_on(monkeypatch, no_db):
     monkeypatch.setattr(cal, "_disclosures", lambda p: _frame([]))
     got = cal.earnings("20260930", [{"t": "600519", "n": "贵州茅台"}],
-                       ref=date(2026, 10, 20))
+                       ref=date(2026, 10, 20), with_na=False)
     assert got["months"] == []
     assert got["focus"] == "2026-10"      # falls back to the reference month
 
@@ -382,3 +385,156 @@ def test_events_come_back_flat_for_the_client_to_group(monkeypatch):
     assert isinstance(got["events"], list)
     assert got["total"] == len(got["events"]) == 5
     assert "days" not in got
+
+
+# ── US and Canadian earnings ─────────────────────────────────────────────────
+def _yf(frames):
+    """Stand in for yfinance; `frames` maps a bare code to a DataFrame."""
+    import types
+
+    class Ticker:
+        def __init__(self, code):
+            self.code = code
+
+        def get_earnings_dates(self, limit=16):
+            return frames.get(self.code)
+
+    mod = types.ModuleType("yfinance")
+    mod.Ticker = Ticker
+    return mod
+
+
+def _edf(rows):
+    """
+    [(iso stamp, est, reported, surprise)] → what yfinance returns.
+
+    Parsed through UTC then converted, because a DatetimeIndex cannot hold
+    mixed offsets — and a range spanning a DST change has them. yfinance
+    returns one market timezone for the same reason.
+    """
+    idx = pd.DatetimeIndex(
+        [pd.Timestamp(r[0]) for r in rows], name="Earnings Date", tz="UTC"
+    ).tz_convert("America/New_York")
+    return pd.DataFrame(
+        {"EPS Estimate": [r[1] for r in rows],
+         "Reported EPS": [r[2] for r in rows],
+         "Surprise(%)": [r[3] for r in rows]}, index=idx)
+
+
+@pytest.mark.parametrize("stamp, want", [
+    ("2026-10-29 08:00:00-04:00", "盘前"),
+    ("2026-10-29 07:00:00-05:00", "盘前"),
+    ("2026-10-29 09:29:00-04:00", "盘前"),
+    ("2026-10-29 16:00:00-04:00", "盘后"),
+    ("2026-10-29 15:00:00-05:00", "盘中"),
+    ("2026-10-29 12:00:00-04:00", "盘中"),
+])
+def test_the_hour_says_before_or_after_the_bell(stamp, want):
+    """
+    The part a date alone loses. 08:00 means the print lands before the open
+    and the gap is tomorrow's; 16:00 means it lands after the close.
+    """
+    assert cal._when(pd.Timestamp(stamp)) == want
+
+
+def test_na_earnings_reads_yahoo_for_north_american_names(monkeypatch):
+    monkeypatch.setitem(sys.modules, "yfinance", _yf({
+        "AAPL": _edf([("2026-10-29 16:00:00-04:00", 1.98, None, None),
+                      ("2026-07-30 16:00:00-04:00", 1.89, 2.02, 6.74)]),
+    }))
+    got = cal.na_earnings([{"t": "US:AAPL", "n": "Apple"}],
+                          ref=date(2026, 10, 1))
+    assert got["watched"] == 1
+    assert [r["date"] for r in got["rows"]] == ["2026-07-30", "2026-10-29"]
+    assert [r["status"] for r in got["rows"]] == ["reported", "scheduled"]
+    assert got["rows"][0]["when"] == "盘后"
+    assert got["rows"][0]["surprise_pct"] == pytest.approx(6.74)
+
+
+def test_a_share_names_are_not_sent_to_yahoo(monkeypatch):
+    """Tushare's filing calendar covers them; Yahoo has nothing to add."""
+    monkeypatch.setitem(sys.modules, "yfinance", _yf({}))
+    got = cal.na_earnings([{"t": "600519", "n": "贵州茅台"}],
+                          ref=date(2026, 10, 1))
+    assert got["watched"] == 0 and got["rows"] == []
+
+
+def test_an_etf_with_no_earnings_is_named_not_an_error(monkeypatch):
+    """
+    Two of 23 real watchlist names were ETFs. They do not report earnings, so
+    an empty answer is correct and belongs in `missing`, not in a log.
+    """
+    monkeypatch.setitem(sys.modules, "yfinance", _yf({"KLIP": None}))
+    got = cal.na_earnings([{"t": "US:KLIP", "n": "KraneShares"}],
+                          ref=date(2026, 10, 1))
+    assert got["rows"] == [] and got["missing"] == ["KraneShares"]
+
+
+def test_a_broken_yahoo_call_loses_one_name_not_the_calendar(monkeypatch):
+    import types
+
+    class Dead:
+        def __init__(self, code):
+            pass
+
+        def get_earnings_dates(self, limit=16):
+            raise RuntimeError("429")
+
+    mod = types.ModuleType("yfinance")
+    mod.Ticker = Dead
+    monkeypatch.setitem(sys.modules, "yfinance", mod)
+    got = cal.na_earnings([{"t": "US:AAPL", "n": "Apple"}],
+                          ref=date(2026, 10, 1))
+    assert got["rows"] == [] and got["missing"] == ["Apple"]
+
+
+def test_dates_far_outside_the_window_are_dropped(monkeypatch):
+    monkeypatch.setitem(sys.modules, "yfinance", _yf({
+        "AAPL": _edf([("2019-01-29 16:00:00-05:00", 1.0, 1.1, 10.0),
+                      ("2026-10-29 16:00:00-04:00", 1.98, None, None)]),
+    }))
+    got = cal.na_earnings([{"t": "US:AAPL", "n": "Apple"}],
+                          ref=date(2026, 10, 1))
+    assert [r["date"] for r in got["rows"]] == ["2026-10-29"]
+
+
+# ── one calendar, both markets ───────────────────────────────────────────────
+def test_both_markets_land_in_the_same_day_bucket(monkeypatch, no_db):
+    """
+    A real October had 金盘科技 and ASML on the same day. One calendar, or the
+    user reads two.
+    """
+    monkeypatch.setattr(cal, "_disclosures", lambda p: _frame([
+        ["600519.SH", "20261001", "20260930", "20261014", None]]))
+    monkeypatch.setitem(sys.modules, "yfinance", _yf({
+        "ASML": _edf([("2026-10-14 16:00:00-04:00", 6.6, None, None)]),
+    }))
+    got = cal.earnings("20260930", [
+        {"t": "600519", "n": "贵州茅台"}, {"t": "US:ASML", "n": "ASML"},
+    ], ref=date(2026, 10, 1))
+
+    day = next(b for b in got["by_date"] if b["date"] == "2026-10-14")
+    assert {r["market"] for r in day["rows"]} == {"CN", "NA"}
+    assert got["watched"] == {"cn": 1, "na": 1, "total": 2}
+
+
+def test_every_row_carries_a_market_so_the_chip_can_say_which(monkeypatch, no_db):
+    monkeypatch.setattr(cal, "_disclosures", lambda p: _frame([
+        ["600519.SH", "20261001", "20260930", "20261014", None]]))
+    monkeypatch.setitem(sys.modules, "yfinance", _yf({
+        "ASML": _edf([("2026-10-20 16:00:00-04:00", 6.6, None, None)])}))
+    got = cal.earnings("20260930", [
+        {"t": "600519", "n": "贵州茅台"}, {"t": "US:ASML", "n": "ASML"},
+    ], ref=date(2026, 10, 1))
+    assert all(r.get("market") in ("CN", "NA") for r in got["rows"])
+
+
+def test_a_watchlist_with_no_a_shares_still_gets_a_calendar(monkeypatch, no_db):
+    """The empty-watchlist path used to return nothing at all."""
+    monkeypatch.setitem(sys.modules, "yfinance", _yf({
+        "ASML": _edf([("2026-10-20 16:00:00-04:00", 6.6, None, None)])}))
+    got = cal.earnings("20260930", [{"t": "US:ASML", "n": "ASML"}],
+                       ref=date(2026, 10, 1))
+    assert len(got["na_rows"]) == 1
+    assert got["focus"] == "2026-10"
+    assert got["watched"]["total"] == 1

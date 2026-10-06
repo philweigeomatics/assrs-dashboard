@@ -13,11 +13,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
 import type { EarningsCalendar, EarningsRow, EcoEvent, EcoWeek }
   from "../lib/types";
 import { NavBar } from "../components/NavBar";
 import { usePersistentState } from "../lib/usePersistentState";
+import { signed } from "../lib/format";
 import { cellDate, monthGrid, parseMonth, safeMonth, shiftMonth }
   from "../lib/monthGrid";
 import { localClock, localDay, localMonday, offBeijing, viewerZone, zoneLabel }
@@ -328,15 +330,15 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
 }
 
 const STATUS: Record<EarningsRow["status"],
-                     { label: string; dot: string; chip: string; icon: string }> = {
+                     { label: string; dot: string; chip: string }> = {
   reported: { label: "已披露", dot: "var(--color-ink-mute)",
-              chip: "bg-sunken text-ink-dim", icon: "✅" },
+              chip: "bg-sunken text-ink-dim" },
   scheduled: { label: "待披露", dot: "var(--color-cyan)",
-               chip: "bg-cyan/10 text-ink", icon: "📋" },
+               chip: "bg-cyan/10 text-ink" },
   overdue: { label: "已过预约日", dot: "var(--color-up)",
-             chip: "bg-up/10 text-up font-medium", icon: "⚠️" },
+             chip: "bg-up/10 text-up font-medium" },
   unknown: { label: "无日期", dot: "var(--color-line-bright)",
-             chip: "bg-sunken text-ink-mute", icon: "—" },
+             chip: "bg-sunken text-ink-mute" },
 };
 
 const DOW = ["一", "二", "三", "四", "五", "六", "日"];
@@ -344,9 +346,10 @@ const DOW = ["一", "二", "三", "四", "五", "六", "日"];
 function EarningsView({ d }: { d: EarningsCalendar }) {
   const today = iso(new Date());
 
-  // Open on the month that actually holds the disclosures. For H1 2026 that
-  // is August, with 80 of 81 — landing on today's month would show an empty
-  // grid a page away from everything.
+  // Open on the month that actually holds the dates. A quarter's A-share
+  // disclosures cluster into a few weeks, so landing on today's month would
+  // often show an empty grid a page away from everything.
+  //
   // An API that does not send `focus` is not hypothetical: Pages deploys in
   // seconds and Cloud Run takes minutes, so the new page runs against the old
   // API every time. It used to take the route down.
@@ -359,10 +362,11 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
     () => new Map((d.by_date ?? []).map((b) => [b.date, b.rows])),
     [d.by_date]);
 
-  if (d.watched === 0) {
+  const watched = d.watched ?? { cn: 0, na: 0, total: 0 };
+  if (watched.total === 0) {
     return (
       <p className="label py-6 text-center">
-        自选股里还没有 A 股 —— 财报披露日期只对 A 股有。
+        自选股是空的 —— 财报日历看的是你自选的那些股票。
       </p>
     );
   }
@@ -371,6 +375,7 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
   const weeks = monthGrid(ym);
   const shift = (by: number) => setYm(shiftMonth(ym, by));
   const inMonth = (d.rows ?? []).filter((r) => r.date?.startsWith(ym)).length;
+  const chronological = [...months].sort((a, b) => a.ym.localeCompare(b.ym));
 
   return (
     <div className="flex flex-col gap-2.5">
@@ -385,12 +390,12 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
         <span className="label tnum">本月 {inMonth} 只</span>
         {months.length > 0 && ym !== focus && (
           <button onClick={() => setYm(focus)} className="text-[12px] text-cyan">
-            回到 {focus.replace("-", " 年 ")} 月（{months[0]?.count} 只）
+            回到 {focus.replace("-", " 年 ")} 月
           </button>
         )}
         <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-1">
           {(Object.keys(STATUS) as EarningsRow["status"][])
-            .filter((k) => d.counts[k])
+            .filter((k) => d.counts?.[k])
             .map((k) => (
               <span key={k} className="flex items-center gap-1.5 text-[12px]">
                 <span className="w-2.5 h-2.5 rounded-full"
@@ -399,10 +404,13 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
                 <span className="tnum font-medium">{d.counts[k]}</span>
               </span>
             ))}
+          <span className="label tnum">
+            A股 {watched.cn} · 美加 {watched.na}
+          </span>
         </div>
       </div>
 
-      {/* A seven-column month never collapses to one column and stay a
+      {/* A seven-column month cannot collapse to one column and still be a
           calendar, so on a narrow screen it scrolls sideways instead. */}
       <div className="overflow-x-auto">
         <div className="min-w-[680px]">
@@ -438,18 +446,7 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
                     )}
                   </div>
                   <div className="flex flex-col gap-0.5 max-h-[150px] overflow-y-auto">
-                    {rows.map((r) => (
-                      <span key={r.code}
-                        title={`${r.n} ${r.t}${
-                          r.moved ? ` · 预约 ${r.pre_date} → 实际 ${r.actual_date}` : ""}`}
-                        // shrink-0: without it a flex column squashes eleven
-                        // chips into the 150px cap and clips the glyphs
-                        // rather than letting the cell scroll.
-                        className={`px-1 py-0.5 rounded text-[11px] leading-[15px]
-                          truncate shrink-0 ${STATUS[r.status].chip}`}>
-                        {r.n}{r.moved && " ⚑"}
-                      </span>
-                    ))}
+                    {rows.map((r) => <Chip key={`${r.market}-${r.code}`} r={r} />)}
                   </div>
                 </div>
               );
@@ -458,13 +455,13 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
         </div>
       </div>
 
-      {months.length > 1 && (
+      {chronological.length > 1 && (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="label">这个报告期还有：</span>
-          {months.filter((mm) => mm.ym !== ym).map((mm) => (
+          <span className="label">其他有安排的月份：</span>
+          {chronological.filter((mm) => mm.ym !== ym).map((mm) => (
             <button key={mm.ym} onClick={() => setYm(mm.ym)}
               className="h-6 px-2 rounded-md bg-sunken text-[12px]">
-              {mm.ym.replace("-", " 年 ")} 月 · {mm.count} 只
+              {mm.ym.replace("-", " 年 ")} 月 · {mm.count}
             </button>
           ))}
         </div>
@@ -472,32 +469,45 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
 
       <details className="mt-1">
         <summary className="text-[12.5px] cursor-pointer text-ink-dim">
-          披露详情（{(d.rows ?? []).length} 只，按日期排序）
+          全部明细（{(d.rows ?? []).length} 条，按日期排序）
         </summary>
         <div className="overflow-x-auto mt-1.5">
           <table className="w-full text-[12px] border-collapse">
             <thead>
               <tr className="text-ink-mute">
                 <th className="text-left font-normal pb-1 pr-2">股票</th>
-                <th className="text-left font-normal pb-1 px-2">代码</th>
-                <th className="text-left font-normal pb-1 px-2">披露日</th>
-                <th className="text-left font-normal pb-1 px-2">预约日</th>
-                <th className="text-left font-normal pb-1 px-2">实际日</th>
+                <th className="text-left font-normal pb-1 px-2">市场</th>
+                <th className="text-left font-normal pb-1 px-2">日期</th>
+                <th className="text-left font-normal pb-1 px-2">时段 / 预约</th>
+                <th className="text-right font-normal pb-1 px-2">预估 EPS</th>
+                <th className="text-right font-normal pb-1 px-2">实际 EPS</th>
                 <th className="text-left font-normal pb-1 pl-2">状态</th>
               </tr>
             </thead>
             <tbody>
               {(d.rows ?? []).map((r) => (
-                <tr key={r.code} className="border-t border-line">
-                  <td className="py-1 pr-2 truncate max-w-[140px]">{r.n}</td>
-                  <td className="py-1 px-2 font-mono tnum text-ink-mute">{r.t}</td>
-                  <td className="py-1 px-2 font-mono tnum">{r.date ?? "—"}</td>
-                  <td className="py-1 px-2 font-mono tnum text-ink-mute">
-                    {r.pre_date ?? "—"}
+                <tr key={`${r.market}-${r.code}`} className="border-t border-line">
+                  <td className="py-1 pr-2">
+                    <StockLink r={r} />
                   </td>
-                  <td className={`py-1 px-2 font-mono tnum ${
-                    r.moved ? "text-brand-ink font-medium" : "text-ink-mute"}`}>
-                    {r.actual_date ?? "—"}
+                  <td className="py-1 px-2 text-ink-mute">
+                    {r.market === "CN" ? "A股" : "美加"}
+                  </td>
+                  <td className="py-1 px-2 font-mono tnum">{r.date ?? "—"}</td>
+                  <td className="py-1 px-2 text-ink-mute">
+                    {r.market === "NA" ? (r.when || "—")
+                      : (r.pre_date ?? "—")}
+                  </td>
+                  <td className="py-1 px-2 text-right tnum text-ink-mute">
+                    {r.eps_estimate ?? "—"}
+                  </td>
+                  <td className="py-1 px-2 text-right tnum">
+                    {r.eps_reported ?? "—"}
+                    {r.surprise_pct != null && (
+                      <span className={r.surprise_pct >= 0 ? "text-up" : "text-down"}>
+                        {" "}{signed(r.surprise_pct, 1, "%")}
+                      </span>
+                    )}
                   </td>
                   <td className="py-1 pl-2">
                     {STATUS[r.status].label}
@@ -510,17 +520,73 @@ function EarningsView({ d }: { d: EarningsCalendar }) {
         </div>
       </details>
 
-      {(d.missing ?? []).length > 0 && (
+      {((d.missing?.cn?.length ?? 0) + (d.missing?.na?.length ?? 0)) > 0 && (
         <p className="label leading-snug">
-          这个报告期还没有披露日期的自选股（{d.missing.length} 只）：
-          {d.missing.slice(0, 12).join("、")}
-          {d.missing.length > 12 && ` 等 ${d.missing.length} 只`}。
+          暂时没有日期的自选股：
+          {(d.missing?.cn?.length ?? 0) > 0
+            && ` A股 ${d.missing.cn.length} 只（${d.missing.cn.slice(0, 8).join("、")}${
+              d.missing.cn.length > 8 ? " 等" : ""}）`}
+          {(d.missing?.na?.length ?? 0) > 0
+            && ` 美加 ${d.missing.na.length} 只（${d.missing.na.slice(0, 8).join("、")}${
+              d.missing.na.length > 8 ? " 等" : ""}）`}
+          。ETF 本来就不发财报。
         </p>
       )}
       <p className="label leading-snug">
-        格子里的日期优先取实际披露日，没有就取交易所预约日。⚑ 表示公司实际披露的日子
-        和自己预约的不是同一天。
+        A股日期来自交易所预约/实际披露日；美加来自 Yahoo 的财报日程，带时段
+        （盘前 / 盘后），未来的日期多为<b>预估</b>，公司正式公告后可能变动。
+        点格子里的股票可直接打开它的个股分析。
       </p>
     </div>
+  );
+}
+
+/**
+ * One stock in a day cell.
+ *
+ * A link, not a label: the calendar is where you notice a name is reporting,
+ * and the next thing anyone wants is its chart. Carries its own timing too —
+ * 盘前/盘后 for a US name is the difference between tonight's gap and
+ * tomorrow's, and a date alone throws that away.
+ */
+function Chip({ r }: { r: EarningsRow }) {
+  const na = r.market === "NA";
+  const title = [
+    `${r.n} ${r.t}`,
+    r.date ?? "",
+    na ? (r.when || "") : "",
+    na && r.eps_estimate != null ? `预估 EPS ${r.eps_estimate}` : "",
+    na && r.eps_reported != null ? `实际 EPS ${r.eps_reported}` : "",
+    r.moved ? `预约 ${r.pre_date} → 实际 ${r.actual_date}` : "",
+    STATUS[r.status].label,
+    "点击查看个股分析",
+  ].filter(Boolean).join(" · ");
+
+  return (
+    <Link to={`/?t=${encodeURIComponent(r.t)}`} title={title}
+      className={`px-1 py-0.5 rounded text-[11px] leading-[15px] shrink-0
+        flex items-baseline gap-1 hover:ring-1 hover:ring-cyan/50
+        ${STATUS[r.status].chip}`}>
+      <span className="truncate">{r.n}</span>
+      {na && r.when && (
+        <span className="ml-auto shrink-0 text-[9.5px] text-ink-mute">
+          {r.when === "盘前" ? "前" : r.when === "盘后" ? "后" : "中"}
+        </span>
+      )}
+      {r.moved && <span className="shrink-0 text-brand-ink">⚑</span>}
+    </Link>
+  );
+}
+
+function StockLink({ r }: { r: EarningsRow }) {
+  return (
+    <Link to={`/?t=${encodeURIComponent(r.t)}`}
+      className="hover:text-cyan truncate inline-block max-w-[150px]"
+      title={`${r.n} ${r.t} · 点击查看个股分析`}>
+      {r.n}
+      <span className="ml-1 font-mono tnum text-[10.5px] text-ink-mute">
+        {r.t}
+      </span>
+    </Link>
   );
 }

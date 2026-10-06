@@ -276,7 +276,7 @@ def _status(actual: str | None, effective: str | None, today: date) -> str:
 
 
 def earnings(period_end: str, watchlist: list[dict],
-             ref: date | None = None) -> dict:
+             ref: date | None = None, with_na: bool = True) -> dict:
     """
     Disclosure dates for the watchlist, for one reporting period.
 
@@ -298,8 +298,26 @@ def earnings(period_end: str, watchlist: list[dict],
         names[code] = str(row.get("n") or symbol)
 
     if not wanted:
-        return {"period": period_end, "rows": [], "by_date": [],
-                "missing": [], "counts": {}, "watched": 0}
+        na = (na_earnings(watchlist, ref) if with_na
+              else {"rows": [], "watched": 0, "missing": []})
+        by_day: dict[str, list] = {}
+        for r in na["rows"]:
+            by_day.setdefault(r["date"], []).append(r)
+        counts: dict[str, int] = {}
+        for r in na["rows"]:
+            counts[r["status"]] = counts.get(r["status"], 0) + 1
+        months = _months(by_day)
+        return {
+            "period": period_end,
+            "rows": na["rows"], "cn_rows": [], "na_rows": na["rows"],
+            "by_date": [{"date": d, "rows": v}
+                        for d, v in sorted(by_day.items())],
+            "months": months,
+            "focus": months[0]["ym"] if months else ref.strftime("%Y-%m"),
+            "missing": {"cn": [], "na": na["missing"]},
+            "counts": counts,
+            "watched": {"cn": 0, "na": na["watched"], "total": na["watched"]},
+        }
 
     df = _disclosures(period_end)
     rows, seen = [], set()
@@ -313,6 +331,7 @@ def earnings(period_end: str, watchlist: list[dict],
             seen.add(code)
             rows.append({
                 "t": wanted[code], "code": code, "n": names[code],
+                "market": "CN",
                 "date": _pretty(effective) if effective else None,
                 "pre_date": _pretty(pre) if pre else None,
                 "actual_date": _pretty(actual) if actual else None,
@@ -334,19 +353,42 @@ def earnings(period_end: str, watchlist: list[dict],
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
 
-    months = _months(by_date)
+    na = (na_earnings(watchlist, ref) if with_na
+          else {"rows": [], "watched": 0, "missing": []})
+
+    # One calendar, both markets. A-share disclosure dates belong to the
+    # reporting period you picked; North American ones are simply whatever
+    # falls in the month you are looking at, because US and Canadian filers
+    # do not report against the A-share quarterly calendar.
+    merged = dict(by_date)
+    for r in na["rows"]:
+        merged.setdefault(r["date"], []).append(r)
+    for day in merged:
+        merged[day] = sorted(merged[day], key=lambda r: (r["market"], r["n"]))
+
+    for r in na["rows"]:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+
+    months = _months(merged)
     return {
         "period": period_end,
-        "rows": rows,
-        "by_date": [{"date": d, "rows": v} for d, v in sorted(by_date.items())],
+        "rows": sorted(rows + na["rows"],
+                       key=lambda r: (r["date"] or "9999", r["n"])),
+        "cn_rows": rows,
+        "na_rows": na["rows"],
+        "by_date": [{"date": d, "rows": v} for d, v in sorted(merged.items())],
         "months": months,
-        # The month the calendar should open on. Disclosure dates for one
-        # quarter cluster into a few weeks, so landing on today's month would
-        # usually show an empty grid a page away from everything.
+        # The month the calendar should open on. A-share disclosure dates for
+        # one quarter cluster into a few weeks, so landing on today's month
+        # would usually show an empty grid a page away from everything.
         "focus": months[0]["ym"] if months else ref.strftime("%Y-%m"),
-        "missing": [names[c] for c in wanted if c not in seen],
+        "missing": {
+            "cn": [names[c] for c in wanted if c not in seen],
+            "na": na["missing"],
+        },
         "counts": counts,
-        "watched": len(wanted),
+        "watched": {"cn": len(wanted), "na": na["watched"],
+                    "total": len(wanted) + na["watched"]},
     }
 
 
@@ -357,3 +399,123 @@ def _months(by_date: dict[str, list]) -> list[dict]:
         tally[day[:7]] = tally.get(day[:7], 0) + len(rows)
     return [{"ym": ym, "count": n}
             for ym, n in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+# ── US and Canadian earnings ─────────────────────────────────────────────────
+#: Yahoo, not Tushare: `disclosure_date` is an A-share filing calendar and has
+#: nothing for a North American name. Measured on a real watchlist, 23 names
+#: took 4.2s across 8 threads, and 21 of them had dates — the two without were
+#: ETFs, which do not report earnings at all.
+NA_WORKERS = 8
+NA_LIMIT = 16
+#: How far either side of today a North American date is worth keeping.
+NA_BACK_DAYS = 200
+NA_FWD_DAYS = 200
+
+
+def _when(stamp) -> str:
+    """
+    盘前 / 盘后 / 盘中, from the hour in the market's own time.
+
+    The hour is the useful part of a US earnings date and the part a date
+    alone throws away: 08:00 means the print lands before the open and the
+    gap is tomorrow's problem, 16:00 means it lands after the close.
+    """
+    try:
+        minute = stamp.hour * 60 + stamp.minute
+    except AttributeError:
+        return ""
+    if minute < 9 * 60 + 30:
+        return "盘前"
+    if minute >= 16 * 60:
+        return "盘后"
+    return "盘中"
+
+
+def _na_one(symbol: str, name: str) -> list[dict]:
+    """Every dated earnings event Yahoo holds for one name."""
+    import markets
+    import pandas as pd
+
+    try:
+        _, code = markets.split(symbol)
+    except Exception:                                              # noqa: BLE001
+        return []
+
+    try:
+        import yfinance as yf
+        frame = yf.Ticker(code).get_earnings_dates(limit=NA_LIMIT)
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"[calendar] {symbol}: {type(exc).__name__}: {exc}"[:160])
+        return []
+    if frame is None or frame.empty:
+        return []      # an ETF, or a name Yahoo has no estimates for
+
+    out = []
+    for stamp, row in frame.iterrows():
+        try:
+            day = stamp.date().isoformat()
+        except AttributeError:
+            continue
+        reported = row.get("Reported EPS")
+        est = row.get("EPS Estimate")
+        surprise = row.get("Surprise(%)")
+        out.append({
+            "t": symbol, "code": code, "n": name,
+            "market": "NA",
+            "date": day,
+            "when": _when(stamp),
+            "eps_estimate": None if pd.isna(est) else round(float(est), 4),
+            "eps_reported": None if pd.isna(reported) else round(float(reported), 4),
+            "surprise_pct": None if pd.isna(surprise) else round(float(surprise), 2),
+            # Yahoo does not say whether a future date is confirmed or
+            # estimated, so neither does this.
+            "estimated": True,
+        })
+    return out
+
+
+def na_earnings(watchlist: list[dict], ref: date | None = None) -> dict:
+    """
+    Earnings dates for the US and Canadian names on the watchlist.
+
+    Scoped to a window around today rather than to a reporting period: North
+    American companies do not file against the quarterly calendar A-shares
+    use, so there is no period to select.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    import markets
+
+    ref = ref or date.today()
+    wanted = []
+    for row in watchlist:
+        symbol = str(row.get("t") or "")
+        try:
+            if markets.split(symbol)[0] in ("US", "CA"):
+                wanted.append((symbol, str(row.get("n") or symbol)))
+        except Exception:                                          # noqa: BLE001
+            continue
+
+    if not wanted:
+        return {"rows": [], "watched": 0, "missing": []}
+
+    rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=min(NA_WORKERS, len(wanted))) as pool:
+        for got in pool.map(lambda w: _na_one(*w), wanted):
+            rows.extend(got)
+
+    lo = (ref - timedelta(days=NA_BACK_DAYS)).isoformat()
+    hi = (ref + timedelta(days=NA_FWD_DAYS)).isoformat()
+    rows = [r for r in rows if lo <= r["date"] <= hi]
+    for r in rows:
+        r["status"] = ("reported" if r["eps_reported"] is not None
+                       else _status(None, r["date"].replace("-", ""), ref))
+    rows.sort(key=lambda r: (r["date"], r["n"]))
+
+    seen = {r["t"] for r in rows}
+    return {
+        "rows": rows,
+        "watched": len(wanted),
+        "missing": [n for t, n in wanted if t not in seen],
+    }
+
