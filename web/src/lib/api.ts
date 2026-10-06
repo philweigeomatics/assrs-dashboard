@@ -10,6 +10,7 @@ import type {
   EcoWeek,
   MacroBoard,
   PortfolioBuild,
+  WatchBoard,
   QtSymbolActivity,
   QtTradedSymbols,
   QtTradeMarks,
@@ -121,6 +122,7 @@ export const api = {
       body: JSON.stringify({ sector, tickers }),
     }),
   sectorNames: () => call<string[]>("/sectors"),
+  watchlistBoard: () => call<WatchBoard>("/watchlist/board"),
   watchlist: (market?: "CN" | "NA") =>
     call<WatchRef[]>(`/watchlist${market ? `?market=${market}` : ""}`),
   supplyChain: (t: string) =>

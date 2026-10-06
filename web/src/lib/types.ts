@@ -1493,3 +1493,38 @@ export type QtTradeMarks = {
   years: number[];
   accounts: string[];
 };
+
+
+/** GET /watchlist/board — the watchlist with something to watch. */
+export type WatchRow = {
+  t: string; n: string; code: string;
+  market: string;
+  at?: string | null;
+  price: Num;
+  /** Percent moves. `chg_pct` is one session. */
+  chg_pct: Num;
+  chg_5d_pct: Num;
+  chg_20d_pct: Num;
+  /** Closes, oldest first. Adjusted, so a 转增 does not draw a cliff. */
+  spark: number[];
+  /** The bar the price came from — may be today and still running. */
+  last_bar: string | null;
+  /**
+   * Null for A-shares, whose bar is published after the close. For US and
+   * Canada it says whether the last bar is a finished session.
+   */
+  session: { complete: boolean; elapsed_pct: number; local_time: string } | null;
+  /** From the nightly scan. A-shares only — nothing scans the NA list yet. */
+  rsi: Num;
+  signals: { id: string; label: string; dir: string; group: string }[];
+  signal_count: number;
+  scan_date: string | null;
+};
+
+export type WatchBoard = {
+  rows: WatchRow[];
+  as_of: string;
+  counts: { total: number; priced: number; cn: number; na: number };
+  scan_date: string | null;
+  spark_points: number;
+};

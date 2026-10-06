@@ -810,6 +810,46 @@ def watchlist(market: str | None = Query(None, pattern="^(CN|NA)$"),
     return out
 
 
+#: A whole watchlist is a few batched calls — 81 A-shares and 23 North
+#: American names came to 7.3s cold — but it is still too slow to redo on
+#: every tab switch.
+_wl_board_cache = TTLCache(maxsize=8, ttl_s=10 * 60)
+
+
+@app.get("/watchlist/board")
+def watchlist_board(user: AppUser = Depends(current_user)):
+    """
+    The watchlist with something on it worth watching.
+
+    Price, today's move, 5- and 20-day moves, sixty sessions of shape, and
+    the signals the nightly scan already wrote and this page never read.
+
+    Both markets in one payload: the client already has CN / NA tabs and
+    filtering two lists it holds beats two round trips.
+    """
+    import data_manager
+    import watchlist_board as wb
+
+    with _as_user(user):
+        rows = [{"t": str(r.get("ticker") or ""),
+                 "n": str(r.get("stock_name") or ""),
+                 "at": r.get("added_date")}
+                for r in (data_manager.get_watchlist() or [])]
+
+        # Keyed on the actual set, not its size: swapping one name for
+        # another leaves the count unchanged and would serve the old board.
+        key = ("board", user.id, tuple(sorted(r["t"] for r in rows)))
+        cached = _wl_board_cache.peek(key)
+        if cached:
+            return cached
+        try:
+            out = wb.board(rows, user.id)
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc))
+        _wl_board_cache.put(key, out)
+        return out
+
+
 @app.post("/watchlist/{ticker}")
 def watchlist_add(ticker: str = TICKER, user: AppUser = Depends(current_user)):
     """
