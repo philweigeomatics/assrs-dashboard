@@ -1532,6 +1532,84 @@ def _market_panel(cache, key, build):
 _cal_earn_cache = TTLCache(maxsize=8, ttl_s=3600)
 
 
+class EcoExplainReq(BaseModel):
+    """
+    Which events to read together, by key rather than by content.
+
+    The client sends identifiers and the server re-reads the events from its
+    own day cache, so the text that reaches the model is always the text the
+    server fetched — a selection cannot smuggle anything into the prompt.
+    """
+    events: list[dict] = Field(..., min_length=1, max_length=40)
+
+
+#: One DeepSeek call is ~15s and costs money, and the same selection asked
+#: twice is the same answer.
+_eco_ai_cache = TTLCache(maxsize=40, ttl_s=6 * 3600)
+
+
+@app.post("/calendar/economic/explain")
+def calendar_eco_explain(req: EcoExplainReq,
+                         user: AppUser = Depends(current_user)):
+    """
+    One combined read of a hand-picked set of economic releases.
+
+    Batched on purpose. A single macro print means very little alone, and the
+    differences between them are the substance — so the whole selection goes
+    in one call, which is both the better answer and the cheaper one.
+    """
+    import calendar_data
+    import eco_advisor
+    from datetime import date as _date
+
+    wanted = []
+    for raw in req.events:
+        try:
+            key = (str(raw.get("date") or "")[:10], str(raw.get("time") or "")[:5],
+                   str(raw.get("country") or "")[:40],
+                   str(raw.get("event") or "")[:200])
+        except Exception:                                       # noqa: BLE001
+            continue
+        if key[0]:
+            wanted.append(key)
+    if not wanted:
+        raise HTTPException(422, "没有可识别的事件")
+
+    cache_key = ("eco-ai", tuple(sorted(wanted)))
+    hit = _eco_ai_cache.peek(cache_key)
+    if hit:
+        return {**hit, "cached": True}
+
+    # Re-read from the day cache rather than trusting what came in.
+    by_day: dict[str, list] = {}
+    for day, *_rest in wanted:
+        if day in by_day:
+            continue
+        try:
+            by_day[day] = calendar_data.eco_day(_date.fromisoformat(day))
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(422, f"读不到 {day} 的事件：{exc}"[:160])
+
+    index = {(e["date"], e["time"], e["country"], e["event"]): e
+             for rows in by_day.values() for e in rows}
+    picked = [index[k] for k in wanted if k in index]
+    if not picked:
+        raise HTTPException(422, "选中的事件已不在日历里，刷新后再试")
+
+    brief = eco_advisor.build_brief(picked)
+    if not brief.get("ok"):
+        raise HTTPException(422, brief.get("reason") or "无法解读")
+    try:
+        out = eco_advisor.explain(brief)
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(502, f"AI 调用失败：{exc}"[:200])
+
+    _eco_ai_cache.put(cache_key, out)
+    return {**out, "cached": False}
+
+
 @app.get("/calendar/economic")
 def calendar_economic(start: str | None = None,
                       user: AppUser = Depends(current_user)):

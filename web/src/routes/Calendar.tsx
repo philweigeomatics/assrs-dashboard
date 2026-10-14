@@ -12,7 +12,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
 import type { EarningsCalendar, EarningsRow, EcoEvent, EcoWeek }
@@ -24,6 +24,7 @@ import { cellDate, monthGrid, parseMonth, safeMonth, shiftMonth }
   from "../lib/monthGrid";
 import { localClock, localDay, localMonday, offBeijing, viewerZone, zoneLabel }
   from "../lib/localDay";
+import { EcoRead } from "../components/market/EcoRead";
 
 const VIEWS = [
   { id: "eco", label: "🌍 经济数据" },
@@ -34,6 +35,9 @@ type View = typeof VIEWS[number]["id"];
 
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const ALL = "__all__";
+//: Matches eco_advisor.MAX_EVENTS. Beyond this the read stops being
+//: a reading of anything in particular.
+const MAX_PICK = 40;
 
 // Both of these used to go through toISOString(), which converts to UTC
 // first — so local midnight anywhere east of Greenwich landed on the previous
@@ -178,10 +182,29 @@ function Body({ q, children }: {
  * grouping is done here from the instant, and the server pads the range a day
  * either side so the first and last columns are complete.
  */
+/** Key an event by what identifies it on the server, not by array position. */
+const keyOf = (e: EcoEvent) => `${e.date}|${e.time}|${e.country}|${e.event}`;
+
 function EcoWeekView({ d }: { d: EcoWeek }) {
   const [country, setCountry] = useState<string>(ALL);
   const [showBeijing, setShowBeijing] = usePersistentState<boolean>(
     "assrs.cal.bjtime", false);
+
+  // Ticked events, by key. Survives filtering and week changes, so you can
+  // gather a few from Monday and a few from Thursday before asking.
+  const [picked, setPicked] = useState<Record<string, EcoEvent>>({});
+  const chosen = Object.values(picked);
+  const toggle = (e: EcoEvent) => setPicked((p) => {
+    const k = keyOf(e);
+    if (p[k]) { const { [k]: _drop, ...rest } = p; return rest; }
+    return { ...p, [k]: e };
+  });
+
+  const read = useMutation({
+    mutationFn: () => api.ecoExplain(chosen.map((e) => ({
+      date: e.date, time: e.time, country: e.country, event: e.event,
+    }))),
+  });
   const today = iso(new Date());
   const zone = viewerZone();
   const offset = zoneLabel();
@@ -247,6 +270,21 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
           ))}
         </select>
         <span className="label tnum">{d.from} → {d.to} · {visible} 条</span>
+        {chosen.length > 0 && (
+          <>
+            <button onClick={() => read.mutate()}
+              disabled={read.isPending || chosen.length > MAX_PICK}
+              title={chosen.length > MAX_PICK
+                ? `一次最多 ${MAX_PICK} 条` : "一次合并解读，不是逐条"}
+              className="h-7 px-2.5 rounded-lg bg-violet text-white text-[12.5px]
+                font-semibold disabled:opacity-60">
+              {read.isPending ? "解读中…（约 15 秒）"
+                : `🤖 合并解读选中的 ${chosen.length} 条`}
+            </button>
+            <button onClick={() => { setPicked({}); read.reset(); }}
+              className="text-[12px] text-ink-mute hover:text-ink">清空</button>
+          </>
+        )}
         {!beijing && (
           <label className="label flex items-center gap-1.5 cursor-pointer"
             title="同时显示 Tushare 原始的北京时间，方便对账">
@@ -257,6 +295,13 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
           </label>
         )}
       </div>
+
+      {read.isError && (
+        <p className="text-[12.5px] text-up">{(read.error as ApiError).message}</p>
+      )}
+      {read.data && (
+        <EcoRead d={read.data} onClose={() => read.reset()} />
+      )}
 
       <div className="grid gap-2 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7
         items-start">
@@ -279,10 +324,18 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
                   const clock = e.at ? localClock(e.at) : e.time;
                   const moved = !!e.at && !beijing
                     && offBeijing(e.at, e.date, e.time);
+                  const on = !!picked[keyOf(e)];
                   return (
-                    <div key={i} className="flex flex-col gap-0.5 text-[11.5px]
-                      border-t border-line pt-1 first:border-0 first:pt-0">
+                    <label key={i}
+                      className={`flex flex-col gap-0.5 text-[11.5px] cursor-pointer
+                        border-t border-line pt-1 first:border-0 first:pt-0
+                        ${on ? "bg-violet/10 rounded-sm -mx-0.5 px-0.5" : ""}`}>
                       <div className="flex items-baseline gap-1.5">
+                        <input type="checkbox" checked={on}
+                          onChange={() => toggle(e)}
+                          aria-label={`选择 ${e.event}`}
+                          className="accent-[var(--color-violet)] shrink-0
+                            w-3 h-3 self-center" />
                         <span className="font-mono tnum text-ink-mute shrink-0">
                           {clock || "—"}
                         </span>
@@ -309,7 +362,7 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
                           )}
                         </div>
                       )}
-                    </div>
+                    </label>
                   );
                 })}
               </div>
@@ -324,6 +377,8 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
         本来就不属于它标的那一天。
         一次显示一周：eco_cal 每分钟只允许 20 次调用，而要拿全一天的数据就得
         单独请求那一天。已发生的日期会永久缓存，来回翻周是免费的。
+        <b> 勾选几条再点「合并解读」</b> —— 一次请求把它们放在一起读，
+        既省 token，也比逐条解释更有意义；选中的条目跨天跨周都会留着。
       </p>
     </div>
   );

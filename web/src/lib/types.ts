@@ -1528,3 +1528,24 @@ export type WatchBoard = {
   scan_date: string | null;
   spark_points: number;
 };
+
+
+/** POST /calendar/economic/explain — one read of a hand-picked set. */
+export type EcoRead = {
+  read: {
+    headline?: string;
+    /** False when the selection does not add up to a theme — and says why. */
+    coherent?: boolean;
+    coherence_note?: string;
+    overall?: string;
+    themes?: { theme: string; read: string; events?: string[] }[];
+    most_important?: { event: string; why: string }[];
+    watch_next?: string[];
+    what_would_change_it?: string;
+  };
+  count: number;
+  released: number;
+  upcoming: number;
+  span: [string, string];
+  cached?: boolean;
+};

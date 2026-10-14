@@ -7,6 +7,7 @@ import type {
   FundDetail,
   CommodityBoard,
   EarningsCalendar,
+  EcoRead,
   EcoWeek,
   MacroBoard,
   PortfolioBuild,
@@ -173,6 +174,12 @@ export const api = {
     call<NewSectorResult>("/admin/sectors", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, tickers }),
+    }),
+  ecoExplain: (events: { date: string; time: string; country: string;
+                         event: string }[]) =>
+    call<EcoRead>("/calendar/economic/explain", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ events }),
     }),
   ecoCalendar: (start: string) =>
     call<EcoWeek>(`/calendar/economic?start=${start}`),
