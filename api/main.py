@@ -1321,14 +1321,16 @@ def equity_brief(ticker: str = TICKER, user: AppUser = Depends(current_user)):
 
 @app.post("/equity/{ticker}/generate/{section}")
 def equity_generate(ticker: str = TICKER,
-                    section: str = Path(..., pattern="^(overview|porters|pestel|competitors|supply-chain)$"),
+                    section: str = Path(..., pattern="^(profile|overview|porters|pestel|competitors|supply-chain)$"),
                     force: bool = Query(False),
                     user: AppUser = Depends(current_user)):
     """
-    Generate one AI section. One DeepSeek call, 20-60s, cached afterwards.
+    Generate AI sections. One DeepSeek call, 20-60s, cached afterwards.
 
-    Per section rather than all at once: each is a separate cost, and asking
-    for Porter's should not also bill PESTEL.
+    `profile` is overview + Porter's + PESTEL in a single call — the three
+    are about the same company from the same input, so asking once is
+    cheaper and they agree with each other. A single section is still
+    available for redoing just that one.
     """
     from api import equity_api
 

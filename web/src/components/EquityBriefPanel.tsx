@@ -27,6 +27,7 @@ import { SupplyChainWindow } from "./SupplyChainWindow";
 const AI_LABEL: Record<string, string> = {
   overview: "公司概览", porters: "波特五力", pestel: "PESTEL", competitors: "同业名单",
 };
+const PROFILE = ["overview", "porters", "pestel"] as const;
 
 export function EquityBriefPanel({ ticker, market }: { ticker: string; market: string }) {
   const [open, setOpen] = useState(false);
@@ -78,11 +79,7 @@ function Report({ d }: { d: EquityBrief }) {
         </div>
       </div>
       <SupplyChain d={d} />
-      <div className="grid gap-3 xl:grid-cols-2 items-start">
-        <AiSection d={d} section="porters" />
-        <AiSection d={d} section="pestel" />
-      </div>
-      <AiSection d={d} section="overview" />
+      <Profile d={d} />
       <p className="label leading-snug">
         财务数据来自 Tushare，同比增长采用其 or_yoy / netprofit_yoy —— A股中报为
         年内累计口径，直接用报表两期相减会拿半年比一个季度。AI 部分为模型生成，
@@ -508,22 +505,65 @@ function SupplyChain({ d }: { d: EquityBrief }) {
 }
 
 
-function GenerateButton({ ticker, section, force = false, label }: {
-  ticker: string; section: string; force?: boolean; label?: string;
+function GenerateButton({ ticker, section, force = false, label, quiet = false }: {
+  ticker: string; section: string; force?: boolean; label?: string; quiet?: boolean;
 }) {
   const qc = useQueryClient();
   const run = useMutation({
     mutationFn: () => api.equityGenerate(ticker, section, force),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["equity", ticker] }),
   });
+  const failed = run.data?.failed ?? [];
   return (
     <span className="flex items-center gap-2">
       <button onClick={() => run.mutate()} disabled={run.isPending}
-        className="h-7 px-2.5 rounded-md bg-violet text-white text-[12px] font-semibold disabled:opacity-60">
+        className={quiet
+          ? "text-[12px] text-ink-mute hover:text-ink disabled:opacity-60"
+          : "h-7 px-2.5 rounded-md bg-violet text-white text-[12px] font-semibold disabled:opacity-60"}>
         {run.isPending ? "生成中…（20–60秒）" : label ?? `生成${AI_LABEL[section] ?? section}`}
       </button>
       {run.isError && <span className="text-[12px] text-up">{(run.error as Error).message}</span>}
+      {failed.length > 0 && (
+        <span className="text-[12px] text-up">
+          {failed.map((s) => AI_LABEL[s] ?? s).join("、")} 返回不完整，未保存，可单独重新生成
+        </span>
+      )}
     </span>
+  );
+}
+
+/**
+ * Overview, Porter's and PESTEL, generated together.
+ *
+ * They are three views of one company from the same two lines of input, so
+ * the first generation asks for all of them in one call — measured at 16-41%
+ * fewer output tokens than three calls, and one wait instead of three. Each
+ * section keeps its own 重新生成 for when only one of them reads badly; that
+ * redoes just that one.
+ */
+function Profile({ d }: { d: EquityBrief }) {
+  const missing = PROFILE.filter((s) => !d.ai[s]);
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[13px] font-semibold">🤖 AI 公司画像</span>
+        <span className="label">概览 · 波特五力 · PESTEL，一次 AI 调用生成</span>
+        <span className="ml-auto">
+          {missing.length > 0
+            ? <GenerateButton ticker={d.ticker} section="profile"
+                label={missing.length === PROFILE.length
+                  ? "生成全部三项"
+                  : `生成缺少的 ${missing.map((s) => AI_LABEL[s]).join("、")}`} />
+            : <GenerateButton ticker={d.ticker} section="profile" force quiet
+                label="三项一起重新生成" />}
+        </span>
+      </div>
+      <div className="grid gap-3 xl:grid-cols-2 items-start">
+        <AiSection d={d} section="porters" />
+        <AiSection d={d} section="pestel" />
+      </div>
+      <AiSection d={d} section="overview" />
+    </div>
   );
 }
 
@@ -539,11 +579,11 @@ function AiSection({ d, section }: { d: EquityBrief; section: "overview" | "port
         {d.generated_at[section] && (
           <span className="label">生成于 {String(d.generated_at[section]).slice(0, 10)}</span>
         )}
-        <span className="ml-auto">
-          {payload
-            ? <GenerateButton ticker={d.ticker} section={section} force label="重新生成" />
-            : <GenerateButton ticker={d.ticker} section={section} />}
-        </span>
+        {payload && (
+          <span className="ml-auto">
+            <GenerateButton ticker={d.ticker} section={section} force quiet label="单独重新生成" />
+          </span>
+        )}
       </div>
       {!payload && <p className="label">尚未生成。</p>}
       {payload && <Tree value={payload} />}

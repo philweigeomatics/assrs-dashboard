@@ -66,6 +66,7 @@ def _raw_call(
     temperature: float,
     timeout: int,
     reasoning_effort: str | None = None,
+    json_mode: bool = False,
 ) -> str:
     """
     Make one DeepSeek chat completion request and return the raw content string.
@@ -102,6 +103,10 @@ def _raw_call(
     }
     if reasoning_effort is not None:
         payload["thinking"] = {"type": "enabled", "reasoning_effort": reasoning_effort}
+    if json_mode:
+        # DeepSeek's JSON output mode: the reply is guaranteed to parse. Off
+        # by default only because existing callers were tuned without it.
+        payload["response_format"] = {"type": "json_object"}
 
     try:
         resp = requests.post(
@@ -213,6 +218,7 @@ def call_json(
     temperature: float = 0.2,
     timeout: int       = 60,
     reasoning_effort: str | None = None,
+    json_mode: bool    = False,
 ) -> dict:
     """
     Call DeepSeek and return the response parsed as a JSON dict.
@@ -228,6 +234,7 @@ def call_json(
         temperature=temperature,
         timeout=timeout,
         reasoning_effort=reasoning_effort,
+        json_mode=json_mode,
     )
 
     # Strip markdown fences if the model adds them despite instructions

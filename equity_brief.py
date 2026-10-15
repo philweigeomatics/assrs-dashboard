@@ -93,74 +93,90 @@ def _write_cache(ticker: str, section: str, payload: Any) -> bool:
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
-_OVERVIEW_PROMPT = """\
-You are an elite Chinese A-share equity analyst.
+# Overview, PESTEL and Porter's are written about the same company from the
+# same two lines of input, so they are asked for together: one call, one
+# reasoning pass over what the company is, three sections out. Each section's
+# brief lives in _PROFILE_TASKS and the prompt is assembled from whichever
+# ones are wanted — all three the first time, just one on a "Regen".
 
+_PROFILE_HEADER = """\
+You are an elite Chinese A-share equity analyst. Write the sections listed
+below about ONE company. They should agree with each other: the forces you
+score and the PESTEL factors you raise should be about the business the
+overview describes.
+
+OUTPUT RULES:
+- Return ONLY raw JSON (start { end }). No markdown.
+- The top-level keys are exactly the section names below, nothing else.
+"""
+
+_SINGLE_HEADER = """\
+You are an elite Chinese A-share equity analyst. Write the section below
+about ONE company.
+
+OUTPUT RULES:
+- Return ONLY raw JSON (start { end }). No markdown.
+"""
+
+_PROFILE_TASKS: dict[str, tuple[str, str]] = {
+    "overview": (
+        """\
 In 3-4 sentences, describe what this company actually does — the products
 or services it sells, who its customers are, and what its main revenue
-drivers are. Be concrete and factual, not promotional.
-
-Avoid filler phrases like "is a leading provider", "is committed to", or
-"offers innovative solutions". Name actual products / customer types /
-end markets.
-
-OUTPUT RULES:
-- Return ONLY raw JSON (start { end }). No markdown.
-- "summary" is one paragraph (3-4 sentences) in English.
-- "tagline" is one short phrase (under 10 words) describing the company's
-  positioning in plain English.
-
-Schema:
-{
-  "tagline": "...",
-  "summary": "..."
+drivers are. Be concrete and factual, not promotional. Avoid filler phrases
+like "is a leading provider", "is committed to", or "offers innovative
+solutions". Name actual products / customer types / end markets.
+"summary" is one paragraph (3-4 sentences) in English. "tagline" is one
+short phrase (under 10 words) describing the company's positioning in
+plain English.""",
+        """{"tagline": "...", "summary": "..."}""",
+    ),
+    "pestel": (
+        """\
+A concise PESTEL analysis focused on factors that materially affect this
+specific company's earnings or valuation in the next 12-24 months. Avoid
+generic statements that could apply to any company. Each of the 6
+dimensions has 2-3 bullet strings; each bullet is one sentence, specific to
+this company's industry & market.""",
+        """{"political": ["...", "..."], "economic": ["...", "..."],
+   "social": ["...", "..."], "technological": ["...", "..."],
+   "environmental": ["...", "..."], "legal": ["...", "..."]}""",
+    ),
+    "porters": (
+        """\
+Porter's Five Forces. Score each force 1-5 where 1 = very weak/favourable
+to the company, 5 = very strong/threatening. Each summary is one sentence
+specific to this company's competitive position.""",
+        """{"rivalry": {"score": 1-5, "summary": "..."},
+   "suppliers": {"score": 1-5, "summary": "..."},
+   "buyers": {"score": 1-5, "summary": "..."},
+   "substitutes": {"score": 1-5, "summary": "..."},
+   "new_entrants": {"score": 1-5, "summary": "..."}}""",
+    ),
 }
-"""
 
-
-_PESTEL_PROMPT = """\
-You are an elite Chinese A-share equity analyst.
-
-Given a company, generate a concise PESTEL analysis focused on factors that
-materially affect this specific company's earnings or valuation in the next
-12-24 months. Avoid generic statements that could apply to any company.
-
-OUTPUT RULES:
-- Return ONLY raw JSON (start { end }). No markdown.
-- Each of the 6 dimensions has 2-3 bullet strings.
-- Each bullet is one sentence, specific to this company's industry & market.
-
-Schema:
-{
-  "political":     ["...", "..."],
-  "economic":      ["...", "..."],
-  "social":        ["...", "..."],
-  "technological": ["...", "..."],
-  "environmental": ["...", "..."],
-  "legal":         ["...", "..."]
+#: The keys each section must come back with, or it is not written.
+_PROFILE_KEYS: dict[str, tuple[str, ...]] = {
+    "overview": ("summary",),
+    "pestel": ("political", "economic", "social",
+               "technological", "environmental", "legal"),
+    "porters": ("rivalry", "suppliers", "buyers", "substitutes", "new_entrants"),
 }
-"""
+
+PROFILE_SECTIONS = tuple(_PROFILE_TASKS)
 
 
-_PORTERS_PROMPT = """\
-You are an elite Chinese A-share equity analyst.
-
-Generate Porter's Five Forces for this company. Score each force 1-5 where
-1 = very weak/favourable to the company, 5 = very strong/threatening.
-Summary is one sentence specific to this company's competitive position.
-
-OUTPUT RULES:
-- Return ONLY raw JSON (start { end }). No markdown.
-
-Schema:
-{
-  "rivalry":      {"score": 1-5, "summary": "..."},
-  "suppliers":    {"score": 1-5, "summary": "..."},
-  "buyers":       {"score": 1-5, "summary": "..."},
-  "substitutes":  {"score": 1-5, "summary": "..."},
-  "new_entrants": {"score": 1-5, "summary": "..."}
-}
-"""
+def _profile_prompt(sections) -> str:
+    if len(sections) == 1:
+        # One section is asked for in its own shape, not wrapped in
+        # {"pestel": {...}}: the extra level of nesting is where the model
+        # dropped a closing bracket on a live PESTEL-only regeneration.
+        s = sections[0]
+        return (f"{_SINGLE_HEADER}\n{_PROFILE_TASKS[s][0]}\n\n"
+                f"Schema:\n{_PROFILE_TASKS[s][1]}\n")
+    tasks = "\n\n".join(f"## {s}\n{_PROFILE_TASKS[s][0]}" for s in sections)
+    schema = ",\n  ".join(f'"{s}": {_PROFILE_TASKS[s][1]}' for s in sections)
+    return f"{_PROFILE_HEADER}\n{tasks}\n\nSchema:\n{{\n  {schema}\n}}\n"
 
 
 _SWOT_PROMPT = """\
@@ -230,39 +246,85 @@ Schema:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def get_company_overview(ticker, name, industry, force_refresh=False):
-    """Returns {payload, generated_at}; payload = {tagline, summary}."""
+def generate_profile(ticker: str, name: str, industry: str,
+                     sections=PROFILE_SECTIONS) -> dict:
+    """
+    One AI call for any subset of overview / PESTEL / Porter's.
+
+    Each section that comes back with its expected keys is cached under its
+    own row, so everything that reads the cache per section keeps working.
+    A section the model dropped or mangled is left unwritten and named in
+    `failed` — the others are still good and are kept.
+
+    Returns {"written": {section: {payload, generated_at}}, "failed": [...]}.
+    """
+    sections = [s for s in PROFILE_SECTIONS if s in sections]
+    if not sections:
+        raise ValueError("no profile section requested")
+    user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
+    # Separately these had 8,000 / 10,000 / 8,000, reasoning included.
+    # JSON mode because one bare quote inside a Chinese sentence — seen live
+    # on 中兴通讯's PESTEL — would otherwise sink all three sections at once.
+    for attempt in (1, 2):
+        try:
+            raw = ai_client.call_json(_profile_prompt(sections), user_msg,
+                                      max_tokens=6000 + 4000 * len(sections),
+                                      timeout=60 + 30 * len(sections),
+                                      json_mode=True)
+            break
+        except RuntimeError as exc:
+            # A dropped bracket is a slip, not a verdict: asking again almost
+            # always parses. Timeouts and API errors are not retried.
+            if attempt == 2 or "invalid JSON" not in str(exc):
+                raise
+    if len(sections) == 1 and isinstance(raw, dict) and sections[0] not in raw:
+        raw = {sections[0]: raw}
+    now = datetime.utcnow().isoformat()
+    written, failed = {}, []
+    for s in sections:
+        part = raw.get(s) if isinstance(raw, dict) else None
+        if isinstance(part, dict) and all(k in part for k in _PROFILE_KEYS[s]):
+            _write_cache(ticker, s, part)
+            written[s] = {"payload": part, "generated_at": now}
+        else:
+            failed.append(s)
+    return {"written": written, "failed": failed}
+
+
+def _profile_section(ticker: str, name: str, industry: str, section: str,
+                     force_refresh: bool) -> dict:
+    """
+    One section, generated alongside whichever of its siblings are missing.
+
+    A first visit fills all three with one call, so the two reads after it
+    are cache hits. A forced Regen redoes only the section asked for.
+    """
     if not force_refresh:
-        cached = _read_cache(ticker, "overview")
+        cached = _read_cache(ticker, section)
         if cached:
             return cached
-    user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
-    payload  = ai_client.call_json(_OVERVIEW_PROMPT, user_msg, max_tokens=8000)
-    _write_cache(ticker, "overview", payload)
-    return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
+        todo = [s for s in PROFILE_SECTIONS
+                if s == section or _read_cache(ticker, s) is None]
+    else:
+        todo = [section]
+    out = generate_profile(ticker, name, industry, todo)
+    if section not in out["written"]:
+        raise RuntimeError(f"AI 返回的 {section} 不完整，没有保存")
+    return out["written"][section]
+
+
+def get_company_overview(ticker, name, industry, force_refresh=False):
+    """Returns {payload, generated_at}; payload = {tagline, summary}."""
+    return _profile_section(ticker, name, industry, "overview", force_refresh)
 
 
 def get_pestel(ticker: str, name: str, industry: str, force_refresh: bool = False) -> dict:
     """Returns {payload, generated_at}; payload is the parsed PESTEL dict."""
-    if not force_refresh:
-        cached = _read_cache(ticker, "pestel")
-        if cached:
-            return cached
-    user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
-    payload  = ai_client.call_json(_PESTEL_PROMPT, user_msg, max_tokens=10000)
-    _write_cache(ticker, "pestel", payload)
-    return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
+    return _profile_section(ticker, name, industry, "pestel", force_refresh)
 
 
 def get_porters(ticker: str, name: str, industry: str, force_refresh: bool = False) -> dict:
-    if not force_refresh:
-        cached = _read_cache(ticker, "porters")
-        if cached:
-            return cached
-    user_msg = f"Company: {name} ({ticker})\nIndustry: {industry}"
-    payload  = ai_client.call_json(_PORTERS_PROMPT, user_msg, max_tokens=8000)
-    _write_cache(ticker, "porters", payload)
-    return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
+    return _profile_section(ticker, name, industry, "porters", force_refresh)
 
 
 def get_swot(ticker: str, name: str, industry: str,

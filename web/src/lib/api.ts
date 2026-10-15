@@ -111,7 +111,7 @@ export const api = {
     call<{ deleted: number }>(`/alerts/notes/${id}`, { method: "DELETE" }),
   equity: (t: string) => call<EquityBrief>(`/equity/${t}`),
   equityGenerate: (t: string, section: string, force = false) =>
-    call<{ section: string }>(`/equity/${t}/generate/${section}?force=${force}`, { method: "POST" }),
+    call<{ section: string; written?: string[]; failed?: string[] }>(`/equity/${t}/generate/${section}?force=${force}`, { method: "POST" }),
   /** Codes only — the server looks the names up and refuses unknown codes. */
   equitySavePeers: (t: string, competitors: { ticker: string }[]) =>
     call<{ saved: number; peers: { ticker: string; name: string; why: string }[] }>(

@@ -9,9 +9,10 @@ forecast and express filings, and whatever supply-chain graph has been saved.
 That is what a GET returns, and it returns it whether or not anyone has ever
 generated the rest.
 
-The SLOW half is four DeepSeek calls — overview, Porter's five forces, PESTEL
-and the peer set. Those are cached per ticker per section in
-equity_brief_cache, so they cost a minute once and nothing thereafter. A GET
+The SLOW half is two DeepSeek calls: one for the company profile (overview,
+Porter's five forces and PESTEL together) and one for the peer set. Each
+section is cached per ticker in equity_brief_cache, so they cost a minute
+once and nothing thereafter. A GET
 never triggers them; it reports which are missing and the client asks for them
 explicitly. A section you did not ask for is never silently billed.
 
@@ -394,6 +395,19 @@ def generate(ticker: str, name: str, industry: str, section: str,
     import equity_brief as eb
 
     eb.ensure_equity_brief_cache_table()
+    if section == "profile":
+        # Overview, Porter's and PESTEL in one call. Measured on two stocks:
+        # 16-41% fewer output tokens than three calls, and one wait instead
+        # of three. Without `force` only the missing ones are asked for.
+        todo = list(eb.PROFILE_SECTIONS) if force else [
+            s for s, v in cached_ai(ticker).items()
+            if s in eb.PROFILE_SECTIONS and not v]
+        if not todo:
+            return {"written": [], "failed": []}
+        out = eb.generate_profile(ticker, name, industry, todo)
+        if not out["written"]:
+            raise RuntimeError("AI 返回的内容不完整，没有保存")
+        return {"written": list(out["written"]), "failed": out["failed"]}
     if section == "overview":
         return eb.get_company_overview(ticker, name, industry, force)
     if section == "porters":
