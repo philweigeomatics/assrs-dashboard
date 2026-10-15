@@ -112,8 +112,10 @@ export const api = {
   equity: (t: string) => call<EquityBrief>(`/equity/${t}`),
   equityGenerate: (t: string, section: string, force = false) =>
     call<{ section: string }>(`/equity/${t}/generate/${section}?force=${force}`, { method: "POST" }),
-  equitySavePeers: (t: string, competitors: { ticker: string; name: string; why: string }[]) =>
-    call<{ saved: number }>(`/equity/${t}/peers`, {
+  /** Codes only — the server looks the names up and refuses unknown codes. */
+  equitySavePeers: (t: string, competitors: { ticker: string }[]) =>
+    call<{ saved: number; peers: { ticker: string; name: string; why: string }[] }>(
+      `/equity/${t}/peers`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ competitors }),
     }),

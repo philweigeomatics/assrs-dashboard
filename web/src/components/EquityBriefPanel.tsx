@@ -15,10 +15,11 @@
  * "fastest growing" read at a glance instead of by scanning numbers.
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { useSymbolSearch } from "../lib/useSymbolSearch";
 import type { EquityBrief, Num, PeerRow, SegmentItem } from "../lib/types";
 import { fixed, money, signed } from "../lib/format";
 import { SupplyChainWindow } from "./SupplyChainWindow";
@@ -156,6 +157,15 @@ function Peers({ d }: { d: EquityBrief }) {
                   <Link to={`/?t=${r.ticker}`} className="hover:text-cyan">
                     {r.name} <span className="font-mono tnum text-[11px] text-ink-mute">{r.ticker}</span>
                   </Link>
+                  {r.name_mismatch && (
+                    // The row's numbers belong to the code, so the official
+                    // name is what is shown; this says what had been written.
+                    <span className="ml-1.5 text-[11px] text-brand-ink cursor-help"
+                      title={`名单里写的是「${r.claimed_name}」，但 ${r.ticker} 实际是「${r.name}」`
+                        + "。可能是改名或戴帽，也可能是代码填错了 —— 后者的话这一行的数据并不是你以为的那家公司。"}>
+                      ⚠ 原记为 {r.claimed_name}
+                    </span>
+                  )}
                 </td>
                 {COLS.map((c) => {
                   const v = r[c.k] as Num;
@@ -182,19 +192,41 @@ function Peers({ d }: { d: EquityBrief }) {
   );
 }
 
+/**
+ * Pick peers from the real stock list; never type them.
+ *
+ * The free-text box stored whatever was written — a code, then a name — and
+ * trusted both. On a real audit 30 of 382 saved peers had the wrong name,
+ * and some were a different company outright: 300369 labelled 卓翼科技 while
+ * the row showed 绿盟科技's PE and margins. Lines that did not parse were
+ * dropped without a word.
+ *
+ * Search-to-add makes a wrong code impossible to enter, and the name comes
+ * from the list rather than the keyboard. This is also what the Streamlit
+ * page did: you curated by removing and adding, never by typing.
+ */
 function PeerEditor({ d, onDone }: { d: EquityBrief; onDone: () => void }) {
   const qc = useQueryClient();
-  const current = (d.ai.competitors?.competitors ?? []).map((c) => `${c.ticker} ${c.name}`).join("\n");
-  const [text, setText] = useState(current);
+  const start = useMemo(
+    () => (d.peers?.rows ?? []).filter((r) => !r.is_target)
+      .map((r) => ({ t: r.ticker, n: r.name, flagged: !!(r.name_mismatch || r.unknown_code) })),
+    [d.peers]);
+  const [picked, setPicked] = useState(start);
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState(false);
+
+  const stocks = useQuery({ queryKey: ["stocks"], queryFn: api.stocks,
+    staleTime: 6 * 3600_000 });
+  const { items } = useSymbolSearch({
+    query: q, stocks: stocks.data ?? [], markets: ["CN"], limit: 8 });
+  const have = new Set([d.ticker, ...picked.map((p) => p.t)]);
+  const hits = items.filter((s) => !have.has(s.t));
+
+  const changed = picked.length !== start.length
+    || picked.some((p, i) => p.t !== start[i]?.t);
 
   const save = useMutation({
-    mutationFn: () => {
-      const rows = text.split("\n").map((line) => {
-        const m = line.trim().match(/^(\d{6})\s*(.*)$/);
-        return m ? { ticker: m[1]!, name: (m[2] || "").trim(), why: "" } : null;
-      }).filter((x): x is { ticker: string; name: string; why: string } => x !== null);
-      return api.equitySavePeers(d.ticker, rows);
-    },
+    mutationFn: () => api.equitySavePeers(d.ticker, picked.map((p) => ({ ticker: p.t }))),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["equity", d.ticker] });
       onDone();
@@ -204,18 +236,66 @@ function PeerEditor({ d, onDone }: { d: EquityBrief; onDone: () => void }) {
   return (
     <div className="rounded-lg bg-sunken p-2.5 flex flex-col gap-2">
       <span className="label">
-        每行一只：六位代码 + 名称。保存会覆盖该股的同业名单（管理员操作，对所有用户生效）。
+        从股票列表里搜索添加，点 ✕ 移除。名称由系统按代码查出，不能手填。
+        保存会覆盖该股的同业名单（管理员操作，对所有用户生效）。
       </span>
-      <textarea value={text} onChange={(e) => setText(e.target.value)} rows={6}
-        className="bg-panel rounded-md p-2 text-[12.5px] font-mono tnum outline-none focus:ring-2 focus:ring-cyan/40" />
-      <div className="flex items-center gap-2">
-        <button onClick={() => save.mutate()} disabled={save.isPending}
-          className="h-7 px-3 rounded-md bg-cyan text-white text-[12.5px] font-semibold disabled:opacity-60">
-          {save.isPending ? "保存中…" : "保存名单"}
+
+      <div className="flex flex-wrap gap-1.5">
+        {picked.map((p) => (
+          <span key={p.t}
+            title={p.flagged ? "原名单里这一条的名称与代码不符，已按代码显示真实名称" : undefined}
+            className={`h-7 pl-2 pr-1 rounded-md flex items-center gap-1.5 text-[12.5px] ${
+              p.flagged ? "bg-brand-ink/15 ring-1 ring-brand-ink/40" : "bg-panel"}`}>
+            {p.flagged && <span className="text-brand-ink">⚠</span>}
+            <span className="truncate max-w-[120px]">{p.n}</span>
+            <span className="font-mono tnum text-[11px] text-ink-mute">{p.t}</span>
+            <button onClick={() => setPicked((x) => x.filter((y) => y.t !== p.t))}
+              aria-label={`移除 ${p.n}`}
+              className="text-ink-mute hover:text-up px-1">✕</button>
+          </span>
+        ))}
+        {picked.length === 0 && <span className="label">名单是空的</span>}
+      </div>
+
+      <div className="relative">
+        <input value={q}
+          onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+          onFocus={() => setOpen(true)}
+          onBlur={() => globalThis.setTimeout(() => setOpen(false), 150)}
+          placeholder="搜索代码或名称添加，例如 300308 或 中际旭创"
+          className="h-8 w-72 max-w-full px-2 rounded-md bg-panel text-[12.5px] outline-none
+            focus:ring-2 focus:ring-cyan/40" />
+        {open && hits.length > 0 && (
+          <div className="card absolute left-0 mt-1 z-30 w-72 py-1">
+            {hits.map((s) => (
+              <button key={s.t} onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setPicked((x) => [...x, { t: s.t, n: s.n, flagged: false }]);
+                  setQ(""); setOpen(false);
+                }}
+                className="w-full flex items-baseline gap-2 px-2 py-1 text-left hover:bg-elevated">
+                <span className="font-mono tnum text-[12px] text-ink-dim shrink-0">{s.t}</span>
+                <span className="text-[12.5px] truncate">{s.n}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button onClick={() => save.mutate()} disabled={save.isPending || !changed}
+          title={changed ? undefined : "还没有改动"}
+          className="h-7 px-3 rounded-md bg-cyan text-white text-[12.5px] font-semibold
+            disabled:opacity-50">
+          {save.isPending ? "保存中…" : `保存名单（${picked.length} 只）`}
         </button>
+        <button onClick={() => setPicked(start)} disabled={!changed}
+          className="text-[12px] text-ink-mute disabled:opacity-50">还原</button>
         <button onClick={onDone} className="text-[12px] text-ink-mute">取消</button>
         <GenerateButton ticker={d.ticker} section="competitors" force label="用AI重新生成" />
-        {save.isError && <span className="text-[12px] text-up">{(save.error as Error).message}</span>}
+        {save.isError && (
+          <span className="text-[12px] text-up">{(save.error as Error).message}</span>
+        )}
       </div>
     </div>
   );

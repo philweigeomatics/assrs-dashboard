@@ -767,7 +767,16 @@ export type SegmentItem = {
 };
 
 export type PeerRow = {
+  /**
+   * `name` is always the official stock_basic name for the code. The name
+   * that was stored with the peer is kept in `claimed_name`, and a difference
+   * is flagged rather than silently corrected — a rename is harmless, a code
+   * that belongs to another company is how an AI-made list goes wrong.
+   */
   ticker: string; name: string; is_target: boolean; why: string;
+  claimed_name?: string | null;
+  name_mismatch?: boolean;
+  unknown_code?: boolean;
   pe_ttm: Num; pb: Num; mv_yi: Num; roe: Num;
   gross_margin: Num; net_margin: Num;
   revenue_yoy: Num; profit_yoy: Num; debt_to_assets: Num;

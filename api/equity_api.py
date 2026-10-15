@@ -224,16 +224,30 @@ def peer_table(ticker: str, name: str, peers: list[dict]) -> dict:
     growing" are readable at a glance rather than by scanning numbers — which
     is the whole reason to put them in one table.
     """
-    import data_manager
+    official = official_names()
 
-    rows = [{**_peer_metrics(ticker), "name": name, "is_target": True, "why": ""}]
+    rows = [{**_peer_metrics(ticker), "name": name, "is_target": True, "why": "",
+             "claimed_name": None, "name_mismatch": False}]
     for p in peers:
         t = str(p.get("ticker"))
+        claimed = (p.get("name") or "").strip() or None
+        real = official.get(t)
         rows.append({
             **_peer_metrics(t),
-            "name": p.get("name") or data_manager.get_stock_name_from_db(t) or t,
+            # The code is the identity; the name is looked up, never trusted.
+            # The stored name used to win, and on a real audit 30 of 382 were
+            # wrong — some stale (闻泰科技 that is now *ST闻泰, hiding a risk
+            # warning), some a different company outright (300369 labelled
+            # 卓翼科技 while showing 绿盟科技's financials).
+            "name": real or claimed or t,
             "is_target": False,
             "why": p.get("why") or "",
+            # Kept so a disagreement is visible rather than silently fixed:
+            # a renamed company is harmless, a code that belongs to someone
+            # else is how an AI-generated peer list goes wrong.
+            "claimed_name": claimed,
+            "name_mismatch": bool(real and claimed and claimed != real),
+            "unknown_code": real is None,
         })
 
     # Rank each column. Cheap is good for the multiples, high is good for the
@@ -256,15 +270,122 @@ def peer_table(ticker: str, name: str, peers: list[dict]) -> dict:
 
 # ── assembly ─────────────────────────────────────────────────────────────────
 def cached_ai(ticker: str) -> dict:
-    """Whatever AI sections already exist, without generating any."""
+    """
+    Whatever AI sections already exist, without generating any.
+
+    One query for every section rather than one per section: this now runs on
+    every page load instead of once per cache lifetime, so the four round
+    trips it used to make are worth collapsing.
+    """
+    import json
+
+    import data_manager
     import equity_brief as eb
 
     eb.ensure_equity_brief_cache_table()
-    out = {}
-    for section in AI_SECTIONS:
-        hit = eb._read_cache(ticker, section)
-        out[section] = hit if hit else None
+    out: dict = {section: None for section in AI_SECTIONS}
+    try:
+        df = data_manager.db.read_table("equity_brief_cache",
+                                        filters={"ticker": ticker})
+    except Exception:                                              # noqa: BLE001
+        return out
+    if df is None or df.empty:
+        return out
+    for _, row in df.iterrows():
+        section = str(row.get("section") or "")
+        if section not in out:
+            continue
+        try:
+            out[section] = {"payload": json.loads(row["payload"]),
+                            "generated_at": row.get("generated_at")}
+        except (TypeError, ValueError):
+            out[section] = None
     return out
+
+
+#: The name map changes when a company is renamed or put under ST — days, not
+#: seconds. Held per process so it costs one query every few hours, and stale
+#: for a few hours at worst, where a stored name was stale forever.
+_NAMES_TTL_S = 6 * 3600
+_names: dict = {"at": 0.0, "map": {}}
+
+
+def official_names() -> dict[str, str]:
+    """Bare six-digit code → the name stock_basic has for it today."""
+    import time
+
+    import data_manager
+
+    if _names["map"] and time.time() - _names["at"] < _NAMES_TTL_S:
+        return _names["map"]
+    try:
+        rows = data_manager.get_all_stock_basic() or []
+    except Exception:                                              # noqa: BLE001
+        rows = []
+    if rows:
+        _names["map"] = {r["ticker"]: r["name"] for r in rows}
+        _names["at"] = time.time()
+    return _names["map"]
+
+
+def ai_half(ticker: str, name: str) -> dict:
+    """
+    The part of the brief that an edit can change: AI sections and the peers.
+
+    Separate from `build` so the route can cache the slow Tushare half and
+    read this fresh. Cloud Run runs more than one instance, and an in-memory
+    cache cleared by a save on one of them is still full on the others —
+    which is exactly how an edited peer list kept coming back unchanged.
+    """
+    ai = cached_ai(ticker)
+    peers = ((ai.get("competitors") or {}).get("payload") or {}).get("competitors") or []
+    return {
+        "ai": {k: (v or {}).get("payload") if v else None for k, v in ai.items()},
+        "generated_at": {k: (v or {}).get("generated_at") if v else None
+                         for k, v in ai.items()},
+        "missing": [k for k, v in ai.items() if not v],
+        "peers": peer_table(ticker, name, peers) if peers else None,
+    }
+
+
+def data_half(ticker: str, name: str, industry: str) -> dict:
+    """The slow half — four Tushare reads — and nothing an edit can change."""
+    return {
+        "ticker": ticker, "name": name, "industry": industry,
+        "fundamentals": _fundamentals(ticker),
+        "filings": _filings(ticker),
+        "segments": {
+            "product": _segments(ticker, "P"),
+            # Tushare's type "D" is 地区 — verified against 中天科技, which
+            # returns 境内 / 境外 — despite the field being described as
+            # department elsewhere.
+            "region": _segments(ticker, "D"),
+        },
+        "supply_chain": _supply_chain(ticker),
+    }
+
+
+def validate_peers(ticker: str, codes: list[str]) -> tuple[list[dict], list[str]]:
+    """
+    Real codes, with their real names. Anything else comes back as rejected.
+
+    No zero-padding of near misses: `zfill` turned "60051" into "060051",
+    which looks like a code and is not one.
+    """
+    official = official_names()
+    kept: list[dict] = []
+    rejected: list[str] = []
+    seen: set[str] = set()
+    for raw in codes:
+        code = str(raw or "").strip()
+        if not code or code == ticker or code in seen:
+            continue
+        if not (len(code) == 6 and code.isdigit()) or code not in official:
+            rejected.append(code)
+            continue
+        seen.add(code)
+        kept.append({"ticker": code, "name": official[code]})
+    return kept, rejected
 
 
 def generate(ticker: str, name: str, industry: str, section: str,
@@ -341,25 +462,5 @@ def generate_supply_chain(ticker: str, name: str, market: str = "CN") -> dict:
 
 
 def build(ticker: str, name: str, industry: str) -> dict:
-    """The fast half, plus whichever AI sections are already cached."""
-    ai = cached_ai(ticker)
-    peers = ((ai.get("competitors") or {}).get("payload") or {}).get("competitors") or []
-
-    return {
-        "ticker": ticker, "name": name, "industry": industry,
-        "fundamentals": _fundamentals(ticker),
-        "filings": _filings(ticker),
-        "segments": {
-            "product": _segments(ticker, "P"),
-            # Tushare's type "D" is 地区 — verified against 中天科技, which
-            # returns 境内 / 境外 — despite the field being described as
-            # department elsewhere.
-            "region": _segments(ticker, "D"),
-        },
-        "supply_chain": _supply_chain(ticker),
-        "ai": {k: (v or {}).get("payload") if v else None for k, v in ai.items()},
-        "generated_at": {k: (v or {}).get("generated_at") if v else None
-                         for k, v in ai.items()},
-        "missing": [k for k, v in ai.items() if not v],
-        "peers": peer_table(ticker, name, peers) if peers else None,
-    }
+    """Both halves, uncached. The route caches only the data half."""
+    return {**data_half(ticker, name, industry), **ai_half(ticker, name)}

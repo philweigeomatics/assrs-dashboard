@@ -1304,10 +1304,15 @@ def equity_brief(ticker: str = TICKER, user: AppUser = Depends(current_user)):
 
     if markets.split(ticker)[0] != "CN":
         raise HTTPException(404, "个股研报目前仅支持 A 股")
+    name = _name(ticker)
     try:
-        return _equity_cache.get_or_compute(
-            ticker,
-            lambda: equity_api.build(ticker, _name(ticker), _industry_of(ticker)))
+        # Only the Tushare half is cached. The AI half — including the peer
+        # list an admin edits — is read fresh, because Cloud Run runs more
+        # than one instance and clearing an in-memory cache on the one that
+        # took the save leaves every other instance serving the old list.
+        data = _equity_cache.get_or_compute(
+            ticker, lambda: equity_api.data_half(ticker, name, _industry_of(ticker)))
+        return {**data, **equity_api.ai_half(ticker, name)}
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:
@@ -1345,7 +1350,8 @@ def equity_generate(ticker: str = TICKER,
     except Exception as exc:                                    # noqa: BLE001
         raise HTTPException(502, f"AI 生成失败：{exc}"[:200])
 
-    _equity_cache._d.pop(ticker, None)       # the brief now has a new section
+    # No cache to clear: AI sections are read fresh on every GET, and the
+    # cached half is Tushare data that a generation does not change.
     return {"section": section, **out}
 
 
@@ -1356,22 +1362,39 @@ class PeersReq(BaseModel):
 @app.post("/equity/{ticker}/peers")
 def equity_save_peers(req: PeersReq, ticker: str = TICKER,
                       user: AppUser = Depends(current_user)):
-    """Admin: replace the curated peer set for this stock."""
+    """
+    Admin: replace the curated peer set for this stock.
+
+    Codes only. Any name that arrives is ignored and the real one is looked
+    up, because the free-text editor stored whatever was typed and 30 of 382
+    saved peers ended up wrong. An unknown code is refused out loud rather
+    than dropped — a list that quietly saves fewer peers than you entered is
+    the other half of the same bug.
+    """
     import equity_brief as eb
+    from api import equity_api
     _require_admin(user)
 
-    cleaned = []
-    for p in req.competitors:
-        t = str(p.get("ticker", "")).strip().zfill(6)
-        if not (len(t) == 6 and t.isdigit() and t != ticker):
-            continue
-        cleaned.append({"ticker": t,
-                        "name": str(p.get("name") or "").strip(),
-                        "why": str(p.get("why") or "").strip()})
+    previous = {}
+    old = eb._read_cache(ticker, "competitors")
+    if old:
+        for p in (old.get("payload") or {}).get("competitors") or []:
+            previous[str(p.get("ticker"))] = str(p.get("why") or "")
+
+    kept, rejected = equity_api.validate_peers(
+        ticker, [p.get("ticker") for p in req.competitors])
+    if rejected:
+        raise HTTPException(422, f"这些代码不存在或不是 A 股：{'、'.join(rejected)}")
+
+    # The AI's reason for including a peer survives an edit that keeps it.
+    for p in kept:
+        p["why"] = previous.get(p["ticker"], "")
+
     eb.ensure_equity_brief_cache_table()
-    eb.save_competitors_curated(ticker, cleaned)
-    _equity_cache._d.pop(ticker, None)
-    return {"saved": len(cleaned)}
+    if not eb.save_competitors_curated(ticker, kept):
+        # This used to swallow a failed write and still report success.
+        raise HTTPException(503, "同业名单写入数据库失败，没有保存")
+    return {"saved": len(kept), "peers": kept}
 
 
 class SectorReq(BaseModel):

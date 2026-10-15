@@ -65,7 +65,14 @@ def _read_cache(ticker: str, section: str) -> dict | None:
         return None
 
 
-def _write_cache(ticker: str, section: str, payload: Any) -> None:
+def _write_cache(ticker: str, section: str, payload: Any) -> bool:
+    """
+    Replace one section's row. Returns whether it was written.
+
+    Best-effort for AI output, where a failed write only costs a regeneration
+    later. NOT best-effort for a curated peer list, which is a person's edit
+    rather than a cache — so the result is returned and that caller checks it.
+    """
     try:
         data_manager.db.delete_records(
             "equity_brief_cache",
@@ -77,9 +84,10 @@ def _write_cache(ticker: str, section: str, payload: Any) -> None:
             "payload":      json.dumps(payload, ensure_ascii=False),
             "generated_at": datetime.utcnow().isoformat(),
         }])
+        return True
     except Exception as exc:
-        # Non-fatal — content was generated successfully; caching is best-effort.
         print(f"[equity_brief] ⚠️ Cache write failed for {ticker}/{section}: {exc}")
+        return False
 
 
 
@@ -335,7 +343,6 @@ def get_competitors(
     return {"payload": payload, "generated_at": datetime.utcnow().isoformat()}
 
 
-def save_competitors_curated(ticker: str, competitors: list[dict]) -> None:
-    """Admin-only: persist the curated competitor list back to the cache."""
-    payload = {"competitors": competitors}
-    _write_cache(ticker, "competitors", payload)
+def save_competitors_curated(ticker: str, competitors: list[dict]) -> bool:
+    """Admin-only: persist the curated competitor list. True if it was written."""
+    return _write_cache(ticker, "competitors", {"competitors": competitors})
