@@ -1558,3 +1558,56 @@ export type EcoRead = {
   span: [string, string];
   cached?: boolean;
 };
+
+/** /seasonality — each full year on one Jan–Dec axis. See seasonality.py. */
+export type SeasonWindow = {
+  start: number; weeks: number; dir: "up" | "down";
+  from: string; to: string;
+  per_year: Record<string, number>;
+  mean: number;
+  /** The weakest qualifying year's move, signed. */
+  weakest: number;
+  hits: number;
+  z: number;
+  /** Share of shuffled calendars whose best window was at least this strong. */
+  p: number;
+};
+
+export type SeasonAhead = {
+  days: number; from: string; to: string;
+  per_year: Record<string, number>; mean: number | null; ups: number; n: number;
+};
+
+export type SeasonBasis = {
+  /** year → [[day slot 0..365, cumulative %], …] */
+  daily: Record<string, [number, number][]>;
+  avg_daily: number[];
+  /** year → 52 weekly % (null = not yet this year) */
+  weekly: Record<string, (number | null)[]>;
+  traded: Record<string, boolean[]>;
+  week_stats: { mean: number; median: number; ups: number; n: number }[];
+  monthly: Record<string, (number | null)[]>;
+  month_stats: { mean: number; ups: number; n: number }[];
+  windows: SeasonWindow[];
+  significance: {
+    p_best: number; shuffles: number; observed_z: number; null_median_z: number;
+    verdict: "strong" | "weak" | "none";
+  };
+  ahead: SeasonAhead[];
+  ytd: { as_of: string; now: number | null; past: Record<string, number | null>;
+         mean: number | null; rank: number | null; of: number } | null;
+  spring: { year: number; date: string; before: number; after: number | null }[];
+  conclusions: string[];
+};
+
+export type Seasonality = {
+  ticker: string; market: string; up_is_red: boolean; benchmark_name: string;
+  years: { year: number; full: boolean; regime: "pre" | "pivot" | "post" | null }[];
+  current_year: number;
+  skipped: number[];
+  as_of: string;
+  week_labels: string[];
+  spring_dates: Record<string, string>;
+  abs: SeasonBasis;
+  excess: SeasonBasis | null;
+};

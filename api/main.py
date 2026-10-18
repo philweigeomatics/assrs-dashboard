@@ -397,6 +397,54 @@ def analysis(ticker: str = TICKER, user: AppUser = Depends(current_user)):
         raise HTTPException(503, str(exc))
 
 
+_season_cache = TTLCache(maxsize=40, ttl_s=6 * 3600)
+
+
+@app.get("/seasonality/{ticker}")
+def seasonality_view(ticker: str = TICKER, years: int = Query(3),
+                     user: AppUser = Depends(current_user)):
+    """
+    Each of the last `years` full calendar years laid on one Jan-Dec axis,
+    with the windows where they agreed and a shuffled-calendar test of
+    whether that agreement beats chance.
+
+    Its own fetch, not the analysis frame: whole calendar years and up to ten
+    of them, where the indicators are calibrated on a rolling 3-year window.
+    Cached six hours — a new bar moves this year's line, not the conclusions.
+    """
+    import seasonality
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    if years not in seasonality.YEAR_CHOICES:
+        raise HTTPException(422, f"years must be one of {list(seasonality.YEAR_CHOICES)}")
+    market, code = markets.parse(ticker)
+    zone = "Asia/Shanghai" if market.conv.code == "CN" else "America/New_York"
+    today = datetime.now(ZoneInfo(zone)).date()
+
+    def load():
+        start = seasonality.start_date(years, today)
+        close = market.fetch_closes_since(code, start)
+        if close is None:
+            raise RuntimeError(f"price data for {ticker} could not be fetched — try again")
+        try:
+            bench = market.fetch_benchmark_since(start)
+        except Exception:                                       # noqa: BLE001
+            # The excess view needs the index; the rest does not.
+            bench = None
+        out = seasonality.build(close, years=years, today=today,
+                                market=market.conv.code, bench=bench)
+        return {"ticker": ticker, "market": market.conv.code,
+                "up_is_red": market.conv.up_is_red,
+                "benchmark_name": market.conv.benchmark_name, **out}
+
+    try:
+        return _season_cache.get_or_compute((ticker, years, today.isoformat()), load)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
 @app.post("/simulate/{ticker}")
 def simulate(req: SimReq, ticker: str = TICKER, user: AppUser = Depends(current_user)):
     """

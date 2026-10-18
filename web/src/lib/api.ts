@@ -25,7 +25,7 @@ import type {
   StrategyResult, WhatIfAi,
   Breadth, Heatmap, Leverage, Rotation, TopList, Wyckoff,
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
-  ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult,
+  ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, Seasonality,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -78,6 +78,8 @@ export const api = {
   history: () => call<HistoryRef[]>("/history"),
   addHistory: (t: string) => call<StockRef>(`/history/${t}`, { method: "POST" }),
   analysis: (t: string) => call<Analysis>(`/analysis/${t}`),
+  seasonality: (t: string, years: number) =>
+    call<Seasonality>(`/seasonality/${t}?years=${years}`),
   simulate: (t: string, body: { pct: number; volume: number; open?: number; high?: number; low?: number }) =>
     call<SimResult>(`/simulate/${t}`, {
       method: "POST",

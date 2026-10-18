@@ -65,5 +65,20 @@ class CNMarket(Market):
             self.conv.benchmark, lookback_days=int(years * 365) + 100)
         return None if idx is None or idx.empty else idx["Close"]
 
+    def fetch_closes_since(self, symbol: str, start) -> pd.Series | None:
+        # Straight to Tushare with a start date: fetch_ohlcv is pinned to the
+        # 3-year window the signals are calibrated on, and a seasonality view
+        # of 5 or 10 years needs more.
+        import data_manager
+        df = data_manager.get_single_stock_data_live(
+            symbol, start_date=start.strftime("%Y%m%d"))
+        return None if df is None or df.empty else df["Close"]
+
+    def fetch_benchmark_since(self, start) -> pd.Series | None:
+        import data_manager
+        idx = data_manager.get_index_data_live(
+            self.conv.benchmark, start_date=start.strftime("%Y%m%d"))
+        return None if idx is None or idx.empty else idx["Close"]
+
 
 MARKET = CNMarket()

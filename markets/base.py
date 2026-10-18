@@ -92,3 +92,21 @@ class Market:
     def fetch_benchmark(self, years: int = 3) -> pd.Series | None:
         df = self.fetch_ohlcv(self.conv.benchmark, years=years)
         return None if df is None or df.empty else df["Close"]
+
+    def fetch_closes_since(self, symbol: str, start) -> pd.Series | None:
+        """
+        Adjusted daily closes from `start` (a date) to today.
+
+        For analyses that need whole calendar years — seasonality compares
+        Jan-Dec of each — rather than the rolling lookback the indicators are
+        calibrated on.
+        """
+        import datetime as _dt
+        years = _dt.date.today().year - start.year + 1
+        df = self.fetch_ohlcv(symbol, years=years)
+        if df is None or df.empty:
+            return None
+        return df.loc[df.index >= pd.Timestamp(start), "Close"]
+
+    def fetch_benchmark_since(self, start) -> pd.Series | None:
+        return self.fetch_closes_since(self.conv.benchmark, start)
