@@ -1597,6 +1597,9 @@ export type SeasonBasis = {
   ytd: { as_of: string; now: number | null; past: Record<string, number | null>;
          mean: number | null; rank: number | null; of: number } | null;
   spring: { year: number; date: string; before: number; after: number | null }[];
+  /** A-shares: kind → sessions ("5" | "10") → per-year rows and summaries.
+   *  Absent from a backend older than this field. */
+  holidays?: Record<string, Record<string, HolidayBlock>>;
   conclusions: string[];
 };
 
@@ -1610,4 +1613,19 @@ export type Seasonality = {
   spring_dates: Record<string, string>;
   abs: SeasonBasis;
   excess: SeasonBasis | null;
+};
+
+export type HolidaySide = {
+  mean: number; median: number; ups: number; n: number;
+  /** Share of random same-length stretches in the same years with a median move at least this big. */
+  p: number | null;
+  /** The year pulling the mean away from the typical year, when one is. */
+  outlier: { year: number; value: number } | null;
+};
+
+export type HolidayBlock = {
+  rows: { year: number; date: string; last_before: string; reopen: string | null;
+          before: number; after: number | null }[];
+  before: HolidaySide | null;
+  after: HolidaySide | null;
 };

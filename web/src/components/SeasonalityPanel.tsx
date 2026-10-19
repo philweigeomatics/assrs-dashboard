@@ -12,7 +12,7 @@
 import { useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api";
-import type { SeasonBasis, Seasonality } from "../lib/types";
+import type { HolidayBlock, HolidaySide, SeasonBasis, Seasonality } from "../lib/types";
 import { signed } from "../lib/format";
 import { usePersistentState } from "../lib/usePersistentState";
 import {
@@ -147,7 +147,9 @@ function Body({ d, grain, basis }: { d: Seasonality; grain: Grain; basis: Basis 
       {grain === "w"
         ? <WeekGrid d={d} b={b} all={all} />
         : <MonthGrid d={d} b={b} all={all} />}
-      {d.market === "CN" && b.spring.length > 0 && <Spring d={d} b={b} />}
+      {d.market === "CN" && (b.holidays
+        ? <Holidays d={d} b={b} />
+        : b.spring.length > 0 && <Spring d={d} b={b} />)}
       <p className="label leading-snug">
         每年从上一年最后一个收盘价起算，按月-日对齐（2月29日单独一格）。周按 1月1日起每 7 天一段，
         最后一段延至 12月31日；休市周（国庆、春节）记为不动并标灰。窗口要求所有年份同向（超过 5 年时允许
@@ -527,6 +529,111 @@ function MonthGrid({ d, b, all }: { d: Seasonality; b: SeasonBasis; all: number[
   );
 }
 
+const HOLIDAY_NAMES: [string, string][] = [["spring", "🧧 春节"], ["labour", "🛠️ 劳动节"], ["national", "🎆 国庆"]];
+
+/**
+ * The sessions into each long A-share closure and out of it, year by year.
+ *
+ * "节后" runs from the last close before the holiday, so the gap on
+ * reopening — usually the biggest single move — counts where a holder feels
+ * it. Summaries use the median: one year like 2024's 924 rally, which landed
+ * the week before 国庆, would otherwise make a holiday look reliable.
+ */
+function Holidays({ d, b }: { d: Seasonality; b: SeasonBasis }) {
+  const [n, setN] = usePersistentState<string>("assrs.season.holidayN", "5");
+  const hol = b.holidays ?? {};
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[13px] font-semibold">🏮 节假日效应</span>
+        <Seg value={n} set={setN}
+          options={[{ v: "5", label: "前后 5 日" }, { v: "10", label: "前后 10 日" }]} />
+        <span className="label">节前 = 休市前最后 {n} 个交易日；节后 = 从休市前收盘到复市后第 {n} 个交易日（含复市跳空）</span>
+      </div>
+      <div className="grid gap-3 md:grid-cols-3 items-start">
+        {HOLIDAY_NAMES.map(([kind, name]) => {
+          const block = hol[kind]?.[n];
+          return block && block.rows.length
+            ? <HolidayCard key={kind} name={name} block={block} d={d} />
+            : null;
+        })}
+      </div>
+    </div>
+  );
+}
+
+function HolidayCard({ name, block, d }: { name: string; block: HolidayBlock; d: Seasonality }) {
+  const tone = (v: number | null | undefined) =>
+    v == null ? undefined : { color: v > 0 === d.up_is_red ? "var(--color-up)" : "var(--color-down)" };
+  const flag = (side: HolidaySide | null, year: number) =>
+    side?.outlier?.year === year ? " ⚑" : "";
+  const sideCell = (side: HolidaySide | null) => side
+    ? (
+      <td className="py-0.5 pl-2 text-right font-semibold" style={tone(side.median)}
+        title={`中位 ${signed(side.median, 2, "%")}，平均 ${signed(side.mean, 2, "%")}`}>
+        {signed(side.median, 1, "%")}
+      </td>
+    ) : <td />;
+  const pCell = (side: HolidaySide | null) => (
+    <td className={`py-0.5 pl-2 text-right ${side?.p != null && side.p < 0.05 ? "font-semibold text-cyan"
+      : side?.p != null && side.p < 0.2 ? "" : "text-ink-mute"}`}>
+      {side?.p == null ? "—" : pctOf(side.p)}
+    </td>
+  );
+  return (
+    <div className="rounded-lg bg-sunken p-2.5 flex flex-col gap-1">
+      <span className="text-[13px] font-semibold">{name}</span>
+      <table className="w-full text-[12px] tnum">
+        <thead>
+          <tr className="label text-left">
+            <th className="font-normal">年份</th>
+            <th className="font-normal" title="休市前最后一个交易日 → 复市第一天">最后交易→复市</th>
+            <th className="font-normal text-right pl-2">节前</th>
+            <th className="font-normal text-right pl-2">节后</th>
+          </tr>
+        </thead>
+        <tbody>
+          {[...block.rows].reverse().map((r) => (
+            <tr key={r.year} className="border-t border-line">
+              <td className="py-0.5">{r.year}{r.year === d.current_year ? <span className="label"> 今年</span> : null}</td>
+              <td className="py-0.5 font-mono text-[11px] text-ink-mute whitespace-nowrap">
+                {r.last_before}→{r.reopen ?? "…"}
+              </td>
+              <td className="py-0.5 pl-2 text-right" style={tone(r.before)}
+                title={flag(block.before, r.year) ? "这一年把平均值拉离了典型年份" : undefined}>
+                {signed(r.before, 1, "%")}{flag(block.before, r.year)}
+              </td>
+              <td className="py-0.5 pl-2 text-right" style={tone(r.after)}
+                title={flag(block.after, r.year) ? "这一年把平均值拉离了典型年份" : undefined}>
+                {signed(r.after, 1, "%")}{flag(block.after, r.year)}
+              </td>
+            </tr>
+          ))}
+          <tr className="border-t-2 border-line">
+            <td className="py-0.5 label" colSpan={2}>中位数</td>
+            {sideCell(block.before)}
+            {sideCell(block.after)}
+          </tr>
+          <tr>
+            <td className="py-0.5 label" colSpan={2}>上涨年数</td>
+            <td className="py-0.5 pl-2 text-right">{block.before ? `${block.before.ups}/${block.before.n}` : "—"}</td>
+            <td className="py-0.5 pl-2 text-right">{block.after ? `${block.after.ups}/${block.after.n}` : "—"}</td>
+          </tr>
+          <tr>
+            <td className="py-0.5 label" colSpan={2}
+              title="同样这些年里，随机挑一段同样长度的交易日，中位涨跌至少这么大的比例。越小越不像巧合">
+              随机也能 ⓘ
+            </td>
+            {pCell(block.before)}
+            {pCell(block.after)}
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** The first release's 春节-only table, for a backend without `holidays`. */
 function Spring({ d, b }: { d: Seasonality; b: SeasonBasis }) {
   const tone = (v: number | null) =>
     v == null ? undefined : { color: v > 0 === d.up_is_red ? "var(--color-up)" : "var(--color-down)" };

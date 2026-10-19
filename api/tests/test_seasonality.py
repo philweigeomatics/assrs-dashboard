@@ -232,3 +232,110 @@ def test_only_the_offered_year_counts_are_accepted():
 
 def test_the_fetch_starts_the_december_before_the_first_year():
     assert S.start_date(3, TODAY) == date(2022, 12, 1)
+
+
+# ── 劳动节 / 国庆 / 春节 ─────────────────────────────────────────────────────
+def _cn_days(start="2019-12-01", end="2026-10-16", closed=()):
+    idx = pd.bdate_range(start, end)
+    for a, b in closed:
+        idx = idx[~((idx >= a) & (idx <= b))]
+    return idx
+
+
+def test_the_closure_is_found_from_the_bars_not_a_table():
+    """2023's 国庆 began Sep 29 with 中秋: the last session was Sep 28."""
+    idx = _cn_days(closed=[("2023-09-29", "2023-10-06")])
+    s = pd.Series(np.linspace(100, 200, len(idx)), index=idx)
+    r = next(x for x in S.holiday(s, "national", [2023], 5) if x["year"] == 2023)
+    assert r["last_before"] == "09-28" and r["reopen"] == "10-09"
+
+
+def test_after_counts_the_gap_on_reopening():
+    idx = _cn_days(closed=[("2025-10-01", "2025-10-08")])
+    s = pd.Series(100.0, index=idx)
+    s[s.index >= "2025-10-09"] = 105.0                       # gaps up on reopening
+    r = S.holiday(s, "national", [2025], 5)[0]
+    assert r["before"] == pytest.approx(0.0) and r["after"] == pytest.approx(5.0)
+
+
+def test_before_is_the_last_n_sessions_into_the_closure():
+    idx = _cn_days(closed=[("2025-05-01", "2025-05-05")])
+    s = pd.Series(100.0, index=idx)
+    pre = s.index[s.index < "2025-05-01"]
+    s[s.index >= pre[-5]] = 103.0                            # rises over the last 5 only
+    assert S.holiday(s, "labour", [2025], 5)[0]["before"] == pytest.approx(3.0)
+    assert S.holiday(s, "labour", [2025], 10)[0]["before"] == pytest.approx(3.0)
+    s2 = s.copy()
+    s2[s2.index >= pre[-4]] = 103.0
+    s2[pre[-5]] = 100.0
+    assert S.holiday(s2, "labour", [2025], 5)[0]["before"] == pytest.approx(3.0)
+
+
+def test_one_huge_year_does_not_make_a_holiday_look_reliable():
+    """
+    茅台 before 国庆 2024: +38.6% from the 924 rally; the typical year +1%.
+    Planted into random walks, that one year must be named as the outlier
+    and must not, on its own, get the holiday called significant — beyond the
+    5% of the time noise alone would.
+    """
+    flagged, named = 0, 0
+    for seed in range(30):
+        rng = np.random.default_rng(seed)
+        idx = _cn_days()
+        s = pd.Series(100 * np.exp(np.cumsum(rng.normal(0, 0.012, len(idx)))), index=idx)
+        pre = s.index[s.index < "2024-10-01"]
+        s[s.index >= pre[-5]] *= 1.40
+        rows = S.holiday(s, "national", [2020, 2021, 2022, 2023, 2024, 2025], 5)
+        side = S._side(s, rows, "before", 5, None)
+        flagged += side["p"] < 0.05
+        named += bool(side["outlier"]) and side["outlier"]["year"] == 2024
+    # Measured: 6/30 with the plant, 3/30 without it. One year can still nudge
+    # a six-year median; on the mean, 6 of 6 years at +9% average flags nearly
+    # every run.
+    assert flagged <= 9
+    assert named >= 25
+
+
+def test_a_move_every_year_shares_is_called_out():
+    rng = np.random.default_rng(9)
+    idx = _cn_days()
+    s = pd.Series(100 * np.exp(np.cumsum(rng.normal(0, 0.012, len(idx)))), index=idx)
+    for y in range(2020, 2026):
+        pre = s.index[s.index < f"{y}-10-01"]
+        s[s.index >= pre[-5]] *= 1.06
+    rows = S.holiday(s, "national", list(range(2020, 2026)), 5)
+    side = S._side(s, rows, "before", 5, None)
+    assert side["ups"] == 6 and side["p"] < 0.05 and side["outlier"] is None
+
+
+def test_holidays_are_a_shares_only():
+    us = S.build(walk(), years=3, today=TODAY, market="US", shuffles=20)
+    cn = S.build(walk(), years=3, today=TODAY, market="CN", shuffles=20)
+    assert us["abs"]["holidays"] == {}
+    assert set(cn["abs"]["holidays"]) == {"spring", "labour", "national"}
+    assert set(cn["abs"]["holidays"]["national"]) == {"5", "10"}
+
+
+def test_the_conclusions_name_the_year_doing_the_pulling():
+    idx = _cn_days()
+    rng = np.random.default_rng(4)
+    s = pd.Series(100 * np.exp(np.cumsum(rng.normal(0, 0.004, len(idx)))), index=idx)
+    pre = s.index[s.index < "2024-10-01"]
+    s[s.index >= pre[-5]] *= 1.40
+    out = S.build(s, years=5, today=TODAY, market="CN", shuffles=20)
+    line = next(c for c in out["abs"]["conclusions"] if c.startswith("国庆"))
+    assert "2024" in line and "中位" in line
+
+
+def test_the_random_comparison_uses_the_same_statistic_as_the_holiday():
+    """
+    A stock that sits still and then jumps 10% one session in five. Its
+    typical day is 0%, so a median of +1% is unusual — but an average of +1%
+    is what it does almost every time. Comparing a holiday's median against
+    random averages would call ordinary behaviour remarkable, or the reverse.
+    """
+    idx = _cn_days("2019-12-01", "2025-12-31")
+    jumps = np.where(np.arange(len(idx)) % 5 == 0, np.log(1.10), 0.0)
+    s = pd.Series(100 * np.exp(np.cumsum(jumps)), index=idx)
+    p = S.placebo_p(s, [2020, 2021, 2022, 2023, 2024, 2025], 1, 1.0)
+    assert p < 0.3

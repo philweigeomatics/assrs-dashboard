@@ -48,7 +48,9 @@ SHUFFLES = 300
 #: year to be reported. Below it, "all three years were up" means "flat".
 MIN_MOVE = 0.01
 HORIZONS = (30, 90)                    # calendar days, for "what comes next"
-SPRING_DAYS = 10                       # trading days either side of 春节
+SPRING_DAYS = 10                       # trading days either side of 春节 (legacy field)
+HOLIDAY_SESSIONS = (5, 10)             # trading days either side of a closure
+PLACEBO_DRAWS = 2000
 REGIME_YEAR = 2024                     # the 924 pivot, A-shares only
 
 #: 春节 (first day of the lunar year). Markets close for the week around it,
@@ -61,6 +63,14 @@ SPRING_FESTIVAL = {
     2026: date(2026, 2, 17), 2027: date(2027, 2, 6), 2028: date(2028, 1, 26),
     2029: date(2029, 2, 13), 2030: date(2030, 2, 3),
 }
+
+#: The three long A-share closures. 春节 moves with the lunar calendar; 劳动节
+#: and 国庆 are anchored on May 1 and Oct 1, though the closure around them
+#: shifts a day or two by year (2023's 国庆 started Sep 29 with 中秋). That is
+#: why the sessions either side are found from the bars themselves — the last
+#: close before the anchor, the first after it — rather than from a holiday
+#: table that would have to be kept in step with the exchange's notices.
+HOLIDAYS = {"spring": "春节", "labour": "劳动节", "national": "国庆"}
 
 _CAL0 = date(2000, 1, 1)               # a leap year, so every month-day has a slot
 
@@ -314,35 +324,139 @@ def ytd(close: pd.Series, full: list[int], cur: int, bench: pd.Series | None = N
             "rank": rank, "of": len(vals) + 1}
 
 
-def spring(close: pd.Series, yrs: list[int], bench: pd.Series | None = None) -> list[dict]:
-    """10 trading days into 春节 and 10 out, per year."""
+def holiday_anchor(kind: str, y: int) -> date | None:
+    if kind == "spring":
+        return SPRING_FESTIVAL.get(y)
+    return date(y, 5, 1) if kind == "labour" else date(y, 10, 1)
+
+
+def _aligned(close: pd.Series, bench: pd.Series | None) -> pd.Series | None:
+    """The index on the stock's own sessions, so position i means the same day in both."""
+    if bench is None:
+        return None
+    return bench.reindex(close.index.union(bench.index)).ffill().reindex(close.index)
+
+
+def _move(close: pd.Series, ba: pd.Series | None, i0: int, i1: int) -> float | None:
+    r = float(close.iloc[i1]) / float(close.iloc[i0])
+    if ba is not None:
+        b0, b1 = ba.iloc[i0], ba.iloc[i1]
+        if not (np.isfinite(b0) and np.isfinite(b1)):
+            return None
+        r /= float(b1) / float(b0)
+    return (r - 1) * 100
+
+
+def holiday(close: pd.Series, kind: str, yrs: list[int], n: int,
+            bench: pd.Series | None = None) -> list[dict]:
+    """
+    The `n` sessions into a closure and the `n` out of it, per year.
+
+    Before: close `n` sessions before the last pre-holiday session → that
+    last close. After: that same last close → the `n`th session after the
+    market reopens, so the gap on reopening — usually the biggest single move
+    — counts as part of "after", which is where a holder experiences it.
+    """
+    ba = _aligned(close, bench)
+    idx = close.index
     out = []
     for y in yrs:
-        sf = SPRING_FESTIVAL.get(y)
-        if sf is None:
+        a = holiday_anchor(kind, y)
+        if a is None:
             continue
-        pre = close[close.index < pd.Timestamp(sf)]
-        post = close[close.index > pd.Timestamp(sf)]
-        if len(pre) <= SPRING_DAYS:
+        t = pd.Timestamp(a)
+        i_pre = int(idx.searchsorted(t)) - 1                 # last session before
+        i_post = int(idx.searchsorted(t, side="right"))      # first session after
+        if i_pre - n < 0 or (t - idx[i_pre]).days > 15:
+            continue                                         # no data around it
+        before = _move(close, ba, i_pre - n, i_pre)
+        after = (_move(close, ba, i_pre, i_post + n - 1)
+                 if i_post + n - 1 < len(idx) else None)
+        if before is None:
             continue
-        p0, p1 = float(pre.iloc[-SPRING_DAYS - 1]), float(pre.iloc[-1])
-        p2 = float(post.iloc[SPRING_DAYS - 1]) if len(post) >= SPRING_DAYS else None
-        before, after = p1 / p0, (p2 / p1 if p2 else None)
-        if bench is not None:
-            def lvl(ts):
-                _, v = _on_or_before(bench, ts.date())
-                return v
-            b0, b1 = lvl(pre.index[-SPRING_DAYS - 1]), lvl(pre.index[-1])
-            if not b0 or not b1:
-                continue
-            before /= b1 / b0
-            if p2:
-                b2 = lvl(post.index[SPRING_DAYS - 1])
-                after = after / (b2 / b1) if b2 else None
-        out.append({"year": y, "date": f"{sf:%m-%d}",
-                    "before": round((before - 1) * 100, 2),
-                    "after": round((after - 1) * 100, 2) if after else None})
+        out.append({"year": y, "date": f"{a:%m-%d}",
+                    "last_before": f"{idx[i_pre]:%m-%d}",
+                    "reopen": f"{idx[i_post]:%m-%d}" if i_post < len(idx) else None,
+                    "before": round(before, 2),
+                    "after": None if after is None else round(after, 2)})
     return out
+
+
+def placebo_p(close: pd.Series, yrs: list[int], n: int, observed: float,
+              bench: pd.Series | None = None, draws: int = PLACEBO_DRAWS,
+              seed: int = 501) -> float | None:
+    """
+    How often `n` sessions starting on a RANDOM day of each of the same years
+    have a MEDIAN move at least as large (either direction) as the holiday's.
+
+    The median, not the mean: 茅台's week before 国庆 2024 was +38.6% — the
+    924 rally, which happened to land there — and on the mean that one year
+    made "before 国庆" look like a reliable +8.8% when the typical year was
+    +1.2%. A holiday effect is something most years share.
+
+    The fair comparison for "the week before 国庆 is strong": strong compared
+    with what this stock does over any five sessions in those years. A stock
+    that rose 60% a year will look good before every holiday.
+    """
+    ba = _aligned(close, bench)
+    c = close.to_numpy(dtype=float)
+    pools = []
+    for y in yrs:
+        pos = np.flatnonzero(close.index.year == y)
+        pos = pos[pos + n < len(c)]
+        if not len(pos):
+            return None
+        r = c[pos + n] / c[pos]
+        if ba is not None:
+            b = ba.to_numpy(dtype=float)
+            r = r / (b[pos + n] / b[pos])
+        pools.append((r - 1) * 100)
+    rng = np.random.default_rng(seed)
+    meds = np.median([pool[rng.integers(0, len(pool), draws)] for pool in pools], axis=0)
+    meds = meds[np.isfinite(meds)]
+    if not len(meds):
+        return None
+    return float((1 + np.sum(np.abs(meds) >= abs(observed))) / (len(meds) + 1))
+
+
+def _side(close, rows, key, n, bench) -> dict | None:
+    pts = [(r["year"], r[key]) for r in rows if r[key] is not None]
+    if not pts:
+        return None
+    vals = [v for _, v in pts]
+    mean = float(np.mean(vals))
+    med = float(np.median(vals))
+    p = placebo_p(close, [y for y, _ in pts], n, med, bench)
+    # Name the year doing the pulling when the mean says something the
+    # typical year does not.
+    y_out, v_out = max(pts, key=lambda t: abs(t[1] - med))
+    pulled = (len(vals) >= 3 and abs(mean - med) > max(1.0, abs(med))
+              and abs(v_out - med) > 3 * max(1.0, abs(med)))
+    return {"mean": round(mean, 2), "median": round(med, 2),
+            "ups": sum(v > 0 for v in vals), "n": len(vals),
+            "p": None if p is None else round(p, 3),
+            "outlier": {"year": y_out, "value": round(v_out, 2)} if pulled else None}
+
+
+def holidays(close: pd.Series, yrs: list[int], bench: pd.Series | None = None) -> dict:
+    """Every holiday at every session count, with per-side summaries and placebo tests."""
+    out = {}
+    for kind in HOLIDAYS:
+        out[kind] = {}
+        for n in HOLIDAY_SESSIONS:
+            rows = holiday(close, kind, yrs, n, bench)
+            out[kind][str(n)] = {
+                "rows": rows,
+                "before": _side(close, rows, "before", n, bench),
+                "after": _side(close, rows, "after", n, bench),
+            }
+    return out
+
+
+def spring(close: pd.Series, yrs: list[int], bench: pd.Series | None = None) -> list[dict]:
+    """10 trading days into 春节 and 10 out — the shape the first release shipped."""
+    return [{"year": r["year"], "date": r["date"], "before": r["before"], "after": r["after"]}
+            for r in holiday(close, "spring", yrs, SPRING_DAYS, bench)]
 
 
 # ── words ────────────────────────────────────────────────────────────────────
@@ -359,7 +473,7 @@ def verdict(p: float) -> tuple[str, str]:
 
 
 def conclusions(*, n: int, full: list[int], windows: list[dict], sig: dict,
-                nxt: list[dict], this_year: dict | None, spr: list[dict],
+                nxt: list[dict], this_year: dict | None, hol: dict,
                 market: str, basis: str, labels: list[str]) -> list[str]:
     who = "相对大盘的超额收益" if basis == "excess" else "股价"
     lines = [f"比较 {'、'.join(map(str, full))} 共 {n} 个完整年度的{who}。"]
@@ -391,11 +505,25 @@ def conclusions(*, n: int, full: list[int], windows: list[dict], sig: dict,
         lines.append(
             f"今年至今（截至 {this_year['as_of']}）{_pct(this_year['now'])}，"
             f"往年同期平均 {_pct(this_year['mean'])}，在 {this_year['of']} 年中排第 {this_year['rank']}。")
-    if market == "CN" and spr:
-        ups = sum(1 for s in spr if s["before"] > 0)
-        mean = float(np.mean([s["before"] for s in spr]))
-        lines.append(f"春节前 {SPRING_DAYS} 个交易日（{spr[0]['year']}–{spr[-1]['year']}）："
-                     f"{len(spr)} 年里 {ups} 年上涨，平均 {_pct(mean)}。")
+    if market == "CN":
+        n = HOLIDAY_SESSIONS[0]
+        for kind, name in HOLIDAYS.items():
+            h = (hol.get(kind) or {}).get(str(n)) or {}
+            bits = []
+            for side, word in (("before", "节前"), ("after", "节后")):
+                st = h.get(side)
+                if not st:
+                    continue
+                tag = ""
+                if st["p"] is not None and st["p"] < 0.05:
+                    tag = "，超出随机"
+                elif st["p"] is not None and st["p"] < 0.20:
+                    tag = "，弱证据"
+                pull = (f"（平均 {_pct(st['mean'])} 主要来自 {st['outlier']['year']} 年的"
+                        f" {_pct(st['outlier']['value'])}）" if st.get("outlier") else "")
+                bits.append(f"{word} {st['ups']}/{st['n']} 年上涨、中位 {_pct(st['median'])}{pull}{tag}")
+            if bits:
+                lines.append(f"{name}（前后各 {n} 个交易日）：{'；'.join(bits)}。")
     if market == "CN" and any(y <= REGIME_YEAR for y in full):
         post = [y for y in full if y > REGIME_YEAR]
         if windows and post:
@@ -473,14 +601,16 @@ def _analyse(close: pd.Series, full: list[int], cur: int, today: date, market: s
 
     nxt = [ahead(close, full, today, h, bench) for h in HORIZONS]
     this_year = ytd(close, full, cur, bench)
-    spr = spring(close, full + ([cur] if have_cur else []), bench) if market == "CN" else []
+    hol_years = full + ([cur] if have_cur else [])
+    spr = spring(close, hol_years, bench) if market == "CN" else []
+    hol = holidays(close, hol_years, bench) if market == "CN" else {}
     sig = {"p_best": round(p_best, 3), "shuffles": shuffles,
            "observed_z": round(obs, 2),
            "null_median_z": round(float(np.median(null)), 2),
            "verdict": verdict(p_best)[0]}
 
     lines = conclusions(n=n, full=full, windows=windows, sig=sig, nxt=nxt,
-                        this_year=this_year, spr=spr, market=market,
+                        this_year=this_year, hol=hol, market=market,
                         basis=basis, labels=labels)
     for w in windows:
         w.pop("r_list")
@@ -489,7 +619,7 @@ def _analyse(close: pd.Series, full: list[int], cur: int, today: date, market: s
         "weekly": weekly, "traded": traded, "week_stats": week_stats,
         "monthly": monthly, "month_stats": month_stats,
         "windows": windows, "significance": sig,
-        "ahead": nxt, "ytd": this_year, "spring": spr,
+        "ahead": nxt, "ytd": this_year, "spring": spr, "holidays": hol,
         "conclusions": lines,
     }
 
