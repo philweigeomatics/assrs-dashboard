@@ -1,5 +1,5 @@
 /**
- * 多股对比 — ranking a group, with no chart.
+ * 多股对比 — ranking a group, then whether its members take turns.
  *
  * Built for one strategy: several names are moving together and all trending
  * up, so sell the ones moving least and concentrate into the leader. Six lines
@@ -28,6 +28,7 @@ import { useSymbolSearch } from "../lib/useSymbolSearch";
 import { usePersistentState } from "../lib/usePersistentState";
 import { fixed, signed } from "../lib/format";
 import { splitMarket } from "../lib/symbols";
+import { SeesawPanel } from "../components/SeesawPanel";
 
 const WINDOWS = [
   { id: "60", label: "3个月" },
@@ -86,6 +87,9 @@ export function Basket() {
           </div>
         )}
         {q.data && <Body d={q.data} />}
+        {symbols.length >= 2 && !q.isError && (
+          <SeesawPanel symbols={symbols} window={window} ready={!!q.data} />
+        )}
       </main>
     </div>
   );

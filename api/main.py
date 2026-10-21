@@ -667,6 +667,65 @@ def basket(symbols: str = Query(..., description="comma-separated, 2-8, one mark
         raise HTTPException(503, str(exc))
 
 
+_seesaw_cache = TTLCache(maxsize=40, ttl_s=20 * 60)
+
+
+@app.get("/basket/seesaw")
+def basket_seesaw(symbols: str = Query(..., description="comma-separated, 2-8, one market"),
+                  window: str = Query(pair_compare.DEFAULT_WINDOW),
+                  user: AppUser = Depends(current_user)):
+    """
+    多股对比 → 跷跷板: do these stocks take turns, daily and weekly, once the
+    market's shared move is taken out? See seesaw.py.
+
+    Separate from /basket because it carries the return series for the
+    charts, which the ranking table has no use for.
+    """
+    import seesaw
+    if window not in pair_compare.WINDOWS:
+        raise HTTPException(422, f"window must be one of {sorted(pair_compare.WINDOWS)}")
+    try:
+        seen = list(dict.fromkeys(markets.canonical(s) for s in symbols.split(",") if s.strip()))
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+    if not 2 <= len(seen) <= pair_compare.MAX_BASKET:
+        raise HTTPException(422, f"需要 2–{pair_compare.MAX_BASKET} 只股票")
+    codes = {markets.split(s)[0] for s in seen}
+    if len(codes) > 1:
+        raise HTTPException(422, "暂不支持跨市场对比 — 所有股票需在同一市场")
+    market_code = codes.pop()
+
+    def load():
+        import pandas as pd
+        closes = {sym: _price_fund(sym)[0].rename(sym) for sym in seen}
+        frame = pd.concat(closes.values(), axis=1).dropna()
+        bars = pair_compare.WINDOWS[window]
+        if bars:
+            frame = frame.tail(bars + 1)
+        if len(frame) < pair_compare.MIN_BARS:
+            raise LookupError(f"只有 {len(frame)} 个共同交易日，不足以计算")
+        try:
+            bench = _benchmark(market_code)
+        except RuntimeError:
+            bench = None
+        conv = markets.get(market_code).conv
+        # Tickers for North America: "Advanced Micro Devices, Inc." does not
+        # fit in a matrix header, and NVDA is what everyone calls it anyway.
+        labels = {s: (_name(s) if market_code == "CN" else markets.split(s)[1]) for s in seen}
+        out = seesaw.analyse(frame, bench, labels=labels,
+                             bench_label=conv.benchmark_name if bench is not None else None)
+        return {**out, "market": market_code, "up_is_red": conv.up_is_red,
+                "window": window, "from": str(frame.index[0].date()),
+                "to": str(frame.index[-1].date())}
+
+    try:
+        return _seesaw_cache.get_or_compute((tuple(seen), window), load)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
 _strategy_cache = TTLCache(maxsize=8, ttl_s=30 * 60)
 # Cointegration over ten codes is 45 pairs of rolling OLS — seconds, not
 # milliseconds, and the same basket gets re-examined as you read it.

@@ -1629,3 +1629,43 @@ export type HolidayBlock = {
   before: HolidaySide | null;
   after: HolidaySide | null;
 };
+
+/** /basket/seesaw — see seesaw.py. Returns are in %; `resid` is after beta × index. */
+export type SeesawRes = {
+  n: number;
+  significant_at: number | null;
+  significant_min: number | null;
+  dates: string[];
+  returns: Record<string, (number | null)[]>;
+  resid: Record<string, (number | null)[]> | null;
+  betas: Record<string, number | null>;
+  raw_corr: (number | null)[][];
+  resid_corr: (number | null)[][] | null;
+  opposite_raw: (number | null)[][];
+  opposite_resid: (number | null)[][] | null;
+  avg_raw: number | null;
+  avg_resid: number | null;
+  roll: number;
+  strongest?: { a: string; b: string; corr: number | null; opposite: number | null;
+                recent_corr: number | null; recent_n: number };
+};
+
+export type SeesawCampStats = {
+  between: number | null; within_a: number | null; within_b: number | null;
+  opposite: number | null; recent: number | null; n: number;
+};
+
+export type Seesaw = {
+  symbols: string[]; labels: Record<string, string>; benchmark: string | null;
+  market: string; up_is_red: boolean; window: string; from: string; to: string;
+  daily: SeesawRes; weekly: SeesawRes;
+  camps: {
+    a: string[]; b: string[]; confirmed: boolean; oos_threshold: number | null;
+    /** Not confirmed on the first half, but clearly opposed lately. Absent from older backends. */
+    emerging?: boolean;
+    daily: SeesawCampStats; weekly: SeesawCampStats | null;
+    out_of_sample: { corr: number | null; same_split: boolean; half_from: string };
+    spread: (number | null)[]; spread_dates: string[];
+  } | null;
+  conclusions: string[];
+};
