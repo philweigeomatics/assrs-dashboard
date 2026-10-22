@@ -1669,3 +1669,38 @@ export type Seesaw = {
   } | null;
   conclusions: string[];
 };
+
+/** /basket/swing — see swing.py. Moves in %; multiples are capture ratios. */
+export type SwingStat = {
+  vol_annual_pct: number | null; avg_abs_daily_pct: number | null;
+  up_day_avg_pct?: number | null; down_day_avg_pct?: number | null;
+  beta?: number | null;
+  /** Average move on index-up days ÷ the index's average up-day move. */
+  beta_up?: number | null;
+  beta_down?: number | null;
+  asymmetry?: number | null;
+  resid_vol_daily_pct?: number | null;
+};
+
+export type SwingMoves = {
+  fall: number | null; reb20: number | null; reb60: number | null;
+  reb20_confirm: number | null; reb60_confirm: number | null;
+};
+
+export type Swing = {
+  symbols: string[]; labels: Record<string, string>; benchmark: string | null;
+  market: string; up_is_red: boolean; window: string; from: string; to: string;
+  threshold: number; entry: "trough" | "confirm"; horizons: number[];
+  stats: Record<string, SwingStat>;
+  episodes: {
+    peak: string; trough: string; turned: string | null; open: boolean; confirm: string | null;
+    market: SwingMoves; stocks: Record<string, SwingMoves>;
+  }[];
+  summary: Record<string, { avg_fall: number | null; avg_rebound: number | null;
+    ratio: number | null; beat: number; n: number } | null>;
+  now: { dd_from_high_pct: number | null; high_date: string; off_low_pct: number | null;
+         in_drawdown: boolean } | null;
+  history_from: string;
+  episode_count: number;
+  conclusions: string[];
+};

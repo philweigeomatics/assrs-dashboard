@@ -29,6 +29,7 @@ import { usePersistentState } from "../lib/usePersistentState";
 import { fixed, signed } from "../lib/format";
 import { splitMarket } from "../lib/symbols";
 import { SeesawPanel } from "../components/SeesawPanel";
+import { SwingPanel } from "../components/SwingPanel";
 
 const WINDOWS = [
   { id: "60", label: "3个月" },
@@ -89,6 +90,9 @@ export function Basket() {
         {q.data && <Body d={q.data} />}
         {symbols.length >= 2 && !q.isError && (
           <SeesawPanel symbols={symbols} window={window} ready={!!q.data} />
+        )}
+        {symbols.length >= 2 && !q.isError && (
+          <SwingPanel symbols={symbols} window={window} ready={!!q.data} />
         )}
       </main>
     </div>

@@ -25,7 +25,7 @@ import type {
   StrategyResult, WhatIfAi,
   Breadth, Heatmap, Leverage, Rotation, TopList, Wyckoff,
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
-  ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, Seasonality, Seesaw,
+  ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, Seasonality, Seesaw, Swing,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -80,6 +80,8 @@ export const api = {
   analysis: (t: string) => call<Analysis>(`/analysis/${t}`),
   seesaw: (symbols: string[], window: string) =>
     call<Seesaw>(`/basket/seesaw?symbols=${symbols.map(encodeURIComponent).join(",")}&window=${window}`),
+  swing: (symbols: string[], window: string, threshold: number, entry: string) =>
+    call<Swing>(`/basket/swing?symbols=${symbols.map(encodeURIComponent).join(",")}&window=${window}&threshold=${threshold}&entry=${entry}`),
   seasonality: (t: string, years: number) =>
     call<Seasonality>(`/seasonality/${t}?years=${years}`),
   simulate: (t: string, body: { pct: number; volume: number; open?: number; high?: number; low?: number }) =>

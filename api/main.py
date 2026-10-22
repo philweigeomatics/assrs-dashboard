@@ -726,6 +726,111 @@ def basket_seesaw(symbols: str = Query(..., description="comma-separated, 2-8, o
         raise HTTPException(503, str(exc))
 
 
+_long_cache = TTLCache(maxsize=60, ttl_s=6 * 3600)
+
+
+def _long_closes(symbol: str, years: int):
+    """
+    `years` of adjusted closes, cached. For drawdown episodes, which need far
+    more history than the 3-year frame the indicators use — a year holds one
+    or two corrections at most.
+    """
+    from datetime import date, timedelta
+
+    def load():
+        market, code = markets.parse(symbol)
+        start = date.today() - timedelta(days=int(years * 365.25))
+        s = market.fetch_closes_since(code, start)
+        if s is None or s.empty:
+            raise RuntimeError(f"price data for {symbol} could not be fetched — try again")
+        return s
+    return _long_cache.get_or_compute((symbol, years), load)
+
+
+def _long_bench(market_code: str, years: int):
+    from datetime import date, timedelta
+
+    def load():
+        mk = markets.get(market_code)
+        start = date.today() - timedelta(days=int(years * 365.25))
+        s = mk.fetch_benchmark_since(start)
+        if s is None or s.empty:
+            raise RuntimeError(f"{mk.conv.benchmark_name} 指数数据暂时读取不到 — 请稍后重试")
+        return s
+    return _long_cache.get_or_compute(("__bench__", market_code, years), load)
+
+
+_swing_cache = TTLCache(maxsize=40, ttl_s=20 * 60)
+
+
+@app.get("/basket/swing")
+def basket_swing(symbols: str = Query(..., description="comma-separated, 2-8, one market"),
+                 window: str = Query(pair_compare.DEFAULT_WINDOW),
+                 threshold: int = Query(8),
+                 entry: str = Query("trough", pattern="^(trough|confirm)$"),
+                 user: AppUser = Depends(current_user)):
+    """
+    多股对比 → 波动与反弹: does the bigger swinger win back more after a
+    market fall, and does it lose more on the way down? See swing.py.
+
+    The swing statistics use the page's window; the drawdown episodes use six
+    years, because a one-year window holds one or two at most.
+    """
+    import swing
+    if window not in pair_compare.WINDOWS:
+        raise HTTPException(422, f"window must be one of {sorted(pair_compare.WINDOWS)}")
+    if threshold not in swing.THRESHOLDS:
+        raise HTTPException(422, f"threshold must be one of {list(swing.THRESHOLDS)}")
+    try:
+        seen = list(dict.fromkeys(markets.canonical(s) for s in symbols.split(",") if s.strip()))
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+    if not 2 <= len(seen) <= pair_compare.MAX_BASKET:
+        raise HTTPException(422, f"需要 2–{pair_compare.MAX_BASKET} 只股票")
+    codes = {markets.split(s)[0] for s in seen}
+    if len(codes) > 1:
+        raise HTTPException(422, "暂不支持跨市场对比 — 所有股票需在同一市场")
+    market_code = codes.pop()
+
+    def load():
+        import pandas as pd
+        frame = pd.concat([_price_fund(s)[0].rename(s) for s in seen], axis=1).dropna()
+        try:
+            bench = _benchmark(market_code)
+        except RuntimeError:
+            bench = None
+        # Cut exactly as pair_compare.basket does — index days first, then the
+        # window — so the up/down multiples here equal the ranking table's
+        # 上/下行捕获 to the decimal.
+        if bench is not None:
+            frame = pd.concat([frame, bench.rename("__m")], axis=1).dropna()
+        bars = pair_compare.WINDOWS[window]
+        if bars:
+            frame = frame.tail(bars + 1)
+        if len(frame) < pair_compare.MIN_BARS:
+            raise LookupError(f"只有 {len(frame)} 个共同交易日，不足以计算")
+        if bench is not None:
+            bench = frame.pop("__m")
+        long = pd.concat([_long_closes(s, swing.HISTORY_YEARS).rename(s) for s in seen], axis=1)
+        try:
+            long_bench = _long_bench(market_code, swing.HISTORY_YEARS)
+        except RuntimeError:
+            long_bench = None
+        conv = markets.get(market_code).conv
+        labels = {s: (_name(s) if market_code == "CN" else markets.split(s)[1]) for s in seen}
+        out = swing.analyse(frame, bench, long, long_bench, labels=labels,
+                            bench_label=conv.benchmark_name, threshold=threshold, entry=entry)
+        return {**out, "market": market_code, "up_is_red": conv.up_is_red, "window": window,
+                "from": str(frame.index[0].date()), "to": str(frame.index[-1].date())}
+
+    try:
+        return _swing_cache.get_or_compute((tuple(seen), window, threshold, entry), load)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
 _strategy_cache = TTLCache(maxsize=8, ttl_s=30 * 60)
 # Cointegration over ten codes is 45 pairs of rolling OLS — seconds, not
 # milliseconds, and the same basket gets re-examined as you read it.
