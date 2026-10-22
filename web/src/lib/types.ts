@@ -1704,3 +1704,57 @@ export type Swing = {
   episode_count: number;
   conclusions: string[];
 };
+
+/** /strategies/chain — 接力与背离 along a chain of 板块 legs. See chain_rotation.py. */
+export type ChainEvent = {
+  date: string; leader_z: number | null; leader_pct: number | null;
+  path: (number | null)[]; end: number | null; followed: boolean;
+};
+
+export type ChainCell = {
+  leader: string; follower: string; n: number;
+  /** Follower's move in the leader's direction, in its own σ, above its norm. + = followed. */
+  excess: number | null;
+  follow_rate: number | null;
+  p: number | null; q: number | null; stable: boolean;
+  first: number | null; second: number | null; first_n?: number; second_n?: number;
+  up: number | null; down: number | null; n_up: number; n_down: number;
+  curve: (number | null)[] | null; base_curve: (number | null)[] | null;
+  events: ChainEvent[];
+};
+
+export type ChainEpisode = {
+  start: string; end: string; days: number; open: boolean; complete?: boolean;
+  days_to_peak?: number; peak_gain_pct?: number | null;
+  fall_after_peak_pct?: number | null; fwd20_pct?: number | null;
+};
+
+export type ChainDivergence = {
+  up: string; down: string; episodes: ChainEpisode[];
+  control: { n_days: number; fwd20_mean: number | null; fwd20_neg_share: number | null };
+  episodes_fwd20_mean: number | null; p_lower: number | null;
+  now: { diverging: boolean; days: number; up_weak: boolean; down_strong: boolean;
+         down_off_high_pct: number | null };
+  mask: boolean[];
+};
+
+export type ChainLive = {
+  leg: string; date: string; z: number | null; pct: number | null; direction: "up" | "down";
+  followers: { follower: string; horizon: number; excess: number | null; follow_rate: number | null;
+               n: number; q: number | null; stable: boolean; since: number | null; days_since: number }[];
+};
+
+export type ChainResult = {
+  legs: { name: string; tickers: string[]; beta: number | null }[];
+  k: number; lookback: number;
+  dates: string[];
+  index: Record<string, (number | null)[]>;
+  bench: (number | null)[];
+  breadth: (number | null)[];
+  z: Record<string, (number | null)[]>;
+  relay: Record<string, ChainCell[]>;
+  live: ChainLive[];
+  divergence: ChainDivergence[];
+  conclusions: string[];
+  missing: string[];
+};

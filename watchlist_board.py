@@ -58,7 +58,8 @@ def _chunks(items: list, size: int = CHUNK):
 
 
 # ── prices ───────────────────────────────────────────────────────────────────
-def _cn_bars(codes: list[str], start: str, end: str) -> dict[str, pd.Series]:
+def _cn_bars(codes: list[str], start: str, end: str,
+             chunk: int = CHUNK) -> dict[str, pd.Series]:
     """
     Forward-adjusted closes per ts_code, from two batched calls per chunk.
 
@@ -72,8 +73,8 @@ def _cn_bars(codes: list[str], start: str, end: str) -> dict[str, pd.Series]:
     api = _api()
     out: dict[str, pd.Series] = {}
 
-    for chunk in _chunks(codes):
-        joined = ",".join(chunk)
+    for part in _chunks(codes, chunk):
+        joined = ",".join(part)
         try:
             px = api.daily(ts_code=joined, start_date=start, end_date=end)
         except Exception as exc:                                   # noqa: BLE001

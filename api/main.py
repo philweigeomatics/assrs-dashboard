@@ -831,6 +831,95 @@ def basket_swing(symbols: str = Query(..., description="comma-separated, 2-8, on
         raise HTTPException(503, str(exc))
 
 
+@app.get("/sector-members")
+def sector_members_route(user: AppUser = Depends(current_user)):
+    """
+    Every 板块 and its stocks, for building a chain. Codes only — the page
+    already holds the full stock list and looks names up from it.
+    """
+    import data_manager
+    try:
+        mp = data_manager.get_sector_stock_map() or {}
+    except Exception as exc:                                    # noqa: BLE001
+        raise HTTPException(503, f"板块列表读取失败：{exc}"[:160])
+    return {k: sorted({str(t).split(".")[0] for t in (v or [])}) for k, v in sorted(mp.items())}
+
+
+class ChainLeg(BaseModel):
+    name: str = Field(..., min_length=1, max_length=20)
+    tickers: list[str] = Field(..., min_length=1, max_length=12)
+
+
+class ChainReq(BaseModel):
+    legs: list[ChainLeg] = Field(..., min_length=2, max_length=6)
+    lookback: int = 504
+    k: float = 2.0
+
+
+_chain_cache = TTLCache(maxsize=20, ttl_s=30 * 60)
+
+
+@app.post("/strategies/chain")
+def strategies_chain(req: ChainReq, user: AppUser = Depends(current_user)):
+    """
+    接力与背离 along a chain of groups, upstream to downstream. See
+    chain_rotation.py. A-shares only: the 板块 are A-share lists.
+    """
+    import chain_rotation
+    import data_manager
+    import watchlist_board
+    from datetime import datetime, timedelta
+
+    import lead_lag_stats
+    import pandas as pd
+    import pytz
+
+    if req.lookback not in chain_rotation.LOOKBACKS:
+        raise HTTPException(422, f"lookback must be one of {list(chain_rotation.LOOKBACKS)}")
+    if req.k not in chain_rotation.THRESHOLDS:
+        raise HTTPException(422, f"k must be one of {list(chain_rotation.THRESHOLDS)}")
+    legs = []
+    for leg in req.legs:
+        codes = list(dict.fromkeys(t.strip() for t in leg.tickers if re.fullmatch(r"\d{6}", t.strip())))
+        if not codes:
+            raise HTTPException(422, f"环节「{leg.name}」里没有有效的 A 股代码")
+        legs.append({"name": leg.name.strip(), "tickers": codes})
+    names = [x["name"] for x in legs]
+    if len(set(names)) != len(names):
+        raise HTTPException(422, "环节名称不能重复")
+
+    key = (tuple((x["name"], tuple(x["tickers"])) for x in legs), req.lookback, req.k)
+
+    def load():
+        sessions = req.lookback + chain_rotation.WARMUP + 5
+        bj = datetime.now(pytz.timezone("Asia/Shanghai"))
+        end = bj.strftime("%Y%m%d")
+        start = (bj - timedelta(days=lead_lag_stats.calendar_span(sessions))).strftime("%Y%m%d")
+        codes = sorted({t for x in legs for t in x["tickers"]})
+        ts = {data_manager.get_tushare_ticker(c): c for c in codes}
+        # Tushare caps a call at ~6,000 rows: as many codes per call as that allows.
+        per_call = max(1, 5500 // (sessions + 40))
+        bars = watchlist_board._cn_bars(list(ts), start, end, chunk=per_call)
+        if not bars:
+            raise RuntimeError("行情读取失败 — 请稍后重试")
+        closes = pd.DataFrame({ts[k]: v for k, v in bars.items()})
+        closes.index = pd.to_datetime(closes.index, format="%Y%m%d")
+        idx = data_manager.get_index_data_live("000300.SH", start_date=start, end_date=end)
+        if idx is None or idx.empty:
+            raise RuntimeError("沪深300 指数数据暂时读取不到 — 请稍后重试")
+        out = chain_rotation.analyse(closes.sort_index(), idx["Close"], legs,
+                                     k=req.k, lookback=req.lookback)
+        out["missing"] = [c for c in codes if c not in closes.columns]
+        return out
+
+    try:
+        return _chain_cache.get_or_compute(key, load)
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(422, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
 _strategy_cache = TTLCache(maxsize=8, ttl_s=30 * 60)
 # Cointegration over ten codes is 45 pairs of rolling OLS — seconds, not
 # milliseconds, and the same basket gets re-examined as you read it.

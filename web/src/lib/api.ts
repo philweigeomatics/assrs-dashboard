@@ -25,7 +25,7 @@ import type {
   StrategyResult, WhatIfAi,
   Breadth, Heatmap, Leverage, Rotation, TopList, Wyckoff,
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
-  ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, Seasonality, Seesaw, Swing,
+  ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, Seasonality, Seesaw, Swing, ChainResult,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -131,6 +131,12 @@ export const api = {
       body: JSON.stringify({ sector, tickers }),
     }),
   sectorNames: () => call<string[]>("/sectors"),
+  sectorMembers: () => call<Record<string, string[]>>("/sector-members"),
+  chain: (body: { legs: { name: string; tickers: string[] }[]; lookback: number; k: number }) =>
+    call<ChainResult>("/strategies/chain", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   watchlistBoard: () => call<WatchBoard>("/watchlist/board"),
   watchlist: (market?: "CN" | "NA") =>
     call<WatchRef[]>(`/watchlist${market ? `?market=${market}` : ""}`),

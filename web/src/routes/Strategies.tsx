@@ -19,6 +19,7 @@ import type { Num, StrategyResult, StrategyRow } from "../lib/types";
 import { NavBar } from "../components/NavBar";
 import { PairTrade } from "../components/PairTrade";
 import { LeadLag } from "../components/LeadLag";
+import { ChainRotation } from "../components/ChainRotation";
 import { fixed, signed } from "../lib/format";
 
 type TabId = "t-trading" | "mean-reversion" | "pair-trade" | "lead-lag";
@@ -38,10 +39,10 @@ const TABS: { id: TabId; label: string; blurb: string }[] = [
   },
   {
     id: "lead-lag",
-    label: "🕰️ 领先滞后",
-    blurb: "哪只票先动、哪只跟着动，以及这个时间差能不能拿来交易。"
-      + "格兰杰检验给方向，滞后相关给形状，协整与半衰期决定价差会不会收敛——"
-      + "三个问题分开看，因为一对股票常常过得了第一关、过不了第三关。",
+    label: "🔁 板块接力·背离",
+    blurb: "把板块按产业链从上游排到下游：某一环大涨大跌之后，哪一环接着动、往哪个方向动；"
+      + "上游走弱而下游还在高位时，下游之后怎么走。都按各自的常态衡量、扣除大盘，并与随机日比较。"
+      + "两只股票之间的格兰杰与协整检验仍在页面底部。",
   },
   {
     id: "mean-reversion",
@@ -83,7 +84,7 @@ export function Strategies() {
         </nav>
 
         {tab === "pair-trade" ? <PairTrade />
-          : tab === "lead-lag" ? <LeadLag />
+          : tab === "lead-lag" ? <RotationTab />
             : <Screen key={tab} id={tab} />}
       </main>
     </div>
@@ -295,5 +296,27 @@ function MRTable({ rows }: { rows: StrategyRow[] }) {
         </tr>
       ))}
     </Shell>
+  );
+}
+
+/**
+ * 板块接力 · 背离 first; the pairwise Granger / cointegration screen it
+ * replaced as the default is still here, folded, because pair trading uses it.
+ */
+function RotationTab() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="flex flex-col gap-3">
+      <ChainRotation />
+      <section className="card">
+        <button onClick={() => setOpen(!open)}
+          className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-elevated rounded-[10px]">
+          <span className="text-[13px] font-semibold">🕰️ 配对检验（高级）</span>
+          <span className="label">两只股票之间的格兰杰因果、滞后相关与协整 —— 配对交易用</span>
+          <span className="ml-auto label">{open ? "收起 ▲" : "展开 ▼"}</span>
+        </button>
+      </section>
+      {open && <LeadLag />}
+    </div>
   );
 }
