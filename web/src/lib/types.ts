@@ -17,6 +17,13 @@ export type Header = {
   pe_ttm: Num;
   pb: Num;
   turnover_rate: Num;
+  /** Parabolic SAR on the last bar. Absent from an API older than the field. */
+  sar?: {
+    value: Num; trend: "long" | "short";
+    /** How far price can move against the trend before the stop is hit, %. */
+    distance_pct: Num;
+    since: string; bars: number;
+  } | null;
 };
 
 export type ActiveBox = {
@@ -76,7 +83,8 @@ export type SeriesKey =
   | "ADX" | "ADX_LOWESS" | "ADX_BB_Upper" | "ADX_BB_Lower" | "DI_Plus" | "DI_Minus"
   | "Price_Z" | "Volume_Z"
   | "PE_TTM"
-  | "MF_Daily" | "MF_Rolling";
+  | "MF_Daily" | "MF_Rolling"
+  | "SAR" | "SAR_Trend";
 
 export type Chips = {
   /** Price of each histogram bin, low → high. */

@@ -163,6 +163,85 @@ def load_moneyflow(ticker: str, lookback_days: int = MF_LOOKBACK_DAYS):
 
 
 # ── the payload ──────────────────────────────────────────────────────────────
+#: Wilder's parabolic SAR, at the textbook settings everyone else's chart uses.
+SAR_STEP = 0.02
+SAR_MAX = 0.2
+
+
+def parabolic_sar(high: pd.Series, low: pd.Series, close: pd.Series,
+                  step: float = SAR_STEP, max_step: float = SAR_MAX) -> tuple[pd.Series, pd.Series]:
+    """
+    (SAR, trend) per bar — trend +1 while the stop trails below price (long),
+    -1 while it sits above (short). The first two bars have no SAR.
+
+    Wilder's rules: the stop moves toward the trend's extreme by an
+    acceleration factor that starts at `step` and grows by `step` each time a
+    new extreme is set, up to `max_step`. A long stop may not rise above
+    either of the two previous lows (a short stop not below the two previous
+    highs). When price crosses the stop the trend flips and the new stop
+    starts at the old trend's extreme.
+
+    Written out rather than imported because the common library version gets
+    that clamp subtly wrong: `ta`'s PSARIndicator moves the stop to the low
+    two bars back if that is below it, and only otherwise to the previous
+    low — so when the previous low is the lower of the two, its long stop is
+    left above it. Wilder's rule is the minimum of both. The test holds this
+    to `ta` everywhere that difference does not arise.
+    """
+    h, lo = high.to_numpy(dtype=float), low.to_numpy(dtype=float)
+    n = len(h)
+    sar = np.full(n, np.nan)
+    trend = np.full(n, np.nan)
+    if n < 3:
+        return pd.Series(sar, index=high.index), pd.Series(trend, index=high.index)
+    up = True
+    af = step
+    ep_up, ep_dn = h[0], lo[0]
+    prev = float(close.iloc[1])
+    for i in range(2, n):
+        if up:
+            cur = prev + af * (ep_up - prev)
+            if lo[i] < cur:
+                up, cur, ep_dn, af = False, ep_up, lo[i], step
+            else:
+                if h[i] > ep_up:
+                    ep_up, af = h[i], min(af + step, max_step)
+                cur = min(cur, lo[i - 1], lo[i - 2])
+        else:
+            cur = prev + af * (ep_dn - prev)
+            if h[i] > cur:
+                up, cur, ep_up, af = True, ep_dn, h[i], step
+            else:
+                if lo[i] < ep_dn:
+                    ep_dn, af = lo[i], min(af + step, max_step)
+                cur = max(cur, h[i - 1], h[i - 2])
+        sar[i] = cur
+        trend[i] = 1 if up else -1
+        prev = cur
+    return pd.Series(sar, index=high.index), pd.Series(trend, index=high.index)
+
+
+def sar_summary(analysis_df: pd.DataFrame) -> dict | None:
+    """Where the trailing stop sits on the last bar, and how long it has held."""
+    sar, trend = parabolic_sar(analysis_df['High'], analysis_df['Low'], analysis_df['Close'])
+    if sar.dropna().empty:
+        return None
+    t = trend.to_numpy()
+    last = int(t[-1])
+    flips = np.flatnonzero(t[1:] != t[:-1]) + 1
+    since = int(flips[-1]) if len(flips) else int(np.flatnonzero(np.isfinite(t))[0])
+    close = float(analysis_df['Close'].iloc[-1])
+    stop = float(sar.iloc[-1])
+    return {
+        "value": _num(stop, 3),
+        "trend": "long" if last > 0 else "short",
+        # How far price can move against the trend before the stop is hit.
+        "distance_pct": _num((close - stop) / close * 100 * (1 if last > 0 else -1), 2),
+        "since": analysis_df.index[since].strftime('%Y-%m-%d'),
+        "bars": int(len(t) - since),
+    }
+
+
 def build_series(analysis_df: pd.DataFrame,
                  fundamentals_df: pd.DataFrame | None = None,
                  moneyflow_df: pd.DataFrame | None = None,
@@ -172,6 +251,11 @@ def build_series(analysis_df: pd.DataFrame,
     returns a dict. Split from build_payload so the parity test can feed it
     the exact frames it hands the Streamlit chart function.
     """
+    # SAR over the whole history, then windowed: computed on the window alone
+    # it would start from scratch at the first visible bar and spend the
+    # opening weeks settling.
+    sar_full, sar_trend_full = parabolic_sar(analysis_df['High'], analysis_df['Low'],
+                                             analysis_df['Close'])
     df = chart_window(analysis_df, regime_anchor)
     n = len(df)
 
@@ -223,6 +307,8 @@ def build_series(analysis_df: pd.DataFrame,
         "DI_Plus": _arr(di_plus, 2), "DI_Minus": _arr(di_minus, 2),
         "Price_Z": _arr(price_z, 3), "Volume_Z": _arr(vol_z, 3),
         "PE_TTM": _arr(pe, 2),
+        "SAR": _arr(sar_full.reindex(df.index), 3),
+        "SAR_Trend": _arr(sar_trend_full.reindex(df.index), 0),
         "MF_Daily": _arr(mf_daily, 1) if has_mf else [None] * n,
         "MF_Rolling": _arr(mf_roll, 1) if has_mf else [None] * n,
     }
@@ -329,6 +415,7 @@ def build_header(analysis_df: pd.DataFrame, fundamentals_df: pd.DataFrame | None
             "pe_ttm": _num(profile.get("pe_ttm"), 2),
             "pb": _num(profile.get("pb"), 2),
         })
+    out["sar"] = sar_summary(analysis_df)
     return out
 
 

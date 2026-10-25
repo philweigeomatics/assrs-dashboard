@@ -615,6 +615,17 @@ function drawPane(chart: IChartApi, pane: PaneSpec, d: Analysis, h: Handles) {
     if (line.kind === "histogram") {
       s = chart.addSeries(HistogramSeries, { ...common, color: line.color });
       s.setData(histData(d, line));
+    } else if (line.kind === "dots") {
+      s = chart.addSeries(LineSeries, {
+        ...common, color: line.color, lineVisible: false,
+        pointMarkersVisible: true, pointMarkersRadius: 2, crosshairMarkerVisible: false,
+      });
+      s.setData(d.dates.map((t, i) => {
+        const v = line.values[i];
+        if (v == null || !Number.isFinite(v)) return { time: t as Time };
+        const c = line.colors?.[i];
+        return c ? { time: t as Time, value: v, color: c } : { time: t as Time, value: v };
+      }));
     } else {
       s = chart.addSeries(LineSeries, {
         ...common, color: line.color, lineWidth: line.width ?? 1,

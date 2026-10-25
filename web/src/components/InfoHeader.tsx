@@ -134,6 +134,14 @@ export function InfoHeader({ data }: { data: Analysis }) {
         <Chip label="箱体" value={boxChip.value} tone={boxChip.tone} title={boxChip.title} />
         <Chip label="波动" value={regimeCn} tone={regimeTone} />
         <Chip label="ADX" value={`${fixed(sg.adx, 1)}${sg.adx_pattern ? ` ${sg.adx_pattern}` : ""}`} tone="calm" />
+        {h.sar && (
+          <Chip label="SAR"
+            value={`${h.sar.trend === "long" ? "多" : "空"} ${fixed(h.sar.value)}（${h.sar.trend === "long" ? "−" : "+"}${fixed(h.sar.distance_pct, 1)}%）`}
+            tone={h.sar.trend === "long" ? "up" : "down"}
+            title={h.sar.trend === "long"
+              ? `抛物线 SAR 跟踪止损在 ${fixed(h.sar.value)}：收盘价再跌 ${fixed(h.sar.distance_pct, 1)}% 触及即转空。自 ${h.sar.since} 起为多，${h.sar.bars} 个交易日`
+              : `抛物线 SAR 在 ${fixed(h.sar.value)}：收盘价再涨 ${fixed(h.sar.distance_pct, 1)}% 越过即转多。自 ${h.sar.since} 起为空，${h.sar.bars} 个交易日`} />
+        )}
       </div>
     </section>
   );

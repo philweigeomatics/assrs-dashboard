@@ -24,7 +24,10 @@ export type LineSpec = {
   color: string;
   width?: 1 | 2 | 3 | 4;
   style?: LineStyleName;
-  kind?: "line" | "histogram";
+  /** "dots" draws a point per bar and no line — the parabolic SAR. */
+  kind?: "line" | "histogram" | "dots";
+  /** Per-point colours, for "dots". */
+  colors?: (string | null)[];
   /** Histogram colouring: by the value's sign, or by the candle body. */
   signBy?: "value" | "body";
   signColors?: [string, string];
@@ -111,6 +114,14 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
       { key: "EMA5", label: "EMA5", values: s(d, "EMA5"), color: "#db2777", style: "dashed", decimals: 2 },
       { key: "BB_Upper", label: "BB上", values: s(d, "BB_Upper"), color: "#94a3b8", decimals: 2 },
       { key: "BB_Lower", label: "BB下", values: s(d, "BB_Lower"), color: "#94a3b8", decimals: 2 },
+      // Parabolic SAR: a dot per bar, under price while the trend is up and
+      // over it while down, coloured by that direction in the market's own
+      // convention — the trailing stop, drawn where it would sit.
+      ...(hasData(d, "SAR") ? [{
+        key: "SAR", label: "SAR", values: s(d, "SAR"), color: "#64748b", kind: "dots" as const,
+        colors: (s(d, "SAR_Trend") ?? []).map((t) => (t == null ? null : t > 0 ? bull(d) : bear(d))),
+        decimals: 2,
+      }] : []),
     ],
     markers: [
       { key: "m_acc", label: "吸筹", idx: d.markers.price.accumulation, position: "belowBar", shape: "circle", color: "#ca8a04" },
