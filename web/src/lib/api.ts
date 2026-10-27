@@ -23,7 +23,7 @@ import type {
   AlertFeed, Analysis, BasketStats, CompareResult, HistoryRef, PairStats, SectorAnalysis,
   AlertNote, EquityBrief, NoteScorecard, PairTradeResult, SimResult, StockRef,
   StrategyResult, WhatIfAi,
-  Breadth, Heatmap, Leverage, Rotation, TopList, Wyckoff,
+  Breadth, Heatmap, Leverage, RiskBoard, Rotation, TopList, Wyckoff,
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
   ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, Seasonality, Seesaw, Swing, ChainResult,
 } from "./types";
@@ -285,6 +285,7 @@ export const api = {
   heatmap: () => call<Heatmap>("/market/heatmap"),
   breadth: (days = 60) => call<Breadth>(`/market/breadth?days=${days}`),
   leverage: () => call<Leverage[]>("/market/leverage"),
+  risk: () => call<RiskBoard>("/market/risk"),
   topList: () => call<TopList>("/market/toplist"),
   wyckoff: (index: string) => call<Wyckoff>(`/market/wyckoff?index=${index}`),
   rotation: (freq: "w" | "d") => call<Rotation>(`/market/rotation?freq=${freq}`),

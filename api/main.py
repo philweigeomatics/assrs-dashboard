@@ -1814,6 +1814,9 @@ _heatmap_cache = TTLCache(maxsize=1, ttl_s=30 * 60)
 _breadth_cache = TTLCache(maxsize=4, ttl_s=6 * 3600)
 _leverage_cache = TTLCache(maxsize=1, ttl_s=30 * 60)
 _toplist_cache = TTLCache(maxsize=1, ttl_s=4 * 3600)
+#: Every input is a daily print; the TTL is short only so the 涨停 backfill's
+#: progress shows up in the percentile while it runs.
+_risk_cache = TTLCache(maxsize=1, ttl_s=20 * 60)
 _wyckoff_cache = TTLCache(maxsize=4, ttl_s=60 * 60)
 _rotation_cache = TTLCache(maxsize=4, ttl_s=6 * 3600)
 #: Short, because half these markets are open while someone is looking at it
@@ -2069,6 +2072,16 @@ def market_leverage(user: AppUser = Depends(current_user)):
     """两融余额 and US margin debt."""
     from api import dashboard_api
     return _market_panel(_leverage_cache, "all", dashboard_api.leverage)
+
+
+@app.get("/market/risk")
+def market_risk(user: AppUser = Depends(current_user)):
+    """
+    🚦 市场风险 — liquidity, margin, limit-up sentiment, valuation, volatility,
+    each graded by its percentile since 2024-10-14.
+    """
+    import market_risk as mrisk
+    return _market_panel(_risk_cache, "all", mrisk.board)
 
 
 @app.get("/market/toplist")

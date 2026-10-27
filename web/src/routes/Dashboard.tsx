@@ -4,6 +4,7 @@
  * Six questions, in the order you would actually ask them on opening the app:
  *
  *   how did the world close?         全球指数
+ *   how fragile is the market?       市场风险
  *   where did money go today?        heatmap  ⇄  sector trend history
  *   where is it moving next?         相对轮动图
  *   what regime is the index in?     统计威科夫
@@ -31,6 +32,7 @@ import { WyckoffPanel } from "../components/market/WyckoffPanel";
 import { LeveragePanel } from "../components/market/LeveragePanel";
 import { TopList } from "../components/market/TopList";
 import { IndexStrip } from "../components/market/IndexStrip";
+import { RiskStrip } from "../components/market/RiskStrip";
 import { MacroPanel } from "../components/market/MacroPanel";
 import { CommodityPanel } from "../components/market/CommodityPanel";
 import { usePersistentState } from "../lib/usePersistentState";
@@ -58,6 +60,9 @@ export function Dashboard() {
   // are open while someone is looking at the page.
   const indices = useQuery({ queryKey: ["mkt", "indices"], queryFn: api.indices,
     staleTime: 5 * 60_000, refetchInterval: 5 * 60_000 });
+  // Daily prints, but the 涨停 history backfills while the page is open.
+  const risk = useQuery({ queryKey: ["mkt", "risk"], queryFn: api.risk,
+    staleTime: 20 * 60_000 });
   const heatmap = useQuery({ queryKey: ["mkt", "heatmap"], queryFn: api.heatmap,
     staleTime: 20 * 60_000, enabled: view === "heatmap" });
   const breadth = useQuery({ queryKey: ["mkt", "breadth"], queryFn: () => api.breadth(60),
@@ -87,6 +92,12 @@ export function Dashboard() {
           subtitle="A 股、亚太、欧美主要指数的最新涨跌。各市场收盘时间不同，卡片标的是它自己那根的日期。"
           q={indices}>
           {indices.data && <IndexStrip data={indices.data} />}
+        </Panel>
+
+        <Panel title="🚦 市场风险"
+          subtitle="流动性、杠杆、情绪、估值与波动，各自按新行情以来的分位分级。琥珀色是风险提示，不是涨跌。"
+          q={risk}>
+          {risk.data && <RiskStrip data={risk.data} />}
         </Panel>
 
         <Panel

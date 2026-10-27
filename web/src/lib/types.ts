@@ -1310,6 +1310,37 @@ export type MacroBoard = {
   as_of: string;
 };
 
+/** GET /market/risk — 🚦 市场风险, each tile graded by its regime percentile. */
+export type RiskTile = {
+  key: "turnover" | "margin" | "limits" | "valuation" | "vol";
+  label: string; unit: string;
+  value: Num; prev: Num;
+  asof: string;
+  /** Share of regime sessions at or below today, 0–100. Null on a thin sample. */
+  pct: Num;
+  /** Regime sessions behind the percentile. */
+  n: number;
+  median: Num;
+  state: string;
+  /** 0 nothing to flag · 1 worth watching · 2 a warning. Risk, not direction. */
+  level: 0 | 1 | 2;
+  note: string;
+  history: Num[];
+  dates: string[];
+  extra: { label: string; value: Num; unit: string }[];
+  /** 涨停 only: sessions since the anchor still waiting to be fetched. */
+  backfill?: number;
+};
+
+export type RiskBoard = {
+  tiles: RiskTile[];
+  missing: string[];
+  anchor: string;
+  backfill: { have: number; need: number };
+  flags: number;
+  as_of: string;
+};
+
 /** What the front two contracts say about a commodity market. */
 export type TermStructure = {
   state: "backwardation" | "contango" | "flat";
