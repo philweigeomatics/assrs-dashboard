@@ -920,6 +920,63 @@ def strategies_chain(req: ChainReq, user: AppUser = Depends(current_user)):
         raise HTTPException(503, str(exc))
 
 
+_cycle_data_cache = TTLCache(maxsize=1, ttl_s=6 * 3600)
+_cycle_cache = TTLCache(maxsize=4, ttl_s=6 * 3600)
+_cycle_pair_cache = TTLCache(maxsize=60, ttl_s=6 * 3600)
+
+
+def _cycle_data():
+    """Every 板块 index and 沪深300, read once and held — the read alone is ~14s."""
+    def load():
+        import data_manager
+        import sector_rotation
+        closes, _, _ = sector_rotation.load_sector_closes()
+        idx = data_manager.get_index_data_live("000300.SH", start_date="20240101")
+        bench = idx["Close"] if idx is not None and not idx.empty else None
+        return closes, bench
+    return _cycle_data_cache.get_or_compute("all", load)
+
+
+@app.get("/sector-cycle")
+def sector_cycle_view(basis: str = Query("abs", pattern="^(abs|rel)$"),
+                      user: AppUser = Depends(current_user)):
+    """
+    板块周期: each 板块's phase in its own trend cycle, and every pair ranked by
+    how strongly they see-saw, against phase-randomised surrogates and
+    corrected for all of them. See sector_cycle.py. ~20s cold, then cached.
+    """
+    import sector_cycle
+    try:
+        closes, bench = _cycle_data()
+        latest = max(s.index.max() for s in closes.values())
+        return _cycle_cache.get_or_compute(
+            (basis, str(latest.date())),
+            lambda: sector_cycle.analyse(closes, bench, basis))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.get("/sector-cycle/pair")
+def sector_cycle_pair(a: str = Query(..., min_length=1, max_length=40),
+                      b: str = Query(..., min_length=1, max_length=40),
+                      basis: str = Query("abs", pattern="^(abs|rel)$"),
+                      user: AppUser = Depends(current_user)):
+    """Two 板块 side by side: both oscillators, the turns, and the evidence."""
+    import sector_cycle
+    try:
+        closes, bench = _cycle_data()
+        latest = max(s.index.max() for s in closes.values())
+        return _cycle_pair_cache.get_or_compute(
+            (a, b, basis, str(latest.date())),
+            lambda: sector_cycle.pair_detail(closes, a, b, bench, basis))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+
+
 _strategy_cache = TTLCache(maxsize=8, ttl_s=30 * 60)
 # Cointegration over ten codes is 45 pairs of rolling OLS — seconds, not
 # milliseconds, and the same basket gets re-examined as you read it.

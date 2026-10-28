@@ -20,9 +20,10 @@ import { NavBar } from "../components/NavBar";
 import { PairTrade } from "../components/PairTrade";
 import { LeadLag } from "../components/LeadLag";
 import { ChainRotation } from "../components/ChainRotation";
+import { SectorCycle } from "../components/SectorCycle";
 import { fixed, signed } from "../lib/format";
 
-type TabId = "t-trading" | "mean-reversion" | "pair-trade" | "lead-lag";
+type TabId = "t-trading" | "mean-reversion" | "pair-trade" | "lead-lag" | "sector-cycle";
 
 const TABS: { id: TabId; label: string; blurb: string }[] = [
   {
@@ -43,6 +44,12 @@ const TABS: { id: TabId; label: string; blurb: string }[] = [
     blurb: "把板块按产业链从上游排到下游：某一环大涨大跌之后，哪一环接着动、往哪个方向动；"
       + "上游走弱而下游还在高位时，下游之后怎么走。都按各自的常态衡量、扣除大盘，并与随机日比较。"
       + "两只股票之间的格兰杰与协整检验仍在页面底部。",
+  },
+  {
+    id: "sector-cycle",
+    label: "📈 板块周期",
+    blurb: "每个板块此刻在自己的趋势周期里处于上行、回落、下行还是回升，已经走了几天、通常走几天；"
+      + "以及哪些板块历史上此起彼伏——用随机对照检验过、并按 325 对一起校正后仍成立的那些。",
   },
   {
     id: "mean-reversion",
@@ -85,6 +92,7 @@ export function Strategies() {
 
         {tab === "pair-trade" ? <PairTrade />
           : tab === "lead-lag" ? <RotationTab />
+          : tab === "sector-cycle" ? <SectorCycle />
             : <Screen key={tab} id={tab} />}
       </main>
     </div>

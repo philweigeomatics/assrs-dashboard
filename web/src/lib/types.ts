@@ -1797,3 +1797,45 @@ export type ChainResult = {
   conclusions: string[];
   missing: string[];
 };
+
+/** /sector-cycle — see sector_cycle.py. Oscillator values are in σ of each 板块's own spread. */
+export type CyclePhase = "up" | "topping" | "down" | "bottoming";
+
+export type CycleRow = {
+  sector: string; beta: number | null;
+  osc: number | null; slope: number | null;
+  phase: CyclePhase | null; days: number; typical: number | null;
+  typical_all: Partial<Record<CyclePhase, number | null>>;
+  last_cross: { dir: "up" | "down"; date: string; days_ago: number } | null;
+  spark: (number | null)[];
+};
+
+export type CyclePair = {
+  a: string; b: string; best_lag: number; best_corr: number | null; corr0: number | null;
+  p: number | null; q: number | null; opposite: number | null; opposite_expected: number | null;
+};
+
+export type SectorCycle = {
+  basis: "abs" | "rel"; start: string; end: string; days: number;
+  board: CycleRow[]; pairs: CyclePair[]; spark_dates: string[];
+  phases: Record<CyclePhase, string>;
+};
+
+export type CycleFollow = {
+  events: number; hits: number; rate: number | null; chance: number | null;
+  median_offset: number | null; p: number | null;
+};
+
+export type CyclePairDetail = {
+  a: string; b: string; basis: "abs" | "rel"; dates: string[];
+  osc_a: (number | null)[]; osc_b: (number | null)[];
+  opposite_mask: boolean[];
+  cross_a: { up: number[]; down: number[] }; cross_b: { up: number[]; down: number[] };
+  lag: { best_lag: number; best_corr: number | null; corr0: number | null; p: number | null;
+         null_median: number | null; curve: (number | null)[]; lags: number[] };
+  opposite: { share: number | null; expected: number | null; p: number | null };
+  a_up_b_down: CycleFollow; a_down_b_up: CycleFollow;
+  now: Record<"a" | "b", { phase: CyclePhase | null; osc: number | null;
+    last_cross: { dir: "up" | "down"; date: string; days_ago: number } | null }>;
+  conclusions: string[];
+};
