@@ -1555,6 +1555,107 @@ def portfolio_delete_fund(fund_id: int, user: AppUser = Depends(current_user)):
             raise HTTPException(404, str(exc))
 
 
+# ── 自建指数 ──────────────────────────────────────────────────────────────────
+class IndexMemberReq(BaseModel):
+    ticker: str = Field(..., max_length=20)
+    name: str | None = Field(None, max_length=60)
+    weight_pct: float | None = Field(None, ge=0, le=100)
+    added_on: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class IndexRulesReq(BaseModel):
+    name: str = Field(..., max_length=60)
+    method: str
+    rebalance: str
+    cap_pct: float | None = None
+    base_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class IndexCreateReq(IndexRulesReq):
+    market: str = Field(..., pattern="^(CN|US)$")
+    members: list[IndexMemberReq] = Field(default_factory=list, max_length=60)
+
+
+class IndexWeightReq(BaseModel):
+    weight_pct: float = Field(..., ge=0, le=100)
+
+
+def _index_call(user: AppUser, fn, *a, **kw):
+    """One error mapping for every index route."""
+    from api import index_api
+
+    with _as_user(user):
+        try:
+            return fn(*a, **kw)
+        except index_api.MissingTables as exc:
+            raise HTTPException(503, str(exc))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc))
+
+
+@app.get("/custom-index")
+def custom_index_list(user: AppUser = Depends(current_user)):
+    """The caller's indexes, plus the methods and schedules to choose from."""
+    from api import index_api
+    return _index_call(user, index_api.list_indexes, user.id)
+
+
+@app.post("/custom-index")
+def custom_index_create(req: IndexCreateReq, user: AppUser = Depends(current_user)):
+    from api import index_api
+    return _index_call(user, index_api.create_index, user.id, name=req.name, market=req.market,
+                       method=req.method, rebalance=req.rebalance, cap_pct=req.cap_pct,
+                       base_date=req.base_date, members=[m.model_dump() for m in req.members])
+
+
+@app.get("/custom-index/{index_id}")
+def custom_index_detail(index_id: int, user: AppUser = Depends(current_user)):
+    """The index computed from its definition: level, members, contribution, change log."""
+    from api import index_api
+    return _index_call(user, index_api.compute, user.id, index_id)
+
+
+@app.put("/custom-index/{index_id}")
+def custom_index_update(index_id: int, req: IndexRulesReq, user: AppUser = Depends(current_user)):
+    from api import index_api
+    return _index_call(user, index_api.update_rules, user.id, index_id, name=req.name, method=req.method,
+                       rebalance=req.rebalance, cap_pct=req.cap_pct, base_date=req.base_date)
+
+
+@app.delete("/custom-index/{index_id}")
+def custom_index_delete(index_id: int, user: AppUser = Depends(current_user)):
+    from api import index_api
+    return _index_call(user, index_api.delete_index, user.id, index_id)
+
+
+@app.post("/custom-index/{index_id}/members")
+def custom_index_add(index_id: int, req: IndexMemberReq, user: AppUser = Depends(current_user)):
+    from api import index_api
+    return _index_call(user, index_api.add_member, user.id, index_id, ticker=req.ticker, name=req.name,
+                       added_on=req.added_on, weight_pct=req.weight_pct)
+
+
+@app.patch("/custom-index/{index_id}/members/{member_id}")
+def custom_index_weight(index_id: int, member_id: int, req: IndexWeightReq,
+                        user: AppUser = Depends(current_user)):
+    from api import index_api
+    return _index_call(user, index_api.set_weight, user.id, index_id, member_id, req.weight_pct)
+
+
+@app.delete("/custom-index/{index_id}/members/{member_id}")
+def custom_index_remove(index_id: int, member_id: int,
+                        mode: str = Query("end", pattern="^(end|purge)$"),
+                        on: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+                        user: AppUser = Depends(current_user)):
+    """`end` removes from a date and keeps the history; `purge` deletes a mistake."""
+    from api import index_api
+    return _index_call(user, index_api.remove_member, user.id, index_id, member_id, mode=mode, on=on)
+
+
 class RebuildReq(BaseModel):
     """Which sectors to rebuild. Empty means every one of them."""
     sectors: list[str] = Field(default_factory=list, max_length=100)

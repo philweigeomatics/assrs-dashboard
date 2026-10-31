@@ -1872,3 +1872,56 @@ export type UsEtfDetail = {
   close: (number | null)[]; ma50: (number | null)[]; ma200: (number | null)[];
   stretch: (number | null)[]; bands: Partial<Record<"10" | "50" | "90", number | null>>;
 };
+
+// ── 自建指数 ──────────────────────────────────────────────────────────────────
+export type IndexMethod = "equal" | "equal_hold" | "cap" | "cap_capped" | "price" | "custom";
+export type IndexRebalance = "M" | "Q" | "H" | "Y" | "never";
+
+export type CustomIndexRef = {
+  id: number; name: string; market: "CN" | "US"; method: IndexMethod; rebalance: IndexRebalance;
+  cap_pct: number | null; base_date: string; created_at: string; rules_updated_at: string;
+  members?: number;
+};
+
+export type CustomIndexList = {
+  indexes: CustomIndexRef[];
+  methods: Record<IndexMethod, { label: string; hint: string }>;
+  rebalance: Record<IndexRebalance, string>;
+};
+
+export type IndexWindow = "1d" | "5d" | "1m" | "3m" | "all";
+
+export type IndexMember = {
+  id: number; ticker: string; name: string;
+  status: "active" | "halted" | "pending" | "nodata" | "removed" | "delisted";
+  weight: number | null; target: number | null; custom: number | null;
+  price: number | null; ret_1d: number | null;
+  contrib: Record<IndexWindow, number | null>;
+  added_on: string; removed_on: string | null; exit_price: number | null;
+};
+
+export type IndexEvent = {
+  date: string; kind: "start" | "add" | "remove" | "rebalance";
+  ticker?: string; name?: string; reason?: "user" | "delisted"; turnover?: number | null; n?: number;
+};
+
+type IndexRet = Record<"1d" | "5d" | "1m" | "3m" | "1y" | "ytd" | "all", number | null>;
+
+export type CustomIndexDetail = {
+  index: CustomIndexRef;
+  as_of: string; start: string; live_from: string | null;
+  method_label: string; rebalance_label: string; bench_label: string;
+  stats: { level: number | null; ret: IndexRet; vol: number | null; max_dd: number | null;
+           max_dd_date: string | null; dd_now: number | null; d200: number | null };
+  bench_ret: IndexRet | null;
+  chart: { dates: string[]; level: (number | null)[]; ma200: (number | null)[]; bench: (number | null)[] | null };
+  members: IndexMember[];
+  events: IndexEvent[];
+  guessed_caps: string[];
+  next_rebalance: string | null;
+  hold: boolean;
+};
+
+export type IndexRulesBody = {
+  name: string; method: IndexMethod; rebalance: IndexRebalance; cap_pct: number | null; base_date: string;
+};

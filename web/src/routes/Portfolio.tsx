@@ -6,6 +6,9 @@
  * writes the same `funds` / `fund_positions` rows the Streamlit page wrote,
  * so a portfolio made in either app is visible in both.
  *
+ * 自建组合&指数 is the third: an index you define (members, weighting,
+ * rebalance) and watch — US or A-shares — rather than an allocation you hold.
+ *
  * 我的组合 manages ONE fund at a time, picked from a dropdown. Every fund
  * expanded at once meant five NAV curves and five drift charts competing for
  * the same screen, and none of them readable.
@@ -21,11 +24,13 @@ import { FundTrack } from "../components/portfolio/FundTrack";
 import { DriftChart } from "../components/portfolio/DriftChart";
 import { Rebalance } from "../components/portfolio/Rebalance";
 import { Industries } from "../components/portfolio/Industries";
+import { CustomIndex } from "../components/portfolio/CustomIndex";
 import { fixed, signed } from "../lib/format";
 
 const SECTIONS = [
   { id: "build", label: "🎯 组合优化" },
   { id: "mine", label: "💼 我的组合" },
+  { id: "index", label: "📊 自建组合&指数" },
 ] as const;
 
 type Section = typeof SECTIONS[number]["id"];
@@ -72,6 +77,8 @@ export function Portfolio() {
             onChanged={() => qc.invalidateQueries({ queryKey: ["pf", "funds"] })}
             onBuild={() => setTab("build")} />
         )}
+
+        {tab === "index" && <CustomIndex />}
       </main>
     </div>
   );

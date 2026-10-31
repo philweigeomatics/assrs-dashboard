@@ -26,6 +26,7 @@ import type {
   Breadth, Heatmap, Leverage, RiskBoard, Rotation, TopList, Wyckoff,
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
   ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, Seasonality, Seesaw, Swing, ChainResult, SectorCycle, CyclePairDetail, UsEtfBoard, UsEtfDetail,
+  CustomIndexList, CustomIndexDetail, IndexRulesBody,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -134,6 +135,29 @@ export const api = {
   sectorMembers: () => call<Record<string, string[]>>("/sector-members"),
   usEtf: () => call<UsEtfBoard>("/market/us-etf"),
   usEtfDetail: (t: string) => call<UsEtfDetail>(`/market/us-etf/${t}`),
+  indexes: () => call<CustomIndexList>("/custom-index"),
+  indexDetail: (id: number) => call<CustomIndexDetail>(`/custom-index/${id}`),
+  createIndex: (body: IndexRulesBody & { market: "CN" | "US";
+                                         members: { ticker: string; name?: string; weight_pct?: number | null }[] }) =>
+    call<{ id: number }>("/custom-index", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    }),
+  updateIndex: (id: number, body: IndexRulesBody) =>
+    call<{ id: number; recomputed: boolean }>(`/custom-index/${id}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    }),
+  deleteIndex: (id: number) => call<{ deleted: number }>(`/custom-index/${id}`, { method: "DELETE" }),
+  addIndexMember: (id: number, m: { ticker: string; name?: string; added_on?: string; weight_pct?: number | null }) =>
+    call<{ ticker: string; added_on: string }>(`/custom-index/${id}/members`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(m),
+    }),
+  setIndexWeight: (id: number, memberId: number, weight_pct: number) =>
+    call<{ ok: boolean }>(`/custom-index/${id}/members/${memberId}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ weight_pct }),
+    }),
+  removeIndexMember: (id: number, memberId: number, mode: "end" | "purge", on?: string) =>
+    call<{ ok: boolean }>(`/custom-index/${id}/members/${memberId}?mode=${mode}${on ? `&on=${on}` : ""}`,
+      { method: "DELETE" }),
   sectorCycle: (basis: "abs" | "rel") => call<SectorCycle>(`/sector-cycle?basis=${basis}`),
   sectorCyclePair: (a: string, b: string, basis: "abs" | "rel") =>
     call<CyclePairDetail>(`/sector-cycle/pair?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&basis=${basis}`),

@@ -1,0 +1,477 @@
+"""
+api/index_api.py — 自建指数: storage, data, and the decision that a stock is gone.
+
+The ledger itself is custom_index.py and pure. This file owns the three
+things that are not:
+
+PERSISTENCE, OWNER-SCOPED
+
+Two tables (supabase/migrations/20261031_custom_index.sql). Every read and
+write carries `app_user_id`; a member row is reached only through an index
+the caller owns.
+
+THE LIVE BOUNDARY
+
+An index built today and started in 2024 has a history made with hindsight:
+its members were picked knowing how they did. `rules_updated_at` records the
+last time the definition changed, and everything before it is drawn as
+回溯（假设）— only what came after was watched, not chosen.
+
+EXITS ARE WRITTEN DOWN
+
+Yahoo drops an acquired company's history some weeks after the deal closes.
+Recomputed from live data alone, a member that left would later vanish from
+its own past and the index history would silently rewrite itself. So the
+first time a member is seen to have stopped trading, its last day, exit price
+and price history are stored on its row, and every later computation uses
+them. US: no bar for 10 sessions. A-shares: the exchange's own delisted list
+must agree — a 停牌 can last months, and a halted stock comes back.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from datetime import date, datetime, timedelta
+
+import pandas as pd
+
+import custom_index as C
+
+NAME_MAX = 40
+MAX_MEMBERS = 60
+MIN_MEMBERS = 2
+EARLIEST = date(2015, 1, 1)
+US_EXIT_GAP = 10
+CN_STALE_GAP = 20
+MIGRATION = "supabase/migrations/20261031_custom_index.sql"
+_A = re.compile(r"^\d{6}$")
+_US = re.compile(r"^US:[A-Z][A-Z0-9.\-]{0,9}$")
+
+
+class MissingTables(RuntimeError):
+    pass
+
+
+def _db():
+    import data_manager
+    return data_manager.db
+
+
+def _guard(fn):
+    """A missing table is a setup step, not a bug — say which step."""
+    def wrapped(*a, **kw):
+        try:
+            return fn(*a, **kw)
+        except (ValueError, LookupError):
+            raise
+        except Exception as exc:                                   # noqa: BLE001
+            if "custom_index" in str(exc) and ("does not exist" in str(exc) or "PGRST" in str(exc)
+                                               or "relation" in str(exc)):
+                raise MissingTables(f"自建指数的表尚未创建 — 请在 Supabase SQL 编辑器运行 {MIGRATION}") from exc
+            raise
+    wrapped.__name__ = fn.__name__
+    return wrapped
+
+
+def _rows(df) -> list[dict]:
+    if df is None or df.empty:
+        return []
+    out = df.where(pd.notna(df), None).to_dict("records")
+    for r in out:
+        for k in ("added_on", "removed_on", "base_date"):
+            if r.get(k) is not None:
+                r[k] = str(r[k])[:10]
+    return out
+
+
+def _today(market: str) -> date:
+    import pytz
+    tz = "Asia/Shanghai" if market == "CN" else "America/New_York"
+    return datetime.now(pytz.timezone(tz)).date()
+
+
+# ── validation ───────────────────────────────────────────────────────────────
+def clean_ticker(market: str, t: str) -> str:
+    t = (t or "").strip().upper()
+    if market == "CN":
+        t = t.split(".")[0].removeprefix("CN:")
+        if not _A.match(t):
+            raise ValueError(f"{t} 不是 A 股代码")
+        return t
+    if not t.startswith("US:"):
+        t = "US:" + t
+    if not _US.match(t):
+        raise ValueError(f"{t} 不是美股代码")
+    return t
+
+
+def clean_rules(market: str, method: str, rebalance: str, cap_pct, base_date) -> dict:
+    if market not in ("CN", "US"):
+        raise ValueError("市场只能是 A 股或美股")
+    if method not in C.METHODS:
+        raise ValueError(f"未知的加权方式：{method}")
+    if rebalance not in C.REBALANCE:
+        raise ValueError(f"未知的调仓频率：{rebalance}")
+    cap = None
+    if method == "cap_capped":
+        cap = float(cap_pct if cap_pct is not None else C.DEFAULT_CAP * 100)
+        if not 2 <= cap <= 50:
+            raise ValueError("单只上限应在 2%–50% 之间")
+    try:
+        bd = date.fromisoformat(str(base_date)[:10])
+    except ValueError:
+        raise ValueError("起始日格式应为 YYYY-MM-DD") from None
+    if bd < EARLIEST or bd > _today(market):
+        raise ValueError(f"起始日应在 {EARLIEST} 与今天之间")
+    return {"market": market, "method": method, "rebalance": rebalance, "cap_pct": cap,
+            "base_date": str(bd)}
+
+
+def _clean_name(name: str) -> str:
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("指数名不能为空")
+    if len(name) > NAME_MAX:
+        raise ValueError(f"指数名最多 {NAME_MAX} 个字符")
+    return name
+
+
+# ── storage ──────────────────────────────────────────────────────────────────
+def _own(user_id: int, index_id: int) -> dict:
+    rows = _rows(_db().read_table("custom_index", filters={"id": int(index_id), "app_user_id": int(user_id)}))
+    if not rows:
+        raise LookupError("没有这个指数")
+    return rows[0]
+
+
+def _members(index_id: int) -> list[dict]:
+    rows = _rows(_db().read_table("custom_index_member", filters={"index_id": int(index_id)}))
+    return sorted(rows, key=lambda r: (r["added_on"], r["ticker"]))
+
+
+@_guard
+def list_indexes(user_id: int) -> dict:
+    rows = _rows(_db().read_table("custom_index", filters={"app_user_id": int(user_id)}))
+    out = []
+    for r in sorted(rows, key=lambda r: str(r.get("created_at") or ""), reverse=True):
+        mem = _members(r["id"])
+        out.append({**_public(r), "members": sum(1 for m in mem if not m.get("removed_on"))})
+    return {"indexes": out, "methods": {k: {"label": v[0], "hint": v[1]} for k, v in C.METHODS.items()},
+            "rebalance": C.REBALANCE}
+
+
+def _public(r: dict) -> dict:
+    return {"id": int(r["id"]), "name": r["name"], "market": r["market"], "method": r["method"],
+            "rebalance": r["rebalance"], "cap_pct": r.get("cap_pct"), "base_date": r["base_date"],
+            "created_at": str(r.get("created_at") or "")[:19],
+            "rules_updated_at": str(r.get("rules_updated_at") or "")[:19]}
+
+
+@_guard
+def create_index(user_id: int, *, name: str, market: str, method: str, rebalance: str,
+                 cap_pct, base_date, members: list[dict]) -> dict:
+    name = _clean_name(name)
+    rules = clean_rules(market, method, rebalance, cap_pct, base_date)
+    picked: dict[str, dict] = {}
+    for m in members or []:
+        t = clean_ticker(market, m.get("ticker", ""))
+        picked[t] = {"ticker": t, "name": (m.get("name") or "")[:60] or None,
+                     "weight_pct": float(m["weight_pct"]) if m.get("weight_pct") not in (None, "") else None}
+    if len(picked) < MIN_MEMBERS:
+        raise ValueError(f"至少需要 {MIN_MEMBERS} 只成分股")
+    if len(picked) > MAX_MEMBERS:
+        raise ValueError(f"最多 {MAX_MEMBERS} 只成分股")
+    if method == "custom" and not any((m["weight_pct"] or 0) > 0 for m in picked.values()):
+        raise ValueError("自定权重需要至少一只设定了权重")
+
+    db = _db()
+    if _rows(db.read_table("custom_index", filters={"app_user_id": int(user_id), "name": name})):
+        raise ValueError(f"已有同名指数「{name}」")
+    now = datetime.utcnow().isoformat()
+    db.insert_records("custom_index", [{"app_user_id": int(user_id), "name": name, **rules,
+                                        "base_value": C.BASE_VALUE, "created_at": now,
+                                        "rules_updated_at": now}])
+    back = _rows(db.read_table("custom_index", filters={"app_user_id": int(user_id), "name": name}))
+    if not back:
+        raise RuntimeError("指数已写入但读不回来 — 请刷新后确认")
+    iid = int(back[0]["id"])
+    db.insert_records("custom_index_member", [{"index_id": iid, **m, "added_on": rules["base_date"]}
+                                              for m in picked.values()])
+    return {"id": iid}
+
+
+@_guard
+def update_rules(user_id: int, index_id: int, *, name: str, method: str, rebalance: str,
+                 cap_pct, base_date) -> dict:
+    """A new rule recomputes the whole history, so the live boundary moves to now."""
+    cur = _own(user_id, index_id)
+    name = _clean_name(name)
+    rules = clean_rules(cur["market"], method, rebalance, cap_pct, base_date)
+    db = _db()
+    if name != cur["name"] and _rows(db.read_table("custom_index", filters={"app_user_id": int(user_id), "name": name})):
+        raise ValueError(f"已有同名指数「{name}」")
+    changed = any(str(cur.get(k)) != str(rules[k]) for k in ("method", "rebalance", "cap_pct", "base_date"))
+    vals = {"name": name, **{k: v for k, v in rules.items() if k != "market"}}
+    if changed:
+        vals["rules_updated_at"] = datetime.utcnow().isoformat()
+    db.update_records("custom_index", vals, {"id": int(index_id), "app_user_id": int(user_id)})
+    # Founding members move with the start date; later additions keep theirs.
+    if rules["base_date"] != cur["base_date"]:
+        for m in _members(index_id):
+            if m["added_on"] == cur["base_date"] or m["added_on"] < rules["base_date"]:
+                db.update_records("custom_index_member", {"added_on": rules["base_date"]}, {"id": int(m["id"])})
+    return {"id": int(index_id), "recomputed": changed}
+
+
+@_guard
+def delete_index(user_id: int, index_id: int) -> dict:
+    _own(user_id, index_id)
+    _db().delete_records("custom_index_member", {"index_id": int(index_id)})
+    _db().delete_records("custom_index", {"id": int(index_id), "app_user_id": int(user_id)})
+    return {"deleted": int(index_id)}
+
+
+@_guard
+def add_member(user_id: int, index_id: int, *, ticker: str, name: str | None,
+               added_on: str | None, weight_pct) -> dict:
+    cur = _own(user_id, index_id)
+    t = clean_ticker(cur["market"], ticker)
+    when = str(added_on or _today(cur["market"]))[:10]
+    if when < cur["base_date"]:
+        raise ValueError("加入日不能早于指数起始日")
+    if when > str(_today(cur["market"])):
+        raise ValueError("加入日不能晚于今天")
+    mem = _members(index_id)
+    if any(m["ticker"] == t and not m.get("removed_on") for m in mem):
+        raise ValueError(f"{t} 已在指数中")
+    if sum(1 for m in mem if not m.get("removed_on")) >= MAX_MEMBERS:
+        raise ValueError(f"最多 {MAX_MEMBERS} 只成分股")
+    _db().insert_records("custom_index_member", [{
+        "index_id": int(index_id), "ticker": t, "name": (name or "")[:60] or None, "added_on": when,
+        "weight_pct": float(weight_pct) if weight_pct not in (None, "") else None}])
+    return {"ticker": t, "added_on": when}
+
+
+@_guard
+def remove_member(user_id: int, index_id: int, member_id: int, *, mode: str, on: str | None) -> dict:
+    """`end` keeps the history (removed from a date); `purge` deletes a mistake outright."""
+    cur = _own(user_id, index_id)
+    rows = [m for m in _members(index_id) if int(m["id"]) == int(member_id)]
+    if not rows:
+        raise LookupError("没有这个成分股")
+    m = rows[0]
+    if mode == "purge":
+        _db().delete_records("custom_index_member", {"id": int(member_id), "index_id": int(index_id)})
+    else:
+        when = str(on or _today(cur["market"]))[:10]
+        if when <= m["added_on"]:
+            raise ValueError("移出日应晚于加入日 — 加错了的请用「删除」")
+        _db().update_records("custom_index_member", {"removed_on": when, "removal": "user"},
+                             {"id": int(member_id)})
+    return {"ok": True}
+
+
+@_guard
+def set_weight(user_id: int, index_id: int, member_id: int, weight_pct) -> dict:
+    _own(user_id, index_id)
+    w = float(weight_pct)
+    if not 0 <= w <= 100:
+        raise ValueError("权重应在 0–100 之间")
+    _db().update_records("custom_index_member", {"weight_pct": w},
+                         {"id": int(member_id), "index_id": int(index_id)})
+    return {"ok": True}
+
+
+# ── data ─────────────────────────────────────────────────────────────────────
+def _cn_closes(codes: list[str], start: date) -> tuple[pd.DataFrame, pd.Series]:
+    import data_manager
+    import watchlist_board
+    end = _today("CN")
+    sessions = max(30, int((end - start).days * 0.68))
+    ts = {data_manager.get_tushare_ticker(c): c for c in codes}
+    per_call = max(1, 5500 // (sessions + 40))
+    bars = watchlist_board._cn_bars(list(ts), start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), chunk=per_call)
+    closes = pd.DataFrame({ts[k]: v for k, v in bars.items()})
+    if not closes.empty:
+        closes.index = pd.to_datetime(closes.index, format="%Y%m%d")
+    idx = data_manager.get_index_data_live("000300.SH", start_date=start.strftime("%Y%m%d"),
+                                           end_date=end.strftime("%Y%m%d"))
+    if idx is None or idx.empty:
+        raise RuntimeError("沪深300 指数数据暂时读取不到 — 请稍后重试")
+    return closes.sort_index(), idx["Close"]
+
+
+def _us_closes(tickers: list[str], start: date) -> tuple[pd.DataFrame, pd.Series]:
+    import yfinance as yf
+    codes = [t.split(":", 1)[1] for t in tickers]
+    want = list(dict.fromkeys(codes + ["SPY"]))
+    raw = yf.download(" ".join(want), start=str(start), interval="1d", auto_adjust=True,
+                      progress=False, threads=True)
+    if raw is None or raw.empty:
+        raise RuntimeError("美股行情暂时读取不到 — 请稍后重试")
+    closes = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw[["Close"]].rename(columns={"Close": want[0]})
+    closes = closes.copy()
+    if closes.index.tz is not None:
+        closes.index = closes.index.tz_localize(None)
+    closes.index = closes.index.normalize()
+    if "SPY" not in closes or closes["SPY"].dropna().empty:
+        raise RuntimeError("SPY 数据暂时读取不到 — 请稍后重试")
+    bench = closes["SPY"].dropna()
+    out = pd.DataFrame({f"US:{c}": closes[c] for c in codes if c in closes.columns and closes[c].notna().any()})
+    return out.sort_index(), bench
+
+
+def _cn_delisted() -> set[str]:
+    def load():
+        import watchlist_board
+        df = watchlist_board._api().stock_basic(list_status="D", fields="ts_code")
+        return {str(c).split(".")[0] for c in (df["ts_code"] if df is not None and not df.empty else [])}
+    return _aux_cache.get_or_compute("cn-delisted", load)
+
+
+def _caps(market: str, tickers: list[str], closes: pd.DataFrame, start: date) -> pd.DataFrame:
+    """
+    A-shares: 流通市值 history from Tushare, exact. US: today's share count ×
+    each day's adjusted price — Yahoo keeps no reliable share-count history,
+    so buybacks and issuance between rebalances are not reflected.
+    """
+    out = {}
+    if market == "CN":
+        import data_manager
+        import watchlist_board
+        api = watchlist_board._api()
+        for t in tickers:
+            def load(t=t):
+                df = api.daily_basic(ts_code=data_manager.get_tushare_ticker(t), start_date=start.strftime("%Y%m%d"),
+                                     end_date=_today("CN").strftime("%Y%m%d"), fields="trade_date,circ_mv")
+                if df is None or df.empty:
+                    return None
+                s = pd.Series(pd.to_numeric(df["circ_mv"], errors="coerce").to_numpy(),
+                              pd.to_datetime(df["trade_date"], format="%Y%m%d"))
+                return s.sort_index()
+            s = _aux_cache.get_or_compute(("cap", t, str(start)), load)
+            if s is not None:
+                out[t] = s
+    else:
+        import yfinance as yf
+        for t in tickers:
+            def shares(t=t):
+                try:
+                    return float(yf.Ticker(t.split(":", 1)[1]).fast_info["shares"])
+                except Exception:                                  # noqa: BLE001
+                    return None
+            n = _aux_cache.get_or_compute(("shares", t), shares)
+            if n and t in closes.columns:
+                out[t] = closes[t] * n
+    return pd.DataFrame(out).reindex(closes.index).ffill() if out else None
+
+
+def _record_exits(index_id: int, members: list[dict], closes: pd.DataFrame, market: str) -> list[dict]:
+    """Write down members that stopped trading, once; return the updated rows."""
+    open_rows = {m["ticker"]: m for m in members if not m.get("removed_on")}
+    if not open_rows or closes.empty:
+        return members
+    sub = closes[[t for t in open_rows if t in closes.columns]]
+    if market == "US":
+        exits = C.detect_exits(sub, US_EXIT_GAP)
+    else:
+        stale = C.detect_exits(sub, CN_STALE_GAP)
+        exits = {t: d for t, d in stale.items() if t in _cn_delisted()} if stale else {}
+    for t, last in exits.items():
+        m = open_rows[t]
+        s = closes[t].dropna()
+        frozen = json.dumps({str(d.date()): round(float(v), 6) for d, v in s.items()})
+        vals = {"removed_on": str(last.date()), "removal": "delisted",
+                "exit_price": round(float(s.iloc[-1]), 6), "frozen_closes": frozen}
+        _db().update_records("custom_index_member", vals, {"id": int(m["id"])})
+        m.update(vals)
+    return members
+
+
+def _with_frozen(closes: pd.DataFrame, members: list[dict], cal: pd.DatetimeIndex) -> pd.DataFrame:
+    """Prices Yahoo no longer has, from the copy kept when the member left."""
+    for m in members:
+        if not m.get("frozen_closes"):
+            continue
+        t = m["ticker"]
+        if t in closes.columns and closes[t].notna().any():
+            continue
+        try:
+            fz = pd.Series(json.loads(m["frozen_closes"]))
+        except (TypeError, ValueError):
+            continue
+        fz.index = pd.to_datetime(fz.index)
+        closes[t] = fz.reindex(cal)
+    return closes
+
+
+# ── compute ──────────────────────────────────────────────────────────────────
+class _Cache:
+    """Expiring memo. The result key is the index's whole definition, so an
+    edit is simply a different key — nothing has to be invalidated."""
+
+    def __init__(self, maxsize: int, ttl_s: float):
+        self.maxsize, self.ttl, self._d = maxsize, ttl_s, {}
+
+    def get_or_compute(self, key, fn):
+        import time
+        hit = self._d.get(key)
+        if hit and time.time() - hit[0] < self.ttl:
+            return hit[1]
+        val = fn()
+        self._d[key] = (time.time(), val)
+        while len(self._d) > self.maxsize:
+            self._d.pop(next(iter(self._d)))
+        return val
+
+
+_price_cache = _Cache(maxsize=30, ttl_s=15 * 60)
+_aux_cache = _Cache(maxsize=400, ttl_s=12 * 3600)
+_result_cache = _Cache(maxsize=30, ttl_s=15 * 60)
+
+
+@_guard
+def compute(user_id: int, index_id: int) -> dict:
+    idx = _own(user_id, index_id)
+    members = _members(index_id)
+    if not members:
+        raise LookupError("指数里还没有成分股")
+    key = (int(index_id), json.dumps([idx, members], sort_keys=True, default=str))
+
+    def run():
+        market = idx["market"]
+        start = date.fromisoformat(idx["base_date"])
+        tickers = sorted({m["ticker"] for m in members})
+        closes, bench = _price_cache.get_or_compute(
+            (market, tuple(tickers), str(start)),
+            lambda: (_cn_closes if market == "CN" else _us_closes)(tickers, start))
+        cal = bench.index[bench.index >= pd.Timestamp(start)]
+        closes = closes.reindex(cal)
+        mem = _record_exits(index_id, [dict(m) for m in members], closes, market)
+        closes = _with_frozen(closes.copy(), mem, cal)
+        cap = float(idx.get("cap_pct") or C.DEFAULT_CAP * 100) / 100
+        caps = (_caps(market, tickers, closes, start)
+                if idx["method"] in ("cap", "cap_capped") else None)
+        ledger = C.build(closes, mem, method=idx["method"], rebalance=idx["rebalance"],
+                         base_date=start, base_value=float(idx.get("base_value") or C.BASE_VALUE),
+                         cap=cap, caps=caps)
+        names = {}
+        if market == "CN":
+            from api.portfolio_api import _cn_names
+            names = _cn_names()
+        out = C.summarise(ledger, members=mem, names=names, method=idx["method"],
+                          rebalance=idx["rebalance"], cap=cap, bench=bench,
+                          live_from=str(idx.get("rules_updated_at") or "")[:10] or None,
+                          closes=closes, caps=caps)
+        label = {m["ticker"]: (names.get(m["ticker"]) or m.get("name") or m["ticker"]) for m in mem}
+        for e in out["events"]:
+            if e.get("ticker"):
+                e["name"] = label.get(e["ticker"], e["ticker"])
+        out["index"] = _public(idx)
+        out["bench_label"] = "沪深300" if market == "CN" else "SPY（含分红）"
+        out["method_label"] = C.METHODS[idx["method"]][0]
+        out["rebalance_label"] = C.REBALANCE[idx["rebalance"]]
+        return out
+
+    return _result_cache.get_or_compute(key, run)
