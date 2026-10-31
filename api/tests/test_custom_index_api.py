@@ -156,3 +156,67 @@ def test_a_missing_table_names_the_migration(monkeypatch):
     monkeypatch.setattr(A, "_db", lambda: Empty())
     with pytest.raises(A.MissingTables, match="20261031_custom_index.sql"):
         A.list_indexes(1)
+
+
+# ── the dashboard and the daily job ──────────────────────────────────────────
+LONG = pd.bdate_range("2024-01-02", "2025-06-30")
+
+
+def long_prices(calls, gone=None):
+    def fetch(tickers, start):
+        calls.append(tuple(tickers))
+        data = {t: pd.Series(np.linspace(10 + i, 20 + 3 * i, len(LONG)), LONG) for i, t in enumerate(sorted(tickers))}
+        if gone and gone in data:
+            data[gone][data[gone].index > "2025-05-30"] = np.nan
+        return pd.DataFrame(data), pd.Series(np.linspace(100, 120, len(LONG)), LONG)
+    return fetch
+
+
+@pytest.fixture
+def fresh(db):
+    A._union.clear()
+    yield db
+    A._union.clear()
+
+
+def test_the_board_downloads_once_for_all_indexes(fresh, monkeypatch):
+    calls = []
+    monkeypatch.setattr(A, "_us_closes", long_prices(calls))
+    make(name="一", base_date="2024-01-02")
+    make(name="二", base_date="2024-03-01", members=[{"ticker": "CCC"}, {"ticker": "AAA"}])
+    out = A.board_rows(1, "US")
+    assert len(calls) == 1 and set(calls[0]) == {"US:AAA", "US:BBB", "US:CCC"}
+    assert sorted(r["name"] for r in out["rows"]) == ["一", "二"]
+    assert all(r["group"] == "我的指数" and r["index_id"] for r in out["rows"])
+    assert A.board_rows(1, "CN") == {"rows": [], "young": [], "failed": []}
+
+
+def test_a_young_index_is_listed_not_given_readings(fresh, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", long_prices([]))
+    make(name="新", base_date="2025-03-03")
+    out = A.board_rows(1, "US")
+    assert out["rows"] == [] and out["young"][0]["name"] == "新" and out["young"][0]["days"] < 220
+
+
+def test_the_daily_job_computes_everyone_and_reports_new_exits(fresh, monkeypatch):
+    calls = []
+    monkeypatch.setattr(A, "_us_closes", long_prices(calls, gone="US:BBB"))
+    make(user=1, name="甲", base_date="2024-01-02")
+    make(user=2, name="乙", base_date="2024-01-02", members=[{"ticker": "AAA"}, {"ticker": "CCC"}])
+    report = A.refresh_all()
+    assert len(calls) == 1
+    by = {r["name"]: r for r in report}
+    assert by["甲"]["ok"] and by["甲"]["new_exits"] == ["US:BBB"]
+    assert by["乙"]["ok"] and by["乙"]["new_exits"] == []
+    # the second run finds nothing new
+    A._result_cache._d.clear()
+    assert {r["name"]: r["new_exits"] for r in A.refresh_all()} == {"甲": [], "乙": []}
+
+
+def test_stretch_detail_is_the_boards_view_of_an_index(fresh, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", long_prices([]))
+    iid = make(base_date="2024-01-02")
+    d = A.stretch_detail(1, iid)
+    assert d["name"] == "光模块" and len(d["dates"]) == len(d["close"]) == len(d["stretch"])
+    with pytest.raises(LookupError):
+        A.stretch_detail(2, iid)

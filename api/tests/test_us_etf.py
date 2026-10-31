@@ -166,3 +166,50 @@ def test_live_only_while_new_york_trades_and_the_bar_is_todays():
     assert U.session_state(pd.Timestamp("2026-10-27"), wed_noon) == "closed"
     assert U.session_state(pd.Timestamp("2026-10-28"), datetime(2026, 10, 28, 17, 0, tzinfo=ny)) == "closed"
     assert U.session_state(pd.Timestamp("2026-10-31"), datetime(2026, 10, 31, 12, 0, tzinfo=ny)) == "closed"
+
+
+# ── the same board for any series ────────────────────────────────────────────
+def test_the_watchers_own_indexes_are_not_part_of_market_breadth():
+    rows = [U.row(t, walk(i), None) for i, (t, _, _) in enumerate(U.UNIVERSE)]
+    rows = [r for r in rows if r]
+    base = U.breadth(rows)
+    mine = U.row("IDX1", walk(99, drift=0.002), None, name="光模块", group=U.MINE)
+    assert mine["name"] == "光模块" and mine["group"] == U.MINE
+    assert U.breadth(rows + [mine]) == base
+
+
+def test_the_a_share_board_reads_against_csi300():
+    import cn_index as N
+    closes = pd.DataFrame({t: walk(i) for i, (t, _, _) in enumerate(N.UNIVERSE)})
+    out = N.analyse(closes)
+    assert out["market"] == "CN" and out["session"] == "closed" and out["bench_name"] == "沪深300"
+    assert out["breadth"]["n"] == sum(1 for _, _, g in N.UNIVERSE if g != "大盘")
+    semi = next(r for r in out["rows"] if r["ticker"] == "H30184.CSI")
+    hs = closes["000300.SH"]
+    s = closes["H30184.CSI"]
+    expect = ((s.iloc[-1] / s.iloc[-64]) / (hs.iloc[-1] / hs.iloc[-64]) - 1) * 100
+    assert semi["name"] == "半导体" and semi["rs_3m"] == pytest.approx(expect, abs=0.06)
+    assert next(r for r in out["rows"] if r["ticker"] == "000300.SH")["rs_3m"] is None
+    assert "行业与主题指数" in out["conclusions"][0]
+    assert N.detail(closes, "H30184.CSI")["name"] == "半导体"
+
+
+def test_every_a_share_code_is_routable():
+    import re
+    import cn_index as N
+    assert all(re.match(N.CODE_RE, t) for t, _, _ in N.UNIVERSE)
+    assert len({t for t, _, _ in N.UNIVERSE}) == len(N.UNIVERSE)
+    assert {g for _, _, g in N.UNIVERSE} == set(N.GROUPS)
+
+
+def test_a_young_series_gets_no_stretch_percentile():
+    """Two years of one rally is not a history to rank against."""
+    young = walk(5, n=450, drift=0.003)
+    r = U.row("IDX1", young, None, name="光模块", group=U.MINE)
+    assert r is not None and r["stretch_rank"] is None and r["after"] is None
+    assert U.row("XLK", walk(5), None)["stretch_rank"] is not None
+
+
+def test_conclusions_name_an_index_and_ticker_an_etf():
+    assert U._label({"ticker": "URA", "name": "铀"}) == "URA"
+    assert U._label({"ticker": "399967.SZ", "name": "军工"}) == "军工"

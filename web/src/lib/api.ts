@@ -26,7 +26,7 @@ import type {
   Breadth, Heatmap, Leverage, RiskBoard, Rotation, TopList, Wyckoff,
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
   ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, Seasonality, Seesaw, Swing, ChainResult, SectorCycle, CyclePairDetail, UsEtfBoard, UsEtfDetail,
-  CustomIndexList, CustomIndexDetail, IndexRulesBody,
+  CustomIndexList, CustomIndexDetail, IndexRulesBody, BoardMarket, MineBoard,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -135,6 +135,10 @@ export const api = {
   sectorMembers: () => call<Record<string, string[]>>("/sector-members"),
   usEtf: () => call<UsEtfBoard>("/market/us-etf"),
   usEtfDetail: (t: string) => call<UsEtfDetail>(`/market/us-etf/${t}`),
+  cnIndex: () => call<UsEtfBoard>("/market/cn-index"),
+  cnIndexDetail: (code: string) => call<UsEtfDetail>(`/market/cn-index/${code}`),
+  indexBoard: (market: BoardMarket) => call<MineBoard>(`/custom-index/board?market=${market}`),
+  indexStretch: (id: number) => call<UsEtfDetail>(`/custom-index/${id}/stretch`),
   indexes: () => call<CustomIndexList>("/custom-index"),
   indexDetail: (id: number) => call<CustomIndexDetail>(`/custom-index/${id}`),
   createIndex: (body: IndexRulesBody & { market: "CN" | "US";

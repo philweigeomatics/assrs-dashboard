@@ -23,11 +23,16 @@ their 200-day, how many above the 50-day, how many in golden cross.
 
 Prices are Yahoo's, split- and dividend-adjusted. During US trading hours
 the last bar is today's, 15 minutes delayed and still moving.
+
+The readings are not specific to ETFs: `row`, `analyse` and `detail` take
+any close series, so the A-share theme indices (cn_index.py) and a user's
+own 自建指数 are read with exactly the same arithmetic.
 """
 
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -62,10 +67,19 @@ GROUPS = ["大盘", "板块", "科技细分", "医疗与金融", "工业与消�
 NAMES = {t: n for t, n, _ in UNIVERSE}
 GROUP_OF = {t: g for t, _, g in UNIVERSE}
 
+#: A user's own indexes sit on the same board, but are not part of the
+#: market's breadth — that describes the market, not the watcher's picks.
+MINE = "我的指数"
+
 FWD_DAYS = 63          # "the next three months"
 EPISODE_GAP = 21       # stretched days this close are one episode
 SPARK_WEEKS = 52
 MIN_BARS = 220         # enough for a 200-day average and some slope
+#: A stretch is ranked against the series' own history only once there is
+#: two years of it. Younger, the history is one regime — a 自建指数 started
+#: in a rally has only ever been far above its average, and would read
+#: "0th percentile, washed out" while 3% below it.
+MIN_RANK_DAYS = 500
 
 
 def _f(v, nd=2):
@@ -155,7 +169,8 @@ def trend_state(above50: bool, above200: bool) -> str:
             (False, False): "空头"}[(above50, above200)]
 
 
-def row(t: str, close: pd.Series, bench: pd.Series | None) -> dict | None:
+def row(t: str, close: pd.Series, bench: pd.Series | None, *, name: str | None = None,
+        group: str | None = None, bench_ticker: str = BENCH) -> dict | None:
     close = close.dropna()
     if len(close) < MIN_BARS:
         return None
@@ -172,7 +187,8 @@ def row(t: str, close: pd.Series, bench: pd.Series | None) -> dict | None:
     cross_days = int(len(g) - flips[-1]) if len(flips) else None
     yr = close.tail(252)
     hi, lo = float(yr.max()), float(yr.min())
-    pct_rank = float((dist.dropna() < d200).mean() * 100)
+    hist = dist.dropna()
+    pct_rank = float((hist < d200).mean() * 100) if len(hist) >= MIN_RANK_DAYS else None
 
     r = close.pct_change()
     vol20 = float(r.tail(20).std() * math.sqrt(252) * 100)
@@ -186,7 +202,7 @@ def row(t: str, close: pd.Series, bench: pd.Series | None) -> dict | None:
     ytd_ret = _f(_pct(last, float(prev_year.iloc[-1])), 1) if len(prev_year) else None
 
     rs = None
-    if bench is not None and t != BENCH:
+    if bench is not None and t != bench_ticker:
         b = bench.reindex(close.index).ffill()
         if b.notna().sum() > 70:
             rs = _f(((last / float(close.iloc[-64])) / (float(b.iloc[-1]) / float(b.iloc[-64])) - 1) * 100, 1)
@@ -195,15 +211,15 @@ def row(t: str, close: pd.Series, bench: pd.Series | None) -> dict | None:
     # asked at the extremes of the ETF's own range — in the middle, "what
     # happened next" is just the base rate.
     after = None
-    if pct_rank >= 80:
+    if pct_rank is not None and pct_rank >= 80:
         after = forward_after(close, dist, above=True, level=d200)
-    elif pct_rank <= 20:
+    elif pct_rank is not None and pct_rank <= 20:
         after = forward_after(close, dist, above=False, level=d200)
 
     weekly = close.tail(SPARK_WEEKS * 5)[::-5][::-1]
     weekly_ma = ma200.reindex(weekly.index)
     return {
-        "ticker": t, "name": NAMES.get(t, t), "group": GROUP_OF.get(t, ""),
+        "ticker": t, "name": name or NAMES.get(t, t), "group": group if group is not None else GROUP_OF.get(t, ""),
         "price": _f(last, 2), "date": str(close.index[-1].date()),
         "ret": {"1d": ret(1), "5d": ret(5), "1m": ret(21), "3m": ret(63), "1y": ret(252), "ytd": ytd_ret},
         "d50": _f(d50, 1), "d200": _f(d200, 1), "slope200": _f(slope200, 2),
@@ -222,7 +238,7 @@ def row(t: str, close: pd.Series, bench: pd.Series | None) -> dict | None:
 # ── the board ────────────────────────────────────────────────────────────────
 def breadth(rows: list[dict]) -> dict:
     """Across the sector and industry funds — the broad-market ones are what is being explained."""
-    pool = [r for r in rows if r["group"] != "大盘"]
+    pool = [r for r in rows if r["group"] not in ("大盘", MINE)]
     if not pool:
         return {}
     n = len(pool)
@@ -238,7 +254,12 @@ def breadth(rows: list[dict]) -> dict:
     }
 
 
-def conclusions(rows: list[dict], br: dict) -> list[str]:
+def _label(r: dict) -> str:
+    """An ETF is called by its ticker; an index code like 399967.SZ means nothing — use its name."""
+    return r["ticker"] if re.fullmatch(r"[A-Z]{1,5}", r["ticker"]) else r["name"]
+
+
+def conclusions(rows: list[dict], br: dict, noun: str = "行业与主题 ETF") -> list[str]:
     if not br:
         return []
     out = []
@@ -248,7 +269,7 @@ def conclusions(rows: list[dict], br: dict) -> list[str]:
             "多数仍在长期均线上方，但并不普遍" if share >= 0.5 else
             "多数已跌破长期均线 —— 结构性走弱" if share >= 0.3 else
             "绝大多数在长期均线下方 —— 普遍的下降趋势")
-    out.append(f"{n} 个行业与主题 ETF 中，{br['above200']} 个在 200 日均线上方、{br['above50']} 个在 50 日均线上方："
+    out.append(f"{n} 个{noun}中，{br['above200']} 个在 200 日均线上方、{br['above50']} 个在 50 日均线上方："
                f"{tone}。")
     if br["above50"] < br["above200"] - 0.2 * n:
         out.append("50 日均线上方的明显少于 200 日上方：长期趋势还在，但短期在普遍回调。")
@@ -264,10 +285,10 @@ def conclusions(rows: list[dict], br: dict) -> list[str]:
     for r in hot[:2]:
         a = r.get("after")
         if not a:
-            out.append(f"{r['ticker']} 现在的拉伸程度在它 {r['history_years']:.0f} 年的历史里几乎没有先例"
+            out.append(f"{_label(r)} 现在的拉伸程度在它 {r['history_years']:.0f} 年的历史里几乎没有先例"
                        f"（不足 3 次可比），历史给不出参照 —— 这本身就是风险。")
         if a:
-            out.append(f"{r['ticker']} 过去 {a['episodes']} 次拉伸到这个程度，之后 3 个月中位 {a['median']:+.1f}%"
+            out.append(f"{_label(r)} 过去 {a['episodes']} 次拉伸到这个程度，之后 3 个月中位 {a['median']:+.1f}%"
                        f"（{a['down_share'] * 100:.0f}% 的情况下跌，期间最大回撤中位 {a['worst_median']:.1f}%）；"
                        f"所有日子的 3 个月中位是 {a['base_median']:+.1f}%。")
     # `is not None`, not `or`: the most washed-out ETF of all has rank 0.
@@ -279,30 +300,36 @@ def conclusions(rows: list[dict], br: dict) -> list[str]:
         for r in cold[:2]:
             a = r.get("after")
             if a:
-                out.append(f"{r['ticker']} 过去 {a['episodes']} 次跌到这个程度，之后 3 个月中位 {a['median']:+.1f}%"
+                out.append(f"{_label(r)} 过去 {a['episodes']} 次跌到这个程度，之后 3 个月中位 {a['median']:+.1f}%"
                            f"（{(1 - a['down_share']) * 100:.0f}% 的情况上涨）；所有日子的 3 个月中位是 "
                            f"{a['base_median']:+.1f}%。次数很少，是参照不是规律。")
             else:
-                out.append(f"{r['ticker']} 已低于它历史上任何可比的位置 —— 没有先例可参照。")
+                out.append(f"{_label(r)} 已低于它历史上任何可比的位置 —— 没有先例可参照。")
     return out
 
 
-def analyse(closes: pd.DataFrame, now: datetime | None = None) -> dict:
-    bench = closes[BENCH].dropna() if BENCH in closes.columns else None
-    rows = [x for x in (row(t, closes[t], bench) for t, _, _ in UNIVERSE if t in closes.columns) if x]
+def analyse(closes: pd.DataFrame, now: datetime | None = None, *,
+            universe: list[tuple[str, str, str]] = UNIVERSE, groups: list[str] = GROUPS,
+            bench: str = BENCH, bench_name: str = "SPY", noun: str = "行业与主题 ETF",
+            session: str | None = None) -> dict:
+    """The whole board. `session` overrides the New York clock — Tushare's
+    index bars are end-of-day only, so an A-share board is always 'closed'."""
+    b = closes[bench].dropna() if bench in closes.columns else None
+    rows = [x for x in (row(t, closes[t], b, name=n, group=g, bench_ticker=bench)
+                        for t, n, g in universe if t in closes.columns) if x]
     if not rows:
-        raise LookupError("没有足够历史的美股 ETF 数据")
+        raise LookupError("没有足够历史的数据")
     br = breadth(rows)
     last = closes.index.max()
     return {
-        "as_of": str(last.date()), "session": session_state(last, now),
-        "groups": GROUPS, "rows": rows, "breadth": br,
-        "conclusions": conclusions(rows, br),
-        "missing": [t for t, _, _ in UNIVERSE if t not in {r["ticker"] for r in rows}],
+        "as_of": str(last.date()), "session": session or session_state(last, now),
+        "groups": groups, "rows": rows, "breadth": br, "bench": bench, "bench_name": bench_name,
+        "conclusions": conclusions(rows, br, noun),
+        "missing": [t for t, _, _ in universe if t not in {r["ticker"] for r in rows}],
     }
 
 
-def detail(closes: pd.DataFrame, ticker: str, years: int = 5) -> dict:
+def detail(closes: pd.DataFrame, ticker: str, years: int = 5, names: dict | None = None) -> dict:
     """One ETF over `years`: price with 50/200-day lines and its stretch with its own bands."""
     if ticker not in closes.columns:
         raise LookupError(f"没有 {ticker}")
@@ -313,7 +340,7 @@ def detail(closes: pd.DataFrame, ticker: str, years: int = 5) -> dict:
     ma50 = close.rolling(50).mean()[cut]
     ma200 = close.rolling(200).mean()[cut]
     return {
-        "ticker": ticker, "name": NAMES.get(ticker, ticker),
+        "ticker": ticker, "name": (names or NAMES).get(ticker, ticker),
         "dates": [str(d.date()) for d in close.index[cut]],
         "close": [_f(v, 2) for v in close[cut].to_numpy()],
         "ma50": [_f(v, 2) for v in ma50.to_numpy()],

@@ -995,7 +995,7 @@ def market_us_etf(user: AppUser = Depends(current_user)):
     """
     import us_etf
     try:
-        return us_etf.analyse(_etf_closes())
+        return {**us_etf.analyse(_etf_closes()), "market": "US"}
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:
@@ -1009,6 +1009,39 @@ def market_us_etf_detail(etf: str = Path(..., pattern="^[A-Z]{2,5}$"),
     import us_etf
     try:
         return us_etf.detail(_etf_closes(), etf)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+_cn_index_cache = TTLCache(maxsize=1, ttl_s=30 * 60)
+
+
+def _cn_index_closes():
+    """Ten years of every A-share theme index — one Tushare call each, four at a time — held 30 minutes."""
+    import cn_index
+    return _cn_index_cache.get_or_compute("all", cn_index.fetch)
+
+
+@app.get("/market/cn-index")
+def market_cn_index(user: AppUser = Depends(current_user)):
+    """A 股主题指数: the US ETF board's readings, for the indices the A-share theme ETFs track."""
+    import cn_index
+    try:
+        return cn_index.analyse(_cn_index_closes())
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.get("/market/cn-index/{code}")
+def market_cn_index_detail(code: str = Path(..., pattern=r"^(\d{6}|H\d{5})\.(SH|SZ|CSI)$"),
+                           user: AppUser = Depends(current_user)):
+    import cn_index
+    try:
+        return cn_index.detail(_cn_index_closes(), code)
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:
@@ -1610,6 +1643,20 @@ def custom_index_create(req: IndexCreateReq, user: AppUser = Depends(current_use
     return _index_call(user, index_api.create_index, user.id, name=req.name, market=req.market,
                        method=req.method, rebalance=req.rebalance, cap_pct=req.cap_pct,
                        base_date=req.base_date, members=[m.model_dump() for m in req.members])
+
+
+@app.get("/custom-index/board")
+def custom_index_board(market: str = Query(..., pattern="^(CN|US)$"), user: AppUser = Depends(current_user)):
+    """The caller's indexes in one market as rows of the dashboard board (我的指数)."""
+    from api import index_api
+    return _index_call(user, index_api.board_rows, user.id, market)
+
+
+@app.get("/custom-index/{index_id}/stretch")
+def custom_index_stretch(index_id: int, user: AppUser = Depends(current_user)):
+    """The board's detail chart for one of the caller's indexes."""
+    from api import index_api
+    return _index_call(user, index_api.stretch_detail, user.id, index_id)
 
 
 @app.get("/custom-index/{index_id}")

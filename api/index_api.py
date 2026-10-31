@@ -443,9 +443,7 @@ def compute(user_id: int, index_id: int) -> dict:
         market = idx["market"]
         start = date.fromisoformat(idx["base_date"])
         tickers = sorted({m["ticker"] for m in members})
-        closes, bench = _price_cache.get_or_compute(
-            (market, tuple(tickers), str(start)),
-            lambda: (_cn_closes if market == "CN" else _us_closes)(tickers, start))
+        closes, bench = _prices(market, tickers, start)
         cal = bench.index[bench.index >= pd.Timestamp(start)]
         closes = closes.reindex(cal)
         mem = _record_exits(index_id, [dict(m) for m in members], closes, market)
@@ -475,3 +473,122 @@ def compute(user_id: int, index_id: int) -> dict:
         return out
 
     return _result_cache.get_or_compute(key, run)
+
+
+# ── one download per market ──────────────────────────────────────────────────
+#: The last bulk download per market: (time, start, tickers, closes, bench).
+#: The dashboard shows every index at once; fetching each index's members
+#: separately would be one Yahoo request per index per refresh. One request
+#: for the union, sliced per index, keeps the request count flat however
+#: many indexes there are.
+_union: dict[str, tuple] = {}
+UNION_TTL = 15 * 60
+
+
+def _fetch(market: str, tickers: list[str], start: date):
+    return (_cn_closes if market == "CN" else _us_closes)(tickers, start)
+
+
+def _prices(market: str, tickers: list[str], start: date):
+    import time
+    hit = _union.get(market)
+    if hit and time.time() - hit[0] < UNION_TTL and hit[1] <= start and set(tickers) <= hit[2]:
+        closes, bench = hit[3], hit[4]
+        return closes[[t for t in tickers if t in closes.columns]], bench
+    return _price_cache.get_or_compute((market, tuple(tickers), str(start)),
+                                       lambda: _fetch(market, tickers, start))
+
+
+def _prefetch(market: str, idxs: list[dict], members: dict[int, list[dict]]) -> None:
+    import time
+    tickers = sorted({m["ticker"] for i in idxs for m in members[i["id"]]})
+    if not tickers:
+        return
+    start = min(date.fromisoformat(i["base_date"]) for i in idxs)
+    hit = _union.get(market)
+    if hit and time.time() - hit[0] < UNION_TTL and hit[1] <= start and set(tickers) <= hit[2]:
+        return
+    closes, bench = _fetch(market, tickers, start)
+    _union[market] = (time.time(), start, set(tickers), closes, bench)
+
+
+def _level(out: dict) -> pd.Series:
+    c = out["chart"]
+    return pd.Series(c["level"], pd.to_datetime(c["dates"]), dtype=float)
+
+
+@_guard
+def board_rows(user_id: int, market: str) -> dict:
+    """
+    The caller's indexes in one market, as rows of the dashboard board —
+    read with the same arithmetic as every ETF and theme index beside them.
+    An index younger than the 200-day line it is measured against is listed
+    by name rather than given readings it cannot have yet.
+    """
+    import us_etf
+    idxs = [r for r in _rows(_db().read_table("custom_index", filters={"app_user_id": int(user_id)}))
+            if r["market"] == market]
+    members = {r["id"]: _members(r["id"]) for r in idxs}
+    idxs = [r for r in idxs if members[r["id"]]]
+    if not idxs:
+        return {"rows": [], "young": [], "failed": []}
+    _prefetch(market, idxs, members)
+    bench_t = "SPY" if market == "US" else "000300.SH"
+    rows, young, failed = [], [], []
+    for r in idxs:
+        try:
+            out = compute(user_id, r["id"])
+        except Exception as exc:                                   # noqa: BLE001
+            failed.append({"id": int(r["id"]), "name": r["name"], "error": str(exc)[:120]})
+            continue
+        bench = _union.get(market, (None,) * 5)[4]
+        x = us_etf.row(f"IDX{r['id']}", _level(out), bench, name=r["name"], group=us_etf.MINE,
+                       bench_ticker=bench_t)
+        if x is None:
+            young.append({"id": int(r["id"]), "name": r["name"], "days": len(out["chart"]["dates"])})
+            continue
+        x["index_id"] = int(r["id"])
+        x["method"] = out["method_label"]
+        rows.append(x)
+    return {"rows": rows, "young": young, "failed": failed}
+
+
+@_guard
+def stretch_detail(user_id: int, index_id: int) -> dict:
+    """The board's detail view (price, 50/200-day, stretch bands) for one of the caller's indexes."""
+    import us_etf
+    out = compute(user_id, index_id)
+    t = f"IDX{index_id}"
+    d = us_etf.detail(pd.DataFrame({t: _level(out)}), t, names={t: out["index"]["name"]})
+    return d
+
+
+def refresh_all() -> list[dict]:
+    """
+    Every user's every index, once — the daily job. Computing is what writes
+    an exit down, so an index nobody opens for weeks still records a member's
+    acquisition before Yahoo forgets it.
+    """
+    report = []
+    rows = _rows(_db().read_table("custom_index"))
+    for market in ("US", "CN"):
+        mine = [r for r in rows if r["market"] == market]
+        members = {r["id"]: _members(r["id"]) for r in mine}
+        mine = [r for r in mine if members[r["id"]]]
+        if not mine:
+            continue
+        try:
+            _prefetch(market, mine, members)
+        except Exception as exc:                                   # noqa: BLE001
+            report += [{"id": r["id"], "name": r["name"], "ok": False, "error": f"prices: {exc}"[:160]} for r in mine]
+            continue
+        for r in mine:
+            before = {m["ticker"] for m in members[r["id"]] if m.get("removal") == "delisted"}
+            try:
+                out = compute(int(r["app_user_id"]), int(r["id"]))
+                gone = [m["ticker"] for m in out["members"] if m["status"] == "delisted" and m["ticker"] not in before]
+                report.append({"id": r["id"], "name": r["name"], "ok": True,
+                               "level": out["stats"]["level"], "as_of": out["as_of"], "new_exits": gone})
+            except Exception as exc:                               # noqa: BLE001
+                report.append({"id": r["id"], "name": r["name"], "ok": False, "error": str(exc)[:160]})
+    return report

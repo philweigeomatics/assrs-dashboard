@@ -37,7 +37,11 @@ type Section = typeof SECTIONS[number]["id"];
 
 export function Portfolio() {
   useEffect(() => { document.title = "ASSRS · 组合"; }, []);
-  const [tab, setTab] = useState<Section>("build");
+  // ?tab=index lets other pages link straight to a section.
+  const [tab, setTab] = useState<Section>(() => {
+    const want = new URLSearchParams(window.location.search).get("tab");
+    return SECTIONS.some((x) => x.id === want) ? (want as Section) : "build";
+  });
   const qc = useQueryClient();
   const funds = useQuery({ queryKey: ["pf", "funds"], queryFn: api.funds });
 

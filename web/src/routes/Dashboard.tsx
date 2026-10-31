@@ -4,7 +4,7 @@
  * Six questions, in the order you would actually ask them on opening the app:
  *
  *   how did the world close?         全球指数
- *   where is each US industry?       美股行业 ETF
+ *   where is each industry?          行业与主题 (US ETFs / A-share theme indices + 我的指数)
  *   how fragile is the market?       市场风险
  *   where did money go today?        heatmap  ⇄  sector trend history
  *   where is it moving next?         相对轮动图
@@ -36,8 +36,9 @@ import { IndexStrip } from "../components/market/IndexStrip";
 import { RiskStrip } from "../components/market/RiskStrip";
 import { MacroPanel } from "../components/market/MacroPanel";
 import { CommodityPanel } from "../components/market/CommodityPanel";
-import { UsEtfPanel } from "../components/market/UsEtfPanel";
+import { IndustryBoard } from "../components/market/IndustryBoard";
 import { usePersistentState } from "../lib/usePersistentState";
+import type { BoardMarket } from "../lib/types";
 import { useSize } from "../lib/useSize";
 import { signed } from "../lib/format";
 
@@ -62,9 +63,18 @@ export function Dashboard() {
   // are open while someone is looking at the page.
   const indices = useQuery({ queryKey: ["mkt", "indices"], queryFn: api.indices,
     staleTime: 5 * 60_000, refetchInterval: 5 * 60_000 });
-  // Ten years of 45 ETFs is one ~12s Yahoo download, held 30 minutes server-side.
+  // 行业与主题: ten years of 45 US ETFs is one ~12s Yahoo download; the A-share
+  // board is one Tushare call per index. Both held 30 minutes server-side and
+  // shared by every user. Only the market on screen is fetched.
+  const [boardMkt, setBoardMkt] = usePersistentState<BoardMarket>("assrs.board.market", "US");
   const usEtf = useQuery({ queryKey: ["mkt", "us-etf"], queryFn: api.usEtf,
-    staleTime: 30 * 60_000 });
+    staleTime: 30 * 60_000, enabled: boardMkt === "US" });
+  const cnIdx = useQuery({ queryKey: ["mkt", "cn-index"], queryFn: api.cnIndex,
+    staleTime: 30 * 60_000, enabled: boardMkt === "CN" });
+  // The user's own indexes in that market: one price download for all of them.
+  const mine = useQuery({ queryKey: ["idx", "board", boardMkt], queryFn: () => api.indexBoard(boardMkt),
+    staleTime: 15 * 60_000, retry: false });
+  const board = boardMkt === "US" ? usEtf : cnIdx;
   // Daily prints, but the 涨停 history backfills while the page is open.
   const risk = useQuery({ queryKey: ["mkt", "risk"], queryFn: api.risk,
     staleTime: 20 * 60_000 });
@@ -99,10 +109,19 @@ export function Dashboard() {
           {indices.data && <IndexStrip data={indices.data} />}
         </Panel>
 
-        <Panel title="🇺🇸 美股行业 ETF"
-          subtitle="每个美国行业 / 主题 ETF 离 50 日、200 日均线多远，这个偏离在它自己 10 年里算不算极端，以及过去同样拉伸之后发生了什么。绿涨红跌。点任一行看五年。"
-          q={usEtf}>
-          {usEtf.data && <UsEtfPanel d={usEtf.data} />}
+        <Panel title="🌐 行业与主题"
+          subtitle={`${boardMkt === "US" ? "每个美国行业 / 主题 ETF" : "每个 A 股主题与行业指数"}离 50 日、200 日均线多远，这个偏离在它自己 10 年里算不算极端，以及过去同样拉伸之后发生了什么。你的自建指数排在最上面。${boardMkt === "US" ? "绿涨红跌" : "红涨绿跌"}。点任一行看走势。`}
+          right={
+            <div className="flex rounded-md bg-sunken p-0.5">
+              {([["US", "🇺🇸 美股 ETF"], ["CN", "🇨🇳 A 股主题"]] as const).map(([m, label]) => (
+                <button key={m} onClick={() => setBoardMkt(m)}
+                  className={`h-7 px-2.5 rounded text-[12.5px] ${boardMkt === m ? "bg-panel shadow-sm font-semibold" : "text-ink-mute hover:text-ink"}`}>{label}</button>
+              ))}
+            </div>
+          }
+          q={board}>
+          {board.data && <IndustryBoard key={boardMkt} d={board.data} market={boardMkt}
+            mine={mine.data} mineError={mine.isError ? (mine.error as Error).message : null} />}
         </Panel>
 
         <Panel title="🚦 市场风险"

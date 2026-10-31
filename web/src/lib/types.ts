@@ -1858,6 +1858,8 @@ export type EtfRow = {
   vol20: number | null; vol_rank: number | null; rs_3m: number | null;
   after: EtfAfter | null;
   spark: (number | null)[]; spark_ma200: (number | null)[];
+  /** Set on 我的指数 rows: the 自建指数 this row reads. */
+  index_id?: number; method?: string;
 };
 
 export type UsEtfBoard = {
@@ -1865,6 +1867,16 @@ export type UsEtfBoard = {
   breadth: { n: number; above200: number; above50: number; golden: number; near_high: number;
              median_d200: number | null; stretched: string[]; washed_out: string[] };
   conclusions: string[]; missing: string[];
+  market?: BoardMarket; bench?: string; bench_name?: string;
+};
+
+export type BoardMarket = "US" | "CN";
+
+/** The caller's own indexes in one market, as board rows. */
+export type MineBoard = {
+  rows: EtfRow[];
+  young: { id: number; name: string; days: number }[];
+  failed: { id: number; name: string; error: string }[];
 };
 
 export type UsEtfDetail = {

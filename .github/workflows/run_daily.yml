@@ -87,3 +87,23 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           python scan_watchlists.py
+
+      # 7. Compute every user's 自建指数. The level needs no schedule — it is
+      #    replayed from its definition on every view — but an acquired
+      #    member's exit is only written down when its index is computed, and
+      #    Yahoo deletes acquired companies weeks later. Daily keeps every
+      #    index's history safe even if nobody opens it. yfinance is an API
+      #    dependency, not in the root requirements, so it is installed here.
+      - name: Compute custom indexes
+        if: always()
+        timeout-minutes: 20
+        env:
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          pip install yfinance
+          python scan_indexes.py
