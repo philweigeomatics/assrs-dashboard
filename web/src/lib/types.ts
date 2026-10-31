@@ -1839,3 +1839,36 @@ export type CyclePairDetail = {
     last_cross: { dir: "up" | "down"; date: string; days_ago: number } | null }>;
   conclusions: string[];
 };
+
+/** /market/us-etf — see us_etf.py. Percentages in %, ranks 0–100 within the ETF's own history. */
+export type EtfAfter = {
+  episodes: number; median: number | null; down_share: number | null; worst_median: number | null;
+  base_median: number | null; base_down_share: number | null; dates: string[];
+};
+
+export type EtfRow = {
+  ticker: string; name: string; group: string; price: number | null; date: string;
+  ret: { "1d": number | null; "5d": number | null; "1m": number | null; "3m": number | null;
+         "1y": number | null; ytd: number | null };
+  d50: number | null; d200: number | null; slope200: number | null;
+  golden: boolean; cross_days: number | null; state: "多头" | "回调" | "反弹" | "空头";
+  hi52: number | null; lo52: number | null; from_high: number | null; range_pos: number | null;
+  /** Where today's distance from the 200-day sits in the ETF's own history, 0–100. */
+  stretch_rank: number | null; history_years: number | null;
+  vol20: number | null; vol_rank: number | null; rs_3m: number | null;
+  after: EtfAfter | null;
+  spark: (number | null)[]; spark_ma200: (number | null)[];
+};
+
+export type UsEtfBoard = {
+  as_of: string; session: "live" | "closed"; groups: string[]; rows: EtfRow[];
+  breadth: { n: number; above200: number; above50: number; golden: number; near_high: number;
+             median_d200: number | null; stretched: string[]; washed_out: string[] };
+  conclusions: string[]; missing: string[];
+};
+
+export type UsEtfDetail = {
+  ticker: string; name: string; dates: string[];
+  close: (number | null)[]; ma50: (number | null)[]; ma200: (number | null)[];
+  stretch: (number | null)[]; bands: Partial<Record<"10" | "50" | "90", number | null>>;
+};

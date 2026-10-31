@@ -25,7 +25,7 @@ import type {
   StrategyResult, WhatIfAi,
   Breadth, Heatmap, Leverage, RiskBoard, Rotation, TopList, Wyckoff,
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
-  ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, Seasonality, Seesaw, Swing, ChainResult, SectorCycle, CyclePairDetail,
+  ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, Seasonality, Seesaw, Swing, ChainResult, SectorCycle, CyclePairDetail, UsEtfBoard, UsEtfDetail,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -132,6 +132,8 @@ export const api = {
     }),
   sectorNames: () => call<string[]>("/sectors"),
   sectorMembers: () => call<Record<string, string[]>>("/sector-members"),
+  usEtf: () => call<UsEtfBoard>("/market/us-etf"),
+  usEtfDetail: (t: string) => call<UsEtfDetail>(`/market/us-etf/${t}`),
   sectorCycle: (basis: "abs" | "rel") => call<SectorCycle>(`/sector-cycle?basis=${basis}`),
   sectorCyclePair: (a: string, b: string, basis: "abs" | "rel") =>
     call<CyclePairDetail>(`/sector-cycle/pair?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&basis=${basis}`),

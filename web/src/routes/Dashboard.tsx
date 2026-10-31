@@ -4,6 +4,7 @@
  * Six questions, in the order you would actually ask them on opening the app:
  *
  *   how did the world close?         全球指数
+ *   where is each US industry?       美股行业 ETF
  *   how fragile is the market?       市场风险
  *   where did money go today?        heatmap  ⇄  sector trend history
  *   where is it moving next?         相对轮动图
@@ -35,6 +36,7 @@ import { IndexStrip } from "../components/market/IndexStrip";
 import { RiskStrip } from "../components/market/RiskStrip";
 import { MacroPanel } from "../components/market/MacroPanel";
 import { CommodityPanel } from "../components/market/CommodityPanel";
+import { UsEtfPanel } from "../components/market/UsEtfPanel";
 import { usePersistentState } from "../lib/usePersistentState";
 import { useSize } from "../lib/useSize";
 import { signed } from "../lib/format";
@@ -60,6 +62,9 @@ export function Dashboard() {
   // are open while someone is looking at the page.
   const indices = useQuery({ queryKey: ["mkt", "indices"], queryFn: api.indices,
     staleTime: 5 * 60_000, refetchInterval: 5 * 60_000 });
+  // Ten years of 45 ETFs is one ~12s Yahoo download, held 30 minutes server-side.
+  const usEtf = useQuery({ queryKey: ["mkt", "us-etf"], queryFn: api.usEtf,
+    staleTime: 30 * 60_000 });
   // Daily prints, but the 涨停 history backfills while the page is open.
   const risk = useQuery({ queryKey: ["mkt", "risk"], queryFn: api.risk,
     staleTime: 20 * 60_000 });
@@ -92,6 +97,12 @@ export function Dashboard() {
           subtitle="A 股、亚太、欧美主要指数的最新涨跌。各市场收盘时间不同，卡片标的是它自己那根的日期。"
           q={indices}>
           {indices.data && <IndexStrip data={indices.data} />}
+        </Panel>
+
+        <Panel title="🇺🇸 美股行业 ETF"
+          subtitle="每个美国行业 / 主题 ETF 离 50 日、200 日均线多远，这个偏离在它自己 10 年里算不算极端，以及过去同样拉伸之后发生了什么。绿涨红跌。点任一行看五年。"
+          q={usEtf}>
+          {usEtf.data && <UsEtfPanel d={usEtf.data} />}
         </Panel>
 
         <Panel title="🚦 市场风险"

@@ -977,6 +977,44 @@ def sector_cycle_pair(a: str = Query(..., min_length=1, max_length=40),
         raise HTTPException(404, str(exc))
 
 
+_etf_closes_cache = TTLCache(maxsize=1, ttl_s=30 * 60)
+
+
+def _etf_closes():
+    """Ten years of every US industry ETF, one Yahoo download (~12s), held 30 minutes."""
+    import us_etf
+    return _etf_closes_cache.get_or_compute("all", us_etf.fetch)
+
+
+@app.get("/market/us-etf")
+def market_us_etf(user: AppUser = Depends(current_user)):
+    """
+    美股行业 ETF: each industry's level against its 50/200-day averages, how
+    stretched that is for it, what followed past stretches, and breadth
+    across them all. See us_etf.py.
+    """
+    import us_etf
+    try:
+        return us_etf.analyse(_etf_closes())
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.get("/market/us-etf/{etf}")
+def market_us_etf_detail(etf: str = Path(..., pattern="^[A-Z]{2,5}$"),
+                         user: AppUser = Depends(current_user)):
+    """Five years of one ETF: price with its averages, and its stretch against its own bands."""
+    import us_etf
+    try:
+        return us_etf.detail(_etf_closes(), etf)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
 _strategy_cache = TTLCache(maxsize=8, ttl_s=30 * 60)
 # Cointegration over ten codes is 45 pairs of rolling OLS — seconds, not
 # milliseconds, and the same basket gets re-examined as you read it.
