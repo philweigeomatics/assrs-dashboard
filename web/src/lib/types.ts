@@ -1860,6 +1860,8 @@ export type EtfRow = {
   spark: (number | null)[]; spark_ma200: (number | null)[];
   /** Set on 我的指数 rows: the 自建指数 this row reads. */
   index_id?: number; method?: string;
+  /** Set when the readings use the same rules replayed from earlier than the index starts. */
+  extended_from?: string | null;
 };
 
 export type UsEtfBoard = {
@@ -1875,7 +1877,7 @@ export type BoardMarket = "US" | "CN";
 /** The caller's own indexes in one market, as board rows. */
 export type MineBoard = {
   rows: EtfRow[];
-  young: { id: number; name: string; days: number }[];
+  young: { id: number; name: string; days: number; hold?: boolean }[];
   failed: { id: number; name: string; error: string }[];
 };
 
@@ -1883,6 +1885,8 @@ export type UsEtfDetail = {
   ticker: string; name: string; dates: string[];
   close: (number | null)[]; ma50: (number | null)[]; ma200: (number | null)[];
   stretch: (number | null)[]; bands: Partial<Record<"10" | "50" | "90", number | null>>;
+  /** 自建指数 only: where the replayed history begins, and where the index itself starts. */
+  extended_from?: string | null; start?: string;
 };
 
 // ── 自建指数 ──────────────────────────────────────────────────────────────────

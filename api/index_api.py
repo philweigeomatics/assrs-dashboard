@@ -499,12 +499,13 @@ def _prices(market: str, tickers: list[str], start: date):
                                        lambda: _fetch(market, tickers, start))
 
 
-def _prefetch(market: str, idxs: list[dict], members: dict[int, list[dict]]) -> None:
+def _prefetch(market: str, idxs: list[dict], members: dict[int, list[dict]],
+              start: date | None = None) -> None:
     import time
     tickers = sorted({m["ticker"] for i in idxs for m in members[i["id"]]})
     if not tickers:
         return
-    start = min(date.fromisoformat(i["base_date"]) for i in idxs)
+    start = start or min(date.fromisoformat(i["base_date"]) for i in idxs)
     hit = _union.get(market)
     if hit and time.time() - hit[0] < UNION_TTL and hit[1] <= start and set(tickers) <= hit[2]:
         return
@@ -515,6 +516,66 @@ def _prefetch(market: str, idxs: list[dict], members: dict[int, list[dict]]) -> 
 def _level(out: dict) -> pd.Series:
     c = out["chart"]
     return pd.Series(c["level"], pd.to_datetime(c["dates"]), dtype=float)
+
+
+# ── reading an index further back than it starts ─────────────────────────────
+#: How far back the dashboard reads an index, whatever its start date.
+EXTEND_YEARS = 10
+
+
+def _extend_from(market: str) -> date:
+    return _today(market) - timedelta(days=int(EXTEND_YEARS * 365.25))
+
+
+def extendable(idx: dict) -> bool:
+    """
+    Whether a longer history of this index is the same index.
+
+    A rebalancing method resets every weight to the same targets at each
+    rebalance whatever date the history began on, so a run started years
+    earlier coincides with the real one from its first rebalance on — the
+    extra years are only extra past. Buy-and-hold never resets: started
+    earlier, its weights are a different portfolio, so it keeps its own start.
+    """
+    return idx["method"] not in C.HOLD_METHODS and idx["rebalance"] != "never"
+
+
+def extended_level(user_id: int, index_id: int) -> tuple[pd.Series, str | None]:
+    """
+    The index's level for the dashboard: the real one, or — when the start
+    date is recent and the method rebalances — the same rules replayed from
+    up to EXTEND_YEARS earlier, scaled to end on the real level. Founding
+    members are moved back to the earlier start; later additions and removals
+    keep their dates; a member that listed later joins when it first trades.
+    Returns (level, the date the extension starts from, or None).
+    """
+    idx = _own(user_id, index_id)
+    out = compute(user_id, index_id)
+    real = _level(out)
+    market = idx["market"]
+    ext = _extend_from(market)
+    base = date.fromisoformat(idx["base_date"])
+    if not extendable(idx) or base <= ext + timedelta(days=30):
+        return real, None
+    members = _members(index_id)
+    key = ("ext", int(index_id), json.dumps([idx, members], sort_keys=True, default=str))
+
+    def run():
+        mem = [dict(m, added_on=str(ext)) if m["added_on"] == idx["base_date"] else dict(m) for m in members]
+        tickers = sorted({m["ticker"] for m in mem})
+        closes, bench = _prices(market, tickers, ext)
+        cal = bench.index[bench.index >= pd.Timestamp(ext)]
+        closes = _with_frozen(closes.reindex(cal).copy(), mem, cal)
+        cap = float(idx.get("cap_pct") or C.DEFAULT_CAP * 100) / 100
+        caps = _caps(market, tickers, closes, ext) if idx["method"] in ("cap", "cap_capped") else None
+        lv = C.build(closes, mem, method=idx["method"], rebalance=idx["rebalance"], base_date=ext,
+                     cap=cap, caps=caps)["level"]
+        return lv
+
+    lv = _result_cache.get_or_compute(key, run)
+    if lv.index[0] >= real.index[0]:
+        return real, None
+    return lv * (float(real.iloc[-1]) / float(lv.iloc[-1])), str(lv.index[0].date())
 
 
 @_guard
@@ -532,23 +593,27 @@ def board_rows(user_id: int, market: str) -> dict:
     idxs = [r for r in idxs if members[r["id"]]]
     if not idxs:
         return {"rows": [], "young": [], "failed": []}
-    _prefetch(market, idxs, members)
+    reach = [_extend_from(market)] if any(extendable(r) for r in idxs) else []
+    _prefetch(market, idxs, members, start=min([date.fromisoformat(r["base_date"]) for r in idxs] + reach))
     bench_t = "SPY" if market == "US" else "000300.SH"
     rows, young, failed = [], [], []
     for r in idxs:
         try:
             out = compute(user_id, r["id"])
+            level, since = extended_level(user_id, r["id"])
         except Exception as exc:                                   # noqa: BLE001
             failed.append({"id": int(r["id"]), "name": r["name"], "error": str(exc)[:120]})
             continue
         bench = _union.get(market, (None,) * 5)[4]
-        x = us_etf.row(f"IDX{r['id']}", _level(out), bench, name=r["name"], group=us_etf.MINE,
+        x = us_etf.row(f"IDX{r['id']}", level, bench, name=r["name"], group=us_etf.MINE,
                        bench_ticker=bench_t)
         if x is None:
-            young.append({"id": int(r["id"]), "name": r["name"], "days": len(out["chart"]["dates"])})
+            young.append({"id": int(r["id"]), "name": r["name"], "days": len(level),
+                          "hold": not extendable(r)})
             continue
         x["index_id"] = int(r["id"])
         x["method"] = out["method_label"]
+        x["extended_from"] = since
         rows.append(x)
     return {"rows": rows, "young": young, "failed": failed}
 
@@ -558,8 +623,11 @@ def stretch_detail(user_id: int, index_id: int) -> dict:
     """The board's detail view (price, 50/200-day, stretch bands) for one of the caller's indexes."""
     import us_etf
     out = compute(user_id, index_id)
+    level, since = extended_level(user_id, index_id)
     t = f"IDX{index_id}"
-    d = us_etf.detail(pd.DataFrame({t: _level(out)}), t, names={t: out["index"]["name"]})
+    d = us_etf.detail(pd.DataFrame({t: level}), t, names={t: out["index"]["name"]})
+    d["extended_from"] = since
+    d["start"] = out["start"]
     return d
 
 

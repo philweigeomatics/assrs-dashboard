@@ -153,7 +153,8 @@ export function IndustryBoard({ d, mine, mineError, market }: {
           ? "价格为 Yahoo 复权数据（含分红拆股）。"
           : "中证 / 国证指数日线来自 Tushare（价格指数，不含分红），收盘后更新；这些是主流主题 ETF 跟踪的指数。"}
         拉伸分位 = 今天离 200 日线的距离，在它自己最多 10 年历史中的分位：
-        +15% 对半导体平常、对公用事业就是极端，所以只和自己比；不足 2 年历史的（多数自建指数）不计分位。
+        +15% 对半导体平常、对公用事业就是极端，所以只和自己比；不足 2 年历史的不计分位。
+        起点较近、会定期调仓的自建指数，用同样规则往前回溯最多 10 年来读这些数（标「回溯自」）。
         「历史同等拉伸后」按段计算（连续拉伸的日子算一段），统计每段之后 63 个交易日的涨跌；段数很少时只是参照。
         {market === "US" ? "美股配色：绿涨红跌。" : "A 股配色：红涨绿跌。"}
         「我的指数」不计入上方的广度统计。
@@ -167,7 +168,8 @@ function MineNote({ mine, error, market }: { mine?: MineBoard; error?: string | 
   if (error) return <p className="label">我的指数暂不可用：{error}</p>;
   if (!mine) return null;
   const parts: string[] = [];
-  if (mine.young.length) parts.push(`不足 220 个交易日、暂不上榜：${mine.young.map((y) => `${y.name}（${y.days} 天）`).join("、")}`);
+  if (mine.young.length) parts.push(`不足 220 个交易日、暂不上榜：${mine.young.map((y) => `${y.name}（${y.days} 天）`).join("、")}`
+    + (mine.young.some((y) => y.hold) ? "（买入持有不会自动往前回溯 —— 起点不同就是另一个组合；把起始日提前即可）" : ""));
   if (mine.failed.length) parts.push(`计算失败：${mine.failed.map((f) => `${f.name}（${f.error}）`).join("、")}`);
   if (!mine.rows.length && !mine.young.length && !mine.failed.length) {
     return (
@@ -216,7 +218,7 @@ function EtfRowView({ r, market, open, onToggle, groupBreak }: {
       <tr onClick={onToggle} className={`border-t border-line cursor-pointer ${open ? "bg-cyan/5" : "hover:bg-elevated"}`}>
         <td className="sticky left-0 z-10 bg-panel py-1.5 pr-2 whitespace-nowrap">
           {r.index_id != null ? (
-            <><span className="font-semibold">{r.name}</span> <span className="label">自建 · {r.method}</span></>
+            <><span className="font-semibold">{r.name}</span> <span className="label">自建 · {r.method}{r.extended_from ? ` · 回溯自 ${r.extended_from.slice(0, 4)}` : ""}</span></>
           ) : isTicker(r.ticker) ? (
             <><span className="font-mono font-semibold">{r.ticker}</span> <span className="text-ink-dim">{r.name}</span></>
           ) : (
@@ -319,9 +321,17 @@ function Detail({ r, market }: { r: EtfRow; market: BoardMarket }) {
   if (q.isError) return <p className="text-[12.5px] text-up">{(q.error as Error).message}</p>;
   const d = q.data!;
   return (
-    <div className="grid gap-3 lg:grid-cols-2 pt-2">
+    <div className="flex flex-col gap-1 pt-2">
+    {d.extended_from && (
+      <p className="label leading-snug">
+        {d.extended_from} 至 {d.start} 是用同样规则、按现在的创始成分往前回溯的假设走势（有事后选股的偏差），
+        只为给 200 日线和拉伸分位足够的历史；{d.start} 之后的第一次调仓起，与指数本身逐日一致。
+      </p>
+    )}
+    <div className="grid gap-3 lg:grid-cols-2">
       <PriceChart d={d} />
       <StretchChart d={d} r={r} />
+    </div>
     </div>
   );
 }

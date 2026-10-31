@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 import sys
 
+from datetime import date
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -191,11 +193,58 @@ def test_the_board_downloads_once_for_all_indexes(fresh, monkeypatch):
     assert A.board_rows(1, "CN") == {"rows": [], "young": [], "failed": []}
 
 
-def test_a_young_index_is_listed_not_given_readings(fresh, monkeypatch):
+def test_a_young_buy_and_hold_index_is_listed_not_given_readings(fresh, monkeypatch):
+    """Buy-and-hold started earlier is a different portfolio, so it is not extended."""
     monkeypatch.setattr(A, "_us_closes", long_prices([]))
-    make(name="新", base_date="2025-03-03")
+    make(name="新", base_date="2025-03-03", method="equal_hold")
     out = A.board_rows(1, "US")
-    assert out["rows"] == [] and out["young"][0]["name"] == "新" and out["young"][0]["days"] < 220
+    assert out["rows"] == [] and out["young"][0]["name"] == "新" and out["young"][0]["hold"] is True
+
+
+def walk_prices(calls):
+    def fetch(tickers, start):
+        calls.append(str(start))
+        rng = np.random.default_rng(11)
+        data = {t: pd.Series(20 * np.exp(np.cumsum(rng.normal(0.0005, 0.02, len(LONG)))), LONG)
+                for t in sorted(tickers)}
+        return pd.DataFrame(data), pd.Series(np.linspace(100, 120, len(LONG)), LONG)
+    return fetch
+
+
+def test_a_recent_rebalancing_index_is_read_over_the_longer_past(fresh, monkeypatch):
+    calls = []
+    monkeypatch.setattr(A, "_us_closes", walk_prices(calls))
+    iid = make(name="新", base_date="2025-03-03", rebalance="Q")
+    out = A.board_rows(1, "US")
+    assert out["young"] == [] and len(out["rows"]) == 1
+    row = out["rows"][0]
+    assert row["extended_from"] == "2024-01-02"
+    real = A._level(A.compute(1, iid))
+    assert row["price"] == pytest.approx(real.iloc[-1], abs=0.01)
+    assert len(calls) == 1                                      # still one download
+
+
+def test_extension_matches_the_real_index_after_a_rebalance(fresh, monkeypatch):
+    """The whole case for extending: identical daily moves once the weights have been reset."""
+    monkeypatch.setattr(A, "_us_closes", walk_prices([]))
+    iid = make(name="新", base_date="2025-03-03", rebalance="Q")
+    real = A._level(A.compute(1, iid))
+    ext, since = A.extended_level(1, iid)
+    assert since == "2024-01-02" and ext.index[0] < real.index[0]
+    after = real.index[real.index >= "2025-04-02"]               # first quarterly reset is 1 April
+    # the real level arrives rounded to 0.01 points; nothing else may differ
+    assert np.allclose(ext.loc[after].pct_change().dropna(), real.loc[after].pct_change().dropna(), atol=2e-5)
+    before = real.index[(real.index > "2025-03-03") & (real.index < "2025-04-01")]
+    assert not np.allclose(ext.loc[before].pct_change().dropna(), real.loc[before].pct_change().dropna(), atol=2e-5)
+    assert ext.iloc[-1] == pytest.approx(real.iloc[-1])
+
+
+def test_an_index_already_starting_long_ago_is_not_extended(fresh, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", walk_prices([]))
+    monkeypatch.setattr(A, "_extend_from", lambda m: date(2024, 1, 2))
+    iid = make(name="老", base_date="2024-01-02")
+    lv, since = A.extended_level(1, iid)
+    assert since is None and lv.equals(A._level(A.compute(1, iid)))
 
 
 def test_the_daily_job_computes_everyone_and_reports_new_exits(fresh, monkeypatch):
@@ -220,3 +269,14 @@ def test_stretch_detail_is_the_boards_view_of_an_index(fresh, monkeypatch):
     assert d["name"] == "光模块" and len(d["dates"]) == len(d["close"]) == len(d["stretch"])
     with pytest.raises(LookupError):
         A.stretch_detail(2, iid)
+
+
+def test_a_later_addition_keeps_its_date_in_the_longer_past(fresh, monkeypatch):
+    """Only the founders move back. A member added in May is not in the April index, extended or not."""
+    monkeypatch.setattr(A, "_us_closes", walk_prices([]))
+    iid = make(name="新", base_date="2025-03-03", rebalance="Q")
+    A.add_member(1, iid, ticker="CCC", name="C", added_on="2025-05-01", weight_pct=None)
+    real = A._level(A.compute(1, iid))
+    ext, _ = A.extended_level(1, iid)
+    april = real.index[(real.index >= "2025-04-02") & (real.index <= "2025-05-01")]
+    assert np.allclose(ext.loc[april].pct_change().dropna(), real.loc[april].pct_change().dropna(), atol=2e-5)
