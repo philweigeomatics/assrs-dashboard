@@ -68,6 +68,9 @@ def _db():
 
 def _guard(fn):
     """A missing table is a setup step, not a bug — say which step."""
+    import functools
+
+    @functools.wraps(fn)
     def wrapped(*a, **kw):
         try:
             return fn(*a, **kw)
@@ -78,7 +81,6 @@ def _guard(fn):
                                                or "relation" in str(exc)):
                 raise MissingTables(f"自建指数的表尚未创建或不是最新 — 请在 Supabase SQL 编辑器运行 {MIGRATION}") from exc
             raise
-    wrapped.__name__ = fn.__name__
     return wrapped
 
 
@@ -251,33 +253,63 @@ def create_index(user_id: int, *, name: str, market: str, method: str, rebalance
 
 
 @_guard
-def update_rules(user_id: int, index_id: int, *, name: str, method: str, rebalance: str,
-                 cap_pct, base_date, bench: str | None = None) -> dict:
+def update_index(user_id: int, index_id: int, *, name: str, bench: str | None = None) -> dict:
     """
-    A new rule recomputes the whole history, so the live boundary moves to
-    now. The comparison index is not a rule — it changes nothing about the
-    index itself — so changing it leaves the boundary where it was.
+    Rename, or change what the index is compared with — nothing that changes
+    the index itself.
+
+    The rules (method, schedule, cap, start date) are fixed at creation, the
+    way an index provider's are: a rule changed after the fact would rewrite
+    every value already watched. To see the same members under another rule,
+    copy the index (`copy_index`) and the two run side by side.
     """
     cur = _own(user_id, index_id)
     name = _clean_name(name)
-    rules = clean_rules(cur["market"], method, rebalance, cap_pct, base_date)
     bench = clean_bench(cur["market"], bench)
     db = _db()
     if name != cur["name"] and _rows(db.read_table("custom_index", filters={"app_user_id": int(user_id), "name": name})):
         raise ValueError(f"已有同名指数「{name}」")
-    changed = any(str(cur.get(k)) != str(rules[k]) for k in ("method", "rebalance", "cap_pct", "base_date"))
-    vals = {"name": name, **{k: v for k, v in rules.items() if k != "market"}}
+    vals: dict = {"name": name}
     if bench is not None or cur.get("bench") is not None:
         vals["bench"] = bench
-    if changed:
-        vals["rules_updated_at"] = datetime.utcnow().isoformat()
     db.update_records("custom_index", vals, {"id": int(index_id), "app_user_id": int(user_id)})
-    # Founding members move with the start date; later additions keep theirs.
-    if rules["base_date"] != cur["base_date"]:
-        for m in _members(index_id):
-            if m["added_on"] == cur["base_date"] or m["added_on"] < rules["base_date"]:
-                db.update_records("custom_index_member", {"added_on": rules["base_date"]}, {"id": int(m["id"])})
-    return {"id": int(index_id), "recomputed": changed}
+    return {"id": int(index_id)}
+
+
+@_guard
+def copy_index(user_id: int, index_id: int, *, name: str, method: str, rebalance: str,
+               cap_pct, bench: str | None = None) -> dict:
+    """
+    A new index with the same members over the same dates — every addition,
+    removal and recorded exit — under a different rule. Same market, same
+    start date, so the two differ in weighting and nothing else.
+
+    The copy's own history is hindsight until today: its rule was chosen
+    after seeing how the original did. Its live boundary is now.
+    """
+    src = _own(user_id, index_id)
+    name = _clean_name(name)
+    rules = clean_rules(src["market"], method, rebalance, cap_pct, src["base_date"])
+    bench = clean_bench(src["market"], bench)
+    members = _members(index_id)
+    if method == "custom" and not any((m.get("weight_pct") or 0) > 0 for m in members):
+        raise ValueError("自定权重需要成分设有权重 — 复制后再逐只设定，或换一种加权方式")
+    db = _db()
+    if _rows(db.read_table("custom_index", filters={"app_user_id": int(user_id), "name": name})):
+        raise ValueError(f"已有同名指数「{name}」")
+    now = datetime.utcnow().isoformat()
+    db.insert_records("custom_index", [{"app_user_id": int(user_id), "name": name, **rules,
+                                        "base_value": float(src.get("base_value") or C.BASE_VALUE),
+                                        "created_at": now, "rules_updated_at": now,
+                                        **({"bench": bench} if bench else {})}])
+    back = _rows(db.read_table("custom_index", filters={"app_user_id": int(user_id), "name": name}))
+    if not back:
+        raise RuntimeError("指数已写入但读不回来 — 请刷新后确认")
+    iid = int(back[0]["id"])
+    keep = ("ticker", "name", "weight_pct", "added_on", "removed_on", "removal", "exit_price", "frozen_closes")
+    db.insert_records("custom_index_member", [
+        {"index_id": iid, **{k: m.get(k) for k in keep if m.get(k) is not None}} for m in members])
+    return {"id": iid, "members": len(members)}
 
 
 @_guard

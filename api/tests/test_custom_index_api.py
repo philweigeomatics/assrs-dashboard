@@ -127,16 +127,18 @@ def test_an_exit_is_written_down_once_and_outlives_yahoo(db, monkeypatch):
     assert later["chart"]["level"] == first["chart"]["level"]
 
 
-def test_the_live_boundary_moves_when_the_rules_change(db, monkeypatch):
-    monkeypatch.setattr(A, "_us_closes", lambda t, s: prices())
+def test_the_rules_are_fixed_once_created(db):
+    """Only the name and the comparison can change; the index itself cannot be redefined."""
+    import inspect
     iid = make()
-    before = A._own(1, iid)["rules_updated_at"]
-    out = A.update_rules(1, iid, name="光模块", method="equal", rebalance="M", cap_pct=None, base_date="2025-01-02")
-    assert out["recomputed"] is False and A._own(1, iid)["rules_updated_at"] == before
-    out = A.update_rules(1, iid, name="光模块", method="equal_hold", rebalance="M", cap_pct=None, base_date="2025-02-03")
-    assert out["recomputed"] is True
-    assert A._own(1, iid)["rules_updated_at"] > before
-    assert all(m["added_on"] == "2025-02-03" for m in A._members(iid))
+    before = dict(A._own(1, iid))
+    A.update_index(1, iid, name="改名", bench="SMH")
+    after = A._own(1, iid)
+    assert after["name"] == "改名" and after["bench"] == "SMH"
+    for k in ("method", "rebalance", "cap_pct", "base_date", "rules_updated_at"):
+        assert str(after.get(k)) == str(before.get(k))
+    assert set(inspect.signature(A.update_index).parameters) == {"user_id", "index_id", "name", "bench"}
+    assert not hasattr(A, "update_rules")
 
 
 def test_removal_keeps_history_and_purge_does_not(db):
@@ -316,10 +318,10 @@ def test_the_comparison_must_come_from_the_boards_list(db):
 def test_changing_the_comparison_does_not_move_the_live_boundary(db):
     iid = make(base_date="2025-01-02")
     before = A._own(1, iid)["rules_updated_at"]
-    out = A.update_rules(1, iid, name="光模块", method="equal", rebalance="M", cap_pct=None,
-                         base_date="2025-01-02", bench="AIQ")
-    assert out["recomputed"] is False and A._own(1, iid)["rules_updated_at"] == before
-    assert A._own(1, iid)["bench"] == "AIQ"
+    A.update_index(1, iid, name="光模块", bench="AIQ")
+    assert A._own(1, iid)["rules_updated_at"] == before and A._own(1, iid)["bench"] == "AIQ"
+    with pytest.raises(ValueError):
+        A.update_index(1, iid, name="光模块", bench="NVDA")
 
 
 def test_an_index_without_a_comparison_saves_without_the_column(db):
@@ -345,3 +347,36 @@ def test_a_mixed_list_is_valid_json(db):
     out = A.list_indexes(1)
     json.dumps(out, allow_nan=False)
     assert {r["name"]: r["cap_pct"] for r in out["indexes"]} == {"a": None, "b": 15.0}
+
+
+# ── copying an index ─────────────────────────────────────────────────────────
+def test_a_copy_has_the_same_members_over_the_same_dates_under_another_rule(fresh, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", long_prices([], gone="US:BBB"))
+    src = make(name="源", base_date="2024-01-02", members=[{"ticker": "AAA"}, {"ticker": "BBB"}, {"ticker": "CCC"}])
+    A.add_member(1, src, ticker="DDD", name="D", added_on="2024-06-03", weight_pct=None)
+    ccc = next(int(m["id"]) for m in A._members(src) if m["ticker"] == "US:CCC")
+    A.remove_member(1, src, ccc, mode="end", on="2025-02-03")
+    A.compute(1, src)                                         # records BBB's exit
+    out = A.copy_index(1, src, name="副本", method="inv_vol", rebalance="Q", cap_pct=None, bench="SMH")
+    assert out["members"] == 4
+    strip = lambda ms: sorted((m["ticker"], m["added_on"], m.get("removed_on"), m.get("removal"), m.get("exit_price"),
+                               bool(m.get("frozen_closes"))) for m in ms)
+    assert strip(A._members(out["id"])) == strip(A._members(src))
+    cp, orig = A._own(1, out["id"]), A._own(1, src)
+    assert cp["method"] == "inv_vol" and cp["rebalance"] == "Q" and cp["bench"] == "SMH"
+    assert cp["base_date"] == orig["base_date"] and cp["market"] == orig["market"]
+    assert cp["rules_updated_at"] > orig["rules_updated_at"]        # the copy's rule is hindsight until now
+    a, b = A.compute(1, src), A.compute(1, out["id"])
+    assert a["start"] == b["start"] and a["chart"]["level"] != b["chart"]["level"]
+    kinds = lambda d: [(e["date"], e["kind"], e.get("ticker")) for e in d["events"] if e["kind"] in ("add", "remove")]
+    assert kinds(a) == kinds(b)                                 # same membership events, different weighting
+
+
+def test_a_copy_is_owner_only_and_named_uniquely(db):
+    src = make()
+    with pytest.raises(LookupError):
+        A.copy_index(2, src, name="偷", method="equal", rebalance="M", cap_pct=None)
+    with pytest.raises(ValueError):
+        A.copy_index(1, src, name="光模块", method="equal", rebalance="M", cap_pct=None)
+    with pytest.raises(ValueError):
+        A.copy_index(1, src, name="自定", method="custom", rebalance="M", cap_pct=None)

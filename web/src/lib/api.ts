@@ -146,9 +146,13 @@ export const api = {
     call<{ id: number }>("/custom-index", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     }),
-  updateIndex: (id: number, body: IndexRulesBody) =>
-    call<{ id: number; recomputed: boolean }>(`/custom-index/${id}`, {
+  updateIndex: (id: number, body: { name: string; bench: string | null }) =>
+    call<{ id: number }>(`/custom-index/${id}`, {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    }),
+  copyIndex: (id: number, body: Omit<IndexRulesBody, "base_date">) =>
+    call<{ id: number; members: number }>(`/custom-index/${id}/copy`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     }),
   deleteIndex: (id: number) => call<{ deleted: number }>(`/custom-index/${id}`, { method: "DELETE" }),
   addIndexMember: (id: number, m: { ticker: string; name?: string; added_on?: string; weight_pct?: number | null }) =>

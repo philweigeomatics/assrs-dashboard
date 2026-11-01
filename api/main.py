@@ -1617,6 +1617,20 @@ class IndexRulesReq(BaseModel):
     bench: str | None = Field(None, max_length=20)
 
 
+class IndexEditReq(BaseModel):
+    """What can change after creation: the name and the comparison. Not the rules."""
+    name: str = Field(..., max_length=60)
+    bench: str | None = Field(None, max_length=20)
+
+
+class IndexCopyReq(BaseModel):
+    name: str = Field(..., max_length=60)
+    method: str
+    rebalance: str
+    cap_pct: float | None = None
+    bench: str | None = Field(None, max_length=20)
+
+
 class IndexCreateReq(IndexRulesReq):
     market: str = Field(..., pattern="^(CN|US)$")
     members: list[IndexMemberReq] = Field(default_factory=list, max_length=60)
@@ -1680,10 +1694,18 @@ def custom_index_detail(index_id: int, user: AppUser = Depends(current_user)):
 
 
 @app.put("/custom-index/{index_id}")
-def custom_index_update(index_id: int, req: IndexRulesReq, user: AppUser = Depends(current_user)):
+def custom_index_update(index_id: int, req: IndexEditReq, user: AppUser = Depends(current_user)):
+    """Rename or change the comparison. The rules are fixed once created — copy to try another."""
     from api import index_api
-    return _index_call(user, index_api.update_rules, user.id, index_id, name=req.name, method=req.method,
-                       rebalance=req.rebalance, cap_pct=req.cap_pct, base_date=req.base_date, bench=req.bench)
+    return _index_call(user, index_api.update_index, user.id, index_id, name=req.name, bench=req.bench)
+
+
+@app.post("/custom-index/{index_id}/copy")
+def custom_index_copy(index_id: int, req: IndexCopyReq, user: AppUser = Depends(current_user)):
+    """The same members over the same dates, under another weighting rule."""
+    from api import index_api
+    return _index_call(user, index_api.copy_index, user.id, index_id, name=req.name, method=req.method,
+                       rebalance=req.rebalance, cap_pct=req.cap_pct, bench=req.bench)
 
 
 @app.delete("/custom-index/{index_id}")

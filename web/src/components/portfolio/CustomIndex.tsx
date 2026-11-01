@@ -12,6 +12,11 @@
  *   * The change log — every add, removal, delisting and rebalance with its
  *     turnover, the way an index provider publishes its notices.
  *
+ * The rules are fixed once an index exists, as an index provider's are: a
+ * rule changed afterwards would rewrite every day already watched. To see
+ * the same members under another weighting, ⧉ 复制 makes a twin with the
+ * same members over the same dates, and the two run side by side.
+ *
  * One market per index, so one currency, one calendar and one benchmark.
  * Colours follow the market: A-shares red up, US green up.
  */
@@ -48,7 +53,7 @@ export function CustomIndex() {
   const qc = useQueryClient();
   const list = useQuery({ queryKey: ["idx", "list"], queryFn: api.indexes });
   const [picked, setPicked] = usePersistentState<number | null>("assrs.index.current", null);
-  const [mode, setMode] = useState<"view" | "new" | "edit">("view");
+  const [mode, setMode] = useState<"view" | "new" | "edit" | "copy">("view");
   const [confirming, setConfirming] = useState(false);
 
   const items = list.data?.indexes ?? [];
@@ -87,7 +92,10 @@ export function CustomIndex() {
         <div className="ml-auto flex items-center gap-1.5">
           {mode === "view" && current && (
             <>
-              <button onClick={() => setMode("edit")} className="h-8 px-3 rounded-lg text-[12.5px] border border-line hover:bg-elevated">✎ 规则</button>
+              <button onClick={() => setMode("edit")} title="改名或换对比指数"
+                className="h-8 px-3 rounded-lg text-[12.5px] border border-line hover:bg-elevated">✎ 编辑</button>
+              <button onClick={() => setMode("copy")} title="同样的成分、同样的日期，换一种加权方式"
+                className="h-8 px-3 rounded-lg text-[12.5px] border border-line hover:bg-elevated">⧉ 复制</button>
               {confirming ? (
                 <span className="flex items-center gap-1 text-[12.5px]">
                   删除「{current.name}」？
@@ -105,8 +113,10 @@ export function CustomIndex() {
         </div>
       </section>
 
-      {mode === "new" && <IndexForm meta={meta} onDone={done} onCancel={() => setMode("view")} />}
-      {mode === "edit" && current && <IndexForm meta={meta} initial={current} onDone={done} onCancel={() => setMode("view")} />}
+      {mode === "new" && <IndexForm meta={meta} kind="new" onDone={done} onCancel={() => setMode("view")} />}
+      {(mode === "edit" || mode === "copy") && current && (
+        <IndexForm key={`${mode}-${current.id}`} meta={meta} kind={mode} source={current} onDone={done} onCancel={() => setMode("view")} />
+      )}
       {mode === "view" && current && <IndexView key={current.id} idx={current} />}
       {mode === "view" && !current && (
         <section className="card p-6 text-[13px] text-ink-dim leading-relaxed">
@@ -124,16 +134,20 @@ export function CustomIndex() {
 // ── define / edit ────────────────────────────────────────────────────────────
 type Draft = { ticker: string; name: string; weight: string };
 
-function IndexForm({ meta, initial, onDone, onCancel }: {
-  meta: CustomIndexList; initial?: CustomIndexRef; onDone: (id?: number) => void; onCancel: () => void;
+function IndexForm({ meta, kind, source, onDone, onCancel }: {
+  meta: CustomIndexList; kind: "new" | "edit" | "copy"; source?: CustomIndexRef;
+  onDone: (id?: number) => void; onCancel: () => void;
 }) {
-  const [name, setName] = useState(initial?.name ?? "");
-  const [market, setMarket] = useState<"CN" | "US">(initial?.market ?? "CN");
-  const [method, setMethod] = useState<IndexMethod>(initial?.method ?? "equal");
-  const [rebalance, setRebalance] = useState<IndexRebalance>(initial?.rebalance ?? "Q");
-  const [cap, setCap] = useState(String(initial?.cap_pct ?? 10));
-  const [start, setStart] = useState(initial?.base_date ?? defaultStart("CN"));
-  const [bench, setBench] = useState(initial?.bench ?? "");
+  // edit: only the name and the comparison. copy: a new rule, same members, same start.
+  const locked = kind === "edit";
+  const sameStart = kind !== "new";
+  const [name, setName] = useState(kind === "copy" ? `${source!.name}·副本` : source?.name ?? "");
+  const [market, setMarket] = useState<"CN" | "US">(source?.market ?? "CN");
+  const [method, setMethod] = useState<IndexMethod>(source?.method ?? "equal");
+  const [rebalance, setRebalance] = useState<IndexRebalance>(source?.rebalance ?? "Q");
+  const [cap, setCap] = useState(String(source?.cap_pct ?? 10));
+  const [start, setStart] = useState(source?.base_date ?? defaultStart("CN"));
+  const [bench, setBench] = useState(source?.bench ?? "");
   const [members, setMembers] = useState<Draft[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
@@ -142,7 +156,11 @@ function IndexForm({ meta, initial, onDone, onCancel }: {
       const rules = { name: name.trim(), method, base_date: start, bench: bench || null,
                       rebalance: method === "equal_hold" ? "never" as const : rebalance,
                       cap_pct: method === "cap_capped" ? Number(cap) : null };
-      if (initial) return api.updateIndex(initial.id, rules);
+      if (kind === "edit") return api.updateIndex(source!.id, { name: rules.name, bench: rules.bench });
+      if (kind === "copy") {
+        const { base_date: _, ...rest } = rules;
+        return api.copyIndex(source!.id, rest);
+      }
       return api.createIndex({ ...rules, market, members: members.map((m) => ({
         ticker: m.ticker, name: m.name, weight_pct: method === "custom" && m.weight ? Number(m.weight) : null })) });
     },
@@ -151,13 +169,13 @@ function IndexForm({ meta, initial, onDone, onCancel }: {
   });
 
   const hold = method === "equal_hold";
-  const backfill = start < today();
-  const ruleChange = initial && (initial.method !== method || initial.rebalance !== rebalance
-    || initial.base_date !== start || (method === "cap_capped" && String(initial.cap_pct) !== cap));
+  const backfill = kind !== "edit" && start < today();
 
   return (
     <section className="card p-3 flex flex-col gap-3 text-[13px]">
-      <div className="font-semibold">{initial ? `修改「${initial.name}」的规则` : "新建指数"}</div>
+      <div className="font-semibold">
+        {kind === "edit" ? `编辑「${source!.name}」` : kind === "copy" ? `复制「${source!.name}」为新指数` : "新建指数"}
+      </div>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <Field label="名称">
           <input value={name} onChange={(e) => setName(e.target.value)} maxLength={40} placeholder="例如：光模块链"
@@ -166,9 +184,9 @@ function IndexForm({ meta, initial, onDone, onCancel }: {
         <Field label="市场">
           <div className="flex rounded-md bg-sunken p-0.5 w-fit">
             {MARKETS.map((m) => (
-              <button key={m.v} disabled={!!initial} onClick={() => {
+              <button key={m.v} disabled={sameStart} onClick={() => {
                 setMarket(m.v); setMembers([]); setBench("");
-                if (!initial) setStart(defaultStart(m.v));
+                if (!source) setStart(defaultStart(m.v));
               }}
                 className={`h-7 px-3 rounded text-[12.5px] ${market === m.v ? "bg-panel shadow-sm font-semibold" : "text-ink-mute"} disabled:opacity-60`}>
                 {m.label}
@@ -177,17 +195,17 @@ function IndexForm({ meta, initial, onDone, onCancel }: {
           </div>
         </Field>
         <Field label="起始日（基点 1000）">
-          <input type="date" value={start} max={today()} min="2015-01-01" onChange={(e) => setStart(e.target.value)}
-            className="h-8 px-2 rounded-md bg-sunken outline-none" />
+          <input type="date" value={start} max={today()} min="2015-01-01" disabled={sameStart} onChange={(e) => setStart(e.target.value)}
+            className="h-8 px-2 rounded-md bg-sunken outline-none disabled:opacity-60" />
         </Field>
         <Field label="加权方式" hint={meta.methods[method]?.hint}>
-          <select value={method} onChange={(e) => setMethod(e.target.value as IndexMethod)}
-            className="h-8 w-full px-2 rounded-md bg-sunken outline-none">
+          <select value={method} disabled={locked} onChange={(e) => setMethod(e.target.value as IndexMethod)}
+            className="h-8 w-full px-2 rounded-md bg-sunken outline-none disabled:opacity-60">
             {(Object.keys(meta.methods) as IndexMethod[]).map((k) => <option key={k} value={k}>{meta.methods[k].label}</option>)}
           </select>
         </Field>
         <Field label="调仓频率" hint={hold ? "买入持有不调仓" : "每个周期的第一个交易日收盘调回目标权重"}>
-          <select value={hold ? "never" : rebalance} disabled={hold} onChange={(e) => setRebalance(e.target.value as IndexRebalance)}
+          <select value={hold ? "never" : rebalance} disabled={hold || locked} onChange={(e) => setRebalance(e.target.value as IndexRebalance)}
             className="h-8 w-full px-2 rounded-md bg-sunken outline-none disabled:opacity-60">
             {(Object.keys(meta.rebalance) as IndexRebalance[]).map((k) => <option key={k} value={k}>{meta.rebalance[k]}</option>)}
           </select>
@@ -207,13 +225,25 @@ function IndexForm({ meta, initial, onDone, onCancel }: {
         </Field>
         {method === "cap_capped" && (
           <Field label="单只上限 %">
-            <input type="number" min={2} max={50} value={cap} onChange={(e) => setCap(e.target.value)}
-              className="h-8 w-24 px-2 rounded-md bg-sunken outline-none" />
+            <input type="number" min={2} max={50} value={cap} disabled={locked} onChange={(e) => setCap(e.target.value)}
+              className="h-8 w-24 px-2 rounded-md bg-sunken outline-none disabled:opacity-60" />
           </Field>
         )}
       </div>
 
-      {!initial && (
+      {kind === "edit" && (
+        <p className="label leading-snug">
+          加权方式、调仓频率、上限和起始日在建立时就固定了 —— 改了会改写你已经看过的每一天，指数就不再是同一条。
+          想用别的加权方式看同一批成分，用「⧉ 复制」建一个并排比较。
+        </p>
+      )}
+      {kind === "copy" && (
+        <p className="label leading-snug">
+          复制「{source!.name}」的全部成分和它们的加入 / 移出日期（含已退市的记录），起始日同为 {source!.base_date}，
+          两条指数只差在加权方式。
+        </p>
+      )}
+      {kind === "new" && (
         <Field label={`成分股（${members.length}）`}>
           <MemberPicker market={market} exclude={members.map((m) => m.ticker)}
             onAdd={(s) => setMembers([...members, { ticker: s.t, name: s.n, weight: "" }])} />
@@ -237,19 +267,18 @@ function IndexForm({ meta, initial, onDone, onCancel }: {
 
       {backfill && (
         <p className="label leading-snug">
-          起始日早于今天：{initial ? "改规则后整段历史按新规则重算，" : ""}今天之前的走势是用现在选定的成分回溯计算的，
-          图上标为「回溯（假设）」—— 成分是事后挑的，这段表现会天然偏好。
+          起始日早于今天：今天之前的走势是用现在选定的{kind === "copy" ? "加权方式" : "成分"}回溯计算的，
+          图上标为「回溯（假设）」—— 是事后选的，这段表现会天然偏好。
         </p>
       )}
-      {ruleChange && <p className="label text-brand-ink">规则改变会重算整段历史，实盘起点也将从今天重新开始。</p>}
       {err && <p className="text-[12.5px] text-up">{err}</p>}
       <div className="flex gap-2">
-        <button onClick={() => { setErr(null); save.mutate(); }} disabled={save.isPending || !name.trim() || (!initial && members.length < 2)}
+        <button onClick={() => { setErr(null); save.mutate(); }} disabled={save.isPending || !name.trim() || (kind === "new" && members.length < 2)}
           className="h-8 px-4 rounded-lg bg-cyan text-white text-[13px] disabled:opacity-50">
-          {save.isPending ? "保存中…" : initial ? "保存规则" : "建立指数"}
+          {save.isPending ? "保存中…" : kind === "edit" ? "保存" : kind === "copy" ? "建立副本" : "建立指数"}
         </button>
         <button onClick={onCancel} className="h-8 px-4 rounded-lg border border-line text-[13px]">取消</button>
-        {!initial && members.length < 2 && <span className="label self-center">至少 2 只</span>}
+        {kind === "new" && members.length < 2 && <span className="label self-center">至少 2 只</span>}
       </div>
     </section>
   );
