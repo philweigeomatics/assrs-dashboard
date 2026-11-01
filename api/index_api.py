@@ -704,7 +704,10 @@ def _effective(idx: dict) -> str:
     """
     today = _today(idx["market"])
     last = _last_day(int(idx["id"]))
-    return str(today if last is None or last["d"] < str(today) else today + timedelta(days=1))
+    when = today if last is None or last["d"] < str(today) else today + timedelta(days=1)
+    while when.weekday() >= 5:                     # a weekend has no close; holidays the ledger skips itself
+        when += timedelta(days=1)
+    return str(when)
 
 
 def _state_json(s: dict) -> dict:
@@ -838,6 +841,8 @@ def rebuild(idx: dict) -> int:
         start = (ext if extend else base) - WARMUP
         bars = _prices(market, [m["ticker"] for m in members], start)
         closes, opens, amounts, mem, caps = _inputs(idx, members, bars, start)
+        if len(closes) > 6:
+            _check_moves(closes, closes.index[-6], market)     # the newest days, whose adjustments may lag
         run = C.build(closes, mem, method=idx["method"], rebalance=idx["rebalance"], base_date=base,
                       base_value=float(idx.get("base_value") or C.BASE_VALUE), cap=_cap(idx), caps=caps,
                       opens=opens, amounts=amounts, states=True)
@@ -908,6 +913,7 @@ def _advance(market: str, idxs: list[dict]) -> list[dict]:
                                    "new_exits": []})
                     continue
                 _check_fresh(last, closes, mem)
+                _check_moves(closes, d0, market)
                 run = C.build(closes, mem, method=idx["method"], rebalance=idx["rebalance"],
                               base_date=date.fromisoformat(idx["base_date"]), cap=_cap(idx), caps=caps,
                               opens=opens, amounts=amounts, resume={**last["state"], "date": last["d"]},
@@ -923,6 +929,44 @@ def _advance(market: str, idxs: list[dict]) -> list[dict]:
         except Exception as exc:                                   # noqa: BLE001
             report.append({"id": iid, "name": idx["name"], "ok": False, "error": str(exc)[:160]})
     return report
+
+
+#: A-share daily limits are ±10% (main board), ±20% (创业板, 科创板), ±30%
+#: (北交所). An adjusted move beyond that is an adjustment not yet applied.
+CN_LIMIT = 0.31
+#: US moves this large are checked against Yahoo's split record.
+US_SUSPECT = (-0.45, 0.8)
+
+
+def _check_moves(closes: pd.DataFrame, since: pd.Timestamp, market: str) -> None:
+    """
+    The days about to be stored, checked for a price adjustment that has not
+    reached the data yet — a 送转 without its factor, a split Yahoo has not
+    applied. Stored once, such a day would be wrong for good; held back, the
+    next run stores it correctly. A stock's first five sessions are exempt
+    (A-share listings have no limit then).
+    """
+    r = closes.pct_change(fill_method=None)
+    seen = closes.notna().cumsum()
+    new = r.loc[r.index > since]
+    for t in new.columns:
+        for d, v in new[t].dropna().items():
+            if seen.at[d, t] <= 5:
+                continue
+            if market == "CN" and abs(v) > CN_LIMIT:
+                raise RuntimeError(f"{t} {d.date()} 复权后 {v * 100:+.0f}% 超过涨跌停 — 复权数据可能尚未更新，这一天暂不存")
+            if market == "US" and not US_SUSPECT[0] < v < US_SUSPECT[1] and _split_on(t, d):
+                raise RuntimeError(f"{t} {d.date()} {v * 100:+.0f}% 恰逢拆股 — 雅虎尚未复权，这一天暂不存")
+
+
+def _split_on(ticker: str, d: pd.Timestamp) -> bool:
+    try:
+        import yfinance as yf
+        s = yf.Ticker(ticker.split(":", 1)[1]).splits
+        idx = s.index.tz_localize(None).normalize() if s.index.tz is not None else s.index.normalize()
+        return bool((idx == d.normalize()).any())
+    except Exception:                                              # noqa: BLE001
+        return True                                                # can't tell: hold the day back
 
 
 def _check_fresh(last: dict, closes: pd.DataFrame, members: list[dict]) -> None:

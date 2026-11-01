@@ -77,6 +77,8 @@ class FakeDB:
 def db(monkeypatch):
     d = FakeDB()
     monkeypatch.setattr(A, "_db", lambda: d)
+    # api.main, once any test imports it, points this at the live dashboard caches.
+    monkeypatch.setattr(A, "BENCH_SOURCE", None)
     A._series_cache._d.clear()
     A._price_cache._d.clear()
     A._catch_up_tried.clear()
@@ -603,3 +605,61 @@ def test_a_detail_says_whether_the_first_day_is_still_on(db, monkeypatch):
     aged(db, iid)
     out = A.compute(1, iid)                                   # cached ledger, fresh flag
     assert out["index"]["settling"] is False and out["today"] == str(A._today("US"))
+
+
+# ── an adjustment that has not reached the data yet is not stored ────────────
+def test_an_a_share_move_beyond_the_limit_is_held_back_until_the_factor_arrives(db, monkeypatch):
+    """A 10送10 without its factor reads as -50% — impossible under a ±20% limit, so the day waits."""
+    cal = LONG[LONG <= "2025-04-15"]
+    def fetch(end, broken):
+        def f(codes, start):
+            c = LONG[LONG <= end]
+            a = pd.Series(np.linspace(10, 12, len(LONG)), LONG).reindex(c)
+            b = pd.Series(np.linspace(30, 33, len(LONG)), LONG).reindex(c)
+            if broken:
+                b.loc[b.index > "2025-04-15"] /= 2                     # the raw halving, unadjusted
+            return pd.DataFrame({"600519": a, "000858": b}), pd.Series(np.linspace(3000, 3300, len(LONG)), LONG).reindex(c)
+        return f
+    monkeypatch.setattr(A, "_cn_closes", fetch("2025-04-15", False))
+    monkeypatch.setattr(A, "_cn_names", lambda: {}, raising=False)
+    import api.portfolio_api as P
+    monkeypatch.setattr(P, "_cn_names", lambda: {})
+    iid = make(market="CN", base_date="2024-03-01", members=[{"ticker": "600519"}, {"ticker": "000858"}])
+    A.compute(1, iid)
+    assert db.days(iid)[-1]["d"] == str(cal[-1].date())
+    A._price_cache._d.clear()
+    monkeypatch.setattr(A, "_cn_closes", fetch("2025-04-22", True))
+    r = A.refresh_all()[0]
+    assert not r["ok"] and "涨跌停" in r["error"] and db.days(iid)[-1]["d"] == "2025-04-15"
+    A._price_cache._d.clear()
+    monkeypatch.setattr(A, "_cn_closes", fetch("2025-04-22", False))  # the factor has arrived
+    assert A.refresh_all()[0]["ok"] and db.days(iid)[-1]["d"] == "2025-04-22"
+
+
+def test_a_us_split_yahoo_has_not_applied_is_held_back_but_a_real_crash_is_stored(db, monkeypatch):
+    def fetch(end, crash):
+        def f(tickers, start):
+            closes, bench = long_prices([], end=end)(tickers, start)
+            if crash:
+                closes.loc[closes.index > "2025-04-15", "US:BBB"] *= 0.1
+            return closes, bench
+        return f
+    monkeypatch.setattr(A, "_us_closes", fetch("2025-04-15", False))
+    iid = make(base_date="2024-03-01")
+    A.compute(1, iid)
+    A._price_cache._d.clear()
+    monkeypatch.setattr(A, "_us_closes", fetch("2025-04-22", True))
+    monkeypatch.setattr(A, "_split_on", lambda t, d: t == "US:BBB")     # Yahoo lists a 10:1 split that day
+    r = A.refresh_all()[0]
+    assert not r["ok"] and "拆股" in r["error"] and db.days(iid)[-1]["d"] == "2025-04-15"
+    monkeypatch.setattr(A, "_split_on", lambda t, d: False)            # no split: a genuine -90% day
+    assert A.refresh_all()[0]["ok"] and db.days(iid)[-1]["d"] == "2025-04-22"
+
+
+def test_a_change_made_at_the_weekend_takes_effect_on_monday(db, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", long_prices([], end="2025-06-27"))
+    iid = make(base_date="2024-03-01")
+    A.compute(1, iid)
+    aged(db, iid)
+    monkeypatch.setattr(A, "_today", lambda m: date(2025, 6, 28))     # Saturday; Friday is stored
+    assert A.add_member(1, iid, ticker="CCC", name="C", added_on=None)["added_on"] == "2025-06-30"

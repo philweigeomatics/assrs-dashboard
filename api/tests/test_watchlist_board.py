@@ -275,3 +275,15 @@ def test_scan_fields_are_attached_when_present():
                   "600031.SH", _series([1.0, 2.0]), hit, _Session(True))
     assert row["rsi"] == 34.8 and row["signal_count"] == 2
     assert row["signals"][0]["label"] == "MACD 金叉"
+
+
+def test_strict_refuses_a_bar_without_its_adjustment_factor(monkeypatch):
+    """On a 送转's ex-date a missing factor would carry yesterday's: the raw halving, stored as a crash."""
+    daily = pd.DataFrame({"ts_code": ["600519.SH"] * 2, "trade_date": ["20260901", "20260902"],
+                          "open": [100.0, 50.0], "close": [100.0, 50.0], "amount": [1.0, 1.0]})
+    adj = pd.DataFrame({"ts_code": ["600519.SH"], "trade_date": ["20260901"], "adj_factor": [1.0]})
+    monkeypatch.setitem(sys.modules, "data_manager", _tushare(daily, adj))
+    monkeypatch.setattr(wb.time, "sleep", lambda s: None)
+    with pytest.raises(RuntimeError, match="复权因子"):
+        wb.cn_daily(["600519.SH"], "20260901", "20260902", strict=True)
+    assert len(wb.cn_daily(["600519.SH"], "20260901", "20260902")["600519.SH"]) == 2   # the sparkline still draws

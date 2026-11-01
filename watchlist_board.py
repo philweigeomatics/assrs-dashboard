@@ -131,6 +131,11 @@ def cn_daily(codes: list[str], start: str, end: str, chunk: int = CHUNK, workers
                           on=["ts_code", "trade_date"], how="left")
         else:
             px["adj_factor"] = 1.0
+        if strict and px["adj_factor"].isna().any():
+            # A bar without its factor would carry yesterday's: on a 送转's
+            # ex-date that is the raw halving, stored as a crash.
+            gap = px[px["adj_factor"].isna()].iloc[0]
+            raise RuntimeError(f"复权因子缺 {gap['ts_code']} {gap['trade_date']} — 稍后重试")
 
         got: dict[str, pd.DataFrame] = {}
         for code, grp in px.groupby("ts_code"):
