@@ -322,7 +322,12 @@ function MemberPicker({ market, exclude, onAdd, placeholder }: {
 // ── watch ────────────────────────────────────────────────────────────────────
 function IndexView({ idx }: { idx: CustomIndexRef }) {
   const q = useQuery({ queryKey: ["idx", "detail", idx.id], queryFn: () => api.indexDetail(idx.id), staleTime: 10 * 60_000 });
-  if (q.isPending) return <section className="card p-6 label text-center">计算「{idx.name}」… 首次需读取全部成分的历史行情</section>;
+  if (q.isPending) return (
+    <section className="card p-6 label text-center leading-relaxed">
+      读取「{idx.name}」…<br />
+      新建的指数第一次打开时，会读取全部成分的历史行情、从起始日算到今天并存下来（约半分钟）；之后每天只追加新的一天，打开即读。
+    </section>
+  );
   if (q.isError) return <section className="card p-4 text-[13px] text-up">{(q.error as Error).message}</section>;
   return <Body d={q.data!} />;
 }
@@ -353,6 +358,7 @@ function Body({ d }: { d: CustomIndexDetail }) {
           <Tile k="年化波动" v={s.vol != null ? `${fixed(s.vol, 0)}%` : "—"}
             sub={s.d200 != null ? `偏离 200 日 ${signed(s.d200, 1, "%")}` : "不足 200 日"} />
         </div>
+        <Split d={d} />
         {d.bench_note && <p className="label text-brand-ink">{d.bench_note}</p>}
         <LevelChart d={d} />
       </section>
@@ -360,7 +366,7 @@ function Body({ d }: { d: CustomIndexDetail }) {
       <Members d={d} />
       <Events d={d} />
       <p className="label leading-snug">
-        全收益指数（复权价，分红再投资）。成分变化、调仓都在当日收盘生效，点位连续；停牌股按停牌前价格计入且不参与调仓；
+        全收益指数（复权价，分红再投资）。每个交易日收盘后存下当天的点位，已存的日子不再重算。成分变化、调仓都在当日收盘生效，点位连续；停牌股按停牌前价格计入且不参与调仓；
         退市或被收购的成分以最后成交价移出，所得按比例分给其余成分，并保存其历史（雅虎会删除被收购公司的数据）。
         {d.index.market === "US" && (d.index.method === "cap" || d.index.method === "cap_capped") &&
           " 美股市值 = 当前股本 × 每日价格：期间回购与增发不计入。"}
@@ -373,6 +379,47 @@ function Body({ d }: { d: CustomIndexDetail }) {
       </p>
     </>
   );
+}
+
+/**
+ * Each day's move in two parts: open against the previous close (overnight —
+ * news while the market was shut, for A-shares often the US session) and
+ * close against the open (the session itself). Compounded over a window the
+ * two show where an index makes and loses its moves. And the members' turnover.
+ */
+function Split({ d }: { d: CustomIndexDetail }) {
+  const red = d.index.market === "CN";
+  const s = d.stats;
+  const wins = (["1d", "1m", "3m", "1y"] as const).filter((k) => s.split?.[k]);
+  if (!wins.length && s.amount == null) return null;
+  const label = { "1d": "今日", "1m": "1 月", "3m": "3 月", "1y": "1 年" };
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px] tnum">
+      {wins.length > 0 && <span className="label" title="开盘 vs 前一日收盘 = 隔夜；收盘 vs 开盘 = 盘中">隔夜 / 盘中</span>}
+      {wins.map((k) => {
+        const x = s.split[k]!;
+        return (
+          <span key={k} className="whitespace-nowrap">
+            <span className="label mr-1">{label[k]}</span>
+            <span className={moveClass(x.gap, red)}>{signed(x.gap, 1, "%")}</span>
+            <span className="label mx-0.5">/</span>
+            <span className={moveClass(x.session, red)}>{signed(x.session, 1, "%")}</span>
+          </span>
+        );
+      })}
+      {s.amount != null && (
+        <span className="whitespace-nowrap ml-auto" title="成分股当日成交额之和；倍数 = 对比前 20 日平均">
+          <span className="label mr-1">成交额</span>{money(s.amount, d.index.market)}
+          {s.amount_x20 != null && <span className={`ml-1 ${s.amount_x20 >= 1.5 ? "font-semibold" : "label"}`}>×{fixed(s.amount_x20, 2)}</span>}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function money(v: number, market: "CN" | "US") {
+  if (market === "CN") return v >= 1e8 ? `${fixed(v / 1e8, 1)} 亿` : `${fixed(v / 1e4, 0)} 万`;
+  return v >= 1e9 ? `$${fixed(v / 1e9, 2)}B` : `$${fixed(v / 1e6, 0)}M`;
 }
 
 function Tile({ k, v, cls = "", sub }: { k: string; v: string; cls?: string; sub?: string }) {
@@ -485,7 +532,7 @@ function Members({ d }: { d: CustomIndexDetail }) {
     onSuccess: refresh, onError: fail,
   });
   // Deleting rewrites every day the member was in — only while none of them has been watched.
-  const purgeable = (m: IndexMember) => settling || m.added_on >= d.today;
+  const purgeable = (m: IndexMember) => settling || m.added_on > d.as_of;
 
   const live = d.members.filter((m) => !["removed", "delisted"].includes(m.status));
   const gone = d.members.filter((m) => ["removed", "delisted"].includes(m.status));
@@ -537,7 +584,7 @@ function Members({ d }: { d: CustomIndexDetail }) {
                 <td className="py-1.5 pr-2 label whitespace-nowrap">{m.added_on}{m.removed_on ? ` → ${m.removed_on}` : ""}</td>
                 <td className="py-1.5 whitespace-nowrap text-right">
                   {(m.status === "active" || m.status === "halted") && (
-                    <button onClick={() => drop.mutate({ m, mode: "end" })} title="今天收盘移出，保留之前的历史"
+                    <button onClick={() => drop.mutate({ m, mode: "end" })} title={`${d.effective} 收盘移出，保留之前的历史`}
                       className="text-[12px] text-cyan mr-2">移出</button>
                   )}
                   {purgeable(m) && (
@@ -572,13 +619,13 @@ function Members({ d }: { d: CustomIndexDetail }) {
               className="h-7 px-1.5 rounded-md bg-sunken text-[12px] outline-none" />
           </label>
         )}
-        <span className="label">{settling ? "当日" : "今天"}收盘买入{d.hold ? "，按目标份额从其余成分按比例腾出资金" : "，其余成分随之重新加权"}</span>
+        <span className="label">{settling ? "生效日" : d.effective}收盘买入{d.hold ? "，按目标份额从其余成分按比例腾出资金" : "，其余成分随之重新加权"}</span>
         {(add.isPending || drop.isPending) && <span className="label">更新中…</span>}
       </div>
       <p className="label leading-snug">
         {settling
           ? "今天是建立当天：成分可以补加到更早的日期，加错的可以连同历史删除。从明天起，加入和移出都从当天收盘生效，已经走过的指数不再改动。"
-          : "加入和移出都从今天收盘生效，之前的点位不变 —— 和指数公司调整成分一样。"}
+          : `加入和移出从 ${d.effective} 收盘生效（已经存下的日子不再改动），之前的点位不变 —— 和指数公司调整成分一样。`}
       </p>
       {err && <p className="text-[12.5px] text-up">{err}</p>}
     </section>

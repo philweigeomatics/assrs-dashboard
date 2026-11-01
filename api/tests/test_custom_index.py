@@ -307,3 +307,108 @@ def test_a_halted_stocks_flat_days_are_not_calm_days():
     s.iloc[40:55] = np.nan                                       # halted three weeks
     v = C.vol_frame(pd.DataFrame({"A": s}))["A"].iloc[-1]
     assert v == pytest.approx(pd.Series(rets).std(), rel=0.02)    # ±2% days only, no zeros mixed in
+
+
+# ── a stored index continues exactly where it stopped ────────────────────────
+def walk(seed, n=len(IDX), vol=0.02):
+    rng = np.random.default_rng(seed)
+    return 20 * np.exp(np.cumsum(rng.normal(0.0005, vol, n)))
+
+
+def busy():
+    """Five names: a halt across the resume date, a join and a removal after it, a late lister."""
+    c = frame(A=walk(1), B=walk(2, vol=0.04), C=walk(3), D=walk(4), E=walk(5))
+    c.loc["2025-03-10":"2025-03-21", "B"] = np.nan              # halted over the resume date
+    c.loc[:"2025-01-20", "E"] = np.nan                          # lists late
+    members = [{"ticker": "A", "added_on": "2025-01-02", "removed_on": None},
+               {"ticker": "B", "added_on": "2025-01-02", "removed_on": None},
+               {"ticker": "C", "added_on": "2025-01-02", "removed_on": "2025-05-20"},
+               {"ticker": "D", "added_on": "2025-04-15", "removed_on": None},
+               {"ticker": "E", "added_on": "2025-01-02", "removed_on": None}]
+    return c, members
+
+
+def resumed(closes, members, d0, later=None, **kw):
+    """Stop at d0 and keep only its state; carry on from it on `later` prices (a fresh download)."""
+    first = run(closes.loc[:d0], members, states=True, **kw)
+    state = {**first["states"][-1], "date": d0}
+    rest = run(later if later is not None else closes, members, resume=state, **kw)
+    return first, rest
+
+
+@pytest.mark.parametrize("method,rebalance", [("equal", "M"), ("inv_vol", "M"), ("equal_hold", "never"),
+                                              ("price", "Q"), ("equal", "never")])
+def test_resuming_from_a_stored_close_is_the_same_index(method, rebalance):
+    closes, members = busy()
+    whole = run(closes, members, method=method, rebalance=rebalance)
+    for d0 in ("2025-02-28", "2025-03-14", "2025-03-31", "2025-04-15"):   # month end, mid-halt, quarter end, join day
+        first, rest = resumed(closes, members, d0, method=method, rebalance=rebalance)
+        joined = pd.concat([first["level"], rest["level"]])
+        assert joined.index.equals(whole["level"].index), d0
+        assert np.allclose(joined.to_numpy(), whole["level"].to_numpy(), rtol=1e-12), d0
+        kinds = lambda r: [(e["date"], e["kind"], e.get("ticker")) for e in r["events"]]
+        assert kinds(first) + kinds(rest) == kinds(whole), d0
+
+
+def test_a_dividend_after_the_stored_close_rescales_old_prices_and_changes_nothing():
+    """Adjusted prices before an ex-date all shrink; the stored holdings are values, so the level holds."""
+    closes, members = busy()
+    later = closes.copy()
+    later.loc[:"2025-04-30", "A"] *= 0.97                       # A goes ex-dividend on 1 May
+    later.loc[:"2025-05-12", "C"] *= 0.5                        # a 10送10 for C on 13 May
+    whole = run(later, members, method="inv_vol")
+    first, rest = resumed(closes, members, "2025-04-15", later=later, method="inv_vol")
+    after = whole["level"].loc[whole["level"].index > "2025-04-15"]
+    assert rest["level"].index.equals(after.index)
+    assert np.allclose(rest["level"].to_numpy(), after.to_numpy(), rtol=1e-12)
+
+
+def test_a_halt_longer_than_the_fresh_download_carries_the_stored_price():
+    closes, members = busy()
+    closes.loc["2025-03-10":"2025-04-30", "B"] = np.nan        # halted for seven weeks
+    whole = run(closes, members)
+    first, _ = resumed(closes, members, "2025-04-15")
+    state = {**first["states"][-1], "date": "2025-04-15"}
+    window = closes.loc["2025-04-01":]                          # B has no price anywhere in it until May
+    rest = run(window, members, resume=state)
+    after = whole["level"].loc[whole["level"].index > "2025-04-15"]
+    assert rest["level"].index.equals(after.index)
+    assert np.allclose(rest["level"].to_numpy(), after.to_numpy(), rtol=1e-12)
+
+
+def test_running_contributions_in_the_state_match_the_windowed_ones():
+    closes, members = busy()
+    r = run(closes, members, states=True)
+    last, start = r["states"][-1]["c"], r["states"][-22]["c"]
+    v0 = r["level"].iloc[-22]
+    want = C.contribution(r["level"], r["dv"], 21)
+    for t, v in want.items():
+        assert (last.get(t, 0) - start.get(t, 0)) / v0 * 100 == pytest.approx(v, abs=1e-9)
+    assert sum(r["states"][-1]["v"].values()) + r["states"][-1]["cash"] == pytest.approx(r["level"].iloc[-1])
+
+
+def test_the_open_splits_each_day_into_overnight_and_session():
+    closes, members = busy()
+    opens = closes * (1 + 0.01 * np.sin(np.arange(len(closes)))[:, None])
+    r = run(closes, members, opens=opens)
+    lv, op = r["level"], r["open"]
+    assert np.isnan(op.iloc[0])                                 # the index begins at a close
+    day = (lv / lv.shift(1)).iloc[1:]
+    split = (op / lv.shift(1) * lv / op).iloc[1:]
+    assert np.allclose(day.to_numpy(), split.to_numpy())
+    # a halted name sits in the open at its last price, not at a missing one
+    d = pd.Timestamp("2025-03-12")
+    assert pd.notna(op.loc[d])
+    no_open = opens.copy()
+    no_open.loc[d, "A"] = np.nan                                # traded, but no opening price
+    assert np.isnan(run(closes, members, opens=no_open)["open"].loc[d])
+
+
+def test_turnover_is_the_members_held_through_the_session():
+    closes, members = busy()
+    amounts = closes.notna().astype(float) * 1e6
+    r = run(closes, members, amounts=amounts)
+    d = pd.Timestamp("2025-03-12")                              # B halted: four names, one silent
+    assert r["amount"].loc[d] == pytest.approx(3e6)
+    assert r["amount"].loc["2025-04-15"] == pytest.approx(4e6)  # D joins at this close, not before it
+    assert r["amount"].loc["2025-04-16"] == pytest.approx(5e6)

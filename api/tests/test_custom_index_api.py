@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import sys
 
-from datetime import date
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
@@ -24,20 +24,40 @@ CAL = pd.bdate_range("2025-01-02", "2025-06-30")
 
 
 class FakeDB:
+    #: Upserts replace the row with the same key, as the real primary keys do.
+    KEYS = {"custom_index_day": ("index_id", "d")}
+
     def __init__(self):
-        self.t: dict[str, list[dict]] = {"custom_index": [], "custom_index_member": []}
+        self.t: dict[str, list[dict]] = {"custom_index": [], "custom_index_member": [], "custom_index_day": []}
         self.seq = 0
 
     def _match(self, r, f):
         return all(str(r.get(k)) == str(v) for k, v in (f or {}).items())
 
-    def read_table(self, name, filters=None, **_):
+    def read_table(self, name, filters=None, columns="*", order_by=None, limit=None):
         if name not in self.t:
             raise RuntimeError(f'relation "public.{name}" does not exist')
-        return pd.DataFrame([dict(r) for r in self.t[name] if self._match(r, filters)])
+        rows = [dict(r) for r in self.t[name] if self._match(r, filters)]
+        for o in reversed([o.strip() for o in (order_by or "").split(",") if o.strip()]):
+            rows.sort(key=lambda r: str(r.get(o.lstrip("-"))), reverse=o.startswith("-"))
+        return pd.DataFrame(rows[:limit] if limit else rows)
+
+    def read_all(self, name, filters=None, columns="*", order_by=None, in_=None, page=1000):
+        df = self.read_table(name, filters, columns, order_by)
+        if in_ and not df.empty:
+            df = df[df[in_[0]].astype(str).isin([str(v) for v in in_[1]])]
+        return df
 
     def insert_records(self, name, recs, upsert=False):
+        if name not in self.t:
+            raise RuntimeError(f'relation "public.{name}" does not exist')
+        key = self.KEYS.get(name)
         for r in recs:
+            r = {k: (dict(v) if isinstance(v, dict) else v) for k, v in r.items()}
+            hit = next((x for x in self.t[name] if all(str(x.get(k)) == str(r.get(k)) for k in key)), None)                 if upsert and key else None
+            if hit is not None:
+                hit.update(r)
+                continue
             self.seq += 1
             self.t[name].append({"id": self.seq, **r})
 
@@ -49,13 +69,17 @@ class FakeDB:
     def delete_records(self, name, filters):
         self.t[name] = [r for r in self.t[name] if not self._match(r, filters)]
 
+    def days(self, iid):
+        return sorted((r for r in self.t["custom_index_day"] if r["index_id"] == iid), key=lambda r: r["d"])
+
 
 @pytest.fixture
 def db(monkeypatch):
     d = FakeDB()
     monkeypatch.setattr(A, "_db", lambda: d)
-    A._result_cache._d.clear()
+    A._series_cache._d.clear()
     A._price_cache._d.clear()
+    A._catch_up_tried.clear()
     return d
 
 
@@ -121,7 +145,6 @@ def test_an_exit_is_written_down_once_and_outlives_yahoo(db, monkeypatch):
 
     # Weeks later Yahoo has nothing for BBB at all — the history must not move.
     monkeypatch.setattr(A, "_us_closes", lambda t, s: prices(vanish=True))
-    A._result_cache._d.clear()
     A._price_cache._d.clear()
     later = A.compute(1, iid)
     assert later["chart"]["level"] == first["chart"]["level"]
@@ -158,7 +181,7 @@ def test_a_missing_table_names_the_migration(monkeypatch):
             super().__init__()
             self.t = {}
     monkeypatch.setattr(A, "_db", lambda: Empty())
-    with pytest.raises(A.MissingTables, match="20261031_custom_index.sql"):
+    with pytest.raises(A.MissingTables, match="20261101_custom_index_day.sql"):
         A.list_indexes(1)
 
 
@@ -166,41 +189,22 @@ def test_a_missing_table_names_the_migration(monkeypatch):
 LONG = pd.bdate_range("2024-01-02", "2025-06-30")
 
 
-def long_prices(calls, gone=None):
+def long_prices(calls, gone=None, end=None, revise=None):
+    """Prices up to `end` (a later download sees more days); `revise` rescales every price before a date."""
     def fetch(tickers, start):
         calls.append(tuple(tickers))
-        data = {t: pd.Series(np.linspace(10 + i, 20 + 3 * i, len(LONG)), LONG) for i, t in enumerate(sorted(tickers))}
+        cal = LONG[LONG <= end] if end else LONG
+        data = {t: pd.Series(np.linspace(10 + i, 20 + 3 * i, len(LONG)), LONG).reindex(cal)
+                for i, t in enumerate(sorted(tickers))}
+        for t in data:                                         # some wiggle, so weights matter
+            data[t] = data[t] * (1 + 0.03 * np.sin(np.arange(len(cal)) / 5 + len(t)))
         if gone and gone in data:
             data[gone][data[gone].index > "2025-05-30"] = np.nan
-        return pd.DataFrame(data), pd.Series(np.linspace(100, 120, len(LONG)), LONG)
+        if revise:
+            for t in data:
+                data[t][data[t].index < revise] *= 0.9
+        return pd.DataFrame(data), pd.Series(np.linspace(100, 120, len(LONG)), LONG).reindex(cal)
     return fetch
-
-
-@pytest.fixture
-def fresh(db):
-    A._union.clear()
-    yield db
-    A._union.clear()
-
-
-def test_the_board_downloads_once_for_all_indexes(fresh, monkeypatch):
-    calls = []
-    monkeypatch.setattr(A, "_us_closes", long_prices(calls))
-    make(name="一", base_date="2024-01-02")
-    make(name="二", base_date="2024-03-01", members=[{"ticker": "CCC"}, {"ticker": "AAA"}])
-    out = A.board_rows(1, "US")
-    assert len(calls) == 1 and set(calls[0]) == {"US:AAA", "US:BBB", "US:CCC"}
-    assert sorted(r["name"] for r in out["rows"]) == ["一", "二"]
-    assert all(r["group"] == "我的指数" and r["index_id"] for r in out["rows"])
-    assert A.board_rows(1, "CN") == {"rows": [], "young": [], "failed": []}
-
-
-def test_a_young_buy_and_hold_index_is_listed_not_given_readings(fresh, monkeypatch):
-    """Buy-and-hold started earlier is a different portfolio, so it is not extended."""
-    monkeypatch.setattr(A, "_us_closes", long_prices([]))
-    make(name="新", base_date="2025-03-03", method="equal_hold")
-    out = A.board_rows(1, "US")
-    assert out["rows"] == [] and out["young"][0]["name"] == "新" and out["young"][0]["hold"] is True
 
 
 def walk_prices(calls):
@@ -213,7 +217,183 @@ def walk_prices(calls):
     return fetch
 
 
-def test_a_recent_rebalancing_index_is_read_over_the_longer_past(fresh, monkeypatch):
+def fail(*_):
+    raise AssertionError("downloaded a price")
+
+
+def test_an_index_is_computed_once_then_read_from_its_record(db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(A, "_us_closes", long_prices(calls))
+    iid = make(base_date="2024-03-01", rebalance="Q")
+    first = A.compute(1, iid)
+    stored = db.days(iid)
+    assert len(calls) == 1 and stored[0]["d"] == "2024-03-01" and stored[-1]["d"] == "2025-06-30"
+    assert first["chart"]["level"][-1] == pytest.approx(stored[-1]["close"], abs=0.01)
+    # Every page after that reads the record and downloads nothing.
+    monkeypatch.setattr(A, "_us_closes", fail)
+    A._price_cache._d.clear()
+    assert A.compute(1, iid)["chart"] == first["chart"]
+    assert A.board_rows(1, "US")["rows"][0]["index_id"] == iid
+    assert len(A.stretch_detail(1, iid)["dates"]) > 0
+
+
+def test_the_board_reads_stored_records_for_any_number_of_indexes(db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(A, "_us_closes", long_prices(calls))
+    for k in range(5):
+        make(name=f"指数{k}", base_date="2024-01-02", members=[{"ticker": "AAA"}, {"ticker": f"C{k}"}])
+    A.board_rows(1, "US")
+    assert len(calls) == 5                                      # each built once, the first time it is seen
+    monkeypatch.setattr(A, "_us_closes", fail)
+    A._price_cache._d.clear()
+    A._series_cache._d.clear()
+    out = A.board_rows(1, "US")
+    assert len(out["rows"]) == 5 and out["failed"] == []
+    assert all(r["group"] == "我的指数" for r in out["rows"])
+    assert A.board_rows(1, "CN") == {"rows": [], "young": [], "failed": []}
+
+
+def test_a_young_buy_and_hold_index_is_listed_not_given_readings(db, monkeypatch):
+    """Buy-and-hold started earlier is a different portfolio, so it has no backtest."""
+    monkeypatch.setattr(A, "_us_closes", long_prices([]))
+    make(name="新", base_date="2025-03-03", method="equal_hold")
+    out = A.board_rows(1, "US")
+    assert out["rows"] == [] and out["young"][0]["name"] == "新" and out["young"][0]["hold"] is True
+
+
+def test_the_job_carries_an_index_forward_and_never_touches_a_stored_day(db, monkeypatch):
+    calls, starts = [], []
+    monkeypatch.setattr(A, "_us_closes", long_prices(calls, end="2025-04-15"))
+    iid = make(base_date="2024-03-01", method="inv_vol", rebalance="M")
+    A.compute(1, iid)
+    before = {r["d"]: (r["close"], r["state"]) for r in db.days(iid)}
+    assert max(before) == "2025-04-15"
+    # Next download: more days, and every older price revised (a dividend, a correction).
+    A._price_cache._d.clear()
+    later = long_prices(calls, end="2025-06-30", revise="2025-04-01")
+    monkeypatch.setattr(A, "_us_closes", lambda t, s: (starts.append(s), later(t, s))[1])
+    report = A.refresh_all()
+    assert report[0]["ok"] and report[0]["added"] == len(LONG[(LONG > "2025-04-15")])
+    after = {r["d"]: (r["close"], r["state"]) for r in db.days(iid)}
+    assert all(after[d] == v for d, v in before.items())         # not one stored day moved
+    # One download, reaching back only far enough for three months of returns.
+    assert len(calls) == 2 and starts == [date(2025, 4, 15) - A.WARMUP]
+    assert A.refresh_all()[0]["added"] == 0                      # nothing new, nothing written
+
+
+def test_carrying_forward_is_the_same_index_as_computing_it_whole(db, monkeypatch):
+    """Stored up to April and continued, or computed to June in one go: the same numbers."""
+    monkeypatch.setattr(A, "_us_closes", long_prices([], end="2025-04-15"))
+    members = [{"ticker": "AAA"}, {"ticker": "BBB"}, {"ticker": "CCC"}]
+    iid = make(name="分段", base_date="2024-03-01", method="inv_vol", rebalance="M", members=members)
+    A.compute(1, iid)
+    A._price_cache._d.clear()
+    monkeypatch.setattr(A, "_us_closes", long_prices([]))
+    A.refresh_all()
+    whole = make(name="一次", base_date="2024-03-01", method="inv_vol", rebalance="M", members=members)
+    A.compute(1, whole)
+    a = [r["close"] for r in db.days(iid)]
+    b = [r["close"] for r in db.days(whole)]
+    assert len(a) == len(b) and np.allclose(a, b, rtol=1e-6)
+
+
+def test_a_session_is_not_stored_before_it_has_settled(db, monkeypatch):
+    import pytz
+    monkeypatch.setattr(A, "_us_closes", long_prices([]))
+    monkeypatch.setattr(A, "_now", lambda m: pytz.timezone("America/New_York").localize(datetime(2025, 6, 30, 14, 0)))
+    iid = make(base_date="2024-03-01")
+    A.compute(1, iid)
+    assert db.days(iid)[-1]["d"] == "2025-06-27"                 # the 30th is still trading
+    monkeypatch.setattr(A, "_now", lambda m: pytz.timezone("America/New_York").localize(datetime(2025, 6, 30, 17, 30)))
+    A._price_cache._d.clear()
+    A.refresh_all()
+    assert db.days(iid)[-1]["d"] == "2025-06-30"
+
+
+def test_a_holding_missing_from_the_download_stops_the_day_rather_than_freezing_it(db, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", long_prices([], end="2025-04-15"))
+    iid = make(base_date="2024-03-01")
+    A.compute(1, iid)
+    n = len(db.days(iid))
+    A._price_cache._d.clear()
+    full = long_prices([])
+    monkeypatch.setattr(A, "_us_closes", lambda t, s: (full(t, s)[0].drop(columns=["US:BBB"]), full(t, s)[1]))
+    report = A.refresh_all()
+    assert not report[0]["ok"] and "US:BBB" in report[0]["error"]
+    assert len(db.days(iid)) == n
+
+
+def test_the_job_writes_an_exit_down_and_reports_it(db, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", long_prices([], end="2025-05-15"))
+    make(user=1, name="甲", base_date="2024-01-02")
+    make(user=2, name="乙", base_date="2024-01-02", members=[{"ticker": "AAA"}, {"ticker": "CCC"}])
+    assert all(r.get("rebuilt") for r in A.refresh_all())
+    A._price_cache._d.clear()
+    monkeypatch.setattr(A, "_us_closes", long_prices([], gone="US:BBB"))
+    by = {r["name"]: r for r in A.refresh_all()}
+    assert by["甲"]["ok"] and by["甲"]["new_exits"] == ["US:BBB"]
+    assert by["乙"]["ok"] and by["乙"]["new_exits"] == []
+    iid = next(int(r["id"]) for r in db.t["custom_index"] if r["name"] == "甲")
+    held = db.days(iid)[-1]["state"]["v"]
+    assert "US:BBB" not in held and set(held) == {"US:AAA"}
+
+
+def test_a_read_after_the_close_stores_the_new_session_without_waiting_for_the_job(db, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", long_prices([], end="2025-06-27"))
+    iid = make(base_date="2024-03-01")
+    A.compute(1, iid)
+    assert db.days(iid)[-1]["d"] == "2025-06-27"
+    A._price_cache._d.clear()
+    monkeypatch.setattr(A, "_us_closes", long_prices([]))
+    spy = pd.Series(np.linspace(400, 500, len(LONG)), LONG)
+    monkeypatch.setattr(A, "BENCH_SOURCE", lambda market, code: spy if code == "SPY" else None)
+    out = A.compute(1, iid)
+    assert out["as_of"] == "2025-06-30" and db.days(iid)[-1]["d"] == "2025-06-30"
+
+
+def test_on_the_first_day_an_edit_recomputes_the_record(db, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", long_prices([]))
+    iid = make(base_date="2024-03-01")
+    A.compute(1, iid)
+    A.add_member(1, iid, ticker="CCC", name="C", added_on="2024-06-03")
+    assert db.days(iid) == []                                   # dropped, to be computed again
+    out = A.compute(1, iid)
+    assert any(e["kind"] == "add" and e["ticker"] == "US:CCC" and e["date"] == "2024-06-03" for e in out["events"])
+
+
+def test_after_the_first_day_a_change_lands_on_the_next_unstored_close(db, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", long_prices([]))
+    iid = make(base_date="2024-03-01")
+    A.compute(1, iid)
+    aged(db, iid)
+    monkeypatch.setattr(A, "_today", lambda m: date(2025, 6, 30))   # today's close already stored
+    assert A.add_member(1, iid, ticker="CCC", name="C", added_on=None)["added_on"] == "2025-07-01"
+    ccc = next(int(m["id"]) for m in A._members(iid) if m["ticker"] == "US:CCC")
+    A.remove_member(1, iid, ccc, mode="purge", on=None)          # never in a stored day: may go
+    bbb = next(int(m["id"]) for m in A._members(iid) if m["ticker"] == "US:BBB")
+    A.remove_member(1, iid, bbb, mode="end", on=None)
+    assert next(m for m in A._members(iid) if m["ticker"] == "US:BBB")["removed_on"] == "2025-07-01"
+    assert db.days(iid)[-1]["d"] == "2025-06-30"                # nothing stored was dropped
+
+
+def test_open_and_turnover_are_stored_and_split_the_move(db, monkeypatch):
+    def fetch(tickers, start):
+        closes, bench = long_prices([])(tickers, start)
+        opens = closes * 1.01                                   # every stock opens 1% above its close
+        return {"close": closes, "open": opens, "amount": closes * 0 + 1e6, "bench": bench}
+    monkeypatch.setattr(A, "_us_closes", fetch)
+    iid = make(base_date="2024-03-01")
+    out = A.compute(1, iid)
+    d = db.days(iid)
+    assert d[0]["open"] is None and d[1]["open"] is not None
+    assert d[-1]["amount"] == pytest.approx(2e6)
+    sp = out["stats"]["split"]["1d"]
+    day = (d[-1]["close"] / d[-2]["close"] - 1) * 100
+    assert (1 + sp["gap"] / 100) * (1 + sp["session"] / 100) == pytest.approx(1 + day / 100, abs=1e-3)
+    assert out["stats"]["amount"] == pytest.approx(2e6) and out["stats"]["amount_x20"] == pytest.approx(1.0)
+
+
+def test_a_recent_rebalancing_index_is_read_over_its_backtest(db, monkeypatch):
     calls = []
     monkeypatch.setattr(A, "_us_closes", walk_prices(calls))
     iid = make(name="新", base_date="2025-03-03", rebalance="Q")
@@ -221,50 +401,37 @@ def test_a_recent_rebalancing_index_is_read_over_the_longer_past(fresh, monkeypa
     assert out["young"] == [] and len(out["rows"]) == 1
     row = out["rows"][0]
     assert row["extended_from"] == "2024-01-02"
-    real = A._level(A.compute(1, iid))
-    assert row["price"] == pytest.approx(real.iloc[-1], abs=0.01)
-    assert len(calls) == 1                                      # still one download
+    assert row["price"] == pytest.approx(db.days(iid)[-1]["close"], abs=0.01)
+    assert len(calls) == 1                                      # the index and its backtest from one download
 
 
-def test_extension_matches_the_real_index_after_a_rebalance(fresh, monkeypatch):
-    """The whole case for extending: identical daily moves once the weights have been reset."""
+def test_the_backtest_is_the_same_rules_run_earlier_and_joined_on_the_start(db, monkeypatch):
+    """Before the start: the founders under the same rules from earlier. From the start: the index itself."""
+    import custom_index as C
     monkeypatch.setattr(A, "_us_closes", walk_prices([]))
     iid = make(name="新", base_date="2025-03-03", rebalance="Q")
-    real = A._level(A.compute(1, iid))
-    ext, since = A.extended_level(1, iid)
-    assert since == "2024-01-02" and ext.index[0] < real.index[0]
-    after = real.index[real.index >= "2025-04-02"]               # first quarterly reset is 1 April
-    # the real level arrives rounded to 0.01 points; nothing else may differ
-    assert np.allclose(ext.loc[after].pct_change().dropna(), real.loc[after].pct_change().dropna(), atol=2e-5)
-    before = real.index[(real.index > "2025-03-03") & (real.index < "2025-04-01")]
-    assert not np.allclose(ext.loc[before].pct_change().dropna(), real.loc[before].pct_change().dropna(), atol=2e-5)
-    assert ext.iloc[-1] == pytest.approx(real.iloc[-1])
+    A.compute(1, iid)
+    idx = A._own(1, iid)
+    lv, since = A._series(idx, A._days(iid))
+    closes, _ = walk_prices([])(["US:AAA", "US:BBB"], None)
+    early = [{"ticker": t, "added_on": "2024-01-02", "removed_on": None} for t in ("US:AAA", "US:BBB")]
+    replay = C.build(closes, early, method="equal", rebalance="Q", base_date="2024-01-02")["level"]
+    pre = lv.index[lv.index <= "2025-03-03"]
+    assert np.allclose(lv.loc[pre].pct_change().dropna(), replay.loc[pre].pct_change().dropna(), atol=1e-5)
+    own = pd.Series([r["close"] for r in A._days(iid)], pd.to_datetime([r["d"] for r in A._days(iid)]))
+    assert np.allclose(lv.loc[own.index].to_numpy(), own.to_numpy(dtype=float))
 
 
-def test_an_index_already_starting_long_ago_is_not_extended(fresh, monkeypatch):
+def test_an_index_already_starting_long_ago_has_no_backtest(db, monkeypatch):
     monkeypatch.setattr(A, "_us_closes", walk_prices([]))
     monkeypatch.setattr(A, "_extend_from", lambda m: date(2024, 1, 2))
     iid = make(name="老", base_date="2024-01-02")
-    lv, since = A.extended_level(1, iid)
-    assert since is None and lv.equals(A._level(A.compute(1, iid)))
+    A.compute(1, iid)
+    lv, since = A._series(A._own(1, iid), A._days(iid))
+    assert since is None and len(lv) == len(A._days(iid))
 
 
-def test_the_daily_job_computes_everyone_and_reports_new_exits(fresh, monkeypatch):
-    calls = []
-    monkeypatch.setattr(A, "_us_closes", long_prices(calls, gone="US:BBB"))
-    make(user=1, name="甲", base_date="2024-01-02")
-    make(user=2, name="乙", base_date="2024-01-02", members=[{"ticker": "AAA"}, {"ticker": "CCC"}])
-    report = A.refresh_all()
-    assert len(calls) == 1
-    by = {r["name"]: r for r in report}
-    assert by["甲"]["ok"] and by["甲"]["new_exits"] == ["US:BBB"]
-    assert by["乙"]["ok"] and by["乙"]["new_exits"] == []
-    # the second run finds nothing new
-    A._result_cache._d.clear()
-    assert {r["name"]: r["new_exits"] for r in A.refresh_all()} == {"甲": [], "乙": []}
-
-
-def test_stretch_detail_is_the_boards_view_of_an_index(fresh, monkeypatch):
+def test_stretch_detail_is_the_boards_view_of_an_index(db, monkeypatch):
     monkeypatch.setattr(A, "_us_closes", long_prices([]))
     iid = make(base_date="2024-01-02")
     d = A.stretch_detail(1, iid)
@@ -273,19 +440,17 @@ def test_stretch_detail_is_the_boards_view_of_an_index(fresh, monkeypatch):
         A.stretch_detail(2, iid)
 
 
-def test_a_later_addition_keeps_its_date_in_the_longer_past(fresh, monkeypatch):
-    """Only the founders move back. A member added in May is not in the April index, extended or not."""
-    monkeypatch.setattr(A, "_us_closes", walk_prices([]))
-    iid = make(name="新", base_date="2025-03-03", rebalance="Q")
-    A.add_member(1, iid, ticker="CCC", name="C", added_on="2025-05-01")
-    real = A._level(A.compute(1, iid))
-    ext, _ = A.extended_level(1, iid)
-    april = real.index[(real.index >= "2025-04-02") & (real.index <= "2025-05-01")]
-    assert np.allclose(ext.loc[april].pct_change().dropna(), real.loc[april].pct_change().dropna(), atol=2e-5)
+def test_deleting_an_index_deletes_its_record(db, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", long_prices([]))
+    iid = make()
+    A.compute(1, iid)
+    assert db.days(iid)
+    A.delete_index(1, iid)
+    assert db.days(iid) == [] and A._members(iid) == []
 
 
 # ── the comparison line ──────────────────────────────────────────────────────
-def test_an_index_can_be_compared_with_an_industry_etf(fresh, monkeypatch):
+def test_an_index_can_be_compared_with_an_industry_etf(db, monkeypatch):
     monkeypatch.setattr(A, "_us_closes", walk_prices([]))
     smh = pd.Series(np.linspace(200, 260, len(LONG)), LONG)
     monkeypatch.setattr(A, "BENCH_SOURCE", lambda market, code: smh if (market, code) == ("US", "SMH") else None)
@@ -299,7 +464,7 @@ def test_an_index_can_be_compared_with_an_industry_etf(fresh, monkeypatch):
     assert row["rs_vs"] == "SMH"
 
 
-def test_an_unreadable_comparison_falls_back_to_the_market_and_says_so(fresh, monkeypatch):
+def test_an_unreadable_comparison_falls_back_to_the_market_and_says_so(db, monkeypatch):
     monkeypatch.setattr(A, "_us_closes", walk_prices([]))
     monkeypatch.setattr(A, "BENCH_SOURCE", None)
     iid = make(name="对比", base_date="2024-06-03", bench="SMH")
@@ -330,12 +495,12 @@ def test_an_index_without_a_comparison_saves_without_the_column(db):
     assert "bench" not in db.t["custom_index"][0]
 
 
-def test_prices_are_fetched_from_before_the_start_for_volatility(fresh, monkeypatch):
+def test_prices_are_fetched_from_before_the_start_for_volatility(db, monkeypatch):
     calls = []
     monkeypatch.setattr(A, "_us_closes", walk_prices(calls))
     iid = make(base_date="2025-01-02", method="inv_vol", rebalance="Q")
     out = A.compute(1, iid)
-    assert calls == [str(date(2025, 1, 2) - A.WARMUP)]
+    assert calls == [str(A._extend_from("US") - A.WARMUP)]      # its backtest's start, less the warm-up
     assert out["start"] == "2025-01-02" and out["chart"]["level"][0] == 1000
 
 
@@ -350,7 +515,7 @@ def test_a_mixed_list_is_valid_json(db):
 
 
 # ── copying an index ─────────────────────────────────────────────────────────
-def test_a_copy_has_the_same_members_over_the_same_dates_under_another_rule(fresh, monkeypatch):
+def test_a_copy_has_the_same_members_over_the_same_dates_under_another_rule(db, monkeypatch):
     monkeypatch.setattr(A, "_us_closes", long_prices([], gone="US:BBB"))
     src = make(name="源", base_date="2024-01-02", members=[{"ticker": "AAA"}, {"ticker": "BBB"}, {"ticker": "CCC"}])
     A.add_member(1, src, ticker="DDD", name="D", added_on="2024-06-03")
@@ -406,11 +571,11 @@ def test_after_the_first_day_members_change_from_today_only(db, monkeypatch):
     iid = make(base_date="2025-01-02")
     aged(db, iid)
     assert A.list_indexes(1)["indexes"][0]["settling"] is False
-    with pytest.raises(ValueError, match="从今天收盘生效"):
+    with pytest.raises(ValueError, match="从下一个收盘生效"):
         A.add_member(1, iid, ticker="CCC", name="C", added_on="2026-10-29")
     assert A.add_member(1, iid, ticker="CCC", name="C", added_on=None)["added_on"] == "2026-10-30"
     bbb = next(int(m["id"]) for m in A._members(iid) if m["ticker"] == "US:BBB")
-    with pytest.raises(ValueError, match="从今天收盘生效"):
+    with pytest.raises(ValueError, match="从下一个收盘生效"):
         A.remove_member(1, iid, bbb, mode="end", on="2026-10-01")
     with pytest.raises(ValueError, match="移出"):
         A.remove_member(1, iid, bbb, mode="purge", on=None)      # it has been in the index for a year

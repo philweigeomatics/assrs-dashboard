@@ -88,12 +88,12 @@ jobs:
         run: |
           python scan_watchlists.py
 
-      # 7. Compute every user's 自建指数. The level needs no schedule — it is
-      #    replayed from its definition on every view — but an acquired
-      #    member's exit is only written down when its index is computed, and
-      #    Yahoo deletes acquired companies weeks later. Daily keeps every
-      #    index's history safe even if nobody opens it. yfinance is an API
-      #    dependency, not in the root requirements, so it is installed here.
+      # 7. Carry every user's 自建指数 forward: each is stored day by day,
+      #    and this adds the sessions since its last stored close (A-shares
+      #    closed and published, the US session before it final), computes
+      #    any new index from its start, and writes down acquired members'
+      #    exits before Yahoo deletes them. yfinance is an API dependency,
+      #    not in the root requirements, so it is installed here.
       - name: Compute custom indexes
         if: always()
         timeout-minutes: 20

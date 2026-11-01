@@ -32,6 +32,7 @@ from __future__ import annotations
 import time
 from datetime import date, timedelta
 
+import numpy as np
 import pandas as pd
 
 #: Calendar days fetched. ~60 trading sessions, enough for a 20-day move and
@@ -68,15 +69,29 @@ def _cn_bars(codes: list[str], start: str, end: str,
     would draw a cliff in the sparkline that never happened to anyone holding
     the stock. `adj_factor` batches the same way, so correctness here costs
     one more call rather than one call per name.
+    """
+    return {c: df["close"] for c, df in cn_daily(codes, start, end, chunk=chunk, workers=workers).items()}
+
+
+def cn_daily(codes: list[str], start: str, end: str, chunk: int = CHUNK, workers: int = 1,
+             strict: bool = False) -> dict[str, pd.DataFrame]:
+    """
+    Per ts_code: forward-adjusted open and close, and turnover in yuan, on
+    trade dates ('YYYYMMDD').
 
     Long histories need many small chunks (a call returns ~6,000 rows), and
     one after another they add up to most of a minute — `workers` runs
     chunks side by side, each call retried once.
+
+    `strict` raises instead of degrading: a failed chunk would silently drop
+    stocks, and a failed adj_factor would leave raw prices in which a 10送10
+    is a 50% crash — tolerable in a sparkline, not in an index that keeps
+    what it computes.
     """
     if not codes:
         return {}
     api = _api()
-    tries = 2 if workers > 1 else 1
+    tries = 2 if workers > 1 or strict else 1
 
     def call(fn, joined):
         for attempt in range(tries):
@@ -88,11 +103,13 @@ def _cn_bars(codes: list[str], start: str, end: str,
                 print(f"[watchlist] retry {joined[:20]}: {type(exc).__name__}"[:160])
                 time.sleep(1.0)
 
-    def one(part: list[str]) -> dict[str, pd.Series]:
+    def one(part: list[str]) -> dict[str, pd.DataFrame]:
         joined = ",".join(part)
         try:
             px = call(api.daily, joined)
         except Exception as exc:                                   # noqa: BLE001
+            if strict:
+                raise
             print(f"[watchlist] daily: {type(exc).__name__}: {exc}"[:160])
             return {}
         if px is None or px.empty:
@@ -101,28 +118,38 @@ def _cn_bars(codes: list[str], start: str, end: str,
         try:
             adj = call(api.adj_factor, joined)
         except Exception:                                          # noqa: BLE001
+            if strict:
+                raise
             adj = None
+        if strict and (adj is None or adj.empty):
+            raise RuntimeError(f"复权因子读取不到：{joined[:40]}")
 
-        px = px[["ts_code", "trade_date", "close"]].copy()
+        cols = [c for c in ("ts_code", "trade_date", "open", "close", "amount") if c in px.columns]
+        px = px[cols].copy()
         if adj is not None and not adj.empty:
             px = px.merge(adj[["ts_code", "trade_date", "adj_factor"]],
                           on=["ts_code", "trade_date"], how="left")
         else:
             px["adj_factor"] = 1.0
 
-        got: dict[str, pd.Series] = {}
+        got: dict[str, pd.DataFrame] = {}
         for code, grp in px.groupby("ts_code"):
             g = grp.sort_values("trade_date")
             factor = pd.to_numeric(g["adj_factor"], errors="coerce").ffill()
-            close = pd.to_numeric(g["close"], errors="coerce")
             latest = factor.iloc[-1] if len(factor) and factor.iloc[-1] else 1.0
-            series = (close * factor / latest) if latest else close
-            series.index = g["trade_date"].astype(str).values
-            got[str(code)] = series.dropna()
+            scale = (factor / latest) if latest else 1.0
+            df = pd.DataFrame({
+                "open": pd.to_numeric(g["open"], errors="coerce") * scale if "open" in g else np.nan,
+                "close": pd.to_numeric(g["close"], errors="coerce") * scale,
+                # Tushare's amount is in thousands of yuan.
+                "amount": pd.to_numeric(g["amount"], errors="coerce") * 1000 if "amount" in g else np.nan,
+            })
+            df.index = g["trade_date"].astype(str).values
+            got[str(code)] = df.dropna(subset=["close"])
         return got
 
     parts = list(_chunks(codes, chunk))
-    out: dict[str, pd.Series] = {}
+    out: dict[str, pd.DataFrame] = {}
     if workers > 1 and len(parts) > 1:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=workers) as pool:

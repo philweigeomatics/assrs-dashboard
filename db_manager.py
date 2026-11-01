@@ -75,6 +75,33 @@ class DatabaseManager:
 
                 return pd.read_sql_query(query, conn, params=params if params else None)
     
+    def read_all(self, table_name, filters=None, columns='*', order_by=None, in_=None, page=1000):
+        """Every matching row, paged past Supabase's 1,000-row response cap.
+
+        Args:
+            in_: optional (column, values) — only rows whose column is one of values
+            order_by: as read_table; give one, or pages may overlap or skip
+        """
+        if not self.use_supabase:
+            df = self.read_table(table_name, filters, columns, order_by)
+            if in_ and not df.empty:
+                df = df[df[in_[0]].astype(str).isin([str(v) for v in in_[1]])]
+            return df
+        rows, start = [], 0
+        while True:
+            query = supabase_client.table(table_name).select(columns)
+            for key, value in (filters or {}).items():
+                query = query.eq(key, value)
+            if in_:
+                query = query.in_(in_[0], list(in_[1]))
+            for order_col in [o.strip() for o in (order_by or '').split(',') if o.strip()]:
+                query = query.order(order_col.lstrip('-'), desc=order_col.startswith('-'))
+            got = query.range(start, start + page - 1).execute().data
+            rows += got
+            if len(got) < page:
+                return pd.DataFrame(rows)
+            start += page
+
     def insert_records(self, table_name, records, upsert=False):
         """Insert records into a table
         

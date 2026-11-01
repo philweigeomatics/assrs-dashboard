@@ -168,8 +168,8 @@ function MineNote({ mine, loading, error, market }: {
   mine?: MineBoard; loading?: boolean; error?: string | null; market: BoardMarket;
 }) {
   if (error) return <p className="label">我的指数暂不可用：{error}</p>;
-  // Each index is read over up to ten years of its members' prices — the first load takes a while.
-  if (loading) return <p className="label animate-pulse">正在计算我的{market === "US" ? "美股" : " A 股"}指数（首次读取十年行情，约半分钟）…</p>;
+  // Stored indexes read in a moment; one opened for the first time is computed and stored first.
+  if (loading) return <p className="label animate-pulse">正在读取我的{market === "US" ? "美股" : " A 股"}指数…（新建的指数第一次要先算出历史并存下，约半分钟）</p>;
   if (!mine) return null;
   const parts: string[] = [];
   if (mine.young.length) parts.push(`不足 220 个交易日、暂不上榜：${mine.young.map((y) => `${y.name}（${y.days} 天）`).join("、")}`

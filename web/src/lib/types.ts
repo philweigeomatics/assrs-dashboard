@@ -1930,16 +1930,24 @@ export type IndexEvent = {
 
 type IndexRet = Record<"1d" | "5d" | "1m" | "3m" | "1y" | "ytd" | "all", number | null>;
 
+/** Over a window: the move made between closes and opens (overnight) and within sessions. */
+export type IndexSplit = { gap: number | null; session: number | null } | null;
+
 export type CustomIndexDetail = {
   index: CustomIndexRef;
-  /** Today in the index's market — the day a membership change takes effect. */
+  /** Today in the index's market. */
   today: string;
+  /** The close a membership change made now takes effect at: today's, or the next once today's is stored. */
+  effective: string;
   as_of: string; start: string; live_from: string | null;
   method_label: string; rebalance_label: string; bench_label: string;
   /** Set when the chosen comparison could not be read and the market was used instead. */
   bench_note?: string | null;
   stats: { level: number | null; ret: IndexRet; vol: number | null; max_dd: number | null;
-           max_dd_date: string | null; dd_now: number | null; d200: number | null };
+           max_dd_date: string | null; dd_now: number | null; d200: number | null;
+           split: Record<"1d" | "1m" | "3m" | "1y", IndexSplit>;
+           /** Members' combined turnover on the latest day, in yuan or dollars; and against its 20-day average. */
+           amount: number | null; amount_x20: number | null };
   bench_ret: IndexRet | null;
   chart: { dates: string[]; level: (number | null)[]; ma200: (number | null)[]; bench: (number | null)[] | null };
   members: IndexMember[];

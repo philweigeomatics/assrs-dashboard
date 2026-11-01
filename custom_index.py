@@ -175,17 +175,30 @@ def _member_on(rows: list[dict], d: pd.Timestamp) -> bool:
 # ── the ledger ───────────────────────────────────────────────────────────────
 def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: str,
           base_date, base_value: float = BASE_VALUE, cap: float = DEFAULT_CAP,
-          caps: pd.DataFrame | None = None) -> dict:
+          caps: pd.DataFrame | None = None, opens: pd.DataFrame | None = None,
+          amounts: pd.DataFrame | None = None, resume: dict | None = None,
+          states: bool = False) -> dict:
     """
     Run the index from `base_date` over the dates in `closes`.
 
     `closes` — adjusted closes on the market's calendar, NaN where a stock did
     not trade (before listing, halted, after delisting). `members` — rows of
     {ticker, added_on, removed_on}; a ticker may have several rows
-    if it left and came back.
+    if it left and came back. `opens` (adjusted the same way) and `amounts`
+    (turnover in currency) are optional and give the index's open and its
+    members' combined turnover each day.
+
+    `resume` continues a stored index instead of starting it: the state at
+    the close of `resume["date"]` — each holding's value, the cash, each
+    member's running contribution — and only the dates after it are
+    computed. Holdings are stored as values, not share counts, because a
+    dividend or a 送转 rescales every adjusted price before it: units are
+    re-derived from today's prices for that close, and only returns are
+    compared, which no adjustment changes.
 
     Returns the level, the end-of-day weights, every member's daily value
-    change (for contribution), and the change log.
+    change (for contribution), and the change log — and with `states`, the
+    state at every close, which is what a stored index keeps.
     """
     if method not in METHODS:
         raise ValueError(f"未知的加权方式：{method}")
@@ -193,17 +206,28 @@ def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: 
         raise ValueError(f"未知的调仓频率：{rebalance}")
     base = pd.Timestamp(base_date)
     closes = closes.sort_index()
+    by_t: dict[str, list[dict]] = {}
+    for m in members:
+        by_t.setdefault(m["ticker"], []).append(m)
+    d0 = pd.Timestamp(resume["date"]) if resume else None
+    if resume:
+        for t in resume.get("v", {}):
+            if t not in by_t:                          # held, but its member row is gone: it leaves now
+                by_t[t] = [{"ticker": t, "added_on": "1900-01-01", "removed_on": str(d0.date())}]
+            if t not in closes.columns:
+                closes = closes.assign(**{t: np.nan})
     warm = closes                       # history before the base date, for trailing volatility
     closes = closes.loc[closes.index >= base]
     if closes.empty:
         raise LookupError("起始日之后没有行情")
+    if resume and d0 not in closes.index:
+        raise LookupError(f"续算日 {d0.date()} 不在行情日历里")
 
-    by_t: dict[str, list[dict]] = {}
-    for m in members:
-        by_t.setdefault(m["ticker"], []).append(m)
     tickers = [t for t in by_t if t in closes.columns]
     traded = closes[tickers].notna()
     px = closes[tickers].ffill()
+    op = opens.reindex(index=closes.index, columns=tickers) if opens is not None else None
+    amt = amounts.reindex(index=closes.index, columns=tickers) if amounts is not None else None
     mcap = caps.reindex(closes.index).ffill() if caps is not None else None
     vols = vol_frame(warm[tickers]).reindex(closes.index) if method == "inv_vol" else None
     hold = method in HOLD_METHODS or rebalance == "never"
@@ -211,21 +235,57 @@ def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: 
     dates = closes.index
     n = len(dates)
     level = np.full(n, np.nan)
+    open_lv = np.full(n, np.nan)
+    turnover = np.full(n, np.nan)
     weights = np.zeros((n, len(tickers)))
     dv = np.zeros((n, len(tickers)))
     col = {t: i for i, t in enumerate(tickers)}
     units: dict[str, float] = {}
     cash = 0.0
+    cum: dict[str, float] = {}
     events: list[dict] = []
     guessed_caps: set[str] = set()
     started = False
+    snaps: list[dict] = []
+
+    if resume:
+        # A price the fresh download no longer reaches (a halt longer than the
+        # window) is the stored one; the next traded price is compared with it.
+        for t, p in resume.get("p", {}).items():
+            if t in px.columns and pd.isna(px.at[d0, t]) and p is not None:
+                px.loc[px.index >= d0, t] = px.loc[px.index >= d0, t].fillna(float(p))
+        for t, v in resume["v"].items():
+            units[t] = float(v) / float(px.at[d0, t])
+        cash = float(resume.get("cash") or 0.0)
+        cum = {t: float(c) for t, c in resume.get("c", {}).items()}
+        guessed_caps = set(resume.get("g", []))
+        started = True
 
     for k, d in enumerate(dates):
+        if d0 is not None and d <= d0:
+            continue
         row = px.loc[d]
         if k > 0:
             prev = px.loc[dates[k - 1]]
             for t, u in units.items():
                 dv[k, col[t]] = u * (row[t] - prev[t])
+                cum[t] = cum.get(t, 0.0) + dv[k, col[t]]
+            if started:
+                # The open is yesterday's holdings at this morning's prices: a
+                # halted name at its last price; a traded name without an
+                # opening price leaves the index without one today.
+                o = cash
+                for t, u in units.items():
+                    if not traded.at[d, t]:
+                        o += u * prev[t]
+                    elif op is not None and pd.notna(op.at[d, t]):
+                        o += u * op.at[d, t]
+                    else:
+                        o = np.nan
+                        break
+                open_lv[k] = o
+                if amt is not None:
+                    turnover[k] = float(np.nansum([amt.at[d, t] for t in units]))
         value = cash + sum(u * row[t] for t, u in units.items())
         if not started:
             value = base_value
@@ -288,6 +348,8 @@ def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: 
 
             if not started:
                 events.append({"date": str(d.date()), "kind": "start", "n": len(names)})
+                if amt is not None:
+                    turnover[k] = float(np.nansum([amt.at[d, t] for t in names]))
             else:
                 for t in sorted(joining):
                     events.append({"date": str(d.date()), "kind": "add", "ticker": t})
@@ -301,13 +363,23 @@ def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: 
         if value > 0:
             for t, u in units.items():
                 weights[k, col[t]] = u * row[t] / value
+        if states:
+            snaps.append({
+                "v": {t: u * row[t] for t, u in units.items()},
+                "p": {t: float(row[t]) for t in units},
+                "c": dict(cum), "cash": cash,
+                "h": sorted(t for t in units if not traded.at[d, t]),
+                "g": sorted(guessed_caps),
+            })
 
     keep = ~np.isnan(level)
-    if not keep.any():
+    if not keep.any() and not resume:
         raise LookupError("起始日之后没有任何成分股有行情")
     idx = dates[keep]
     return {
         "level": pd.Series(level[keep], idx),
+        "open": pd.Series(open_lv[keep], idx),
+        "amount": pd.Series(turnover[keep], idx),
         "weights": pd.DataFrame(weights[keep], idx, tickers),
         "dv": pd.DataFrame(dv[keep], idx, tickers),
         "traded": traded.loc[idx],
@@ -315,6 +387,7 @@ def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: 
         "events": events,
         "guessed_caps": sorted(guessed_caps),
         "hold": hold,
+        "states": snaps if states else None,
     }
 
 
