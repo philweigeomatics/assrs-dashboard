@@ -258,7 +258,10 @@ function EtfRowView({ r, market, open, onToggle, groupBreak }: {
           {fixed(r.vol20, 0)}%<span className={`label ${(r.vol_rank ?? 0) >= 80 ? "text-brand-ink" : ""}`}> ({fixed(r.vol_rank, 0)})</span>
         </td>
         <td className={`py-1.5 pr-2 text-right ${moveClass(r.ret["3m"], red)}`}>{signed(r.ret["3m"], 1, "%")}</td>
-        <td className={`py-1.5 pr-2 text-right ${moveClass(r.rs_3m, red)}`}>{signed(r.rs_3m, 1, "%")}</td>
+        <td className={`py-1.5 pr-2 text-right ${moveClass(r.rs_3m, red)}`}>
+          {signed(r.rs_3m, 1, "%")}
+          {r.rs_vs && <div className="label text-[10.5px]" title="自建指数和它自己选的对比指数比">vs {r.rs_vs}</div>}
+        </td>
         <td className="py-1.5 whitespace-nowrap text-[11.5px]">
           {a ? (
             <span title={`${a.episodes} 段：${a.dates.join("、")}`}>

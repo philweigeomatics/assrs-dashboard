@@ -280,3 +280,68 @@ def test_a_later_addition_keeps_its_date_in_the_longer_past(fresh, monkeypatch):
     ext, _ = A.extended_level(1, iid)
     april = real.index[(real.index >= "2025-04-02") & (real.index <= "2025-05-01")]
     assert np.allclose(ext.loc[april].pct_change().dropna(), real.loc[april].pct_change().dropna(), atol=2e-5)
+
+
+# ── the comparison line ──────────────────────────────────────────────────────
+def test_an_index_can_be_compared_with_an_industry_etf(fresh, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", walk_prices([]))
+    smh = pd.Series(np.linspace(200, 260, len(LONG)), LONG)
+    monkeypatch.setattr(A, "BENCH_SOURCE", lambda market, code: smh if (market, code) == ("US", "SMH") else None)
+    iid = make(name="对比", base_date="2024-06-03", bench="SMH")
+    out = A.compute(1, iid)
+    assert out["bench_label"] == "SMH 半导体" and out["bench_note"] is None
+    start = smh.loc["2024-06-03"]
+    assert out["bench_ret"]["all"] == pytest.approx((smh.iloc[-1] / start - 1) * 100, abs=0.01)
+    assert A.list_indexes(1)["indexes"][0]["bench_label"] == "SMH 半导体"
+    row = A.board_rows(1, "US")["rows"][0]
+    assert row["rs_vs"] == "SMH"
+
+
+def test_an_unreadable_comparison_falls_back_to_the_market_and_says_so(fresh, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", walk_prices([]))
+    monkeypatch.setattr(A, "BENCH_SOURCE", None)
+    iid = make(name="对比", base_date="2024-06-03", bench="SMH")
+    out = A.compute(1, iid)
+    assert out["bench_label"] == "SPY（含分红）" and "SMH" in out["bench_note"]
+
+
+def test_the_comparison_must_come_from_the_boards_list(db):
+    with pytest.raises(ValueError):
+        make(bench="NVDA")
+    with pytest.raises(ValueError):
+        make(market="CN", members=[{"ticker": "600519"}, {"ticker": "000858"}], bench="SMH")
+    make(name="a", market="CN", members=[{"ticker": "600519"}, {"ticker": "000858"}], bench="931160.CSI")
+
+
+def test_changing_the_comparison_does_not_move_the_live_boundary(db):
+    iid = make(base_date="2025-01-02")
+    before = A._own(1, iid)["rules_updated_at"]
+    out = A.update_rules(1, iid, name="光模块", method="equal", rebalance="M", cap_pct=None,
+                         base_date="2025-01-02", bench="AIQ")
+    assert out["recomputed"] is False and A._own(1, iid)["rules_updated_at"] == before
+    assert A._own(1, iid)["bench"] == "AIQ"
+
+
+def test_an_index_without_a_comparison_saves_without_the_column(db):
+    """A database migrated before `bench` existed must still accept a plain index."""
+    make()
+    assert "bench" not in db.t["custom_index"][0]
+
+
+def test_prices_are_fetched_from_before_the_start_for_volatility(fresh, monkeypatch):
+    calls = []
+    monkeypatch.setattr(A, "_us_closes", walk_prices(calls))
+    iid = make(base_date="2025-01-02", method="inv_vol", rebalance="Q")
+    out = A.compute(1, iid)
+    assert calls == [str(date(2025, 1, 2) - A.WARMUP)]
+    assert out["start"] == "2025-01-02" and out["chart"]["level"][0] == 1000
+
+
+def test_a_mixed_list_is_valid_json(db):
+    """One capped index beside an uncapped one made cap_pct a float column — NaN broke the list."""
+    import json
+    make(name="a")
+    make(name="b", method="cap_capped", cap_pct=15)
+    out = A.list_indexes(1)
+    json.dumps(out, allow_nan=False)
+    assert {r["name"]: r["cap_pct"] for r in out["indexes"]} == {"a": None, "b": 15.0}

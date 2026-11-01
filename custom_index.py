@@ -55,6 +55,7 @@ METHODS: dict[str, tuple[str, str]] = {
     "cap": ("市值加权", "按市值分配，大公司权重大（A 股用流通市值）"),
     "cap_capped": ("市值加权·单只上限", "按市值分配，但单只不超过上限，超出部分按比例分给其余"),
     "price": ("价格加权", "按股价分配，股价高的权重大（道琼斯的做法）"),
+    "inv_vol": ("波动率倒数加权", "按近 3 个月波动率的倒数分配：越稳的权重越大，每只对指数涨跌的影响大致相同"),
     "custom": ("自定权重", "按你设定的权重，每次调仓恢复"),
 }
 
@@ -64,6 +65,13 @@ REBALANCE: dict[str, str] = {"M": "每月", "Q": "每季", "H": "每半年", "Y"
 HOLD_METHODS = {"equal_hold"}
 
 DEFAULT_CAP = 0.10
+
+#: Inverse-volatility weights read the last three months of daily returns as
+#: of the rebalance close — nothing after it. A name with less than a month
+#: of returns (just listed, or back from a long halt) takes the median
+#: volatility of the others rather than an estimate from a handful of days.
+VOL_DAYS = 63
+VOL_MIN_DAYS = 20
 BASE_VALUE = 1000.0
 
 WINDOWS = {"1d": 1, "5d": 5, "1m": 21, "3m": 63, "1y": 252}
@@ -105,14 +113,32 @@ def capped(raw: dict[str, float], cap: float) -> dict[str, float]:
             fixed[t] = cap
 
 
+def vol_frame(closes: pd.DataFrame) -> pd.DataFrame:
+    """
+    Trailing volatility of daily returns on every date, from traded closes
+    only — a halted stock's flat days are missing returns, not zero ones.
+    """
+    r = closes.pct_change(fill_method=None)
+    return r.rolling(VOL_DAYS, min_periods=VOL_MIN_DAYS).std()
+
+
 def targets(method: str, names: list[str], *, price: pd.Series, mcap: pd.Series | None,
-            custom: dict[str, float], cap: float) -> tuple[dict[str, float], list[str]]:
-    """Target weights for `names` on one day, and the names whose cap had to be guessed."""
+            custom: dict[str, float], cap: float,
+            vol: pd.Series | None = None) -> tuple[dict[str, float], list[str]]:
+    """Target weights for `names` on one day, and the names whose cap or volatility had to be guessed."""
     if not names:
         return {}, []
     guessed: list[str] = []
     if method in ("equal", "equal_hold"):
         raw = {t: 1.0 for t in names}
+    elif method == "inv_vol":
+        # Each name's weight × its volatility is the same for all: every
+        # member moves the index about as much as any other.
+        known = {t: float(vol[t]) for t in names
+                 if vol is not None and t in vol.index and pd.notna(vol[t]) and vol[t] > 0}
+        fill = float(np.median(list(known.values()))) if known else 1.0
+        guessed = [t for t in names if t not in known]
+        raw = {t: 1.0 / known.get(t, fill) for t in names}
     elif method == "price":
         raw = {t: float(price[t]) for t in names}
     elif method == "custom":
@@ -173,6 +199,7 @@ def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: 
         raise ValueError(f"未知的调仓频率：{rebalance}")
     base = pd.Timestamp(base_date)
     closes = closes.sort_index()
+    warm = closes                       # history before the base date, for trailing volatility
     closes = closes.loc[closes.index >= base]
     if closes.empty:
         raise LookupError("起始日之后没有行情")
@@ -185,6 +212,7 @@ def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: 
     px = closes[tickers].ffill()
     custom = {t: max(float(r.get("weight_pct") or 0) for r in rows) for t, rows in by_t.items()}
     mcap = caps.reindex(closes.index).ffill() if caps is not None else None
+    vols = vol_frame(warm[tickers]).reindex(closes.index) if method == "inv_vol" else None
     hold = method in HOLD_METHODS or rebalance == "never"
 
     dates = closes.index
@@ -232,9 +260,10 @@ def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: 
             names = sorted(t for t in active if t not in frozen)
             price_row = row
             cap_row = mcap.loc[d] if mcap is not None else None
+            vol_row = vols.loc[d] if vols is not None else None
 
             if not started or not hold:
-                w, g = targets(method, names, price=price_row, mcap=cap_row, custom=custom, cap=cap)
+                w, g = targets(method, names, price=price_row, mcap=cap_row, custom=custom, cap=cap, vol=vol_row)
                 guessed_caps.update(g)
                 investable = value - frozen_value
                 for t in list(units):
@@ -248,7 +277,7 @@ def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: 
                 # everyone already held is scaled together to fund them (or to
                 # absorb a leaver's proceeds). Nobody else is reset.
                 w, g = targets(method, sorted(active), price=price_row, mcap=cap_row,
-                               custom=custom, cap=cap)
+                               custom=custom, cap=cap, vol=vol_row)
                 guessed_caps.update(g)
                 buy = {t: value * w[t] for t in joining if t not in frozen}
                 stay = [t for t in units if t not in frozen]
@@ -368,7 +397,8 @@ def summarise(run: dict, *, members: list[dict], names: dict[str, str], method: 
         px_now = closes.ffill().loc[last]
         cap_now = caps.reindex(closes.index).ffill().loc[last] if caps is not None else None
         custom = {m["ticker"]: float(m.get("weight_pct") or 0) for m in members}
-        tgt, _ = targets(method, names_now, price=px_now, mcap=cap_now, custom=custom, cap=cap)
+        vol_now = vol_frame(closes[[t for t in names_now if t in closes.columns]]).iloc[-1] if method == "inv_vol" else None
+        tgt, _ = targets(method, names_now, price=px_now, mcap=cap_now, custom=custom, cap=cap, vol=vol_now)
 
     contrib = {k: contribution(level, run["dv"], v) for k, v in
                {"1d": 1, "5d": 5, "1m": 21, "3m": 63, "all": None}.items()}

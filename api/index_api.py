@@ -45,6 +45,14 @@ EARLIEST = date(2015, 1, 1)
 US_EXIT_GAP = 10
 CN_STALE_GAP = 20
 MIGRATION = "supabase/migrations/20261031_custom_index.sql"
+#: Prices fetched before the base date: inverse-volatility needs three months
+#: of returns at the first rebalance. The level still starts on the base date.
+WARMUP = timedelta(days=120)
+
+#: Set by api.main to (market, code) → that board's closes, read from the
+#: dashboard's own 30-minute cache, so a comparison line costs no request.
+#: Unset (the daily job), every comparison is the broad market.
+BENCH_SOURCE = None
 _A = re.compile(r"^\d{6}$")
 _US = re.compile(r"^US:[A-Z][A-Z0-9.\-]{0,9}$")
 
@@ -68,7 +76,7 @@ def _guard(fn):
         except Exception as exc:                                   # noqa: BLE001
             if "custom_index" in str(exc) and ("does not exist" in str(exc) or "PGRST" in str(exc)
                                                or "relation" in str(exc)):
-                raise MissingTables(f"自建指数的表尚未创建 — 请在 Supabase SQL 编辑器运行 {MIGRATION}") from exc
+                raise MissingTables(f"自建指数的表尚未创建或不是最新 — 请在 Supabase SQL 编辑器运行 {MIGRATION}") from exc
             raise
     wrapped.__name__ = fn.__name__
     return wrapped
@@ -77,7 +85,9 @@ def _guard(fn):
 def _rows(df) -> list[dict]:
     if df is None or df.empty:
         return []
-    out = df.where(pd.notna(df), None).to_dict("records")
+    # object first: on a float column `where(..., None)` puts the NaN straight
+    # back, and one capped index beside an uncapped one makes cap_pct float.
+    out = df.astype(object).where(pd.notna(df), None).to_dict("records")
     for r in out:
         for k in ("added_on", "removed_on", "base_date"):
             if r.get(k) is not None:
@@ -128,6 +138,41 @@ def clean_rules(market: str, method: str, rebalance: str, cap_pct, base_date) ->
             "base_date": str(bd)}
 
 
+def bench_choices() -> dict[str, list[dict]]:
+    """What an index can be compared with: the dashboard board's own lists."""
+    import cn_index
+    import us_etf
+    return {"US": [{"code": t, "name": n, "group": g} for t, n, g in us_etf.UNIVERSE],
+            "CN": [{"code": t, "name": n, "group": g} for t, n, g in cn_index.UNIVERSE]}
+
+
+def clean_bench(market: str, bench) -> str | None:
+    if bench in (None, ""):
+        return None
+    if bench not in {c["code"] for c in bench_choices()[market]}:
+        raise ValueError(f"{bench} 不在可选的对比指数里")
+    return bench
+
+
+def bench_label(market: str, code: str | None) -> str:
+    if not code:
+        return "沪深300" if market == "CN" else "SPY（含分红）"
+    name = next((c["name"] for c in bench_choices()[market] if c["code"] == code), code)
+    return f"{code} {name}" if market == "US" else name
+
+
+def _comparison(market: str, code: str | None) -> pd.Series | None:
+    """The chosen industry index's closes, or None to fall back to the market."""
+    if not code or BENCH_SOURCE is None:
+        return None
+    try:
+        s = BENCH_SOURCE(market, code)
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"[index] comparison {code}: {type(exc).__name__}: {exc}"[:160])
+        return None
+    return s.dropna() if s is not None and not s.dropna().empty else None
+
+
 def _clean_name(name: str) -> str:
     name = (name or "").strip()
     if not name:
@@ -158,21 +203,23 @@ def list_indexes(user_id: int) -> dict:
         mem = _members(r["id"])
         out.append({**_public(r), "members": sum(1 for m in mem if not m.get("removed_on"))})
     return {"indexes": out, "methods": {k: {"label": v[0], "hint": v[1]} for k, v in C.METHODS.items()},
-            "rebalance": C.REBALANCE}
+            "rebalance": C.REBALANCE, "benches": bench_choices()}
 
 
 def _public(r: dict) -> dict:
     return {"id": int(r["id"]), "name": r["name"], "market": r["market"], "method": r["method"],
             "rebalance": r["rebalance"], "cap_pct": r.get("cap_pct"), "base_date": r["base_date"],
+            "bench": r.get("bench"), "bench_label": bench_label(r["market"], r.get("bench")),
             "created_at": str(r.get("created_at") or "")[:19],
             "rules_updated_at": str(r.get("rules_updated_at") or "")[:19]}
 
 
 @_guard
 def create_index(user_id: int, *, name: str, market: str, method: str, rebalance: str,
-                 cap_pct, base_date, members: list[dict]) -> dict:
+                 cap_pct, base_date, members: list[dict], bench: str | None = None) -> dict:
     name = _clean_name(name)
     rules = clean_rules(market, method, rebalance, cap_pct, base_date)
+    bench = clean_bench(market, bench)
     picked: dict[str, dict] = {}
     for m in members or []:
         t = clean_ticker(market, m.get("ticker", ""))
@@ -189,9 +236,11 @@ def create_index(user_id: int, *, name: str, market: str, method: str, rebalance
     if _rows(db.read_table("custom_index", filters={"app_user_id": int(user_id), "name": name})):
         raise ValueError(f"已有同名指数「{name}」")
     now = datetime.utcnow().isoformat()
+    # `bench` only when set: an index without one must still save on a
+    # database migrated before the column existed.
     db.insert_records("custom_index", [{"app_user_id": int(user_id), "name": name, **rules,
                                         "base_value": C.BASE_VALUE, "created_at": now,
-                                        "rules_updated_at": now}])
+                                        "rules_updated_at": now, **({"bench": bench} if bench else {})}])
     back = _rows(db.read_table("custom_index", filters={"app_user_id": int(user_id), "name": name}))
     if not back:
         raise RuntimeError("指数已写入但读不回来 — 请刷新后确认")
@@ -203,16 +252,23 @@ def create_index(user_id: int, *, name: str, market: str, method: str, rebalance
 
 @_guard
 def update_rules(user_id: int, index_id: int, *, name: str, method: str, rebalance: str,
-                 cap_pct, base_date) -> dict:
-    """A new rule recomputes the whole history, so the live boundary moves to now."""
+                 cap_pct, base_date, bench: str | None = None) -> dict:
+    """
+    A new rule recomputes the whole history, so the live boundary moves to
+    now. The comparison index is not a rule — it changes nothing about the
+    index itself — so changing it leaves the boundary where it was.
+    """
     cur = _own(user_id, index_id)
     name = _clean_name(name)
     rules = clean_rules(cur["market"], method, rebalance, cap_pct, base_date)
+    bench = clean_bench(cur["market"], bench)
     db = _db()
     if name != cur["name"] and _rows(db.read_table("custom_index", filters={"app_user_id": int(user_id), "name": name})):
         raise ValueError(f"已有同名指数「{name}」")
     changed = any(str(cur.get(k)) != str(rules[k]) for k in ("method", "rebalance", "cap_pct", "base_date"))
     vals = {"name": name, **{k: v for k, v in rules.items() if k != "market"}}
+    if bench is not None or cur.get("bench") is not None:
+        vals["bench"] = bench
     if changed:
         vals["rules_updated_at"] = datetime.utcnow().isoformat()
     db.update_records("custom_index", vals, {"id": int(index_id), "app_user_id": int(user_id)})
@@ -443,8 +499,8 @@ def compute(user_id: int, index_id: int) -> dict:
         market = idx["market"]
         start = date.fromisoformat(idx["base_date"])
         tickers = sorted({m["ticker"] for m in members})
-        closes, bench = _prices(market, tickers, start)
-        cal = bench.index[bench.index >= pd.Timestamp(start)]
+        closes, bench = _prices(market, tickers, start - WARMUP)
+        cal = bench.index[bench.index >= pd.Timestamp(start - WARMUP)]
         closes = closes.reindex(cal)
         mem = _record_exits(index_id, [dict(m) for m in members], closes, market)
         closes = _with_frozen(closes.copy(), mem, cal)
@@ -458,8 +514,9 @@ def compute(user_id: int, index_id: int) -> dict:
         if market == "CN":
             from api.portfolio_api import _cn_names
             names = _cn_names()
+        cmp = _comparison(market, idx.get("bench"))
         out = C.summarise(ledger, members=mem, names=names, method=idx["method"],
-                          rebalance=idx["rebalance"], cap=cap, bench=bench,
+                          rebalance=idx["rebalance"], cap=cap, bench=cmp if cmp is not None else bench,
                           live_from=str(idx.get("rules_updated_at") or "")[:10] or None,
                           closes=closes, caps=caps)
         label = {m["ticker"]: (names.get(m["ticker"]) or m.get("name") or m["ticker"]) for m in mem}
@@ -467,7 +524,9 @@ def compute(user_id: int, index_id: int) -> dict:
             if e.get("ticker"):
                 e["name"] = label.get(e["ticker"], e["ticker"])
         out["index"] = _public(idx)
-        out["bench_label"] = "沪深300" if market == "CN" else "SPY（含分红）"
+        out["bench_label"] = bench_label(market, idx.get("bench") if cmp is not None else None)
+        out["bench_note"] = (None if cmp is not None or not idx.get("bench")
+                             else f"{bench_label(market, idx['bench'])} 暂时读取不到，改用大盘对比")
         out["method_label"] = C.METHODS[idx["method"]][0]
         out["rebalance_label"] = C.REBALANCE[idx["rebalance"]]
         return out
@@ -563,8 +622,8 @@ def extended_level(user_id: int, index_id: int) -> tuple[pd.Series, str | None]:
     def run():
         mem = [dict(m, added_on=str(ext)) if m["added_on"] == idx["base_date"] else dict(m) for m in members]
         tickers = sorted({m["ticker"] for m in mem})
-        closes, bench = _prices(market, tickers, ext)
-        cal = bench.index[bench.index >= pd.Timestamp(ext)]
+        closes, bench = _prices(market, tickers, ext - WARMUP)
+        cal = bench.index[bench.index >= pd.Timestamp(ext - WARMUP)]
         closes = _with_frozen(closes.reindex(cal).copy(), mem, cal)
         cap = float(idx.get("cap_pct") or C.DEFAULT_CAP * 100) / 100
         caps = _caps(market, tickers, closes, ext) if idx["method"] in ("cap", "cap_capped") else None
@@ -594,7 +653,8 @@ def board_rows(user_id: int, market: str) -> dict:
     if not idxs:
         return {"rows": [], "young": [], "failed": []}
     reach = [_extend_from(market)] if any(extendable(r) for r in idxs) else []
-    _prefetch(market, idxs, members, start=min([date.fromisoformat(r["base_date"]) for r in idxs] + reach))
+    _prefetch(market, idxs, members,
+              start=min([date.fromisoformat(r["base_date"]) for r in idxs] + reach) - WARMUP)
     bench_t = "SPY" if market == "US" else "000300.SH"
     rows, young, failed = [], [], []
     for r in idxs:
@@ -604,9 +664,11 @@ def board_rows(user_id: int, market: str) -> dict:
         except Exception as exc:                                   # noqa: BLE001
             failed.append({"id": int(r["id"]), "name": r["name"], "error": str(exc)[:120]})
             continue
-        bench = _union.get(market, (None,) * 5)[4]
+        # Relative strength against the index's own comparison, when it has one.
+        cmp = _comparison(market, r.get("bench"))
+        bench = cmp if cmp is not None else _union.get(market, (None,) * 5)[4]
         x = us_etf.row(f"IDX{r['id']}", level, bench, name=r["name"], group=us_etf.MINE,
-                       bench_ticker=bench_t)
+                       bench_ticker=r.get("bench") if cmp is not None else bench_t)
         if x is None:
             young.append({"id": int(r["id"]), "name": r["name"], "days": len(level),
                           "hold": not extendable(r)})
@@ -614,6 +676,7 @@ def board_rows(user_id: int, market: str) -> dict:
         x["index_id"] = int(r["id"])
         x["method"] = out["method_label"]
         x["extended_from"] = since
+        x["rs_vs"] = (r["bench"] if market == "US" else bench_label(market, r["bench"])) if cmp is not None else None
         rows.append(x)
     return {"rows": rows, "young": young, "failed": failed}
 
@@ -646,7 +709,8 @@ def refresh_all() -> list[dict]:
         if not mine:
             continue
         try:
-            _prefetch(market, mine, members)
+            _prefetch(market, mine, members,
+                      start=min(date.fromisoformat(r["base_date"]) for r in mine) - WARMUP)
         except Exception as exc:                                   # noqa: BLE001
             report += [{"id": r["id"], "name": r["name"], "ok": False, "error": f"prices: {exc}"[:160]} for r in mine]
             continue

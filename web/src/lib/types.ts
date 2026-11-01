@@ -1862,6 +1862,8 @@ export type EtfRow = {
   index_id?: number; method?: string;
   /** Set when the readings use the same rules replayed from earlier than the index starts. */
   extended_from?: string | null;
+  /** 我的指数 only: what 相对 is measured against when it is the index's own comparison. */
+  rs_vs?: string | null;
 };
 
 export type UsEtfBoard = {
@@ -1890,12 +1892,14 @@ export type UsEtfDetail = {
 };
 
 // ── 自建指数 ──────────────────────────────────────────────────────────────────
-export type IndexMethod = "equal" | "equal_hold" | "cap" | "cap_capped" | "price" | "custom";
+export type IndexMethod = "equal" | "equal_hold" | "cap" | "cap_capped" | "price" | "custom" | "inv_vol";
 export type IndexRebalance = "M" | "Q" | "H" | "Y" | "never";
 
 export type CustomIndexRef = {
   id: number; name: string; market: "CN" | "US"; method: IndexMethod; rebalance: IndexRebalance;
   cap_pct: number | null; base_date: string; created_at: string; rules_updated_at: string;
+  /** The industry ETF / theme index it is compared with; null = the broad market. */
+  bench?: string | null; bench_label?: string;
   members?: number;
 };
 
@@ -1903,6 +1907,7 @@ export type CustomIndexList = {
   indexes: CustomIndexRef[];
   methods: Record<IndexMethod, { label: string; hint: string }>;
   rebalance: Record<IndexRebalance, string>;
+  benches: Record<"US" | "CN", { code: string; name: string; group: string }[]>;
 };
 
 export type IndexWindow = "1d" | "5d" | "1m" | "3m" | "all";
@@ -1927,6 +1932,8 @@ export type CustomIndexDetail = {
   index: CustomIndexRef;
   as_of: string; start: string; live_from: string | null;
   method_label: string; rebalance_label: string; bench_label: string;
+  /** Set when the chosen comparison could not be read and the market was used instead. */
+  bench_note?: string | null;
   stats: { level: number | null; ret: IndexRet; vol: number | null; max_dd: number | null;
            max_dd_date: string | null; dd_now: number | null; d200: number | null };
   bench_ret: IndexRet | null;
@@ -1940,4 +1947,5 @@ export type CustomIndexDetail = {
 
 export type IndexRulesBody = {
   name: string; method: IndexMethod; rebalance: IndexRebalance; cap_pct: number | null; base_date: string;
+  bench?: string | null;
 };

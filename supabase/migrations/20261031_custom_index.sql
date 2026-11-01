@@ -11,7 +11,7 @@ create table if not exists public.custom_index (
     name             text        not null,
     -- One market per index: one currency, one calendar, one benchmark.
     market           text        not null check (market in ('CN', 'US')),
-    -- equal | equal_hold | cap | cap_capped | price | custom
+    -- equal | equal_hold | cap | cap_capped | price | custom | inv_vol
     method           text        not null,
     -- M | Q | H | Y | never
     rebalance        text        not null,
@@ -19,6 +19,9 @@ create table if not exists public.custom_index (
     cap_pct          real,
     base_date        date        not null,
     base_value       real        not null default 1000,
+    -- What the index is compared with: a US industry ETF or an A-share theme
+    -- index from the dashboard board. Null = the broad market.
+    bench            text,
     created_at       timestamptz not null default now(),
     -- The last time the definition changed. History before it was computed
     -- with hindsight and is drawn as 回溯（假设）.
@@ -44,6 +47,10 @@ create table if not exists public.custom_index_member (
     -- because Yahoo later drops an acquired company's history entirely.
     frozen_closes text
 );
+
+-- Safe to re-run: a database created from the first version of this file
+-- gains the comparison column without touching anything else.
+alter table public.custom_index add column if not exists bench text;
 
 create index if not exists custom_index_member_index_id on public.custom_index_member (index_id);
 create index if not exists custom_index_app_user_id on public.custom_index (app_user_id);

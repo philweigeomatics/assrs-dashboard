@@ -111,7 +111,8 @@ export function CustomIndex() {
       {mode === "view" && !current && (
         <section className="card p-6 text-[13px] text-ink-dim leading-relaxed">
           <p className="font-semibold text-ink mb-1">把你关注的一组股票做成一条指数</p>
-          <p>选成分股、加权方式（等权 / 等资金买入持有 / 市值加权 / 市值加权带上限 / 价格加权 / 自定权重）和调仓频率，
+          <p>选成分股、加权方式（等权 / 等资金买入持有 / 市值加权 / 市值加权带上限 / 价格加权 / 自定权重 / 波动率倒数加权）、
+            调仓频率和一个对比用的行业指数，
             系统会按指数公司的做法逐日记账：调仓、增删成分、停牌、被收购退市都不会让点位跳空，
             并告诉你每只股票对涨跌贡献了多少。A 股和美股分开建。</p>
         </section>
@@ -132,12 +133,13 @@ function IndexForm({ meta, initial, onDone, onCancel }: {
   const [rebalance, setRebalance] = useState<IndexRebalance>(initial?.rebalance ?? "Q");
   const [cap, setCap] = useState(String(initial?.cap_pct ?? 10));
   const [start, setStart] = useState(initial?.base_date ?? defaultStart("CN"));
+  const [bench, setBench] = useState(initial?.bench ?? "");
   const [members, setMembers] = useState<Draft[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
   const save = useMutation({
     mutationFn: async () => {
-      const rules = { name: name.trim(), method, base_date: start,
+      const rules = { name: name.trim(), method, base_date: start, bench: bench || null,
                       rebalance: method === "equal_hold" ? "never" as const : rebalance,
                       cap_pct: method === "cap_capped" ? Number(cap) : null };
       if (initial) return api.updateIndex(initial.id, rules);
@@ -165,7 +167,7 @@ function IndexForm({ meta, initial, onDone, onCancel }: {
           <div className="flex rounded-md bg-sunken p-0.5 w-fit">
             {MARKETS.map((m) => (
               <button key={m.v} disabled={!!initial} onClick={() => {
-                setMarket(m.v); setMembers([]);
+                setMarket(m.v); setMembers([]); setBench("");
                 if (!initial) setStart(defaultStart(m.v));
               }}
                 className={`h-7 px-3 rounded text-[12.5px] ${market === m.v ? "bg-panel shadow-sm font-semibold" : "text-ink-mute"} disabled:opacity-60`}>
@@ -188,6 +190,19 @@ function IndexForm({ meta, initial, onDone, onCancel }: {
           <select value={hold ? "never" : rebalance} disabled={hold} onChange={(e) => setRebalance(e.target.value as IndexRebalance)}
             className="h-8 w-full px-2 rounded-md bg-sunken outline-none disabled:opacity-60">
             {(Object.keys(meta.rebalance) as IndexRebalance[]).map((k) => <option key={k} value={k}>{meta.rebalance[k]}</option>)}
+          </select>
+        </Field>
+        <Field label="对比指数" hint="图上的对比线和「相对」读数用它；换它不会重算指数">
+          <select value={bench} onChange={(e) => setBench(e.target.value)}
+            className="h-8 w-full px-2 rounded-md bg-sunken outline-none">
+            <option value="">大盘（{market === "US" ? "SPY" : "沪深300"}）</option>
+            {[...new Set(meta.benches[market].map((b) => b.group))].map((g) => (
+              <optgroup key={g} label={g}>
+                {meta.benches[market].filter((b) => b.group === g).map((b) => (
+                  <option key={b.code} value={b.code}>{market === "US" ? `${b.code} ${b.name}` : b.name}</option>
+                ))}
+              </optgroup>
+            ))}
           </select>
         </Field>
         {method === "cap_capped" && (
@@ -301,7 +316,7 @@ function Body({ d }: { d: CustomIndexDetail }) {
           <span className={`text-[15px] font-semibold tnum ${moveClass(s.ret["1d"], red)}`}>{signed(s.ret["1d"], 2, "%")}</span>
           <span className="label">
             {d.method_label} · {d.hold ? "不调仓" : `${d.rebalance_label}调仓`}
-            {d.index.cap_pct ? ` · 单只上限 ${d.index.cap_pct}%` : ""} · 起始 {d.start} = 1000 · 截至 {d.as_of}
+            {d.index.cap_pct ? ` · 单只上限 ${d.index.cap_pct}%` : ""} · 对比 {d.bench_label} · 起始 {d.start} = 1000 · 截至 {d.as_of}
             {d.next_rebalance ? ` · 下次调仓 ${d.next_rebalance} 后首个交易日` : ""}
           </span>
         </div>
@@ -315,6 +330,7 @@ function Body({ d }: { d: CustomIndexDetail }) {
           <Tile k="年化波动" v={s.vol != null ? `${fixed(s.vol, 0)}%` : "—"}
             sub={s.d200 != null ? `偏离 200 日 ${signed(s.d200, 1, "%")}` : "不足 200 日"} />
         </div>
+        {d.bench_note && <p className="label text-brand-ink">{d.bench_note}</p>}
         <LevelChart d={d} />
       </section>
 
@@ -326,8 +342,11 @@ function Body({ d }: { d: CustomIndexDetail }) {
         {d.index.market === "US" && (d.index.method === "cap" || d.index.method === "cap_capped") &&
           " 美股市值 = 当前股本 × 每日价格：期间回购与增发不计入。"}
         {d.index.market === "CN" && (d.index.method === "cap" || d.index.method === "cap_capped") && " A 股市值为流通市值。"}
-        {d.guessed_caps.length > 0 && ` 缺少市值数据、按平均市值估算：${d.guessed_caps.map(bare).join("、")}。`}
-        {" "}基准：{d.bench_label}{d.index.market === "CN" ? "（价格指数，不含分红）" : ""}。
+        {d.index.method === "inv_vol" && " 波动率 = 调仓日收盘前 3 个月的日收益标准差，只用当时已有的数据；停牌日不算作零波动。"}
+        {d.guessed_caps.length > 0 && (d.index.method === "inv_vol"
+          ? ` 上市或复牌不足一个月、按其余成分的中位波动率估算：${d.guessed_caps.map(bare).join("、")}。`
+          : ` 缺少市值数据、按平均市值估算：${d.guessed_caps.map(bare).join("、")}。`)}
+        {" "}对比：{d.bench_label}{d.index.market === "CN" ? "（价格指数，不含分红）" : ""}。
       </p>
     </>
   );

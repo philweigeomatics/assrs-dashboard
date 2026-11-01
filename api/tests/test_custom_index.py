@@ -253,3 +253,58 @@ def test_summary_marks_status_drift_and_the_live_boundary():
     assert s["live_from"] == "2025-05-01"
     assert s["chart"]["bench"][0] == pytest.approx(1000)
     assert s["stats"]["ret"]["all"] == pytest.approx((s["chart"]["level"][-1] / 1000 - 1) * 100, abs=0.01)
+
+
+# ── inverse volatility ───────────────────────────────────────────────────────
+WARM = pd.bdate_range("2024-09-02", "2025-06-30")
+
+
+def noisy(seed, daily_vol, n=len(WARM)):
+    rng = np.random.default_rng(seed)
+    return pd.Series(50 * np.exp(np.cumsum(rng.normal(0, daily_vol, n))), WARM[:n])
+
+
+def test_inverse_volatility_weights_the_calm_more_and_equalises_the_swing():
+    """Weight × volatility is the same for every member: each moves the index about equally."""
+    a, b = noisy(1, 0.01), noisy(2, 0.03)
+    cl = pd.DataFrame({"A": a, "B": b})
+    r = C.build(cl, mem("A", "B"), method="inv_vol", rebalance="Q", base_date="2025-01-02")
+    w = r["weights"].iloc[0]
+    v = C.vol_frame(cl).loc[r["weights"].index[0]]
+    assert w["A"] > 0.65
+    assert w["A"] * v["A"] == pytest.approx(w["B"] * v["B"])
+    assert r["guessed_caps"] == []
+
+
+def test_inverse_volatility_reads_only_the_past_at_each_rebalance():
+    """Calm before the start, wild after: the opening weights know only the calm."""
+    a = noisy(3, 0.01)
+    rng = np.random.default_rng(4)
+    rets = np.where(WARM < pd.Timestamp("2025-01-03"), rng.normal(0, 0.01, len(WARM)), rng.normal(0, 0.05, len(WARM)))
+    b = pd.Series(50 * np.exp(np.cumsum(rets)), WARM)
+    cl = pd.DataFrame({"A": a, "B": b})
+    r = C.build(cl, mem("A", "B"), method="inv_vol", rebalance="Q", base_date="2025-01-02")
+    assert r["weights"].iloc[0]["B"] == pytest.approx(0.5, abs=0.1)      # similar calm vols → near equal
+    assert r["weights"].loc["2025-04-01"]["B"] < 0.3                     # the next reset sees the storm
+
+
+def test_a_member_without_a_months_returns_takes_the_median_volatility():
+    a, b = noisy(5, 0.01), noisy(6, 0.03)
+    c = pd.Series(np.nan, WARM)
+    c.loc["2024-12-20":] = noisy(7, 0.02).loc["2024-12-20":]           # listed two weeks before the start
+    cl = pd.DataFrame({"A": a, "B": b, "C": c})
+    r = C.build(cl, mem("A", "B", "C"), method="inv_vol", rebalance="Q", base_date="2025-01-02")
+    assert r["guessed_caps"] == ["C"]
+    v = C.vol_frame(cl).loc[r["weights"].index[0]]
+    w = r["weights"].iloc[0]
+    assert w["C"] * np.median([v["A"], v["B"]]) == pytest.approx(w["A"] * v["A"])
+
+
+def test_a_halted_stocks_flat_days_are_not_calm_days():
+    """A 停牌 is missing returns, not 0% ones — counting them would make a halted stock look safe."""
+    idx = pd.bdate_range("2025-01-02", periods=80)
+    rets = np.tile([0.02, -0.02], 40)
+    s = pd.Series(100 * np.cumprod(1 + rets), idx)
+    s.iloc[40:55] = np.nan                                       # halted three weeks
+    v = C.vol_frame(pd.DataFrame({"A": s}))["A"].iloc[-1]
+    assert v == pytest.approx(pd.Series(rets).std(), rel=0.02)    # ±2% days only, no zeros mixed in

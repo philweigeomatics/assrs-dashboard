@@ -1048,6 +1048,17 @@ def market_cn_index_detail(code: str = Path(..., pattern=r"^(\d{6}|H\d{5})\.(SH|
         raise HTTPException(503, str(exc))
 
 
+def _board_series(market: str, code: str):
+    """One series off the dashboard board's cached download — a 自建指数's comparison line."""
+    closes = _etf_closes() if market == "US" else _cn_index_closes()
+    return closes[code] if code in closes.columns else None
+
+
+from api import index_api as _index_api  # noqa: E402
+
+_index_api.BENCH_SOURCE = _board_series
+
+
 _strategy_cache = TTLCache(maxsize=8, ttl_s=30 * 60)
 # Cointegration over ten codes is 45 pairs of rolling OLS — seconds, not
 # milliseconds, and the same basket gets re-examined as you read it.
@@ -1602,6 +1613,8 @@ class IndexRulesReq(BaseModel):
     rebalance: str
     cap_pct: float | None = None
     base_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    #: An industry ETF / theme index from the dashboard board to compare with; None = the market.
+    bench: str | None = Field(None, max_length=20)
 
 
 class IndexCreateReq(IndexRulesReq):
@@ -1642,7 +1655,7 @@ def custom_index_create(req: IndexCreateReq, user: AppUser = Depends(current_use
     from api import index_api
     return _index_call(user, index_api.create_index, user.id, name=req.name, market=req.market,
                        method=req.method, rebalance=req.rebalance, cap_pct=req.cap_pct,
-                       base_date=req.base_date, members=[m.model_dump() for m in req.members])
+                       base_date=req.base_date, members=[m.model_dump() for m in req.members], bench=req.bench)
 
 
 @app.get("/custom-index/board")
@@ -1670,7 +1683,7 @@ def custom_index_detail(index_id: int, user: AppUser = Depends(current_user)):
 def custom_index_update(index_id: int, req: IndexRulesReq, user: AppUser = Depends(current_user)):
     from api import index_api
     return _index_call(user, index_api.update_rules, user.id, index_id, name=req.name, method=req.method,
-                       rebalance=req.rebalance, cap_pct=req.cap_pct, base_date=req.base_date)
+                       rebalance=req.rebalance, cap_pct=req.cap_pct, base_date=req.base_date, bench=req.bench)
 
 
 @app.delete("/custom-index/{index_id}")
