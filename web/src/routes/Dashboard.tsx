@@ -121,7 +121,8 @@ export function Dashboard() {
           }
           q={board}>
           {board.data && <IndustryBoard key={boardMkt} d={board.data} market={boardMkt}
-            mine={mine.data} mineError={mine.isError ? (mine.error as Error).message : null} />}
+            mine={mine.data} mineLoading={mine.isPending}
+            mineError={mine.isError ? (mine.error as Error).message : null} />}
         </Panel>
 
         <Panel title="🚦 市场风险"

@@ -29,6 +29,7 @@ sparklines are close to free.
 
 from __future__ import annotations
 
+import time
 from datetime import date, timedelta
 
 import pandas as pd
@@ -59,7 +60,7 @@ def _chunks(items: list, size: int = CHUNK):
 
 # ── prices ───────────────────────────────────────────────────────────────────
 def _cn_bars(codes: list[str], start: str, end: str,
-             chunk: int = CHUNK) -> dict[str, pd.Series]:
+             chunk: int = CHUNK, workers: int = 1) -> dict[str, pd.Series]:
     """
     Forward-adjusted closes per ts_code, from two batched calls per chunk.
 
@@ -67,24 +68,38 @@ def _cn_bars(codes: list[str], start: str, end: str,
     would draw a cliff in the sparkline that never happened to anyone holding
     the stock. `adj_factor` batches the same way, so correctness here costs
     one more call rather than one call per name.
+
+    Long histories need many small chunks (a call returns ~6,000 rows), and
+    one after another they add up to most of a minute — `workers` runs
+    chunks side by side, each call retried once.
     """
     if not codes:
         return {}
     api = _api()
-    out: dict[str, pd.Series] = {}
+    tries = 2 if workers > 1 else 1
 
-    for part in _chunks(codes, chunk):
+    def call(fn, joined):
+        for attempt in range(tries):
+            try:
+                return fn(ts_code=joined, start_date=start, end_date=end)
+            except Exception as exc:                               # noqa: BLE001
+                if attempt == tries - 1:
+                    raise
+                print(f"[watchlist] retry {joined[:20]}: {type(exc).__name__}"[:160])
+                time.sleep(1.0)
+
+    def one(part: list[str]) -> dict[str, pd.Series]:
         joined = ",".join(part)
         try:
-            px = api.daily(ts_code=joined, start_date=start, end_date=end)
+            px = call(api.daily, joined)
         except Exception as exc:                                   # noqa: BLE001
             print(f"[watchlist] daily: {type(exc).__name__}: {exc}"[:160])
-            continue
+            return {}
         if px is None or px.empty:
-            continue
+            return {}
 
         try:
-            adj = api.adj_factor(ts_code=joined, start_date=start, end_date=end)
+            adj = call(api.adj_factor, joined)
         except Exception:                                          # noqa: BLE001
             adj = None
 
@@ -95,6 +110,7 @@ def _cn_bars(codes: list[str], start: str, end: str,
         else:
             px["adj_factor"] = 1.0
 
+        got: dict[str, pd.Series] = {}
         for code, grp in px.groupby("ts_code"):
             g = grp.sort_values("trade_date")
             factor = pd.to_numeric(g["adj_factor"], errors="coerce").ffill()
@@ -102,7 +118,19 @@ def _cn_bars(codes: list[str], start: str, end: str,
             latest = factor.iloc[-1] if len(factor) and factor.iloc[-1] else 1.0
             series = (close * factor / latest) if latest else close
             series.index = g["trade_date"].astype(str).values
-            out[str(code)] = series.dropna()
+            got[str(code)] = series.dropna()
+        return got
+
+    parts = list(_chunks(codes, chunk))
+    out: dict[str, pd.Series] = {}
+    if workers > 1 and len(parts) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for got in pool.map(one, parts):
+                out.update(got)
+    else:
+        for part in parts:
+            out.update(one(part))
     return out
 
 

@@ -54,8 +54,8 @@ const STATE_HINT: Record<string, string> = {
   反弹: "站上 50 日线，但仍在 200 日线下方", 空头: "在 50 日和 200 日均线下方",
 };
 
-export function IndustryBoard({ d, mine, mineError, market }: {
-  d: UsEtfBoard; mine?: MineBoard; mineError?: string | null; market: BoardMarket;
+export function IndustryBoard({ d, mine, mineLoading, mineError, market }: {
+  d: UsEtfBoard; mine?: MineBoard; mineLoading?: boolean; mineError?: string | null; market: BoardMarket;
 }) {
   const [picked, setGroup] = usePersistentState<string>(`assrs.board.group.${market}`, "全部");
   const [sort, setSort] = usePersistentState<SortKey>("assrs.etf.sort", "group");
@@ -147,7 +147,7 @@ export function IndustryBoard({ d, mine, mineError, market }: {
           </tbody>
         </table>
       </div>
-      <MineNote mine={mine} error={mineError} market={market} />
+      <MineNote mine={mine} loading={mineLoading} error={mineError} market={market} />
       <p className="label leading-snug">
         {market === "US"
           ? "价格为 Yahoo 复权数据（含分红拆股）。"
@@ -164,8 +164,12 @@ export function IndustryBoard({ d, mine, mineError, market }: {
   );
 }
 
-function MineNote({ mine, error, market }: { mine?: MineBoard; error?: string | null; market: BoardMarket }) {
+function MineNote({ mine, loading, error, market }: {
+  mine?: MineBoard; loading?: boolean; error?: string | null; market: BoardMarket;
+}) {
   if (error) return <p className="label">我的指数暂不可用：{error}</p>;
+  // Each index is read over up to ten years of its members' prices — the first load takes a while.
+  if (loading) return <p className="label animate-pulse">正在计算我的{market === "US" ? "美股" : " A 股"}指数（首次读取十年行情，约半分钟）…</p>;
   if (!mine) return null;
   const parts: string[] = [];
   if (mine.young.length) parts.push(`不足 220 个交易日、暂不上榜：${mine.young.map((y) => `${y.name}（${y.days} 天）`).join("、")}`

@@ -402,7 +402,9 @@ def _cn_closes(codes: list[str], start: date) -> tuple[pd.DataFrame, pd.Series]:
     sessions = max(30, int((end - start).days * 0.68))
     ts = {data_manager.get_tushare_ticker(c): c for c in codes}
     per_call = max(1, 5500 // (sessions + 40))
-    bars = watchlist_board._cn_bars(list(ts), start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), chunk=per_call)
+    # Ten years is ~2 stocks a call: 28 members are 14 chunks, four at a time.
+    bars = watchlist_board._cn_bars(list(ts), start.strftime("%Y%m%d"), end.strftime("%Y%m%d"),
+                                    chunk=per_call, workers=4)
     closes = pd.DataFrame({ts[k]: v for k, v in bars.items()})
     if not closes.empty:
         closes.index = pd.to_datetime(closes.index, format="%Y%m%d")

@@ -127,6 +127,44 @@ def test_codes_are_chunked_so_one_call_cannot_hit_the_row_cap(monkeypatch):
     assert sum(len(c) for c in seen) == 95
 
 
+def test_chunks_fetched_side_by_side_match_one_by_one_and_a_failed_call_is_retried(monkeypatch):
+    """Ten years of 28 stocks is 14 chunks — in parallel, with one retry each, and the same closes."""
+    monkeypatch.setattr(wb.time, "sleep", lambda s: None)
+    mod = types.ModuleType("data_manager")
+    mod.init_tushare = lambda: True
+
+    class Api:
+        def daily(self, ts_code=None, **kw):
+            rows = [(c, d, 10.0 + i + j) for i, c in enumerate(ts_code.split(","))
+                    for j, d in enumerate(["20260901", "20260902", "20260903"])]
+            return pd.DataFrame(rows, columns=["ts_code", "trade_date", "close"])
+
+        def adj_factor(self, ts_code=None, **kw):
+            rows = [(c, d, f) for c in ts_code.split(",")
+                    for d, f in (("20260901", 2.0), ("20260902", 1.0), ("20260903", 1.0))]
+            return pd.DataFrame(rows, columns=["ts_code", "trade_date", "adj_factor"])
+
+    mod.TUSHARE_API = Api()
+    monkeypatch.setitem(sys.modules, "data_manager", mod)
+    codes = [f"{600000 + i}.SH" for i in range(28)]
+    one = wb._cn_bars(codes, "20260901", "20260903", chunk=2)
+    par = wb._cn_bars(codes, "20260901", "20260903", chunk=2, workers=4)
+    assert set(one) == set(par) == set(codes)
+    assert all(one[c].equals(par[c]) for c in codes)
+
+    tried: set[str] = set()
+    real = Api.daily
+
+    def flaky(self, ts_code=None, **kw):              # every chunk is turned away once, then answers
+        if ts_code not in tried:
+            tried.add(ts_code)
+            raise RuntimeError("抱歉，您每分钟最多访问该接口")
+        return real(self, ts_code=ts_code, **kw)
+    monkeypatch.setattr(Api, "daily", flaky)
+    got = wb._cn_bars(codes[:8], "20260901", "20260903", chunk=2, workers=4)
+    assert set(got) == set(codes[:8]) and len(tried) == 4
+
+
 def test_no_codes_is_no_call(monkeypatch):
     def boom():
         raise AssertionError("should not have initialised Tushare")
