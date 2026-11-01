@@ -84,7 +84,7 @@ def test_one_user_cannot_reach_anothers_index(db, monkeypatch):
     with pytest.raises(LookupError):
         A.delete_index(2, iid)
     with pytest.raises(LookupError):
-        A.add_member(2, iid, ticker="CCC", name=None, added_on=None, weight_pct=None)
+        A.add_member(2, iid, ticker="CCC", name=None, added_on=None)
     assert A.list_indexes(2)["indexes"] == []
     assert len(A.list_indexes(1)["indexes"]) == 1
 
@@ -277,7 +277,7 @@ def test_a_later_addition_keeps_its_date_in_the_longer_past(fresh, monkeypatch):
     """Only the founders move back. A member added in May is not in the April index, extended or not."""
     monkeypatch.setattr(A, "_us_closes", walk_prices([]))
     iid = make(name="新", base_date="2025-03-03", rebalance="Q")
-    A.add_member(1, iid, ticker="CCC", name="C", added_on="2025-05-01", weight_pct=None)
+    A.add_member(1, iid, ticker="CCC", name="C", added_on="2025-05-01")
     real = A._level(A.compute(1, iid))
     ext, _ = A.extended_level(1, iid)
     april = real.index[(real.index >= "2025-04-02") & (real.index <= "2025-05-01")]
@@ -353,7 +353,7 @@ def test_a_mixed_list_is_valid_json(db):
 def test_a_copy_has_the_same_members_over_the_same_dates_under_another_rule(fresh, monkeypatch):
     monkeypatch.setattr(A, "_us_closes", long_prices([], gone="US:BBB"))
     src = make(name="源", base_date="2024-01-02", members=[{"ticker": "AAA"}, {"ticker": "BBB"}, {"ticker": "CCC"}])
-    A.add_member(1, src, ticker="DDD", name="D", added_on="2024-06-03", weight_pct=None)
+    A.add_member(1, src, ticker="DDD", name="D", added_on="2024-06-03")
     ccc = next(int(m["id"]) for m in A._members(src) if m["ticker"] == "US:CCC")
     A.remove_member(1, src, ccc, mode="end", on="2025-02-03")
     A.compute(1, src)                                         # records BBB's exit
@@ -380,3 +380,61 @@ def test_a_copy_is_owner_only_and_named_uniquely(db):
         A.copy_index(1, src, name="光模块", method="equal", rebalance="M", cap_pct=None)
     with pytest.raises(ValueError):
         A.copy_index(1, src, name="自定", method="custom", rebalance="M", cap_pct=None)
+
+
+# ── nothing watched is rewritten ─────────────────────────────────────────────
+def aged(db, iid):
+    """The index was made long ago: its first day, when the backfill can still be edited, is over."""
+    for r in db.t["custom_index"]:
+        if r["id"] == iid:
+            r["created_at"] = "2025-01-02T10:00:00"
+
+
+def test_on_the_first_day_members_can_be_back_dated(db):
+    iid = make(base_date="2025-01-02")
+    assert A.list_indexes(1)["indexes"][0]["settling"] is True
+    A.add_member(1, iid, ticker="CCC", name="C", added_on="2025-03-03")
+    bbb = next(int(m["id"]) for m in A._members(iid) if m["ticker"] == "US:BBB")
+    A.remove_member(1, iid, bbb, mode="end", on="2025-04-01")
+    aaa = next(int(m["id"]) for m in A._members(iid) if m["ticker"] == "US:AAA")
+    A.remove_member(1, iid, aaa, mode="purge", on=None)
+    assert sorted(m["ticker"] for m in A._members(iid)) == ["US:BBB", "US:CCC"]
+
+
+def test_after_the_first_day_members_change_from_today_only(db, monkeypatch):
+    monkeypatch.setattr(A, "_today", lambda market: date(2026, 10, 30))
+    iid = make(base_date="2025-01-02")
+    aged(db, iid)
+    assert A.list_indexes(1)["indexes"][0]["settling"] is False
+    with pytest.raises(ValueError, match="从今天收盘生效"):
+        A.add_member(1, iid, ticker="CCC", name="C", added_on="2026-10-29")
+    assert A.add_member(1, iid, ticker="CCC", name="C", added_on=None)["added_on"] == "2026-10-30"
+    bbb = next(int(m["id"]) for m in A._members(iid) if m["ticker"] == "US:BBB")
+    with pytest.raises(ValueError, match="从今天收盘生效"):
+        A.remove_member(1, iid, bbb, mode="end", on="2026-10-01")
+    with pytest.raises(ValueError, match="移出"):
+        A.remove_member(1, iid, bbb, mode="purge", on=None)      # it has been in the index for a year
+    A.remove_member(1, iid, bbb, mode="end", on=None)
+    assert next(m for m in A._members(iid) if m["ticker"] == "US:BBB")["removed_on"] == "2026-10-30"
+    ccc = next(int(m["id"]) for m in A._members(iid) if m["ticker"] == "US:CCC")
+    A.remove_member(1, iid, ccc, mode="purge", on=None)      # added today: it has not moved the index yet
+    assert "US:CCC" not in {m["ticker"] for m in A._members(iid)}
+
+
+def test_the_first_day_is_the_markets_own_day(db, monkeypatch):
+    """17:00 UTC on 31 Oct is still the 31st in New York but already the 1st in Shanghai."""
+    idx = {"market": "CN", "created_at": "2026-10-31T17:00:00"}
+    monkeypatch.setattr(A, "_today", lambda market: date(2026, 11, 1) if market == "CN" else date(2026, 10, 31))
+    assert A._settling(idx) and A._settling({**idx, "market": "US"})
+    monkeypatch.setattr(A, "_today", lambda market: date(2026, 10, 31))
+    assert not A._settling(idx)
+    assert not A._settling({"market": "US", "created_at": None})
+
+
+def test_a_detail_says_whether_the_first_day_is_still_on(db, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", lambda t, s: prices())
+    iid = make()
+    assert A.compute(1, iid)["index"]["settling"] is True
+    aged(db, iid)
+    out = A.compute(1, iid)                                   # cached ledger, fresh flag
+    assert out["index"]["settling"] is False and out["today"] == str(A._today("US"))

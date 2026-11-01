@@ -1603,7 +1603,6 @@ def portfolio_delete_fund(fund_id: int, user: AppUser = Depends(current_user)):
 class IndexMemberReq(BaseModel):
     ticker: str = Field(..., max_length=20)
     name: str | None = Field(None, max_length=60)
-    weight_pct: float | None = Field(None, ge=0, le=100)
     added_on: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -1634,10 +1633,6 @@ class IndexCopyReq(BaseModel):
 class IndexCreateReq(IndexRulesReq):
     market: str = Field(..., pattern="^(CN|US)$")
     members: list[IndexMemberReq] = Field(default_factory=list, max_length=60)
-
-
-class IndexWeightReq(BaseModel):
-    weight_pct: float = Field(..., ge=0, le=100)
 
 
 def _index_call(user: AppUser, fn, *a, **kw):
@@ -1718,14 +1713,7 @@ def custom_index_delete(index_id: int, user: AppUser = Depends(current_user)):
 def custom_index_add(index_id: int, req: IndexMemberReq, user: AppUser = Depends(current_user)):
     from api import index_api
     return _index_call(user, index_api.add_member, user.id, index_id, ticker=req.ticker, name=req.name,
-                       added_on=req.added_on, weight_pct=req.weight_pct)
-
-
-@app.patch("/custom-index/{index_id}/members/{member_id}")
-def custom_index_weight(index_id: int, member_id: int, req: IndexWeightReq,
-                        user: AppUser = Depends(current_user)):
-    from api import index_api
-    return _index_call(user, index_api.set_weight, user.id, index_id, member_id, req.weight_pct)
+                       added_on=req.added_on)
 
 
 @app.delete("/custom-index/{index_id}/members/{member_id}")
@@ -1733,7 +1721,7 @@ def custom_index_remove(index_id: int, member_id: int,
                         mode: str = Query("end", pattern="^(end|purge)$"),
                         on: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
                         user: AppUser = Depends(current_user)):
-    """`end` removes from a date and keeps the history; `purge` deletes a mistake."""
+    """`end` leaves at today's close and keeps the history; `purge` deletes a mistake (first day only)."""
     from api import index_api
     return _index_call(user, index_api.remove_member, user.id, index_id, member_id, mode=mode, on=on)
 

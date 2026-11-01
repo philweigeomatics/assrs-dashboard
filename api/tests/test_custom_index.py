@@ -117,12 +117,11 @@ def test_price_weight_holds_equal_units():
     assert r["weights"].iloc[0]["A"] == pytest.approx(0.75)
 
 
-def test_custom_weights_are_restored_at_rebalance():
-    a = path(10, 20)
-    r = run(frame(A=a, B=np.full(len(IDX), 5.0)),
-            [{"ticker": "A", "added_on": "2025-01-02", "weight_pct": 70},
-             {"ticker": "B", "added_on": "2025-01-02", "weight_pct": 30}], method="custom")
-    assert r["weights"].loc["2025-03-03"]["A"] == pytest.approx(0.70)
+def test_hand_set_weights_are_not_an_index_method():
+    """A list of weights you choose is a portfolio (组合), not a rule an index follows."""
+    assert "custom" not in C.METHODS
+    with pytest.raises(ValueError):
+        run(frame(A=path(10, 20), B=np.full(len(IDX), 5.0)), mem("A", "B"), method="custom")
 
 
 def test_missing_caps_are_guessed_and_named():

@@ -1892,7 +1892,7 @@ export type UsEtfDetail = {
 };
 
 // ── 自建指数 ──────────────────────────────────────────────────────────────────
-export type IndexMethod = "equal" | "equal_hold" | "cap" | "cap_capped" | "price" | "custom" | "inv_vol";
+export type IndexMethod = "equal" | "equal_hold" | "cap" | "cap_capped" | "price" | "inv_vol";
 export type IndexRebalance = "M" | "Q" | "H" | "Y" | "never";
 
 export type CustomIndexRef = {
@@ -1900,6 +1900,8 @@ export type CustomIndexRef = {
   cap_pct: number | null; base_date: string; created_at: string; rules_updated_at: string;
   /** The industry ETF / theme index it is compared with; null = the broad market. */
   bench?: string | null; bench_label?: string;
+  /** Still the day it was made: members can be back-dated or deleted outright. After it, changes count from today. */
+  settling: boolean;
   members?: number;
 };
 
@@ -1915,7 +1917,7 @@ export type IndexWindow = "1d" | "5d" | "1m" | "3m" | "all";
 export type IndexMember = {
   id: number; ticker: string; name: string;
   status: "active" | "halted" | "pending" | "nodata" | "removed" | "delisted";
-  weight: number | null; target: number | null; custom: number | null;
+  weight: number | null; target: number | null;
   price: number | null; ret_1d: number | null;
   contrib: Record<IndexWindow, number | null>;
   added_on: string; removed_on: string | null; exit_price: number | null;
@@ -1930,6 +1932,8 @@ type IndexRet = Record<"1d" | "5d" | "1m" | "3m" | "1y" | "ytd" | "all", number 
 
 export type CustomIndexDetail = {
   index: CustomIndexRef;
+  /** Today in the index's market — the day a membership change takes effect. */
+  today: string;
   as_of: string; start: string; live_from: string | null;
   method_label: string; rebalance_label: string; bench_label: string;
   /** Set when the chosen comparison could not be read and the market was used instead. */

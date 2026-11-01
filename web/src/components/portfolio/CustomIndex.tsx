@@ -121,7 +121,7 @@ export function CustomIndex() {
       {mode === "view" && !current && (
         <section className="card p-6 text-[13px] text-ink-dim leading-relaxed">
           <p className="font-semibold text-ink mb-1">把你关注的一组股票做成一条指数</p>
-          <p>选成分股、加权方式（等权 / 等资金买入持有 / 市值加权 / 市值加权带上限 / 价格加权 / 自定权重 / 波动率倒数加权）、
+          <p>选成分股、加权方式（等权 / 等资金买入持有 / 市值加权 / 市值加权带上限 / 价格加权 / 波动率倒数加权）、
             调仓频率和一个对比用的行业指数，
             系统会按指数公司的做法逐日记账：调仓、增删成分、停牌、被收购退市都不会让点位跳空，
             并告诉你每只股票对涨跌贡献了多少。A 股和美股分开建。</p>
@@ -132,7 +132,7 @@ export function CustomIndex() {
 }
 
 // ── define / edit ────────────────────────────────────────────────────────────
-type Draft = { ticker: string; name: string; weight: string };
+type Draft = { ticker: string; name: string };
 
 function IndexForm({ meta, kind, source, onDone, onCancel }: {
   meta: CustomIndexList; kind: "new" | "edit" | "copy"; source?: CustomIndexRef;
@@ -161,8 +161,7 @@ function IndexForm({ meta, kind, source, onDone, onCancel }: {
         const { base_date: _, ...rest } = rules;
         return api.copyIndex(source!.id, rest);
       }
-      return api.createIndex({ ...rules, market, members: members.map((m) => ({
-        ticker: m.ticker, name: m.name, weight_pct: method === "custom" && m.weight ? Number(m.weight) : null })) });
+      return api.createIndex({ ...rules, market, members: members.map((m) => ({ ticker: m.ticker, name: m.name })) });
     },
     onSuccess: (r) => onDone(r.id),
     onError: (e) => setErr((e as Error).message),
@@ -246,17 +245,12 @@ function IndexForm({ meta, kind, source, onDone, onCancel }: {
       {kind === "new" && (
         <Field label={`成分股（${members.length}）`}>
           <MemberPicker market={market} exclude={members.map((m) => m.ticker)}
-            onAdd={(s) => setMembers([...members, { ticker: s.t, name: s.n, weight: "" }])} />
+            onAdd={(s) => setMembers([...members, { ticker: s.t, name: s.n }])} />
           <div className="flex flex-wrap gap-1.5 mt-2">
             {members.map((m, i) => (
               <span key={m.ticker} className="h-7 pl-2 pr-1 rounded-md bg-sunken flex items-center gap-1.5 text-[12.5px]">
                 <span className="truncate max-w-[120px]">{m.name}</span>
                 <span className="font-mono text-[11px] text-ink-mute">{bare(m.ticker)}</span>
-                {method === "custom" && (
-                  <input value={m.weight} inputMode="decimal" placeholder="%" aria-label={`${m.name} 权重`}
-                    onChange={(e) => setMembers(members.map((x, j) => (j === i ? { ...x, weight: e.target.value } : x)))}
-                    className="w-12 h-5 px-1 rounded bg-panel text-[12px] outline-none" />
-                )}
                 <button onClick={() => setMembers(members.filter((_, j) => j !== i))} aria-label={`移除 ${m.name}`}
                   className="text-ink-mute hover:text-ink px-1">✕</button>
               </span>
@@ -472,32 +466,32 @@ function Members({ d }: { d: CustomIndexDetail }) {
   const qc = useQueryClient();
   const red = d.index.market === "CN";
   const [win, setWin] = usePersistentState<IndexWindow>("assrs.index.window", "1m");
-  const [addOn, setAddOn] = useState(today());
+  // The first day the backfill is still being put together, so a member can be back-dated.
+  // After it, a change counts from today's close and the index already watched stays as it was.
+  const settling = d.index.settling;
+  const [addOn, setAddOn] = useState(d.today);
   const [err, setErr] = useState<string | null>(null);
   const [showGone, setShowGone] = useState(false);
   const refresh = () => qc.invalidateQueries({ queryKey: ["idx"] });
   const fail = (e: unknown) => setErr((e as Error).message);
 
   const add = useMutation({
-    mutationFn: (s: StockRef) => api.addIndexMember(d.index.id, { ticker: s.t, name: s.n, added_on: addOn }),
+    mutationFn: (s: StockRef) => api.addIndexMember(d.index.id, { ticker: s.t, name: s.n, added_on: settling ? addOn : undefined }),
     onSuccess: refresh, onError: fail,
   });
   const drop = useMutation({
     mutationFn: ({ m, mode }: { m: IndexMember; mode: "end" | "purge" }) =>
-      api.removeIndexMember(d.index.id, m.id, mode, mode === "end" ? today() : undefined),
+      api.removeIndexMember(d.index.id, m.id, mode),
     onSuccess: refresh, onError: fail,
   });
-  const weigh = useMutation({
-    mutationFn: ({ m, w }: { m: IndexMember; w: number }) => api.setIndexWeight(d.index.id, m.id, w),
-    onSuccess: refresh, onError: fail,
-  });
+  // Deleting rewrites every day the member was in — only while none of them has been watched.
+  const purgeable = (m: IndexMember) => settling || m.added_on >= d.today;
 
   const live = d.members.filter((m) => !["removed", "delisted"].includes(m.status));
   const gone = d.members.filter((m) => ["removed", "delisted"].includes(m.status));
   const rows = showGone ? [...live, ...gone] : live;
   const maxC = Math.max(0.01, ...d.members.map((m) => Math.abs(m.contrib[win] ?? 0)));
   const sum = d.members.reduce((a, m) => a + (m.contrib[win] ?? 0), 0);
-  const isCustom = d.index.method === "custom";
 
   return (
     <section className="card p-3 flex flex-col gap-2">
@@ -537,9 +531,6 @@ function Members({ d }: { d: CustomIndexDetail }) {
                 </td>
                 <td className="py-1.5 pr-2">
                   <WeightBar w={m.weight} t={m.target} />
-                  {isCustom && m.status !== "removed" && m.status !== "delisted" && (
-                    <WeightEdit value={m.custom} onSave={(w) => weigh.mutate({ m, w })} />
-                  )}
                 </td>
                 <td className={`py-1.5 pr-2 text-right ${moveClass(m.ret_1d, red)}`}>{signed(m.ret_1d, 2, "%")}</td>
                 <td className="py-1.5 pr-2"><ContribBar v={m.contrib[win]} max={maxC} red={red} /></td>
@@ -549,8 +540,10 @@ function Members({ d }: { d: CustomIndexDetail }) {
                     <button onClick={() => drop.mutate({ m, mode: "end" })} title="今天收盘移出，保留之前的历史"
                       className="text-[12px] text-cyan mr-2">移出</button>
                   )}
-                  <button onClick={() => { if (globalThis.confirm(`彻底删除 ${m.name}？它在指数历史里的记录也会一起消失（加错了才用这个）`)) drop.mutate({ m, mode: "purge" }); }}
-                    title="加错了：连同历史一起删除" className="text-[12px] text-ink-mute hover:text-up">删除</button>
+                  {purgeable(m) && (
+                    <button onClick={() => { if (globalThis.confirm(`彻底删除 ${m.name}？它在指数历史里的记录也会一起消失（加错了才用这个）`)) drop.mutate({ m, mode: "purge" }); }}
+                      title="加错了：连同历史一起删除" className="text-[12px] text-ink-mute hover:text-up">删除</button>
+                  )}
                 </td>
               </tr>
             ))}
@@ -573,13 +566,20 @@ function Members({ d }: { d: CustomIndexDetail }) {
         <span className="label">加入成分</span>
         <MemberPicker market={d.index.market} exclude={live.map((m) => m.ticker)} placeholder="搜索并加入…"
           onAdd={(s) => { setErr(null); add.mutate(s); }} />
-        <label className="label flex items-center gap-1">生效日
-          <input type="date" value={addOn} min={d.index.base_date} max={today()} onChange={(e) => setAddOn(e.target.value)}
-            className="h-7 px-1.5 rounded-md bg-sunken text-[12px] outline-none" />
-        </label>
-        <span className="label">当日收盘买入{d.hold ? "，按目标份额从其余成分按比例腾出资金" : "，其余成分随之重新加权"}</span>
-        {(add.isPending || drop.isPending || weigh.isPending) && <span className="label">更新中…</span>}
+        {settling && (
+          <label className="label flex items-center gap-1">生效日
+            <input type="date" value={addOn} min={d.index.base_date} max={d.today} onChange={(e) => setAddOn(e.target.value)}
+              className="h-7 px-1.5 rounded-md bg-sunken text-[12px] outline-none" />
+          </label>
+        )}
+        <span className="label">{settling ? "当日" : "今天"}收盘买入{d.hold ? "，按目标份额从其余成分按比例腾出资金" : "，其余成分随之重新加权"}</span>
+        {(add.isPending || drop.isPending) && <span className="label">更新中…</span>}
       </div>
+      <p className="label leading-snug">
+        {settling
+          ? "今天是建立当天：成分可以补加到更早的日期，加错的可以连同历史删除。从明天起，加入和移出都从当天收盘生效，已经走过的指数不再改动。"
+          : "加入和移出都从今天收盘生效，之前的点位不变 —— 和指数公司调整成分一样。"}
+      </p>
       {err && <p className="text-[12.5px] text-up">{err}</p>}
     </section>
   );
@@ -611,20 +611,6 @@ function ContribBar({ v, max, red }: { v: number | null; max: number; red: boole
       </span>
       <span className={`w-14 text-right ${moveClass(v, red)}`}>{signed(v, 2)}</span>
     </div>
-  );
-}
-
-function WeightEdit({ value, onSave }: { value: number | null; onSave: (w: number) => void }) {
-  const [v, setV] = useState(value != null ? String(value) : "");
-  return (
-    <span className="flex items-center gap-1 mt-0.5">
-      <span className="label">设定</span>
-      <input value={v} onChange={(e) => setV(e.target.value)} inputMode="decimal" aria-label="自定权重"
-        className="w-12 h-5 px-1 rounded bg-sunken text-[12px] outline-none" />
-      {v !== (value != null ? String(value) : "") && Number.isFinite(Number(v)) && v !== "" && (
-        <button onClick={() => onSave(Number(v))} className="text-[11.5px] text-cyan">保存</button>
-      )}
-    </span>
   );
 }
 

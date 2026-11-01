@@ -17,6 +17,17 @@ its members were picked knowing how they did. `rules_updated_at` records the
 last time the definition changed, and everything before it is drawn as
 回溯（假设）— only what came after was watched, not chosen.
 
+NOTHING WATCHED IS REWRITTEN
+
+Levels are not stored: each view replays the ledger, and the replay gives
+the same past as long as its inputs do. So the inputs only move forward, the
+way an index provider's do. The rules are fixed at creation; a member joins
+or leaves from today's close; deleting a member from the whole history is
+for mistakes, so only on the day the index was made or the day the member
+was added — neither has a watched value it could change. The creation day
+is also when the backfill is still being assembled, so on that day alone a
+member can be back-dated to any day from the start.
+
 EXITS ARE WRITTEN DOWN
 
 Yahoo drops an acquired company's history some weeks after the deal closes.
@@ -101,6 +112,17 @@ def _today(market: str) -> date:
     import pytz
     tz = "Asia/Shanghai" if market == "CN" else "America/New_York"
     return datetime.now(pytz.timezone(tz)).date()
+
+
+def _settling(idx: dict) -> bool:
+    """Still the day the index was made, in its market's calendar: the backfill can still be edited."""
+    import pytz
+    made = str(idx.get("created_at") or "")[:19]
+    if not made:
+        return False
+    tz = pytz.timezone("Asia/Shanghai" if idx["market"] == "CN" else "America/New_York")
+    at = pytz.utc.localize(datetime.fromisoformat(made)).astimezone(tz).date()
+    return at == _today(idx["market"])
 
 
 # ── validation ───────────────────────────────────────────────────────────────
@@ -213,7 +235,8 @@ def _public(r: dict) -> dict:
             "rebalance": r["rebalance"], "cap_pct": r.get("cap_pct"), "base_date": r["base_date"],
             "bench": r.get("bench"), "bench_label": bench_label(r["market"], r.get("bench")),
             "created_at": str(r.get("created_at") or "")[:19],
-            "rules_updated_at": str(r.get("rules_updated_at") or "")[:19]}
+            "rules_updated_at": str(r.get("rules_updated_at") or "")[:19],
+            "settling": _settling(r)}
 
 
 @_guard
@@ -225,14 +248,11 @@ def create_index(user_id: int, *, name: str, market: str, method: str, rebalance
     picked: dict[str, dict] = {}
     for m in members or []:
         t = clean_ticker(market, m.get("ticker", ""))
-        picked[t] = {"ticker": t, "name": (m.get("name") or "")[:60] or None,
-                     "weight_pct": float(m["weight_pct"]) if m.get("weight_pct") not in (None, "") else None}
+        picked[t] = {"ticker": t, "name": (m.get("name") or "")[:60] or None}
     if len(picked) < MIN_MEMBERS:
         raise ValueError(f"至少需要 {MIN_MEMBERS} 只成分股")
     if len(picked) > MAX_MEMBERS:
         raise ValueError(f"最多 {MAX_MEMBERS} 只成分股")
-    if method == "custom" and not any((m["weight_pct"] or 0) > 0 for m in picked.values()):
-        raise ValueError("自定权重需要至少一只设定了权重")
 
     db = _db()
     if _rows(db.read_table("custom_index", filters={"app_user_id": int(user_id), "name": name})):
@@ -292,8 +312,6 @@ def copy_index(user_id: int, index_id: int, *, name: str, method: str, rebalance
     rules = clean_rules(src["market"], method, rebalance, cap_pct, src["base_date"])
     bench = clean_bench(src["market"], bench)
     members = _members(index_id)
-    if method == "custom" and not any((m.get("weight_pct") or 0) > 0 for m in members):
-        raise ValueError("自定权重需要成分设有权重 — 复制后再逐只设定，或换一种加权方式")
     db = _db()
     if _rows(db.read_table("custom_index", filters={"app_user_id": int(user_id), "name": name})):
         raise ValueError(f"已有同名指数「{name}」")
@@ -306,7 +324,7 @@ def copy_index(user_id: int, index_id: int, *, name: str, method: str, rebalance
     if not back:
         raise RuntimeError("指数已写入但读不回来 — 请刷新后确认")
     iid = int(back[0]["id"])
-    keep = ("ticker", "name", "weight_pct", "added_on", "removed_on", "removal", "exit_price", "frozen_closes")
+    keep = ("ticker", "name", "added_on", "removed_on", "removal", "exit_price", "frozen_closes")
     db.insert_records("custom_index_member", [
         {"index_id": iid, **{k: m.get(k) for k in keep if m.get(k) is not None}} for m in members])
     return {"id": iid, "members": len(members)}
@@ -322,52 +340,57 @@ def delete_index(user_id: int, index_id: int) -> dict:
 
 @_guard
 def add_member(user_id: int, index_id: int, *, ticker: str, name: str | None,
-               added_on: str | None, weight_pct) -> dict:
+               added_on: str | None = None) -> dict:
+    """Joins at today's close — or, on the day the index was made, from any day since its start."""
     cur = _own(user_id, index_id)
     t = clean_ticker(cur["market"], ticker)
-    when = str(added_on or _today(cur["market"]))[:10]
+    today = str(_today(cur["market"]))
+    when = str(added_on or today)[:10]
+    if when > today:
+        raise ValueError("加入日不能晚于今天")
+    if when < today and not _settling(cur):
+        raise ValueError("成分变化从今天收盘生效 — 往回改会改写已经走过的指数（只有建立当天可以补加到更早的日期）")
     if when < cur["base_date"]:
         raise ValueError("加入日不能早于指数起始日")
-    if when > str(_today(cur["market"])):
-        raise ValueError("加入日不能晚于今天")
     mem = _members(index_id)
     if any(m["ticker"] == t and not m.get("removed_on") for m in mem):
         raise ValueError(f"{t} 已在指数中")
     if sum(1 for m in mem if not m.get("removed_on")) >= MAX_MEMBERS:
         raise ValueError(f"最多 {MAX_MEMBERS} 只成分股")
     _db().insert_records("custom_index_member", [{
-        "index_id": int(index_id), "ticker": t, "name": (name or "")[:60] or None, "added_on": when,
-        "weight_pct": float(weight_pct) if weight_pct not in (None, "") else None}])
+        "index_id": int(index_id), "ticker": t, "name": (name or "")[:60] or None, "added_on": when}])
     return {"ticker": t, "added_on": when}
 
 
 @_guard
 def remove_member(user_id: int, index_id: int, member_id: int, *, mode: str, on: str | None) -> dict:
-    """`end` keeps the history (removed from a date); `purge` deletes a mistake outright."""
+    """
+    `end` leaves at today's close and keeps the history. `purge` deletes a
+    mistake outright, which rewrites every day it was in — so only while
+    nothing it was in has been watched: on the index's first day, or the
+    member's own (it joins at that close and has not moved the index yet).
+    """
     cur = _own(user_id, index_id)
     rows = [m for m in _members(index_id) if int(m["id"]) == int(member_id)]
     if not rows:
         raise LookupError("没有这个成分股")
     m = rows[0]
+    today = str(_today(cur["market"]))
+    settling = _settling(cur)
     if mode == "purge":
+        if not settling and m["added_on"] < today:
+            raise ValueError("它已经在指数里走过了，删除会改写那段历史 — 请用「移出」，从今天收盘起不再计入")
         _db().delete_records("custom_index_member", {"id": int(member_id), "index_id": int(index_id)})
     else:
-        when = str(on or _today(cur["market"]))[:10]
+        when = str(on or today)[:10]
+        if when > today:
+            raise ValueError("移出日不能晚于今天")
+        if when < today and not settling:
+            raise ValueError("成分变化从今天收盘生效 — 往回改会改写已经走过的指数（只有建立当天可以改到更早的日期）")
         if when <= m["added_on"]:
             raise ValueError("移出日应晚于加入日 — 加错了的请用「删除」")
         _db().update_records("custom_index_member", {"removed_on": when, "removal": "user"},
                              {"id": int(member_id)})
-    return {"ok": True}
-
-
-@_guard
-def set_weight(user_id: int, index_id: int, member_id: int, weight_pct) -> dict:
-    _own(user_id, index_id)
-    w = float(weight_pct)
-    if not 0 <= w <= 100:
-        raise ValueError("权重应在 0–100 之间")
-    _db().update_records("custom_index_member", {"weight_pct": w},
-                         {"id": int(member_id), "index_id": int(index_id)})
     return {"ok": True}
 
 
@@ -555,7 +578,6 @@ def compute(user_id: int, index_id: int) -> dict:
         for e in out["events"]:
             if e.get("ticker"):
                 e["name"] = label.get(e["ticker"], e["ticker"])
-        out["index"] = _public(idx)
         out["bench_label"] = bench_label(market, idx.get("bench") if cmp is not None else None)
         out["bench_note"] = (None if cmp is not None or not idx.get("bench")
                              else f"{bench_label(market, idx['bench'])} 暂时读取不到，改用大盘对比")
@@ -563,7 +585,8 @@ def compute(user_id: int, index_id: int) -> dict:
         out["rebalance_label"] = C.REBALANCE[idx["rebalance"]]
         return out
 
-    return _result_cache.get_or_compute(key, run)
+    # Outside the cache: whether the first day is still on changes at midnight, not with the data.
+    return {**_result_cache.get_or_compute(key, run), "index": _public(idx), "today": str(_today(idx["market"]))}
 
 
 # ── one download per market ──────────────────────────────────────────────────

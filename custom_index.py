@@ -56,7 +56,6 @@ METHODS: dict[str, tuple[str, str]] = {
     "cap_capped": ("市值加权·单只上限", "按市值分配，但单只不超过上限，超出部分按比例分给其余"),
     "price": ("价格加权", "按股价分配，股价高的权重大（道琼斯的做法）"),
     "inv_vol": ("波动率倒数加权", "按近 3 个月波动率的倒数分配：越稳的权重越大，每只对指数涨跌的影响大致相同"),
-    "custom": ("自定权重", "按你设定的权重，每次调仓恢复"),
 }
 
 REBALANCE: dict[str, str] = {"M": "每月", "Q": "每季", "H": "每半年", "Y": "每年", "never": "不调仓"}
@@ -123,8 +122,7 @@ def vol_frame(closes: pd.DataFrame) -> pd.DataFrame:
 
 
 def targets(method: str, names: list[str], *, price: pd.Series, mcap: pd.Series | None,
-            custom: dict[str, float], cap: float,
-            vol: pd.Series | None = None) -> tuple[dict[str, float], list[str]]:
+            cap: float, vol: pd.Series | None = None) -> tuple[dict[str, float], list[str]]:
     """Target weights for `names` on one day, and the names whose cap or volatility had to be guessed."""
     if not names:
         return {}, []
@@ -141,10 +139,6 @@ def targets(method: str, names: list[str], *, price: pd.Series, mcap: pd.Series 
         raw = {t: 1.0 / known.get(t, fill) for t in names}
     elif method == "price":
         raw = {t: float(price[t]) for t in names}
-    elif method == "custom":
-        raw = {t: float(custom.get(t) or 0) for t in names}
-        if sum(raw.values()) <= 0:
-            raw = {t: 1.0 for t in names}
     else:
         known = {t: float(mcap[t]) for t in names
                  if mcap is not None and t in mcap.index and pd.notna(mcap[t]) and mcap[t] > 0}
@@ -187,7 +181,7 @@ def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: 
 
     `closes` — adjusted closes on the market's calendar, NaN where a stock did
     not trade (before listing, halted, after delisting). `members` — rows of
-    {ticker, added_on, removed_on, weight_pct}; a ticker may have several rows
+    {ticker, added_on, removed_on}; a ticker may have several rows
     if it left and came back.
 
     Returns the level, the end-of-day weights, every member's daily value
@@ -210,7 +204,6 @@ def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: 
     tickers = [t for t in by_t if t in closes.columns]
     traded = closes[tickers].notna()
     px = closes[tickers].ffill()
-    custom = {t: max(float(r.get("weight_pct") or 0) for r in rows) for t, rows in by_t.items()}
     mcap = caps.reindex(closes.index).ffill() if caps is not None else None
     vols = vol_frame(warm[tickers]).reindex(closes.index) if method == "inv_vol" else None
     hold = method in HOLD_METHODS or rebalance == "never"
@@ -263,7 +256,7 @@ def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: 
             vol_row = vols.loc[d] if vols is not None else None
 
             if not started or not hold:
-                w, g = targets(method, names, price=price_row, mcap=cap_row, custom=custom, cap=cap, vol=vol_row)
+                w, g = targets(method, names, price=price_row, mcap=cap_row, cap=cap, vol=vol_row)
                 guessed_caps.update(g)
                 investable = value - frozen_value
                 for t in list(units):
@@ -277,7 +270,7 @@ def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: 
                 # everyone already held is scaled together to fund them (or to
                 # absorb a leaver's proceeds). Nobody else is reset.
                 w, g = targets(method, sorted(active), price=price_row, mcap=cap_row,
-                               custom=custom, cap=cap, vol=vol_row)
+                               cap=cap, vol=vol_row)
                 guessed_caps.update(g)
                 buy = {t: value * w[t] for t in joining if t not in frozen}
                 stay = [t for t in units if t not in frozen]
@@ -396,9 +389,8 @@ def summarise(run: dict, *, members: list[dict], names: dict[str, str], method: 
         names_now = sorted(t for t in held if traded_now.get(t, False))
         px_now = closes.ffill().loc[last]
         cap_now = caps.reindex(closes.index).ffill().loc[last] if caps is not None else None
-        custom = {m["ticker"]: float(m.get("weight_pct") or 0) for m in members}
         vol_now = vol_frame(closes[[t for t in names_now if t in closes.columns]]).iloc[-1] if method == "inv_vol" else None
-        tgt, _ = targets(method, names_now, price=px_now, mcap=cap_now, custom=custom, cap=cap, vol=vol_now)
+        tgt, _ = targets(method, names_now, price=px_now, mcap=cap_now, cap=cap, vol=vol_now)
 
     contrib = {k: contribution(level, run["dv"], v) for k, v in
                {"1d": 1, "5d": 5, "1m": 21, "3m": 63, "all": None}.items()}
@@ -420,7 +412,6 @@ def summarise(run: dict, *, members: list[dict], names: dict[str, str], method: 
             "status": status,
             "weight": _f(w_now.get(t, 0) * 100, 2) if t in held else None,
             "target": _f(tgt[t] * 100, 2) if t in tgt else None,
-            "custom": _f(m.get("weight_pct"), 2),
             "price": _f(s.iloc[-1], 2) if len(s) else None,
             "ret_1d": _f(_ret(s, 1), 2) if t in held else None,
             "contrib": {k: _f(c.get(t), 2) for k, c in contrib.items()},

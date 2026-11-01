@@ -142,7 +142,7 @@ export const api = {
   indexes: () => call<CustomIndexList>("/custom-index"),
   indexDetail: (id: number) => call<CustomIndexDetail>(`/custom-index/${id}`),
   createIndex: (body: IndexRulesBody & { market: "CN" | "US";
-                                         members: { ticker: string; name?: string; weight_pct?: number | null }[] }) =>
+                                         members: { ticker: string; name?: string }[] }) =>
     call<{ id: number }>("/custom-index", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     }),
@@ -155,13 +155,9 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     }),
   deleteIndex: (id: number) => call<{ deleted: number }>(`/custom-index/${id}`, { method: "DELETE" }),
-  addIndexMember: (id: number, m: { ticker: string; name?: string; added_on?: string; weight_pct?: number | null }) =>
+  addIndexMember: (id: number, m: { ticker: string; name?: string; added_on?: string }) =>
     call<{ ticker: string; added_on: string }>(`/custom-index/${id}/members`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(m),
-    }),
-  setIndexWeight: (id: number, memberId: number, weight_pct: number) =>
-    call<{ ok: boolean }>(`/custom-index/${id}/members/${memberId}`, {
-      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ weight_pct }),
     }),
   removeIndexMember: (id: number, memberId: number, mode: "end" | "purge", on?: string) =>
     call<{ ok: boolean }>(`/custom-index/${id}/members/${memberId}?mode=${mode}${on ? `&on=${on}` : ""}`,
