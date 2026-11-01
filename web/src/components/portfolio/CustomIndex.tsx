@@ -382,10 +382,12 @@ function Body({ d }: { d: CustomIndexDetail }) {
 }
 
 /**
- * Each day's move in two parts: open against the previous close (overnight —
- * news while the market was shut, for A-shares often the US session) and
- * close against the open (the session itself). Compounded over a window the
- * two show where an index makes and loses its moves. And the members' turnover.
+ * Each day's move in two parts, both from trading-hours prices only: the jump
+ * at the opening bell against the previous close (what the market priced in
+ * while it was shut — for A-shares often the US session) and the move from
+ * the open to the close. The index itself is close to close; this only says
+ * where each move happened. Compounded over a window the two show where an
+ * index makes and loses its moves. And the members' turnover.
  */
 function Split({ d }: { d: CustomIndexDetail }) {
   const red = d.index.market === "CN";
@@ -395,7 +397,7 @@ function Split({ d }: { d: CustomIndexDetail }) {
   const label = { "1d": "今日", "1m": "1 月", "3m": "3 月", "1y": "1 年" };
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px] tnum">
-      {wins.length > 0 && <span className="label" title="开盘 vs 前一日收盘 = 隔夜；收盘 vs 开盘 = 盘中">隔夜 / 盘中</span>}
+      {wins.length > 0 && <span className="label" title="开盘跳空 = 开盘价 vs 前一日收盘价（休市期间的消息在开盘时一次反映）；盘中 = 收盘价 vs 开盘价。都只用交易时段的价格，两者相乘就是当日涨跌">开盘跳空 / 盘中</span>}
       {wins.map((k) => {
         const x = s.split[k]!;
         return (
