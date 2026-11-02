@@ -890,6 +890,25 @@ export type Breadth = {
   total: number;
 };
 
+// ── 信用与债务 ──────────────────────────────────────────────────────────────────
+export type Weekly = { dates: string[]; v: Num[] };
+export type CreditLevel = "calm" | "weak" | "stress";
+export type CreditRecord = { n: number; median63: Num; up63: Num; dd63: Num; list: { date: string; r63: Num; dd63: Num }[] };
+export type CreditBoard = {
+  as_of: string; level: CreditLevel; level_label: string; level_since: string; hold: number; of: number;
+  rules: { key: string; label: string; rule: string; ok: boolean | null; value: string | null; since: string | null }[];
+  spreads: Record<string, Weekly & { label: string; now: Num; m6: Num; lo: Num; hi: Num }>;
+  baa: Weekly & { bands: Record<"20" | "50" | "80", Num>; rank: Num };
+  level_hist: Weekly;
+  nfci: Weekly | null;
+  sloos: Weekly | null;
+  market: (Weekly & { key: string; name: string; price: Num; off_high: Num; m3: Num })[];
+  record: { weak: CreditRecord; stress: CreditRecord; base: { median63: Num; up63: Num; dd63: Num } };
+  us_debt: { now: Num; yoy: Num; asof: string } | null;
+  credit_gdp: Record<"CN" | "US", Weekly | null>;
+  china: Partial<Record<"tsf_yoy" | "m1_yoy" | "m2_yoy", Weekly | null>>;
+};
+
 // ── 杠杆周期 ──────────────────────────────────────────────────────────────────
 export type CycleStage = "none" | "clearing" | "bottom" | "right";
 export type CycleRule = { key: string; label: string; rule: string; ok: boolean | null; value: string | null; since: string | null };

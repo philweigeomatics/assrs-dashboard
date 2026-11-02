@@ -2334,6 +2334,16 @@ def market_breadth(days: int = Query(60, ge=10, le=250),
 
 
 _cycle_cache = TTLCache(maxsize=1, ttl_s=30 * 60)
+#: FRED spreads are daily, the rest weekly to quarterly; ~10 requests to rebuild.
+_credit_cache = TTLCache(maxsize=1, ttl_s=3 * 3600)
+
+
+@app.get("/market/credit")
+def market_credit(user: AppUser = Depends(current_user)):
+    """信用与债务: US credit stress (six fixed rules with their record) and China's credit cycle as context."""
+    import credit_stress
+    return _market_panel(_credit_cache, "all",
+                         lambda: credit_stress.board(credit_stress.fetch_us(), credit_stress.fetch_china()))
 
 
 @app.get("/market/leverage-cycle")

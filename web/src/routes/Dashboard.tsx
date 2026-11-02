@@ -32,6 +32,7 @@ import { RotationMap } from "../components/market/RotationMap";
 import { WyckoffPanel } from "../components/market/WyckoffPanel";
 import { LeveragePanel } from "../components/market/LeveragePanel";
 import { LeverageCycle } from "../components/market/LeverageCycle";
+import { CreditPanel } from "../components/market/CreditPanel";
 import { TopList } from "../components/market/TopList";
 import { IndexStrip } from "../components/market/IndexStrip";
 import { RiskStrip } from "../components/market/RiskStrip";
@@ -91,6 +92,7 @@ export function Dashboard() {
     staleTime: 20 * 60_000 });
   const cycle = useQuery({ queryKey: ["mkt", "leverage-cycle"], queryFn: api.leverageCycle,
     staleTime: 30 * 60_000 });
+  const credit = useQuery({ queryKey: ["mkt", "credit"], queryFn: api.credit, staleTime: 60 * 60_000 });
   const toplist = useQuery({ queryKey: ["mkt", "toplist"], queryFn: api.topList,
     staleTime: 2 * 3600_000 });
   // Monthly and quarterly prints, and settlements struck once a day —
@@ -175,6 +177,12 @@ export function Dashboard() {
               <div className="mt-2"><LeveragePanel data={leverage.data.filter((x) => x.market === "US")} /></div>
             </details>
           )}
+        </Panel>
+
+        <Panel title="🏦 信用与债务"
+          subtitle="AI 资本开支背后的债务有没有变成信用紧张？美国为主：六条固定规则，各自成立与否和历史记录；中国信用周期作背景。"
+          q={credit}>
+          {credit.data && <CreditPanel d={credit.data} />}
         </Panel>
 
         <Panel title="📊 宏观"
