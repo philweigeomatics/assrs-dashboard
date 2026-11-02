@@ -9,7 +9,7 @@
  * figures are neutral lines.
  */
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { CreditBoard, CreditLevel, Weekly } from "../../lib/types";
 import { fixed, signed } from "../../lib/format";
 
@@ -30,6 +30,10 @@ export function CreditPanel({ d }: { d: CreditBoard }) {
         )}
       </div>
 
+      <p className="label leading-snug">
+        下面六条是固定规则，每条要么成立（✓）要么不成立（✗）；成立的条数决定上面的级别：0–1 条平稳，2 条走弱，3 条以上紧张。
+        每条下面是今天的读数，灰字是这条规则的具体门槛。
+      </p>
       <div className="grid gap-1.5 grid-cols-1 md:grid-cols-2">
         {d.rules.map((r) => (
           <div key={r.key} className="flex gap-2 rounded-lg bg-sunken px-2.5 py-1.5 text-[12.5px]" title={r.rule}>
@@ -39,54 +43,73 @@ export function CreditPanel({ d }: { d: CreditBoard }) {
             <div className="min-w-0">
               <div className={r.ok ? "font-medium" : "text-ink-dim"}>{r.label}</div>
               <div className="label tnum">{r.value ?? "—"}{r.ok && r.since ? ` · 自 ${r.since}` : ""}</div>
+              <div className="label text-[10.5px] leading-snug text-ink-mute">{r.rule}</div>
             </div>
           </div>
         ))}
       </div>
 
-      <div className="grid gap-2 grid-cols-1 md:grid-cols-3">
-        {Object.entries(d.spreads).map(([k, s]) => (
-          <Mini key={k} title={s.label} unit="%" w={s} nd={2}
-            sub={`6 个月前 ${fixed(s.m6, 2)}% · 3 年区间 ${fixed(s.lo, 2)}–${fixed(s.hi, 2)}%`} />
-        ))}
-      </div>
-      <Mini title="Baa − 10 年期国债（1986 年以来）" unit="%" w={d.baa} nd={2} tall
-        lines={[d.baa.bands["20"], d.baa.bands["80"]]}
-        sub={`分位 ${fixed((d.baa.rank ?? 0) * 100, 0)}% · 虚线 = 20 / 80 分位（${fixed(d.baa.bands["20"], 2)}% / ${fixed(d.baa.bands["80"], 2)}%）`} />
+      <Group title="① 借钱给企业的利息，比借给美国政府高多少（信用利差）"
+        what="利差 = 公司债收益率 − 同期限国债收益率，单位是百分点。它是市场对“企业还不上钱”的定价：越高 = 越担心违约。平时稳定，危机时会在几周内翻倍（2008 年高收益债利差到过 20%，2020 年 3 月到过 10%）。">
+        <div className="grid gap-2 grid-cols-1 md:grid-cols-3">
+          {Object.entries(d.spreads).map(([k, s]) => (
+            <Mini key={k} title={s.label} unit="%" w={s} nd={2}
+              what={SPREAD_WHAT[k]}
+              sub={`6 个月前 ${fixed(s.m6, 2)}% · 3 年区间 ${fixed(s.lo, 2)}–${fixed(s.hi, 2)}%`} />
+          ))}
+        </div>
+        <Mini title="Baa 公司债 − 10 年期国债，1986 年以来" unit="%" w={d.baa} nd={2} tall
+          lines={[d.baa.bands["20"], d.baa.bands["80"]]}
+          what="同样是利差，但能看 40 年：最高的几个峰都是信用危机：2002 年 3.9%、2008 年 6.2%、2020 年 4.3%。今天在哪条虚线附近，就说明今天的担心程度在历史上算低还是高。"
+          sub={`今天在 1986 年以来 ${fixed((d.baa.rank ?? 0) * 100, 0)}% 分位 · 虚线 = 20 / 80 分位（${fixed(d.baa.bands["20"], 2)}% / ${fixed(d.baa.bands["80"], 2)}%）`} />
+      </Group>
 
-      <div className="grid gap-2 grid-cols-2 md:grid-cols-5">
-        {d.market.map((m) => (
-          <div key={m.key} className="rounded-lg bg-sunken p-2" title={m.name}>
-            <div className="flex items-baseline gap-1">
-              <span className="text-[12.5px] font-semibold">{m.key}</span>
-              <span className="label truncate">{m.name}</span>
+      <Group title="② 风险最高的那部分债，价格在跌吗（市场价格）"
+        what="利差是统计出来的，价格是每天成交出来的。下面每张小图是近 3 年的价格走势；“距一年高点”越负 = 跌得越深。前三个是债，后两个是 AI 举债最多的公司股票——如果它们的债出问题，往往先在股价上看到。">
+        <div className="grid gap-2 grid-cols-2 md:grid-cols-5">
+          {d.market.map((m) => (
+            <div key={m.key} className="rounded-lg bg-sunken p-2" title={MARKET_WHAT[m.key] ?? m.name}>
+              <div className="flex items-baseline gap-1">
+                <span className="text-[12.5px] font-semibold">{m.key}</span>
+                <span className="label truncate">{m.name}</span>
+              </div>
+              <div className="flex items-baseline gap-2 tnum text-[12.5px]">
+                <span className={moveUS(m.off_high)}>距一年高点 {signed(m.off_high, 1, "%")}</span>
+                <span className={`label ${moveUS(m.m3)}`}>3 月 {signed(m.m3, 1, "%")}</span>
+              </div>
+              <Spark w={m} />
+              <div className="label text-[10.5px] leading-snug">{MARKET_WHAT[m.key]}</div>
             </div>
-            <div className="flex items-baseline gap-2 tnum text-[12.5px]">
-              <span className={moveUS(m.off_high)}>距一年高点 {signed(m.off_high, 1, "%")}</span>
-              <span className={`label ${moveUS(m.m3)}`}>3 月 {signed(m.m3, 1, "%")}</span>
-            </div>
-            <Spark w={m} />
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      </Group>
 
-      <div className="grid gap-2 grid-cols-1 md:grid-cols-2">
-        {d.nfci && <Mini title="芝加哥联储金融条件指数 NFCI（> 0 = 比平均紧）" unit="" w={d.nfci} nd={2} lines={[0]} />}
-        {d.sloos && <Mini title="收紧企业贷款标准的银行净占比（季度）" unit="%" w={d.sloos} nd={1} lines={[0, 20]} />}
-      </div>
+      <Group title="③ 钱好不好借（融资条件与银行放贷）"
+        what="利差是借钱的价格，这两张是借钱的难度：整体金融环境松还是紧，银行愿不愿意给企业放贷。">
+        <div className="grid gap-2 grid-cols-1 md:grid-cols-2">
+          {d.nfci && <Mini title="芝加哥联储金融条件指数 NFCI" unit="" w={d.nfci} nd={2} lines={[0]}
+            what="综合了利率、利差、股市、杠杆等 100 多个指标。0 = 历史平均；高于 0（虚线以上）= 比平均紧，钱难借；低于 0 = 宽松。2008 年 11 月到过 +3.1，2020 年 4 月 +0.3。" />}
+          {d.sloos && <Mini title="银行收紧企业贷款标准的净占比（季度）" unit="%" w={d.sloos} nd={1} lines={[0, 20]}
+            what="美联储每季度问各家银行：对大中型企业放贷是收紧了还是放松了。正数 = 收紧的银行多于放松的。上面那条虚线 20% 以上出现在 1990–91、1998、2000–03、2008–09、2020、2022–23——几乎每次都是衰退或信用收缩。" />}
+        </div>
+      </Group>
 
       <Record d={d} />
 
-      <section className="flex flex-col gap-1.5">
-        <span className="text-[13px] font-semibold">中国信用周期（背景，不参与评级）</span>
+      <Group title="④ 中国信用周期（背景，不参与评级）"
+        what="中国公司债利差不在当前数据权限内，所以这里看的是信用的“量”而不是“价”：私人部门欠了多少债，新增信用在加速还是放缓。">
         <div className="grid gap-2 grid-cols-1 md:grid-cols-4">
-          {d.credit_gdp.CN && <Mini title="中国私人部门信贷 / GDP（BIS）" unit="%" w={d.credit_gdp.CN} nd={1} />}
-          {d.credit_gdp.US && <Mini title="美国私人部门信贷 / GDP（BIS）" unit="%" w={d.credit_gdp.US} nd={1} />}
-          {d.china.tsf_yoy && <Mini title="社融存量同比" unit="%" w={d.china.tsf_yoy} nd={1} />}
+          {d.credit_gdp.CN && <Mini title="中国私人部门信贷 / GDP（BIS）" unit="%" w={d.credit_gdp.CN} nd={1}
+            what="企业和家庭欠的债，占一年 GDP 的百分比（季度，国际清算银行）。越高 = 整体杠杆越重。" />}
+          {d.credit_gdp.US && <Mini title="美国私人部门信贷 / GDP（BIS）" unit="%" w={d.credit_gdp.US} nd={1}
+            what="同一口径的美国，用来对照。" />}
+          {d.china.tsf_yoy && <Mini title="社融存量同比" unit="%" w={d.china.tsf_yoy} nd={1}
+            what="全社会融资总额比一年前多了百分之几。往下 = 信用在收缩，往上 = 在扩张。" />}
           {d.china.m1_yoy && <Mini title="M1 同比" unit="%" w={d.china.m1_yoy} nd={1}
+            what="企业活期存款为主。M1 增速远低于 M2 = 钱趴在定期里不愿花，企业活力弱。"
             sub={d.china.m2_yoy ? `M2 同比 ${fixed(d.china.m2_yoy.v[d.china.m2_yoy.v.length - 1], 1)}%` : undefined} />}
         </div>
-      </section>
+      </Group>
 
       <p className="label leading-snug">
         规则只用历史足够长的序列，所以每个读数都有历史记录；每个数据按它实际公布的日子进入（贷款官员调查约晚 5 周、
@@ -95,6 +118,31 @@ export function CreditPanel({ d }: { d: CreditBoard }) {
         中国公司债利差不在当前 Tushare 权限内，中国部分只作背景。数据：FRED（圣路易斯联储）、Yahoo、Tushare，3 小时更新。
       </p>
     </div>
+  );
+}
+
+const SPREAD_WHAT: Record<string, string> = {
+  BAMLH0A0HYM2: "评级在 BB 及以下的“垃圾债”。最敏感：企业一出问题这里最先跳。",
+  BAMLC0A0CM: "全部投资级公司债（BBB 及以上），包括大型科技公司发的债。",
+  BAMLC0A4CBBB: "投资级里最低的一档，离“垃圾”只差一级——甲骨文这类高负债大厂多在这附近。",
+};
+const MARKET_WHAT: Record<string, string> = {
+  BIZD: "上市的私募信贷基金（BDC），放贷给中型企业。私募信贷看得见的一端。",
+  BKLN: "浮动利率的杠杆贷款，借款人多是高负债企业。",
+  HYG: "最大的高收益债 ETF：垃圾债的成交价格。",
+  ORCL: "为 AI 数据中心大量举债的大厂之一。",
+  CRWV: "租 GPU 的 AI 云，负债高、现金流薄。",
+};
+
+function Group({ title, what, children }: { title: string; what: string; children: ReactNode }) {
+  return (
+    <section className="flex flex-col gap-1.5">
+      <div>
+        <div className="text-[13px] font-semibold">{title}</div>
+        <p className="label leading-snug">{what}</p>
+      </div>
+      {children}
+    </section>
   );
 }
 
@@ -109,8 +157,9 @@ function path(v: (number | null)[], x: (i: number) => number, y: (n: number) => 
   return s;
 }
 
-function Mini({ title, unit, w, nd, sub, lines = [], tall = false }: {
-  title: string; unit: string; w: Weekly; nd: number; sub?: string; lines?: (number | null)[]; tall?: boolean;
+function Mini({ title, unit, w, nd, sub, what, lines = [], tall = false }: {
+  title: string; unit: string; w: Weekly; nd: number; sub?: string; what?: string;
+  lines?: (number | null)[]; tall?: boolean;
 }) {
   const W = 300, H = tall ? 110 : 80;
   const vals = [...w.v, ...lines].filter((x): x is number => x != null);
@@ -139,7 +188,13 @@ function Mini({ title, unit, w, nd, sub, lines = [], tall = false }: {
         <path d={path(w.v, x, y)} fill="none" stroke="var(--color-ink-dim)" strokeWidth={1.2} vectorEffect="non-scaling-stroke" />
         {hover != null && <line x1={x(hover)} x2={x(hover)} y1={0} y2={H} stroke="var(--color-line-bright)" vectorEffect="non-scaling-stroke" />}
       </svg>
-      <div className="label truncate">{hover != null ? w.dates[h] : sub ?? `${w.dates[0] ?? ""} 起`}</div>
+      <div className="flex justify-between label text-[10.5px] tnum -mt-0.5">
+        <span>{w.dates[0]}</span>
+        <span>{hover != null ? `${w.dates[h]} · ${fixed(w.v[h], nd)}${unit}` : `最低 ${fixed(lo, nd)}${unit} · 最高 ${fixed(hi, nd)}${unit}`}</span>
+        <span>{w.dates[n - 1]}</span>
+      </div>
+      {sub && <div className="label leading-snug">{sub}</div>}
+      {what && <div className="label leading-snug text-[11px] mt-0.5 text-ink-dim">{what}</div>}
     </div>
   );
 }
