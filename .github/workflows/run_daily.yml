@@ -70,6 +70,22 @@ jobs:
       #    the CSV commit with `always()`, so neither step can block the other;
       #    it exits non-zero if any ticker still fails after a retry, which
       #    marks the run failed and sends the failure email.
+      # 6b. 杠杆周期: append the day's 两融, 流通市值/成交额, 中证全指 and broad-ETF
+      #     creations to market_cycle_day (and re-read the last few sessions —
+      #     margin data can publish a day late). ~50 Tushare calls.
+      - name: Store leverage-cycle series
+        if: always()
+        timeout-minutes: 20
+        env:
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python leverage_cycle.py
+
       - name: Scan all watchlists for Today's Alerts
         if: always()
         timeout-minutes: 90

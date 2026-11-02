@@ -890,6 +890,22 @@ export type Breadth = {
   total: number;
 };
 
+// ── 杠杆周期 ──────────────────────────────────────────────────────────────────
+export type CycleStage = "none" | "clearing" | "bottom" | "right";
+export type CycleRule = { key: string; label: string; rule: string; ok: boolean | null; value: string | null; since: string | null };
+export type CycleEpisodes = { n: number; median63: Num; up63: Num; median126: Num;
+                              list: { date: string; r63: Num; r126: Num }[] };
+export type LeverageCycle = {
+  as_of: string;
+  stage: CycleStage; stage_label: string; stage_since: string;
+  layers: { key: string; title: string; items: CycleRule[]; hold: number; of: number }[];
+  /** From 2014. `stage` is one letter a day: - c b r. */
+  series: { dates: string[]; index: Num[]; balance: Num[]; ratio: Num[]; buy_share: Num[]; etf: Num[]; stage: string };
+  bands: Record<"ratio" | "buy_share", Record<"10" | "20" | "50" | "80" | "90", Num>>;
+  episodes: Record<"clearing" | "bottom" | "right", CycleEpisodes> & { base: { median63: Num; up63: Num; median126: Num } };
+  latest: { balance: Num; ratio: Num; buy_share: Num; index: Num; repay: Num; buy: Num };
+};
+
 export type Leverage = {
   market: string;
   label: string;

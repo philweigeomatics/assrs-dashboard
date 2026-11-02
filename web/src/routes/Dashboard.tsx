@@ -31,6 +31,7 @@ import { BreadthGrid } from "../components/market/BreadthGrid";
 import { RotationMap } from "../components/market/RotationMap";
 import { WyckoffPanel } from "../components/market/WyckoffPanel";
 import { LeveragePanel } from "../components/market/LeveragePanel";
+import { LeverageCycle } from "../components/market/LeverageCycle";
 import { TopList } from "../components/market/TopList";
 import { IndexStrip } from "../components/market/IndexStrip";
 import { RiskStrip } from "../components/market/RiskStrip";
@@ -88,6 +89,8 @@ export function Dashboard() {
     queryFn: () => api.wyckoff(index), staleTime: 30 * 60_000 });
   const leverage = useQuery({ queryKey: ["mkt", "leverage"], queryFn: api.leverage,
     staleTime: 20 * 60_000 });
+  const cycle = useQuery({ queryKey: ["mkt", "leverage-cycle"], queryFn: api.leverageCycle,
+    staleTime: 30 * 60_000 });
   const toplist = useQuery({ queryKey: ["mkt", "toplist"], queryFn: api.topList,
     staleTime: 2 * 3600_000 });
   // Monthly and quarterly prints, and settlements struck once a day —
@@ -162,10 +165,16 @@ export function Dashboard() {
           )}
         </Panel>
 
-        <Panel title="💳 市场杠杆"
-          subtitle="客户保证金借款余额 —— 最直接的风险偏好指标。红 = 加杠杆，绿 = 去杠杆。"
-          q={leverage}>
-          {leverage.data && <LeveragePanel data={leverage.data} />}
+        <Panel title="💳 杠杆周期 · 出清 → 底部 → 右侧"
+          subtitle="A 股两融从去杠杆到见底再到右侧确认，按四层固定规则逐条判断：存量、浓度、背离、承接。给出可验证的信号和每个阶段的历史表现，不是买卖指令。"
+          q={cycle}>
+          {cycle.data && <LeverageCycle d={cycle.data} />}
+          {leverage.data && (
+            <details className="mt-1">
+              <summary className="label cursor-pointer">美股保证金借款（FINRA，月度）</summary>
+              <div className="mt-2"><LeveragePanel data={leverage.data.filter((x) => x.market === "US")} /></div>
+            </details>
+          )}
         </Panel>
 
         <Panel title="📊 宏观"

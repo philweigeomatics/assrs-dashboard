@@ -2333,6 +2333,24 @@ def market_breadth(days: int = Query(60, ge=10, le=250),
     return _market_panel(_breadth_cache, days, lambda: dashboard_api.breadth(days))
 
 
+_cycle_cache = TTLCache(maxsize=1, ttl_s=30 * 60)
+
+
+@app.get("/market/leverage-cycle")
+def market_leverage_cycle(user: AppUser = Depends(current_user)):
+    """杠杆周期: 杠杆出清 → 底部区域 → 右侧确认, from stored whole-market series and the theme board."""
+    import leverage_cycle
+
+    def build():
+        try:
+            themes = _cn_index_closes()
+        except Exception as exc:                                    # noqa: BLE001
+            print(f"[cycle] themes: {type(exc).__name__}: {exc}"[:160])
+            themes = None
+        return leverage_cycle.board(leverage_cycle.load(), themes)
+    return _market_panel(_cycle_cache, "all", build)
+
+
 @app.get("/market/leverage")
 def market_leverage(user: AppUser = Depends(current_user)):
     """两融余额 and US margin debt."""
