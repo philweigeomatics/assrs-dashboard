@@ -5,6 +5,9 @@ numpy
 plotly>=5.15
 ta
 tushare
+# tushare 1.4.29 imports six (tushare/trader/trader.py) without declaring it;
+# without this line `import tushare` fails on a fresh install.
+six
 scipy
 matplotlib
 # Pinned: 0.15 removed grangercausalitytests(verbose=), which this repo
