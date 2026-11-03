@@ -8,15 +8,16 @@
  *
  * Colours keep the app's convention everywhere: red is up (利好), green is
  * down (利空), including on US stocks.
+ *
+ * A view of 个股分析, not a page of its own: the stock is picked once, up
+ * there, and this panel is handed it. Mount it keyed on the ticker, so the
+ * selected risk and any refresh in flight belong to the stock they began on.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
-import type { RiskEvidence, RiskRadar as Board, RiskRow, StockRef } from "../lib/types";
-import { NavBar } from "../components/NavBar";
-import { StockPicker } from "../components/StockPicker";
+import type { RiskEvidence, RiskRadar as Board, RiskRow } from "../lib/types";
 import { KIND_LABEL, citations, leanClass, sparkPoints, tierClass } from "../lib/risk";
 
 const TABS = [
@@ -34,20 +35,14 @@ function ago(iso: string | null): string {
   return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
-export function RiskRadar() {
-  useEffect(() => { document.title = "ASSRS · 风险雷达"; }, []);
+export function RiskRadarPanel({ ticker }: { ticker: string }) {
   const qc = useQueryClient();
-  const [params, setParams] = useSearchParams();
-  const ticker = params.get("t");
   const [tab, setTab] = useState<Tab>("all");
   const [sel, setSel] = useState<string | null>(null);
 
-  const stocks = useQuery({ queryKey: ["stocks"], queryFn: api.stocks, staleTime: 6 * 3600_000 });
-  const history = useQuery({ queryKey: ["history"], queryFn: api.history, staleTime: 60_000 });
   const board = useQuery({
     queryKey: ["risk", ticker],
-    queryFn: () => api.riskRadar(ticker!),
-    enabled: Boolean(ticker),
+    queryFn: () => api.riskRadar(ticker),
     staleTime: 10 * 60_000,
     retry: (n, err) => !(err instanceof ApiError && err.status < 500) && n < 1,
   });
@@ -59,7 +54,7 @@ export function RiskRadar() {
   const refresh = useMutation({
     mutationFn: async () => {
       setStage("collect");
-      const t = ticker!;
+      const t = ticker;
       const first = await api.riskRefresh(t);
       qc.setQueryData(["risk", t], first);
       if (!first.persisted) return first;
@@ -69,27 +64,6 @@ export function RiskRadar() {
     onSuccess: (b) => qc.setQueryData(["risk", b.symbol], b),
     onSettled: () => setStage(null),
   });
-  const record = useMutation({
-    mutationFn: (t: string) => api.addHistory(t),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["history"] }),
-  });
-
-  useEffect(() => {
-    if (!ticker && history.data?.[0]) setParams({ t: history.data[0].t }, { replace: true });
-  }, [ticker, history.data, setParams]);
-
-  const current: StockRef | null = useMemo(() => {
-    if (!ticker) return null;
-    const hit = stocks.data?.find((s) => s.t === ticker) ?? history.data?.find((h) => h.t === ticker);
-    return hit ? { t: hit.t, n: hit.n } : { t: ticker, n: ticker };
-  }, [ticker, stocks.data, history.data]);
-
-  function pick(s: StockRef) {
-    setParams({ t: s.t });
-    record.mutate(s.t);
-    setSel(null);
-    refresh.reset();
-  }
 
   // A refresh result is written into the query cache, so it shows even when
   // the GET itself failed.
@@ -97,14 +71,8 @@ export function RiskRadar() {
   const selected = data?.risks.find((r) => r.id === sel) ?? (data ? topRisk(data) : undefined);
 
   return (
-    <div className="min-h-screen">
-      <NavBar>
-        <StockPicker stocks={stocks.data ?? []} history={history.data ?? []}
-          current={current} onPick={pick} />
-      </NavBar>
-      <main className="max-w-[1500px] mx-auto px-3 py-3 flex flex-col gap-3">
-        {!ticker && <div className="card p-10 text-center text-ink-mute">在上方选择一只股票</div>}
-        {ticker && board.isLoading && <div className="card p-10 text-center label">读取中…</div>}
+      <div className="flex flex-col gap-3">
+        {board.isLoading && <div className="card p-10 text-center label">读取中…</div>}
         {board.error && !data && (
           // Most often the tables do not exist yet. A refresh still works
           // without them — it returns the board, it just cannot keep it.
@@ -168,8 +136,7 @@ export function RiskRadar() {
             <Sources data={data} />
           </>
         )}
-      </main>
-    </div>
+      </div>
   );
 }
 

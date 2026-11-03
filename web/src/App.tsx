@@ -12,7 +12,6 @@ import { Alerts } from "./routes/Alerts";
 import { Basket } from "./routes/Basket";
 import { Calendar } from "./routes/Calendar";
 import { Strategies } from "./routes/Strategies";
-import { RiskRadar } from "./routes/RiskRadar";
 import { Admin } from "./routes/Admin";
 import { Portfolio } from "./routes/Portfolio";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -34,6 +33,12 @@ function RequireAuth({ children }: { children: ReactNode }) {
       {children}
     </ErrorBoundary>
   );
+}
+
+function RiskRedirect() {
+  const t = new URLSearchParams(useLocation().search).get("t");
+  const q = new URLSearchParams({ v: "risk", ...(t ? { t } : {}) });
+  return <Navigate to={`/?${q}`} replace />;
 }
 
 export function App() {
@@ -116,14 +121,8 @@ export function App() {
                 </RequireAuth>
               }
             />
-            <Route
-              path="/risk"
-              element={
-                <RequireAuth>
-                  <RiskRadar />
-                </RequireAuth>
-              }
-            />
+            {/* 风险雷达 is a view of 个股分析 now; old links land on it. */}
+            <Route path="/risk" element={<RiskRedirect />} />
             <Route
               path="/strategies"
               element={

@@ -16,7 +16,6 @@ import { api } from "../lib/api";
 const PAGES = [
   { to: "/market", label: "🗺️ 市场看板" },
   { to: "/", label: "📈 个股分析" },
-  { to: "/risk", label: "🧭 风险雷达" },
   { to: "/watchlist", label: "⭐ 自选股" },
   { to: "/alerts", label: "🔔 今日提醒" },
   { to: "/calendar", label: "🗓️ 日历" },
