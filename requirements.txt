@@ -24,3 +24,8 @@ scikit-learn>=1.0.0
 streamlit-plotly-events
 bcrypt
 streamlit-aggrid
+# 🧭 风险雷达's A-share text feeds (巨潮 announcements, 互动易, 东方财富 research,
+# news flashes): this Tushare account has no news or announcement permission.
+# AKShare scrapes, so its calls break when a site changes; risk_sources
+# reports a broken feed instead of failing.
+akshare>=1.17.80

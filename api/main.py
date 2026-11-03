@@ -1924,6 +1924,65 @@ def equity_generate(ticker: str = TICKER,
     return {"section": section, **out}
 
 
+_risk_locks: dict[str, threading.Lock] = {}
+_risk_locks_guard = threading.Lock()
+
+
+def _risk_lock(symbol: str) -> threading.Lock:
+    with _risk_locks_guard:
+        return _risk_locks.setdefault(symbol, threading.Lock())
+
+
+@app.get("/risk/{ticker}")
+def risk_board(ticker: str = TICKER, user: AppUser = Depends(current_user)):
+    """
+    🧭 风险雷达 as last refreshed: scores computed now from stored evidence.
+    Never fetches or calls the AI — see the POST. A stock never refreshed
+    comes back with every risk at 证据不足 and refreshed_at null.
+    """
+    import risk_radar
+    try:
+        return risk_radar.board(ticker, _name(ticker), markets.split(ticker)[0])
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.post("/risk/{ticker}/refresh")
+def risk_refresh(ticker: str = TICKER, synthesize: bool = Query(True),
+                 user: AppUser = Depends(current_user)):
+    """
+    Collect every feed, file the new items, re-measure 敞口, rewrite the
+    利空/利好 cases. One to three minutes. Serialised per stock, so a double
+    click waits for the first refresh instead of paying for the AI twice.
+    """
+    import risk_radar
+    market = markets.split(ticker)[0]
+    with _risk_lock(ticker):
+        try:
+            return risk_radar.refresh(ticker, _name(ticker), market,
+                                      _industry_of(ticker) if market == "CN" else "",
+                                      synthesize=synthesize)
+        except Exception as exc:                                # noqa: BLE001
+            raise HTTPException(502, f"风险雷达刷新失败：{exc}"[:200])
+
+
+@app.post("/risk/{ticker}/synthesize")
+def risk_synthesize(ticker: str = TICKER, user: AppUser = Depends(current_user)):
+    """
+    Rewrite the 利空/利好 cases from stored evidence. The page calls this
+    after a refresh with synthesize=false, so neither request nears Cloud
+    Run's 300s limit.
+    """
+    import risk_radar
+    with _risk_lock(ticker):
+        try:
+            return risk_radar.synthesize(ticker, _name(ticker), markets.split(ticker)[0])
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc))
+        except Exception as exc:                                # noqa: BLE001
+            raise HTTPException(502, f"AI 论点生成失败：{exc}"[:200])
+
+
 class PeersReq(BaseModel):
     competitors: list[dict] = Field(..., max_length=20)
 

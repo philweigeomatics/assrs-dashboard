@@ -12,6 +12,7 @@ import { Alerts } from "./routes/Alerts";
 import { Basket } from "./routes/Basket";
 import { Calendar } from "./routes/Calendar";
 import { Strategies } from "./routes/Strategies";
+import { RiskRadar } from "./routes/RiskRadar";
 import { Admin } from "./routes/Admin";
 import { Portfolio } from "./routes/Portfolio";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -112,6 +113,14 @@ export function App() {
               element={
                 <RequireAuth>
                   <Calendar />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/risk"
+              element={
+                <RequireAuth>
+                  <RiskRadar />
                 </RequireAuth>
               }
             />
