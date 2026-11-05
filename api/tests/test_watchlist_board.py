@@ -162,7 +162,7 @@ def test_chunks_fetched_side_by_side_match_one_by_one_and_a_failed_call_is_retri
         return real(self, ts_code=ts_code, **kw)
     monkeypatch.setattr(Api, "daily", flaky)
     got = wb._cn_bars(codes[:8], "20260901", "20260903", chunk=2, workers=4)
-    assert set(got) == set(codes[:8]) and len(tried) == 4
+    assert set(got) == set(codes[:8]) and len(tried) == 8          # one daily call per code
 
 
 def test_no_codes_is_no_call(monkeypatch):
@@ -287,3 +287,27 @@ def test_strict_refuses_a_bar_without_its_adjustment_factor(monkeypatch):
     with pytest.raises(RuntimeError, match="复权因子"):
         wb.cn_daily(["600519.SH"], "20260901", "20260902", strict=True)
     assert len(wb.cn_daily(["600519.SH"], "20260901", "20260902")["600519.SH"]) == 2   # the sparkline still draws
+
+
+def test_a_list_of_codes_answered_with_nothing_does_not_lose_the_stocks(monkeypatch):
+    """Since November 2026 Tushare answers daily(ts_code="a,b") with no rows and no error."""
+    monkeypatch.setattr(wb.time, "sleep", lambda s: None)
+    mod = types.ModuleType("data_manager")
+    mod.init_tushare = lambda: True
+
+    class Api:
+        def daily(self, ts_code=None, **kw):
+            if "," in ts_code:
+                return pd.DataFrame(columns=["ts_code", "trade_date", "close"])
+            return pd.DataFrame([(ts_code, "20261104", 10.0), (ts_code, "20261105", 11.0)],
+                                columns=["ts_code", "trade_date", "close"])
+
+        def adj_factor(self, ts_code=None, **kw):
+            return pd.DataFrame([(c, d, 1.0) for c in ts_code.split(",") for d in ("20261104", "20261105")],
+                                columns=["ts_code", "trade_date", "adj_factor"])
+
+    mod.TUSHARE_API = Api()
+    monkeypatch.setitem(sys.modules, "data_manager", mod)
+    codes = [f"{600000 + i}.SH" for i in range(6)]
+    got = wb.cn_daily(codes, "20261101", "20261105", chunk=40, strict=True)
+    assert set(got) == set(codes) and all(list(df["close"]) == [10.0, 11.0] for df in got.values())

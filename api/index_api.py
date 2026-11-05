@@ -984,11 +984,12 @@ def _check_fresh(last: dict, closes: pd.DataFrame, members: list[dict]) -> None:
     by_t: dict[str, list] = {}
     for m in members:
         by_t.setdefault(m["ticker"], []).append(m)
-    for t in last["state"].get("v", {}):
-        if t in halted or not C._member_on(by_t.get(t, []), nxt[0]):
-            continue
-        if t not in closes.columns or closes[t].loc[closes.index >= d0].dropna().empty:
-            raise RuntimeError(f"{t} 没有任何新行情 — 下载失败，或已被收购退市（若是后者，请把它移出指数）")
+    held = [t for t in last["state"].get("v", {}) if t not in halted and C._member_on(by_t.get(t, []), nxt[0])]
+    missing = [t for t in held if t not in closes.columns or closes[t].loc[closes.index >= d0].dropna().empty]
+    if len(missing) > 1 and len(missing) >= len(held) / 2:
+        raise RuntimeError(f"行情下载整体为空（{len(missing)}/{len(held)} 只没有数据）— 数据源接口异常，这一天暂不存，下次运行重试")
+    if missing:
+        raise RuntimeError(f"{missing[0]} 没有任何新行情 — 下载失败，或已被收购退市（若是后者，请把它移出指数）")
 
 
 # ── reading the record ───────────────────────────────────────────────────────

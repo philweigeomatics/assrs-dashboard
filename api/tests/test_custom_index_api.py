@@ -663,3 +663,14 @@ def test_a_change_made_at_the_weekend_takes_effect_on_monday(db, monkeypatch):
     aged(db, iid)
     monkeypatch.setattr(A, "_today", lambda m: date(2025, 6, 28))     # Saturday; Friday is stored
     assert A.add_member(1, iid, ticker="CCC", name="C", added_on=None)["added_on"] == "2025-06-30"
+
+
+def test_a_download_that_comes_back_empty_says_so_rather_than_blaming_one_stock(db, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", long_prices([], end="2025-04-15"))
+    iid = make(base_date="2024-03-01", members=[{"ticker": "AAA"}, {"ticker": "BBB"}, {"ticker": "CCC"}])
+    A.compute(1, iid)
+    A._price_cache._d.clear()
+    full = long_prices([])
+    monkeypatch.setattr(A, "_us_closes", lambda t, s: (full(t, s)[0].iloc[:, :0], full(t, s)[1]))
+    r = A.refresh_all()[0]
+    assert not r["ok"] and "整体为空" in r["error"]

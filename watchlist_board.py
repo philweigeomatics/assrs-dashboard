@@ -63,7 +63,7 @@ def _chunks(items: list, size: int = CHUNK):
 def _cn_bars(codes: list[str], start: str, end: str,
              chunk: int = CHUNK, workers: int = 1) -> dict[str, pd.Series]:
     """
-    Forward-adjusted closes per ts_code, from two batched calls per chunk.
+    Forward-adjusted closes per ts_code (see cn_daily for how they are read).
 
     Adjusted rather than raw: `daily` is 不复权, so a 转增 inside the window
     would draw a cliff in the sparkline that never happened to anyone holding
@@ -79,11 +79,13 @@ def cn_daily(codes: list[str], start: str, end: str, chunk: int = CHUNK, workers
     Per ts_code: forward-adjusted open and close, and turnover in yuan, on
     trade dates ('YYYYMMDD').
 
-    Long histories need many small chunks (a call returns ~6,000 rows), and
-    one after another they add up to most of a minute — `workers` runs
-    chunks side by side, each call retried once.
+    `daily` is read one code per call, `workers` (at least four) at a time:
+    since November 2026 Tushare answers a comma-separated list of codes with
+    no rows and no error. `adj_factor` still takes a list, so it stays
+    batched in chunks sized to its ~6,000-row cap. Every call is retried with
+    a growing pause, which is what Tushare's per-minute limit needs.
 
-    `strict` raises instead of degrading: a failed chunk would silently drop
+    `strict` raises instead of degrading: a failed call would silently drop
     stocks, and a failed adj_factor would leave raw prices in which a 10送10
     is a 50% crash — tolerable in a sparkline, not in an index that keeps
     what it computes.
@@ -91,7 +93,7 @@ def cn_daily(codes: list[str], start: str, end: str, chunk: int = CHUNK, workers
     if not codes:
         return {}
     api = _api()
-    tries = 2 if workers > 1 or strict else 1
+    tries = 3
 
     def call(fn, joined):
         for attempt in range(tries):
@@ -101,20 +103,27 @@ def cn_daily(codes: list[str], start: str, end: str, chunk: int = CHUNK, workers
                 if attempt == tries - 1:
                     raise
                 print(f"[watchlist] retry {joined[:20]}: {type(exc).__name__}"[:160])
-                time.sleep(1.0)
+                time.sleep(1.0 * 2 ** attempt)
 
-    def one(part: list[str]) -> dict[str, pd.DataFrame]:
-        joined = ",".join(part)
+    def daily(code: str) -> pd.DataFrame | None:
         try:
-            px = call(api.daily, joined)
+            return call(api.daily, code)
         except Exception as exc:                                   # noqa: BLE001
             if strict:
                 raise
-            print(f"[watchlist] daily: {type(exc).__name__}: {exc}"[:160])
-            return {}
-        if px is None or px.empty:
-            return {}
+            print(f"[watchlist] daily {code}: {type(exc).__name__}: {exc}"[:160])
+            return None
 
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(4, workers)) as pool:
+        bars = dict(zip(codes, pool.map(daily, codes)))
+
+    def one(part: list[str]) -> dict[str, pd.DataFrame]:
+        frames = [bars[c] for c in part if bars.get(c) is not None and len(bars[c])]
+        if not frames:
+            return {}
+        px = pd.concat(frames, ignore_index=True)
+        joined = ",".join(part)
         try:
             adj = call(api.adj_factor, joined)
         except Exception:                                          # noqa: BLE001
