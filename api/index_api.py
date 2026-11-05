@@ -1274,6 +1274,149 @@ def stretch_detail(user_id: int, index_id: int) -> dict:
     return d
 
 
+# ── comparing, and the US session live ───────────────────────────────────────
+@_guard
+def compare(user_id: int) -> dict:
+    """Every index the caller has, as its stored closes — to be drawn on one chart, rebased."""
+    from concurrent.futures import ThreadPoolExecutor
+    idxs = _rows(_db().read_table("custom_index", filters={"app_user_id": int(user_id)}, columns=_IDX_COLS))
+
+    def load(r):
+        try:
+            return r, _days(int(r["id"])), None
+        except Exception as exc:                                   # noqa: BLE001
+            return r, None, str(exc)[:120]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        got = list(pool.map(load, idxs))
+    out = []
+    for r, days, err in got:
+        if not days:
+            continue
+        out.append({"id": int(r["id"]), "name": r["name"], "market": r["market"],
+                    "method": C.METHODS[r["method"]][0],
+                    "live_from": str(r.get("rules_updated_at") or "")[:10] or None,
+                    "dates": [d["d"] for d in days], "close": [d["close"] for d in days]})
+    return {"indexes": sorted(out, key=lambda x: (x["market"], x["name"]))}
+
+
+#: Intraday prices are fetched at most once a minute per set of tickers, and
+#: shared by every request in that minute.
+LIVE_TTL = 60
+_live_cache = _Cache(maxsize=20, ttl_s=LIVE_TTL)
+SESSION = ((9, 30), (16, 0))                      # New York regular session
+
+
+def _us_intraday(tickers: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Today's (or the latest session's) 5-minute closes, and the last week of
+    daily closes — both UNadjusted, so a live price and the close it is
+    compared with are in the same units. One bulk Yahoo call each.
+    """
+    import yfinance as yf
+
+    def norm(df):
+        if df is None or df.empty:
+            return pd.DataFrame()
+        c = df["Close"] if isinstance(df.columns, pd.MultiIndex) else df[["Close"]].rename(columns={"Close": codes[0]})
+        c = c.copy()
+        c.columns = [f"US:{x}" for x in c.columns]
+        return c
+
+    codes = [t.split(":", 1)[1] for t in tickers]
+    bars = norm(yf.download(" ".join(codes), period="1d", interval="5m", auto_adjust=False,
+                            prepost=False, progress=False, threads=True))
+    daily = norm(yf.download(" ".join(codes), period="7d", interval="1d", auto_adjust=False,
+                             progress=False, threads=True))
+    if len(bars) and bars.index.tz is not None:
+        bars.index = bars.index.tz_convert("America/New_York").tz_localize(None)
+    if len(daily) and daily.index.tz is not None:
+        daily.index = daily.index.tz_localize(None)
+    daily.index = daily.index.normalize()
+    return bars, daily
+
+
+@_guard
+def live(user_id: int) -> dict:
+    """
+    The caller's US indexes through the current (or latest) session, every
+    five minutes, from what each held at the close before it.
+
+    Nothing is stored and nothing needs to be: a stored close keeps every
+    holding's value, so the level at any moment is cash + Σ value × (price
+    now ÷ that close) — exact, because membership changes and rebalances only
+    happen at a close. The session's path is rebuilt from Yahoo's intraday
+    bars on each read; once the session is over its close is stored the
+    usual way. Unadjusted prices on both sides: on an ex-dividend day the
+    dividend shows as a dip until the close is stored, when it is counted.
+    """
+    idxs = [r for r in _rows(_db().read_table("custom_index", filters={"app_user_id": int(user_id)},
+                                              columns=_IDX_COLS)) if r["market"] == "US"]
+    now = _now("US")
+    base = {"open": False, "session": None, "as_of": None, "now": now.strftime("%Y-%m-%d %H:%M"),
+            "ttl": LIVE_TTL, "indexes": []}
+    if not idxs:
+        return base
+    from concurrent.futures import ThreadPoolExecutor
+
+    def load(r):
+        # Every stored day of the last week, so whichever is the session's
+        # previous close can be found once the session's date is known.
+        iid = int(r["id"])
+        days = _days(iid)
+        if not days:
+            return iid, r, None, []
+        recent = [d["d"] for d in days[-6:]]
+        st = _states(iid, recent)
+        return iid, r, days, [(d, st.get(d, {})) for d in recent]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        loaded = [x for x in pool.map(load, idxs) if x[2]]
+    if not loaded:
+        return base
+    refs = {iid: (r, days) for iid, r, days, _ in loaded}
+    states = {iid: st for iid, _, _, st in loaded}
+    held = {t for st in states.values() for _, x in st for t in x.get("v", {})}
+    if not held:
+        return base
+    key = tuple(sorted(held))
+    bars, daily = _live_cache.get_or_compute(key, lambda: _us_intraday(list(key)))
+    if bars.empty:
+        return base
+    session = bars.index[0].normalize()
+    open_ = (now.date() == session.date() and now.weekday() < 5
+             and SESSION[0] <= (now.hour, now.minute) < SESSION[1])
+    times = [t.strftime("%H:%M") for t in bars.index]
+    out = []
+    for iid, (r, days) in refs.items():
+        prior = [(d, x) for d, x in states[iid] if pd.Timestamp(d) < session and x.get("v")]
+        if not prior:
+            out.append({"id": iid, "name": r["name"], "error": "最近一周没有存下的收盘"})
+            continue
+        ref_d, st = prior[-1]
+        ref = pd.Timestamp(ref_d)
+        if ref not in daily.index:
+            out.append({"id": iid, "name": r["name"], "error": f"取不到 {ref_d} 的收盘价"})
+            continue
+        ref_close = daily.loc[ref]
+        level = pd.Series(float(st.get("cash") or 0.0), bars.index)
+        missing = []
+        for t, v in st["v"].items():
+            p0 = ref_close.get(t)
+            path = bars[t].ffill() if t in bars.columns else None
+            if p0 is None or not pd.notna(p0) or path is None or path.notna().sum() == 0:
+                missing.append(t)                         # carried at its close: flat
+                level += float(v)
+                continue
+            level += float(v) * (path.fillna(p0) / float(p0))
+        ref_level = sum(float(v) for v in st["v"].values()) + float(st.get("cash") or 0.0)
+        out.append({"id": iid, "name": r["name"], "ref_date": ref_d, "ref_level": _num(ref_level, 2),
+                    "level": _num(level.iloc[-1], 2), "chg": _num((level.iloc[-1] / ref_level - 1) * 100, 2),
+                    "levels": [_num(v, 2) for v in level.to_numpy()], "missing": missing})
+    return {**base, "open": open_, "session": str(session.date()), "as_of": times[-1] if times else None,
+            "times": times, "indexes": sorted(out, key=lambda x: x["name"])}
+
+
 def refresh_all() -> list[dict]:
     """
     The daily job: every user's every index carried forward from its last

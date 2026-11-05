@@ -1667,6 +1667,20 @@ def custom_index_create(req: IndexCreateReq, user: AppUser = Depends(current_use
                        base_date=req.base_date, members=[m.model_dump() for m in req.members], bench=req.bench)
 
 
+@app.get("/custom-index/compare")
+def custom_index_compare(user: AppUser = Depends(current_user)):
+    """Every index of the caller as stored closes, for one rebased chart."""
+    from api import index_api
+    return _index_call(user, index_api.compare, user.id)
+
+
+@app.get("/custom-index/live")
+def custom_index_live(user: AppUser = Depends(current_user)):
+    """The caller's US indexes through the current session, every five minutes (Yahoo, ≤ 1 fetch a minute)."""
+    from api import index_api
+    return _index_call(user, index_api.live, user.id)
+
+
 @app.get("/custom-index/board")
 def custom_index_board(market: str = Query(..., pattern="^(CN|US)$"), user: AppUser = Depends(current_user)):
     """The caller's indexes in one market as rows of the dashboard board (我的指数)."""

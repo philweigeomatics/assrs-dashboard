@@ -971,6 +971,17 @@ export type Breadth = {
   total: number;
 };
 
+export type IndexCompare = {
+  indexes: { id: number; name: string; market: "CN" | "US"; method: string; live_from: string | null;
+             dates: string[]; close: number[] }[];
+};
+export type IndexLive = {
+  open: boolean; session: string | null; as_of: string | null; now: string; ttl: number;
+  times?: string[];
+  indexes: { id: number; name: string; ref_date?: string; ref_level?: number | null; level?: number | null;
+             chg?: number | null; levels?: (number | null)[]; missing?: string[]; error?: string }[];
+};
+
 // ── 信用与债务 ──────────────────────────────────────────────────────────────────
 export type Weekly = { dates: string[]; v: Num[] };
 export type CreditLevel = "calm" | "weak" | "stress";

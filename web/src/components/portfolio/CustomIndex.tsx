@@ -28,6 +28,7 @@ import type {
   CustomIndexDetail, CustomIndexList, CustomIndexRef, IndexMember, IndexMethod, IndexRebalance, IndexWindow, StockRef,
 } from "../../lib/types";
 import { useSymbolSearch } from "../../lib/useSymbolSearch";
+import { IndexCompare } from "./IndexCompare";
 import { usePersistentState } from "../../lib/usePersistentState";
 import { fixed, moveClass, signed } from "../../lib/format";
 
@@ -53,7 +54,13 @@ export function CustomIndex() {
   const qc = useQueryClient();
   const list = useQuery({ queryKey: ["idx", "list"], queryFn: api.indexes });
   const [picked, setPicked] = usePersistentState<number | null>("assrs.index.current", null);
-  const [mode, setMode] = useState<"view" | "new" | "edit" | "copy">("view");
+  // The 单个指数 / 对比 choice is remembered; a half-filled form is not.
+  const [lastView, setLastView] = usePersistentState<"view" | "compare">("assrs.index.view", "view");
+  const [mode, setModeState] = useState<"view" | "new" | "edit" | "copy" | "compare">(lastView);
+  const setMode = (m: typeof mode) => {
+    setModeState(m);
+    if (m === "view" || m === "compare") setLastView(m);
+  };
   const [confirming, setConfirming] = useState(false);
 
   const items = list.data?.indexes ?? [];
@@ -89,6 +96,14 @@ export function CustomIndex() {
             ))}
           </select>
         )}
+        {items.length > 1 && (mode === "view" || mode === "compare") && (
+          <div className="flex rounded-lg bg-sunken p-0.5">
+            {([["view", "单个指数"], ["compare", "📈 对比"]] as const).map(([m, label]) => (
+              <button key={m} onClick={() => setMode(m)}
+                className={`h-7 px-2.5 rounded-md text-[12.5px] ${mode === m ? "bg-panel shadow-sm font-semibold" : "text-ink-mute hover:text-ink"}`}>{label}</button>
+            ))}
+          </div>
+        )}
         <div className="ml-auto flex items-center gap-1.5">
           {mode === "view" && current && (
             <>
@@ -107,7 +122,7 @@ export function CustomIndex() {
               )}
             </>
           )}
-          {mode === "view" && (
+          {(mode === "view" || mode === "compare") && (
             <button onClick={() => setMode("new")} className="h-8 px-3 rounded-lg text-[12.5px] bg-cyan text-white">＋ 新建指数</button>
           )}
         </div>
@@ -118,6 +133,7 @@ export function CustomIndex() {
         <IndexForm key={`${mode}-${current.id}`} meta={meta} kind={mode} source={current} onDone={done} onCancel={() => setMode("view")} />
       )}
       {mode === "view" && current && <IndexView key={current.id} idx={current} />}
+      {mode === "compare" && <IndexCompare />}
       {mode === "view" && !current && (
         <section className="card p-6 text-[13px] text-ink-dim leading-relaxed">
           <p className="font-semibold text-ink mb-1">把你关注的一组股票做成一条指数</p>

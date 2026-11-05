@@ -674,3 +674,67 @@ def test_a_download_that_comes_back_empty_says_so_rather_than_blaming_one_stock(
     monkeypatch.setattr(A, "_us_closes", lambda t, s: (full(t, s)[0].iloc[:, :0], full(t, s)[1]))
     r = A.refresh_all()[0]
     assert not r["ok"] and "整体为空" in r["error"]
+
+
+# ── the US session live, and the comparison ──────────────────────────────────
+def session(prices: dict[str, float], ref_closes: dict[str, float], ref_day="2025-06-27", day="2025-06-30"):
+    """Yahoo's answer: 5-minute bars for `day` ending at `prices`, and the daily close of `ref_day`."""
+    times = pd.date_range(f"{day} 09:30", periods=3, freq="5min")
+    bars = pd.DataFrame({t: [ref_closes[t], (ref_closes[t] + p) / 2, p] for t, p in prices.items()}, index=times)
+    daily = pd.DataFrame({t: [c, np.nan] for t, c in ref_closes.items()},
+                         index=pd.to_datetime([ref_day, day]))
+    return lambda tickers: (bars[[t for t in tickers if t in bars.columns]], daily)
+
+
+def test_live_is_each_holding_at_the_previous_close_moved_by_its_price(db, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", long_prices([], end="2025-06-27"))
+    iid = make(base_date="2024-03-01")
+    A.compute(1, iid)
+    last = A._last_day(iid)
+    v, cash = last["state"]["v"], last["state"]["cash"]
+    ref = {"US:AAA": 20.0, "US:BBB": 40.0}                   # unadjusted closes, whatever their scale
+    monkeypatch.setattr(A, "_us_intraday", session({"US:AAA": 22.0, "US:BBB": 36.0}, ref))
+    A._live_cache._d.clear()
+    out = A.live(1)
+    x = out["indexes"][0]
+    want = cash + v["US:AAA"] * 1.1 + v["US:BBB"] * 0.9
+    assert x["ref_date"] == "2025-06-27" and x["level"] == pytest.approx(want, abs=0.01)
+    assert x["ref_level"] == pytest.approx(sum(v.values()) + cash, abs=0.01)
+    assert x["chg"] == pytest.approx((want / x["ref_level"] - 1) * 100, abs=0.01)
+    assert len(x["levels"]) == len(out["times"]) == 3 and out["session"] == "2025-06-30"
+
+
+def test_live_uses_the_close_before_the_session_even_once_the_session_is_stored(db, monkeypatch):
+    """After the close is stored, the session's path is still measured from the day before it."""
+    monkeypatch.setattr(A, "_us_closes", long_prices([]))      # stored through 2025-06-30
+    iid = make(base_date="2024-03-01")
+    A.compute(1, iid)
+    assert A._last_day(iid)["d"] == "2025-06-30"
+    monkeypatch.setattr(A, "_us_intraday", session({"US:AAA": 21.0, "US:BBB": 41.0}, {"US:AAA": 20.0, "US:BBB": 40.0}))
+    A._live_cache._d.clear()
+    assert A.live(1)["indexes"][0]["ref_date"] == "2025-06-27"
+
+
+def test_a_holding_without_intraday_prices_is_carried_flat_and_named(db, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", long_prices([], end="2025-06-27"))
+    iid = make(base_date="2024-03-01")
+    A.compute(1, iid)
+    v = A._last_day(iid)["state"]["v"]
+    monkeypatch.setattr(A, "_us_intraday", session({"US:AAA": 22.0}, {"US:AAA": 20.0, "US:BBB": 40.0}))
+    A._live_cache._d.clear()
+    x = A.live(1)["indexes"][0]
+    assert x["missing"] == ["US:BBB"]
+    assert x["level"] == pytest.approx(A._last_day(iid)["state"]["cash"] + v["US:AAA"] * 1.1 + v["US:BBB"], abs=0.01)
+
+
+def test_compare_lists_every_index_with_its_stored_closes(db, monkeypatch):
+    monkeypatch.setattr(A, "_us_closes", long_prices([]))
+    a = make(name="甲", base_date="2024-03-01")
+    b = make(name="乙", base_date="2024-06-03", members=[{"ticker": "AAA"}, {"ticker": "CCC"}])
+    A.compute(1, a)
+    A.compute(1, b)
+    out = A.compare(1)["indexes"]
+    assert {x["name"] for x in out} == {"甲", "乙"}
+    x = next(x for x in out if x["name"] == "乙")
+    assert x["dates"][0] == "2024-06-03" and len(x["dates"]) == len(x["close"]) and x["close"][0] == 1000
+    assert A.compare(2) == {"indexes": []}                      # another user sees nothing

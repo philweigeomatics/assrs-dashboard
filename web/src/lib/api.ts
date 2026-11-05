@@ -26,7 +26,7 @@ import type {
   Breadth, Heatmap, Leverage, LeverageCycle, CreditBoard, RiskBoard, Rotation, TopList, Wyckoff,
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
   ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, Seasonality, Seesaw, Swing, ChainResult, SectorCycle, CyclePairDetail, UsEtfBoard, UsEtfDetail,
-  CustomIndexList, CustomIndexDetail, IndexRulesBody, BoardMarket, MineBoard,
+  CustomIndexList, CustomIndexDetail, IndexRulesBody, BoardMarket, MineBoard, IndexCompare, IndexLive,
   RiskRadar,
 } from "./types";
 
@@ -144,6 +144,8 @@ export const api = {
   usEtfDetail: (t: string) => call<UsEtfDetail>(`/market/us-etf/${t}`),
   cnIndex: () => call<UsEtfBoard>("/market/cn-index"),
   cnIndexDetail: (code: string) => call<UsEtfDetail>(`/market/cn-index/${code}`),
+  indexCompare: () => call<IndexCompare>("/custom-index/compare"),
+  indexLive: () => call<IndexLive>("/custom-index/live"),
   indexBoard: (market: BoardMarket) => call<MineBoard>(`/custom-index/board?market=${market}`),
   indexStretch: (id: number) => call<UsEtfDetail>(`/custom-index/${id}/stretch`),
   indexes: () => call<CustomIndexList>("/custom-index"),
