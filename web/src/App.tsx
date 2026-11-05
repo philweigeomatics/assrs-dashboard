@@ -35,6 +35,12 @@ function RequireAuth({ children }: { children: ReactNode }) {
   );
 }
 
+function RiskRedirect() {
+  const t = new URLSearchParams(useLocation().search).get("t");
+  const q = new URLSearchParams({ v: "risk", ...(t ? { t } : {}) });
+  return <Navigate to={`/?${q}`} replace />;
+}
+
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -115,6 +121,8 @@ export function App() {
                 </RequireAuth>
               }
             />
+            {/* 风险雷达 is a view of 个股分析 now; old links land on it. */}
+            <Route path="/risk" element={<RiskRedirect />} />
             <Route
               path="/strategies"
               element={

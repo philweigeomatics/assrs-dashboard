@@ -16,19 +16,33 @@ import { SectorPanel } from "../components/SectorPanel";
 import { CompareStats } from "../components/CompareStats";
 import { EquityBriefPanel } from "../components/EquityBriefPanel";
 import { SeasonalityPanel } from "../components/SeasonalityPanel";
+import { RiskRadarPanel } from "../components/RiskRadarPanel";
+
+const VIEWS = [
+  { id: "ta", label: "📈 技术分析" },
+  { id: "risk", label: "🧭 风险雷达" },
+] as const;
+type View = typeof VIEWS[number]["id"];
 
 export function TechnicalAnalysis() {
   const qc = useQueryClient();
   useEffect(() => { document.title = "ASSRS · 个股分析"; }, []);
   const [params, setParams] = useSearchParams();
   const ticker = params.get("t");
+  // Two views of the one stock picked above. In the URL, so a link opens
+  // the view it was copied from.
+  const view: View = params.get("v") === "risk" ? "risk" : "ta";
+  const withView = (t: string, v: View = view): Record<string, string> =>
+    (v === "risk" ? { t, v } : { t });
 
   const stocks = useQuery({ queryKey: ["stocks"], queryFn: api.stocks, staleTime: 6 * 3600_000 });
   const history = useQuery({ queryKey: ["history"], queryFn: api.history, staleTime: 60_000 });
+  // Only while the chart is shown: a first analysis runs the HMM for 10–25s,
+  // which someone opening 风险雷达 did not ask for. Cached once it has run.
   const analysis = useQuery({
     queryKey: ["analysis", ticker],
     queryFn: () => api.analysis(ticker!),
-    enabled: Boolean(ticker),
+    enabled: Boolean(ticker) && view === "ta",
     staleTime: 10 * 60_000,
     retry: (n, err) => !(err instanceof ApiError && err.status < 500) && n < 1,
   });
@@ -41,7 +55,7 @@ export function TechnicalAnalysis() {
   const myTrades = useQuery({
     queryKey: ["qt", "marks", ticker],
     queryFn: () => api.qtTradeMarks(ticker!, 3),
-    enabled: Boolean(ticker),
+    enabled: Boolean(ticker) && view === "ta",
     staleTime: 6 * 3600_000,
     retry: false,
   });
@@ -66,7 +80,7 @@ export function TechnicalAnalysis() {
 
   // Opening the page with no ?t= picks up where you left off.
   useEffect(() => {
-    if (!ticker && history.data?.[0]) setParams({ t: history.data[0].t }, { replace: true });
+    if (!ticker && history.data?.[0]) setParams(withView(history.data[0].t), { replace: true });
   }, [ticker, history.data, setParams]);
 
   const current: StockRef | null = useMemo(() => {
@@ -76,7 +90,7 @@ export function TechnicalAnalysis() {
   }, [ticker, stocks.data, history.data]);
 
   function pick(s: StockRef) {
-    setParams({ t: s.t });
+    setParams(withView(s.t));
     record.mutate(s.t);
     // A ghost and a comparison belong to the stock they were made against.
     setGhost(null);
@@ -100,6 +114,22 @@ export function TechnicalAnalysis() {
           <div className="card p-10 text-center text-ink-mute">在上方输入股票代码或名称开始分析</div>
         )}
 
+        {ticker && (
+          <div className="card p-1 self-start flex gap-1" role="tablist" aria-label="分析视图">
+            {VIEWS.map((v) => (
+              <button key={v.id} role="tab" aria-selected={view === v.id}
+                onClick={() => setParams(withView(ticker, v.id))}
+                className={`h-9 px-4 rounded-lg text-[14px] font-semibold transition-colors ${
+                  view === v.id ? "bg-elevated text-ink" : "text-ink-mute hover:text-ink"}`}>
+                {v.label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {ticker && view === "risk" && <RiskRadarPanel key={ticker} ticker={ticker} />}
+
+        {view === "ta" && <>
         {ticker && analysis.isPending && (
           <div className="card p-10 flex flex-col items-center gap-2 text-ink-mute">
             <div className="h-6 w-6 rounded-full border-2 border-line border-t-cyan animate-spin" />
@@ -182,6 +212,7 @@ export function TechnicalAnalysis() {
             elsewhere would show an error with a retry button for something
             that will never succeed. */}
         {analysis.data?.market === "CN" && <SectorPanel ticker={analysis.data.ticker} />}
+        </>}
       </main>
     </div>
   );

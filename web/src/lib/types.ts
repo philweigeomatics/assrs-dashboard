@@ -1,6 +1,87 @@
 /** Shapes returned by the FastAPI service (api/main.py, ta_payload.py). */
 
 export type StockRef = { t: string; n: string; ex?: string };
+
+/** 🧭 风险雷达 — see risk_radar.py. 利空 = "down", 利好 = "up". */
+export type RiskEvidence = {
+  eid: string;
+  d: string;
+  source: string;
+  kind: "filing" | "data" | "qa" | "macro" | "research" | "news";
+  title: string;
+  url: string | null;
+  risk: string;
+  dir: "down" | "up";
+  strength: number;
+  fact: boolean;
+  note: string | null;
+  tagged_by: "rule" | "ai";
+  weight: number;
+};
+
+export type RiskLevel = "高" | "中" | "低";
+export type RiskTier = "高" | "偏高" | "中" | "偏低" | "低" | "证据不足";
+
+export type RiskRow = {
+  id: string;
+  kind: "macro" | "micro";
+  name: string;
+  en: string;
+  exposure: RiskLevel;
+  exposure_source: "measured" | "ai" | "default";
+  exposure_note: string;
+  down: number;
+  up: number;
+  n: number;
+  tier: RiskTier;
+  lean: "偏空" | "偏多" | "中性";
+  d7_down: number;
+  d7_up: number;
+  trend: { down: number[]; up: number[] };
+  bear: string | null;
+  bull: string | null;
+  watch: string[];
+  evidence: RiskEvidence[];
+};
+
+export type RiskSourceStatus = {
+  source: string; label: string; ok: boolean; n: number; reason: string | null; secs?: number;
+};
+
+export type RiskReading = {
+  key: string; label: string; risk: string; rate: boolean;
+  beta: number; t: number; r2: number; weeks: number; level: RiskLevel;
+};
+
+export type RiskRadar = {
+  symbol: string;
+  name: string;
+  market: "CN" | "US" | "CA";
+  as_of: string;
+  refreshed_at: string | null;
+  synthesized_at: string | null;
+  persisted: boolean;
+  summary: {
+    down: number | null;
+    up: number | null;
+    down_tier: RiskTier;
+    up_tier: RiskTier;
+    top: { id: string; name: string; down: number; exposure: RiskLevel; d7_down: number } | null;
+    n: number;
+    facts: number;
+    opinions: number;
+    stored: number;
+    untagged: number;
+    irrelevant: number;
+  };
+  sources: RiskSourceStatus[];
+  readings: RiskReading[];
+  risks: RiskRow[];
+  method: {
+    window_days: number; min_evidence: number; opinion_weight: number; scale_k: number;
+    half_life: Record<string, number>; credibility: Record<string, number>;
+  };
+};
 export type HistoryRef = StockRef & { at?: string | null };
 
 export type Num = number | null;

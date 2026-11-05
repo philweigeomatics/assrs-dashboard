@@ -27,6 +27,7 @@ import type {
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
   ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, Seasonality, Seesaw, Swing, ChainResult, SectorCycle, CyclePairDetail, UsEtfBoard, UsEtfDetail,
   CustomIndexList, CustomIndexDetail, IndexRulesBody, BoardMarket, MineBoard,
+  RiskRadar,
 } from "./types";
 
 const API = ((import.meta.env.VITE_API_URL as string | undefined) || "http://127.0.0.1:8000")
@@ -117,6 +118,12 @@ export const api = {
   noteDelete: (id: number) =>
     call<{ deleted: number }>(`/alerts/notes/${id}`, { method: "DELETE" }),
   equity: (t: string) => call<EquityBrief>(`/equity/${t}`),
+  riskRadar: (t: string) => call<RiskRadar>(`/risk/${t}`),
+  /** Fetch every feed and file the new items. Up to two minutes. */
+  riskRefresh: (t: string) =>
+    call<RiskRadar>(`/risk/${t}/refresh?synthesize=false`, { method: "POST" }),
+  /** Rewrite the 利空/利好 cases from stored evidence — its own request, see the route. */
+  riskSynthesize: (t: string) => call<RiskRadar>(`/risk/${t}/synthesize`, { method: "POST" }),
   equityGenerate: (t: string, section: string, force = false) =>
     call<{ section: string; written?: string[]; failed?: string[] }>(`/equity/${t}/generate/${section}?force=${force}`, { method: "POST" }),
   /** Codes only — the server looks the names up and refuses unknown codes. */
