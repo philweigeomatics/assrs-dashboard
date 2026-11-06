@@ -207,6 +207,12 @@ export function ChartStack({
   const [win, setWin] = useState<{ from: number; to: number } | null>(null);
   const retPane = panes.find((p) => p.id === "ret");
   const changes = retPane?.lines[0]?.values;
+  // What-If's hypothetical bar, as a change on the last real close.
+  const ghostChange = useMemo(() => {
+    const c0 = data.ohlcv.c[data.dates.length - 1];
+    const c1 = ghost?.ohlcv.c;
+    return c0 && c1 != null && Number.isFinite(c1) ? (c1 / c0 - 1) * 100 : null;
+  }, [ghost, data]);
   const moveStats = useMemo(() => {
     if (!changes) return null;
     const r = win ?? defaultRange();
@@ -481,8 +487,17 @@ export function ChartStack({
                      color: up ? gpal.upFill : gpal.downFill }]);
         gs.set("volume:__ghostvol", s);
       }
+      // 涨跌幅分位 too: the ghost's change, ranked in the legend below.
+      if (pane.id === "ret" && ghostChange != null) {
+        const s = chart.addSeries(HistogramSeries, {
+          priceLineVisible: false, lastValueVisible: false,
+        });
+        s.setData([{ time: gDate, value: ghostChange,
+                     color: ghostChange >= 0 ? gpal.upFill : gpal.downFill }]);
+        gs.set("ret:__ghostret", s);
+      }
     }
-  }, [ghost, data, panes]);
+  }, [ghost, ghostChange, data, panes]);
 
   // ── the comparison stock ──────────────────────────────────────────────
   useEffect(() => {
@@ -539,6 +554,7 @@ export function ChartStack({
 
   const idx = hover ?? data.dates.length - 1;
   const move = rankDay(moveStats, changes?.[idx] ?? null);
+  const ghostMove = rankDay(moveStats, ghostChange);
   const pct = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(2)}%`;
   const retExtra = !changes ? null : !moveStats ? (
     <span className="text-[11px] text-ink-mute">图中不足 {MIN_DAYS} 个交易日，放宽区间再看</span>
@@ -549,6 +565,12 @@ export function ChartStack({
           <b>{sizeWord(move.sizeRank)}</b>
           <span className="text-ink-dim"> · 第 {Math.round(move.rank)} 百分位 · 幅度超过 {Math.round(move.sizeRank)}% 的日子
             {Number.isFinite(move.multiple) && ` · ${move.multiple.toFixed(1)}× 中位`}</span>
+        </span>
+      )}
+      {ghostMove && (
+        <span className="text-[11.5px] tnum text-brand-ink">
+          👻 {pct(ghostMove.change)}：<b>{sizeWord(ghostMove.sizeRank)}</b> · 第 {Math.round(ghostMove.rank)} 百分位
+          · 幅度超过 {Math.round(ghostMove.sizeRank)}% 的日子
         </span>
       )}
       <span className="text-[11px] text-ink-mute tnum">
