@@ -14,6 +14,7 @@
  */
 
 import type { Analysis, Num, Segment, SeriesKey } from "./types";
+import { dailyChanges } from "./moveRank";
 
 export type LineStyleName = "solid" | "dashed" | "dotted";
 
@@ -85,7 +86,7 @@ const bearDark = (d: Analysis) => (d.up_is_red ? GREEN_DARK : RED_DARK);
 // that same inversion — these take their colours as literals, so written out
 // by hand they stay Shanghai-coloured on a New York chart while the candles
 // flip, which is exactly what the volume and MACD panes used to do.
-const fill = (d: Analysis, a: number): [string, string] => {
+export const fill = (d: Analysis, a: number): [string, string] => {
   const red = `rgba(220,38,38,${a})`;
   const green = `rgba(22,163,74,${a})`;
   return d.up_is_red ? [red, green] : [green, red];
@@ -139,6 +140,18 @@ export function buildPanes(d: Analysis): { main: PaneSpec; subs: PaneSpec[] } {
   };
 
   const subs: PaneSpec[] = [
+    // Each day's close-to-close change. The bars are pale; the days beyond
+    // P5 / P95 of the bars IN VIEW are drawn solid and the two lines mark
+    // those percentiles — ChartStack recomputes both on every zoom, so "is
+    // +5% a big day?" is answered against whatever stretch is on screen.
+    {
+      id: "ret", title: "涨跌幅分位", height: 100,
+      lines: [
+        { key: "Ret", label: "涨跌%", values: dailyChanges(d.ohlcv.c), color: "#94a3b8", kind: "histogram",
+          signBy: "value", signColors: fill(d, 0.28), decimals: 2 },
+      ],
+      markers: [], guides: [], bands: [],
+    },
     {
       id: "volume", title: "成交量 / OBV", height: 110,
       lines: [

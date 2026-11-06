@@ -29,6 +29,7 @@ import {
   LineSeries,
   LineStyle,
   type IChartApi,
+  type IPriceLine,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
   type Logical,
@@ -42,6 +43,7 @@ import type { Analysis, CompareResult, SimResult } from "../../lib/types";
 import {
   buildPanes,
   defaultHidden,
+  fill,
   type LineSpec,
   type MarkerSpec,
   type PaneSpec,
@@ -53,6 +55,7 @@ import { Legend } from "./Legend";
 import { Readout } from "./Readout";
 import { ResizablePane } from "./ResizablePane";
 import { usePersistentState } from "../../lib/usePersistentState";
+import { MIN_DAYS, rankDay, sizeWord, windowStats } from "../../lib/moveRank";
 
 // Named for the COLOUR, not the direction. Which one a rising bar gets depends
 // on the market: red is a gain in Shanghai and a loss in New York, so the
@@ -199,6 +202,17 @@ export function ChartStack({
     return { from: Math.max(0, n - data.initial_visible) as Logical, to: (n + 3) as Logical };
   }, [data]);
 
+  // The bars in view, as whole bar indices — what 涨跌幅分位 ranks a day
+  // against. Null until the chart reports its first range.
+  const [win, setWin] = useState<{ from: number; to: number } | null>(null);
+  const retPane = panes.find((p) => p.id === "ret");
+  const changes = retPane?.lines[0]?.values;
+  const moveStats = useMemo(() => {
+    if (!changes) return null;
+    const r = win ?? defaultRange();
+    return windowStats(changes, r.from, r.to);
+  }, [changes, win, defaultRange]);
+
   // ── build every pane ──────────────────────────────────────────────────
   useEffect(() => {
     const h: Handles = { charts: new Map(), series: new Map(), markers: new Map() };
@@ -295,9 +309,25 @@ export function ChartStack({
       return () => c.unsubscribeCrosshairMove(fn);
     });
 
+    // Once a frame at most: a drag fires this per pixel.
+    const mainScale = h.charts.get("main")?.timeScale();
+    let frame = 0;
+    const onWin = (r: LogicalRange | null) => {
+      if (!r) return;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const from = Math.ceil(r.from);
+        const to = Math.floor(r.to);
+        setWin((p) => (p && p.from === from && p.to === to ? p : { from, to }));
+      });
+    };
+    mainScale?.subscribeVisibleLogicalRangeChange(onWin);
+
     for (const c of charts) c.timeScale().setVisibleLogicalRange(defaultRange());
 
     return () => {
+      cancelAnimationFrame(frame);
+      mainScale?.unsubscribeVisibleLogicalRangeChange(onWin);
       offRange.forEach((f) => f());
       offCross.forEach((f) => f());
       for (const c of charts) c.remove();
@@ -319,6 +349,30 @@ export function ChartStack({
       plugin.setMarkers(markerList(data, specs.filter((m) => !off.has(`${pane}:${m.key}`))));
     }
   }, [hidden, data, panes]);
+
+  // ── 涨跌幅分位: repaint for the window in view ─────────────────────────
+  // The days beyond the window's P5 / P95 go solid and two lines mark those
+  // percentiles. Same bars, same times, so setData leaves the zoom alone.
+  const retLines = useRef<{ series: ISeriesApi<SeriesType, Time>; lines: IPriceLine[] } | null>(null);
+  useEffect(() => {
+    const s = handles.current.series.get("ret:Ret");
+    if (!s || !changes) return;
+    const [softUp, softDown] = fill(data, 0.28);
+    const [up, down] = fill(data, 0.9);
+    const st = moveStats;
+    s.setData(data.dates.map((t, i) => {
+      const v = changes[i];
+      if (v == null || !Number.isFinite(v)) return { time: t as Time };
+      const big = st != null && i >= st.from && i <= st.to && (v >= st.p95 || v <= st.p5);
+      return { time: t as Time, value: v, color: v >= 0 ? (big ? up : softUp) : (big ? down : softDown) };
+    }));
+    if (retLines.current?.series !== s) retLines.current = { series: s, lines: [] };
+    for (const l of retLines.current.lines) s.removePriceLine(l);
+    const line = (price: number, title: string, color: string) => s.createPriceLine({
+      price, title, color, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true,
+    });
+    retLines.current.lines = st ? [line(st.p95, "P95", up), line(st.p5, "P5", down)] : [];
+  }, [moveStats, changes, data]);
 
   // ── the viewer's own fills ────────────────────────────────────────────
   // Their own plugin rather than a MarkerSpec: those are built from the
@@ -484,6 +538,24 @@ export function ChartStack({
     setHidden((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
   const idx = hover ?? data.dates.length - 1;
+  const move = rankDay(moveStats, changes?.[idx] ?? null);
+  const pct = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(2)}%`;
+  const retExtra = !changes ? null : !moveStats ? (
+    <span className="text-[11px] text-ink-mute">图中不足 {MIN_DAYS} 个交易日，放宽区间再看</span>
+  ) : (
+    <>
+      {move && (
+        <span className="text-[11.5px] tnum">
+          <b>{sizeWord(move.sizeRank)}</b>
+          <span className="text-ink-dim"> · 第 {Math.round(move.rank)} 百分位 · 幅度超过 {Math.round(move.sizeRank)}% 的日子
+            {Number.isFinite(move.multiple) && ` · ${move.multiple.toFixed(1)}× 中位`}</span>
+        </span>
+      )}
+      <span className="text-[11px] text-ink-mute tnum">
+        图中 {moveStats.n} 日：P5 {pct(moveStats.p5)} · P95 {pct(moveStats.p95)} · 中位幅度 {moveStats.medianAbs.toFixed(2)}%
+      </span>
+    </>
+  );
 
   // ── pointer tools on the price pane ───────────────────────────────────
   function onLayerPointerDown(e: React.PointerEvent<HTMLDivElement>) {
@@ -584,9 +656,11 @@ export function ChartStack({
           overlay={
             <>
               {pane.id === "main" && (
-                <Readout data={data} index={idx} ghost={ghost} compare={compare} />
+                <Readout data={data} index={idx} ghost={ghost} compare={compare}
+                  move={move && { rank: move.rank, word: sizeWord(move.sizeRank) }} />
               )}
-              <Legend pane={pane} index={idx} hidden={hidden} onToggle={toggle} />
+              <Legend pane={pane} index={idx} hidden={hidden} onToggle={toggle}
+                extra={pane.id === "ret" ? retExtra : null} />
             </>
           }
         />

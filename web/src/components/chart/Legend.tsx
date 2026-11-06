@@ -10,6 +10,7 @@
  * swallow every drag that started under it. Only the buttons opt back in.
  */
 
+import type { ReactNode } from "react";
 import type { PaneSpec } from "../../lib/panes";
 
 const GLYPH: Record<string, string> = {
@@ -24,11 +25,14 @@ export function Legend({
   index,
   hidden,
   onToggle,
+  extra = null,
 }: {
   pane: PaneSpec;
   index: number;
   hidden: string[];
   onToggle: (id: string) => void;
+  /** Read-only text after the entries, for a pane that has more to say than its values. */
+  extra?: ReactNode;
 }) {
   const off = new Set(hidden);
   return (
@@ -76,6 +80,7 @@ export function Legend({
           </button>
         );
       })}
+      {extra}
     </div>
   );
 }

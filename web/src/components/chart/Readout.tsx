@@ -13,11 +13,14 @@ export function Readout({
   index,
   ghost = null,
   compare = null,
+  move = null,
 }: {
   data: Analysis;
   index: number;
   ghost?: SimResult | null;
   compare?: CompareResult | null;
+  /** The day's change ranked among the days in view (涨跌幅分位). */
+  move?: { rank: number; word: string } | null;
 }) {
   const o = data.ohlcv.o[index];
   const h = data.ohlcv.h[index];
@@ -52,6 +55,7 @@ export function Readout({
       <F k="低" val={l.toFixed(2)} cls={data.up_is_red ? "text-down" : "text-up"} />
       <F k="收" val={c.toFixed(2)} cls={`${moveClass(chg, data.up_is_red)} font-semibold`} />
       <F k="涨跌" val={chg == null ? "—" : `${chg > 0 ? "+" : ""}${chg.toFixed(2)}%`} cls={moveClass(chg, data.up_is_red)} />
+      {move && <F k="分位" val={`${Math.round(move.rank)} · ${move.word}`} />}
       <F k="振幅" val={amp == null ? "—" : `${amp.toFixed(2)}%`} />
       <F k="量" val={v == null ? "—" : compact(v)} />
       {compare && (
