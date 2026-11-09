@@ -410,11 +410,7 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
 
       <section className="card p-3 flex flex-col gap-2">
         <h3 className="text-[13.5px] font-semibold">📈 历史模拟</h3>
-        <p className="label">
-          用最终权重回看这段历史。优化就是在这段数据上做的，所以这条线一定好看 ——
-          等权和{d.benchmark ? d.benchmark.label : "基准"}画在一起才读得出来。
-        </p>
-        <Curves d={d} />
+        <Curves d={d} tweak={tweak} />
       </section>
     </div>
   );

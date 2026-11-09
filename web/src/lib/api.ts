@@ -11,6 +11,7 @@ import type {
   EcoWeek,
   MacroBoard,
   PortfolioBuild,
+  PortfolioSimulation,
   WatchBoard,
   QtSymbolActivity,
   QtTradedSymbols,
@@ -253,6 +254,13 @@ export const api = {
     symbols: string[]; mode: string; target_return_pct: number | null;
     max_weight_pct: number; lookback: number; duration: number; rf_pct: number;
   }) => call<PortfolioBuild>("/portfolio/build", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }),
+  portfolioSimulate: (body: {
+    symbols: string[]; weights: Record<string, number>;
+    mine: Record<string, number> | null; years: number;
+  }) => call<PortfolioSimulation>("/portfolio/simulate", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   }),

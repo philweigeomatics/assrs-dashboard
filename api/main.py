@@ -1447,6 +1447,18 @@ class WeighReq(BaseModel):
     rf_pct: float = Field(3.0, ge=0.0, le=10.0)
 
 
+class SimulateReq(BaseModel):
+    """
+    Weights already decided, run over a longer history. `weights` is the
+    optimiser's answer, `mine` the hand-set ones if there are any; both are
+    percentages.
+    """
+    symbols: list[str] = Field(..., min_length=2, max_length=30)
+    weights: dict[str, float] = Field(..., min_length=1)
+    mine: dict[str, float] | None = None
+    years: int = Field(..., ge=1, le=10)
+
+
 class RebalanceReq(BaseModel):
     """The new mandate. Must sum to 100% — checked again on the server."""
     positions: list[dict] = Field(..., min_length=1, max_length=60)
@@ -1506,6 +1518,27 @@ def portfolio_weigh_route(req: WeighReq, user: AppUser = Depends(current_user)):
            req.max_weight_pct, req.lookback, req.duration, req.rf_pct)
     try:
         return _portfolio_cache.get_or_compute(key, run)
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.post("/portfolio/simulate")
+def portfolio_simulate_route(req: SimulateReq, user: AppUser = Depends(current_user)):
+    """
+    历史模拟 further back than the optimiser's window, weights held as given.
+
+    The closes are cached on their own: moving a weight changes the arithmetic
+    but not the prices, and a re-read is one call per stock.
+    """
+    import portfolio_build
+
+    try:
+        px = _sim_closes_cache.get_or_compute(
+            (tuple(sorted(req.symbols)), req.years),
+            lambda: portfolio_build.sim_closes(req.symbols, req.years))
+        return portfolio_build.simulate(px, req.weights, req.mine)
     except LookupError as exc:
         raise HTTPException(422, str(exc))
     except RuntimeError as exc:
@@ -2165,6 +2198,8 @@ _indices_cache = TTLCache(maxsize=1, ttl_s=5 * 60)
 #: A build is a dozen price fetches plus two dozen constrained solves, and
 #: the screen re-asks on every slider change.
 _portfolio_cache = TTLCache(maxsize=20, ttl_s=20 * 60)
+#: Prices for 历史模拟's longer ranges, one entry per (stocks, years).
+_sim_closes_cache = TTLCache(maxsize=12, ttl_s=30 * 60)
 #: Macro is monthly and quarterly data — an hour is already generous.
 _macro_cache = TTLCache(maxsize=1, ttl_s=3600)
 #: One entry per (product, liquidity toggle). Settlements are struck once a

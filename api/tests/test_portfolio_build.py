@@ -37,6 +37,10 @@ class FakeMarket:
     def __init__(self, frames):
         self.frames = frames
 
+    def fetch_closes_since(self, code, start):
+        s = self.frames.get(code)
+        return None if s is None else s[s.index >= pd.Timestamp(start)]
+
     def fetch_ohlcv(self, code, years=3):
         # Keyed by the BARE code, as a real adapter is.
         s = self.frames.get(code)
@@ -820,3 +824,88 @@ def test_marks_place_the_other_strategies_on_the_same_axes(cn):
     assert modes == {"min_variance", "risk_parity"}
     for m in out["marks"]:
         assert m["vol_pct"] > 0 and m["label"]
+
+
+# ── 历史模拟 over a longer range ─────────────────────────────────────────────
+def long_walk(seed, start, end=None, vol=0.015):
+    idx = pd.bdate_range(start, end or pd.Timestamp.today().normalize())
+    rng = np.random.default_rng(seed)
+    return pd.Series(100 * np.exp(np.cumsum(rng.normal(0.0003, vol, len(idx)))), index=idx)
+
+
+@pytest.fixture
+def old(cn):
+    cn.clear()
+    cn.update({"600519": long_walk(1, "2015-01-05"), "000001": long_walk(2, "2015-01-05")})
+    sys.modules["data_manager"].get_index_data_live = (
+        lambda code, lookback_days=0: pd.DataFrame({"Close": long_walk(9, "2015-01-05")}))
+    return cn
+
+
+def test_a_longer_range_reaches_past_the_optimiser_s_window(old):
+    px = pb.sim_closes(list(old), 5)
+    want = (pd.Timestamp.today().normalize() - pd.DateOffset(years=5))
+    assert 0 <= (px.index[0] - want).days <= 3
+    out = pb.simulate(px, {"600519": 50, "000001": 50})
+    assert out["limited_by"] is None
+    n = len(out["dates"])
+    assert n > 1200
+    assert len(out["curve"]) == len(out["equal_curve"]) == len(out["benchmark"]["curve"]) == n
+    assert out["curve"][0] == out["benchmark"]["curve"][0] == 0.0
+
+
+def test_my_weights_get_their_own_line_on_the_same_arithmetic(old):
+    px = pb.sim_closes(list(old), 2)
+    out = pb.simulate(px, {"600519": 50, "000001": 50}, {"600519": 80, "000001": 20})
+    daily = px.pct_change(fill_method=None).dropna(how="any")
+    want = pb.curve(daily, pd.Series({"600519": 0.8, "000001": 0.2}))
+    assert out["mine_curve"] == want and out["mine_curve"] != out["curve"]
+    assert pb.simulate(px, {"600519": 50, "000001": 50})["mine_curve"] is None
+
+
+def test_all_my_weight_on_one_stock_is_that_stock(old):
+    px = pb.sim_closes(list(old), 1)
+    out = pb.simulate(px, {"600519": 50, "000001": 50}, {"600519": 100})
+    s = px["600519"]
+    assert out["mine_curve"][-1] == pytest.approx((s.iloc[-1] / s.iloc[0] - 1) * 100, abs=1e-2)
+
+
+def test_weights_short_of_100_stay_in_cash(old):
+    px = pb.sim_closes(list(old), 1)
+    a = pb.simulate(px, {"600519": 50, "000001": 50})["curve"]
+    b = pb.simulate(px, {"600519": 25, "000001": 25})["curve"]
+    assert abs(b[1]) == pytest.approx(abs(a[1]) / 2, abs=2e-3)
+
+
+def test_the_youngest_stock_sets_the_start_and_is_named(old):
+    old["300750"] = long_walk(3, "2025-03-03")
+    px = pb.sim_closes(list(old), 5)
+    assert str(px.index[0].date()) == "2025-03-03"
+    out = pb.simulate(px, {"600519": 50, "000001": 50})
+    assert out["limited_by"]["t"] == "300750" and out["limited_by"]["from"] == "2025-03-03"
+    assert out["limited_by"]["n"] == "宁德时代"
+
+
+def test_a_range_that_is_not_offered_is_refused(old):
+    with pytest.raises(LookupError):
+        pb.sim_closes(list(old), 4)
+
+
+def test_no_weight_at_all_is_refused_not_a_flat_line(old):
+    px = pb.sim_closes(list(old), 1)
+    with pytest.raises(LookupError):
+        pb.simulate(px, {"600519": 50}, {"600519": 0})
+
+
+def test_the_benchmark_is_asked_for_far_enough_back(old):
+    asked = {}
+
+    def spy(code, lookback_days=0):
+        asked["days"] = lookback_days
+        return pd.DataFrame({"Close": long_walk(9, "2015-01-05")})
+
+    sys.modules["data_manager"].get_index_data_live = spy
+    px = pb.sim_closes(list(old), 10)
+    out = pb.simulate(px, {"600519": 50, "000001": 50})
+    assert asked["days"] >= (pd.Timestamp.today() - px.index[0]).days
+    assert out["benchmark"]["curve"][0] == 0.0

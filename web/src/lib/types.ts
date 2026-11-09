@@ -683,6 +683,20 @@ export type IndustryExposure = {
   note: string;
 };
 
+/** POST /portfolio/simulate — decided weights, replayed further back. */
+export type PortfolioSimulation = {
+  from: string; to: string;
+  asked_from: string | null;
+  missing: string[];
+  /** The stock whose late start cut the range short, if one did. */
+  limited_by: { t: string; n: string; from: string } | null;
+  dates: string[];
+  curve: number[];
+  mine_curve: number[] | null;
+  equal_curve: number[];
+  benchmark: { label: string; curve: (number | null)[] } | null;
+};
+
 /** POST /portfolio/weigh — where a hand-set allocation lands. */
 export type WeighResult = {
   market: string;

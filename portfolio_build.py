@@ -501,15 +501,20 @@ def benchmark_closes(market: str, index: pd.Index) -> tuple:
     code, label = BENCHMARKS.get(market, (None, ""))
     if not code:
         return None, ""
+    first = pd.Timestamp(index[0]).tz_localize(None)
     try:
         if market == "CN":
             import data_manager
-            df = data_manager.get_index_data_live(code, lookback_days=1500)
+            # At least the 1500 days a normal build needs; a longer simulation
+            # asks for as far back as its first date.
+            days = max(1500, (pd.Timestamp.today() - first).days + 30)
+            df = data_manager.get_index_data_live(code, lookback_days=days)
             s = None if df is None or df.empty else df["Close"]
         else:
             import yfinance as yf
-            raw = yf.Ticker(code).history(period="5y", auto_adjust=True,
-                                          raise_errors=False)
+            older = (pd.Timestamp.today() - first).days > 4.5 * 365
+            raw = yf.Ticker(code).history(period="max" if older else "5y",
+                                          auto_adjust=True, raise_errors=False)
             s = None if raw is None or raw.empty else raw["Close"]
     except Exception as exc:                                       # noqa: BLE001
         print(f"[portfolio_build] benchmark {code}: {type(exc).__name__}: {exc}")
@@ -810,15 +815,18 @@ def build(symbols: list[str], *, target_return: float | None = None,
         "equal_curve": curve(daily, equal),
     }
 
-    if bench is not None and bench.notna().any():
-        first = bench.dropna()
-        rebased = (bench / first.iloc[0] - 1) * 100
-        out["benchmark"] = {
-            "label": bench_label,
-            "curve": [None if v != v else round(float(v), 3) for v in rebased]}
-    else:
-        out["benchmark"] = None
+    out["benchmark"] = _rebased(bench, bench_label)
     return out
+
+
+def _rebased(bench: pd.Series | None, label: str) -> dict | None:
+    """The benchmark as a cumulative % from its first close, or None."""
+    if bench is None or not bench.notna().any():
+        return None
+    first = bench.dropna()
+    rebased = (bench / first.iloc[0] - 1) * 100
+    return {"label": label,
+            "curve": [None if v != v else round(float(v), 3) for v in rebased]}
 
 
 # ── industry exposure ────────────────────────────────────────────────────────
@@ -996,3 +1004,111 @@ def weigh(symbols: list[str], weights: dict, *, lookback: int = DEFAULT_LOOKBACK
         "dates": [str(d.date()) for d in px.index],
     })
     return out
+
+
+# ── a longer look back ───────────────────────────────────────────────────────
+#: How far back 历史模拟 can run, in years.
+SIM_YEARS = (1, 2, 3, 5, 10)
+
+#: A name whose prices start later than the requested date by more than this
+#: is what cut the simulation short. Under it, the gap is a holiday or a
+#: weekend at the start of the range.
+SIM_SLACK_DAYS = 20
+
+
+def sim_closes(symbols: list[str], years: int) -> pd.DataFrame:
+    """
+    Aligned adjusted closes for the last `years`, independent of the
+    optimiser's lookback.
+
+    A separate read because load_closes goes through fetch_ohlcv, which is
+    pinned to the 3-year window the signals are calibrated on. Every name has
+    to be priced on every date, so the youngest one sets the start; which one
+    it was is kept in `attrs`, since a simulation that is shorter than asked
+    for has to say why.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    import markets
+
+    if years not in SIM_YEARS:
+        raise LookupError(f"模拟区间只能是 {SIM_YEARS} 年")
+    syms = list(dict.fromkeys(markets.canonical(s) for s in symbols))
+    if len(syms) < 2:
+        raise LookupError("至少需要两只股票")
+    market_of(syms)
+    start = (pd.Timestamp.today().normalize() - pd.DateOffset(years=years)).date()
+
+    def fetch(sym: str):
+        try:
+            market, code = markets.parse(sym)
+            return sym, market.fetch_closes_since(code, start), None
+        except Exception as exc:                                   # noqa: BLE001
+            return sym, None, f"{sym}: {type(exc).__name__}: {exc}"
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        got = list(pool.map(fetch, syms))
+    frames: dict[str, pd.Series] = {}
+    missing: list[str] = []
+    why: list[str] = []
+    for sym, close, err in got:
+        if close is None or close.dropna().empty:
+            missing.append(sym)
+            why.append(err or f"{sym}: 没有返回行情")
+            continue
+        close = close[close.index >= pd.Timestamp(start)]
+        frames[sym] = close.rename(sym)
+    if not frames:
+        raise RuntimeError("行情读取失败 — " + "；".join(why[:3]))
+
+    px = pd.concat(frames.values(), axis=1).sort_index()
+    px = px.dropna(axis=1, how="all")
+    starts = {c: px[c].first_valid_index() for c in px.columns}
+    px = px.ffill().dropna(how="any")
+    if len(px) < 2:
+        raise LookupError("这些股票没有共同的交易日，画不出历史模拟")
+
+    youngest = max(starts, key=lambda c: starts[c])
+    late = starts[youngest] > pd.Timestamp(start) + pd.Timedelta(days=SIM_SLACK_DAYS)
+    px.attrs.update(missing=missing, asked_from=str(start),
+                    limited_by=(youngest, str(starts[youngest].date())) if late else None)
+    return px
+
+
+def simulate(px: pd.DataFrame, weights: dict, mine: dict | None = None) -> dict:
+    """
+    Weights fixed in advance, run over the closes given.
+
+    Same arithmetic as the curves in build() and weigh(), so the lines stay
+    comparable with the ones drawn over the optimiser's window: each day is
+    the weighted sum of that day's returns, and weights summing to under 100%
+    leave the rest in cash at 0% rather than being scaled up.
+    """
+    import markets
+
+    daily = px.pct_change(fill_method=None).dropna(how="any")
+
+    def book(raw: dict) -> pd.Series:
+        w = pd.Series({markets.canonical(k): float(v) / 100.0 for k, v in raw.items()})
+        w = w.reindex(px.columns).fillna(0.0)
+        if float(w.sum()) <= 0:
+            raise LookupError("权重合计必须大于 0")
+        return w
+
+    market = market_of(list(px.columns))
+    names = _names(list(px.columns), market)
+    bench, bench_label = benchmark_closes(market, px.index)
+    equal = pd.Series(1.0 / px.shape[1], index=px.columns)
+    limited = px.attrs.get("limited_by")
+    return {
+        "from": str(px.index[0].date()), "to": str(px.index[-1].date()),
+        "asked_from": px.attrs.get("asked_from"),
+        "missing": px.attrs.get("missing", []),
+        "limited_by": ({"t": limited[0], "n": names.get(limited[0], limited[0]),
+                        "from": limited[1]} if limited else None),
+        "dates": [str(d.date()) for d in px.index],
+        "curve": curve(daily, book(weights)),
+        "mine_curve": curve(daily, book(mine)) if mine else None,
+        "equal_curve": curve(daily, equal),
+        "benchmark": _rebased(bench, bench_label),
+    }
