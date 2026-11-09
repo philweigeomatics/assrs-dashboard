@@ -1422,13 +1422,13 @@ class BuildReq(BaseModel):
     """
     2-30 tickers from ONE market, and where on the frontier to sit.
 
-    `mode` picks the objective: max_sharpe, min_variance, risk_parity, or
-    target. In target mode `target_return_pct` asks for the least variance
+    `mode` picks the objective: max_sharpe, min_variance, risk_parity, equal
+    or target. In target mode `target_return_pct` asks for the least variance
     that reaches that annualised return, which is how a point clicked on the
     frontier becomes weights.
     """
     symbols: list[str] = Field(..., min_length=2, max_length=30)
-    #: max_sharpe | min_variance | risk_parity | target
+    #: max_sharpe | min_variance | risk_parity | equal | target
     mode: str | None = None
     target_return_pct: float | None = Field(None, ge=-100.0, le=500.0)
     max_weight_pct: float = Field(30.0, ge=5.0, le=100.0)

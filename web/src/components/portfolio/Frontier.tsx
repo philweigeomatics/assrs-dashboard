@@ -165,7 +165,8 @@ export function Frontier({ d, onPick, busy, custom }: {
           </circle>
         ))}
 
-        {eq.vol != null && eq.ret != null && (
+        {/* In 等权重 mode this would be a second dot for the same portfolio. */}
+        {d.mode !== "equal" && eq.vol != null && eq.ret != null && (
           <circle cx={x(eq.vol)} cy={y(eq.ret)} r={5} fill={EQUAL}
             stroke="var(--color-panel)" strokeWidth={2}>
             <title>{`等权重 · 年化 ${fixed(eq.ret, 1)}% · 波动 ${fixed(eq.vol, 1)}%`}</title>
@@ -202,7 +203,7 @@ export function Frontier({ d, onPick, busy, custom }: {
           <Key key={m.mode} colour={MARK_COLOUR[m.mode] ?? SINGLE}
             shape="ring" label={m.label} />
         ))}
-        <Key colour={EQUAL} label="等权重" />
+        {d.mode !== "equal" && <Key colour={EQUAL} label="等权重" />}
         {custom && <Key colour={CUSTOM} label="你的权重" />}
         <Key colour={SINGLE} shape="ring" label="单只股票" />
         {offChart > 0 && (

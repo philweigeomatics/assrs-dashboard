@@ -622,7 +622,7 @@ export type FollowThrough = {
  * `mode` is "max_sharpe" with no target, or "target" when a point on the
  * frontier was chosen: the least variance that reaches that return.
  */
-export type BuildMode = "max_sharpe" | "min_variance" | "risk_parity" | "target";
+export type BuildMode = "max_sharpe" | "min_variance" | "risk_parity" | "equal" | "target";
 
 export type PortfolioBuild = {
   market: string;

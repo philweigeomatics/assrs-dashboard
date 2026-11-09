@@ -64,12 +64,16 @@ export function Curves({ d, tweak }: { d: PortfolioBuild; tweak: WeighResult | n
     own = d.dates.map((t) => at.get(t) ?? NaN);
   }
 
+  // Equal weight fits nothing, so it has no comparison line to duplicate and
+  // no window its weights came from.
+  const isEqual = d.mode === "equal";
+
   const series = [
     { key: "opt", label: d.mode === "target" ? "目标组合" : d.mode_label, values: opt, colour: "var(--color-cyan)" },
     ...(own
       ? [{ key: "mine", label: tweak && !tweak.balanced ? `你的权重（合计 ${tweak.sum_pct}%）` : "你的权重", values: own, colour: MINE }]
       : []),
-    { key: "eq", label: "等权重", values: equal, colour: "#a855f7" },
+    ...(isEqual ? [] : [{ key: "eq", label: "等权重", values: equal, colour: "#a855f7" }]),
     ...(bench
       ? [{
           key: "bm", label: bench.label,
@@ -110,7 +114,7 @@ export function Curves({ d, tweak }: { d: PortfolioBuild; tweak: WeighResult | n
   };
 
   // Where the optimiser's window begins, when the replay starts before it.
-  const fitted = long ? dates.indexOf(d.from) : -1;
+  const fitted = long && !isEqual ? dates.indexOf(d.from) : -1;
   const benchLabel = d.benchmark ? d.benchmark.label : "基准";
 
   return (
@@ -131,7 +135,9 @@ export function Curves({ d, tweak }: { d: PortfolioBuild; tweak: WeighResult | n
 
       <p className="label leading-snug">
         {years === 0
-          ? `用最终权重回看这段历史。优化就是在这段数据上做的，所以这条线一定好看 —— 等权和${benchLabel}画在一起才读得出来。`
+          ? isEqual
+            ? `每只一样多，权重不是从这段行情里算出来的，所以这条线可以直接和${benchLabel}比；不过股票本身是今天选的，仍然带着后见之明。`
+            : `用最终权重回看这段历史。优化就是在这段数据上做的，所以这条线一定好看 —— 等权和${benchLabel}画在一起才读得出来。`
           : `权重不变，只把回放拉长。${fitted > 0
               ? "虚线右边是算权重用的那段；左边的行情优化器没见过，更能说明这组权重的成色，不过股票本身是今天选的，仍然带着后见之明。"
               : ""}`}

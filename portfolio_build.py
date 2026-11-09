@@ -659,6 +659,7 @@ MODES = {
     "max_sharpe": "最大夏普",
     "min_variance": "最小方差",
     "risk_parity": "风险平价",
+    "equal": "等权重",
     "target": "目标收益",
 }
 
@@ -667,6 +668,11 @@ def weights_for(mode: str, mu: pd.Series, cov: pd.DataFrame, *,
                 target_return: float | None, max_weight: float,
                 min_weight: float = 0.0, rf: float = 0.03) -> np.ndarray:
     """One place that decides what "optimise" means."""
+    if mode == "equal":
+        # Nothing to solve, and no cap to honour: a cap below 1/N would make
+        # the thing being asked for impossible, and it is not a risk the cap
+        # is there to prevent.
+        return np.full(len(mu), 1.0 / len(mu))
     if mode == "min_variance":
         return min_variance(mu, cov, max_weight=max_weight,
                             min_weight=min_weight)
@@ -740,8 +746,8 @@ def build(symbols: list[str], *, target_return: float | None = None,
     """
     Weights, the frontier they came off, the risk metrics and the assessment.
 
-    `mode` decides what "optimise" means: 最大夏普, 最小方差, 风险平价, or
-    目标收益 — the last set by clicking a point on the frontier, which asks
+    `mode` decides what "optimise" means: 最大夏普, 最小方差, 风险平价, 等权重,
+    or 目标收益 — the last set by clicking a point on the frontier, which asks
     for the least variance that reaches that return and is what makes the
     curve a menu rather than an illustration.
 
@@ -786,12 +792,13 @@ def build(symbols: list[str], *, target_return: float | None = None,
         "lookback": int(len(daily)), "duration": int(duration),
         "from": str(px.index[0].date()), "to": str(px.index[-1].date()),
         "missing": px.attrs.get("missing", []),
-        "holdings": [{"t": t, "n": names.get(t, t),
-                      "weight_pct": round(float(w.get(t, 0.0)) * 100, 2),
-                      # A weight is not a risk: this is the share of
-                      # portfolio volatility the position actually carries.
-                      "risk_pct": round(float(rc[i]) * 100, 2)}
-                     for i, t in enumerate(px.columns)],
+        "holdings": _to_hundred(
+            [{"t": t, "n": names.get(t, t),
+              "weight_pct": round(float(w.get(t, 0.0)) * 100, 2),
+              # A weight is not a risk: this is the share of
+              # portfolio volatility the position actually carries.
+              "risk_pct": round(float(rc[i]) * 100, 2)}
+             for i, t in enumerate(px.columns)]),
         # From the annualised moments, so the dot sits exactly on the frontier.
         "opt": {"ann_return_pct": round(ann_ret * 100, 2),
                 "ann_vol_pct": round(ann_vol * 100, 2),
@@ -817,6 +824,20 @@ def build(symbols: list[str], *, target_return: float | None = None,
 
     out["benchmark"] = _rebased(bench, bench_label)
     return out
+
+
+def _to_hundred(holdings: list[dict]) -> list[dict]:
+    """
+    Rounded weights that still add up to exactly 100.
+
+    When every weight rounds the same way the errors pile up: 26 names at an
+    equal 3.85% come to 100.10%, which saving a fund refuses. The difference
+    goes to the largest holding, where it is smallest as a share.
+    """
+    gap = round(100.0 - sum(h["weight_pct"] for h in holdings), 2)
+    top = max(holdings, key=lambda h: h["weight_pct"])
+    top["weight_pct"] = round(top["weight_pct"] + gap, 2)
+    return holdings
 
 
 def _rebased(bench: pd.Series | None, label: str) -> dict | None:

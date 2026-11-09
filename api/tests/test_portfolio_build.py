@@ -804,8 +804,31 @@ def test_a_target_return_still_means_target_mode_without_saying_so(cn):
     assert out["mode"] == "target"
 
 
+def test_equal_mode_holds_every_name_the_same(cn):
+    out = pb.build(list(cn), max_weight=0.5, mode="equal")
+    assert out["mode_label"] == "等权重"
+    assert [h["weight_pct"] for h in out["holdings"]] == [25.0] * 4
+    # It is the same portfolio as the comparison line, by definition.
+    assert out["curve"] == out["equal_curve"]
+    assert out["stats"] == out["equal_stats"]
+
+
+def test_equal_mode_is_not_stopped_by_a_cap_it_cannot_meet(cn):
+    # Four names under a 10% cap cannot add up to 100%. The optimisers fail
+    # here; equal weight has nothing to solve.
+    out = pb.build(list(cn), max_weight=0.10, mode="equal")
+    assert [h["weight_pct"] for h in out["holdings"]] == [25.0] * 4
+    assert out["frontier"] == []
+
+
+@pytest.mark.parametrize("n", range(2, 31))
+def test_rounded_weights_always_add_up_to_a_hundred(n):
+    rows = [{"weight_pct": round(100 / n, 2)} for _ in range(n)]
+    assert sum(h["weight_pct"] for h in pb._to_hundred(rows)) == pytest.approx(100, abs=1e-6)
+
+
 def test_every_mode_reports_which_one_it_was(cn):
-    for mode in ("max_sharpe", "min_variance", "risk_parity"):
+    for mode in ("max_sharpe", "min_variance", "risk_parity", "equal"):
         out = pb.build(list(cn), max_weight=0.5, mode=mode)
         assert out["mode"] == mode
         assert out["mode_label"] == pb.MODES[mode]

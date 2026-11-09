@@ -36,7 +36,7 @@ describe("signature", () => {
       { symbols: ["600519"] }, { maxWeight: 25 },
       { lookback: 120 }, { duration: 5 }, { rf: 2 },
       // Changing the objective changes the answer.
-      { mode: "risk_parity" }, { mode: "min_variance" },
+      { mode: "risk_parity" }, { mode: "min_variance" }, { mode: "equal" },
     ]) {
       expect(signature({ ...base, ...diff })).not.toBe(signature(base));
     }

@@ -44,6 +44,8 @@ const BUILD_MODES: { id: BuildMode; label: string; hint: string }[] = [
     hint: "只求波动最小，完全不看预期收益。前沿曲线最左端就是它。" },
   { id: "risk_parity", label: "风险平价",
     hint: "让每只股票承担同样多的风险，而不是同样多的仓位。也不预测收益，只用协方差。" },
+  { id: "equal", label: "等权重",
+    hint: "每只一样多，什么都不估计，单只上限对它不起作用。其他几种方法都得先赢过它才算有用。" },
 ];
 
 export type Market = "CN" | "US";
@@ -315,8 +317,9 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
               : `${d.mode_label}配置`}
           </h3>
           <span className="label">
-            {d.from} → {d.to} · {d.lookback} 个交易日 · 上限 {d.max_weight_pct}%
-            · 无风险 {d.rf_pct}%
+            {d.from} → {d.to} · {d.lookback} 个交易日
+            {d.mode !== "equal" && ` · 上限 ${d.max_weight_pct}%`}
+            {` · 无风险 ${d.rf_pct}%`}
             {d.duration > 1 && ` · 收益周期 ${d.duration} 天`}
           </span>
         </div>
@@ -339,7 +342,9 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
           </thead>
           <tbody>
             <tr className="border-t border-line font-medium">
-              <td className="py-1 pr-3" title="优化器算出来的：把各股年化均值按权重加权，再用协方差矩阵算波动。假设每天都调回目标权重。">优化器预期（按权重加权）</td>
+              <td className="py-1 pr-3" title={`${d.mode === "equal" ? "" : "优化器算出来的："}把各股年化均值按权重加权，再用协方差矩阵算波动。假设每天都调回目标权重。`}>
+                {d.mode === "equal" ? "预期（按权重加权）" : "优化器预期（按权重加权）"}
+              </td>
               <td className="py-1 px-2 text-right tnum">{signed(d.opt.ann_return_pct, 1, "%")}</td>
               <td className="py-1 px-2 text-right tnum">{fixed(d.opt.ann_vol_pct, 1)}%</td>
               <td className="py-1 px-2 text-right tnum">{fixed(d.opt.sharpe, 2)}</td>
@@ -352,13 +357,15 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
               <td className="py-1 px-2 text-right tnum">{fixed(d.stats.sharpe, 2)}</td>
               <td className="py-1 pl-2 text-right tnum">{fixed(d.stats.max_drawdown_pct, 1)}%</td>
             </tr>
-            <tr className="border-t border-line text-ink-dim">
-              <td className="py-1 pr-3" title="每只一样多，同样买入持有。优化如果赢不过这一行，就没有产生价值。">等权买入持有（对照）</td>
-              <td className="py-1 px-2 text-right tnum">{signed(d.equal_stats.ann_return_pct, 1, "%")}</td>
-              <td className="py-1 px-2 text-right tnum">{fixed(d.equal_stats.ann_vol_pct, 1)}%</td>
-              <td className="py-1 px-2 text-right tnum">{fixed(d.equal_stats.sharpe, 2)}</td>
-              <td className="py-1 pl-2 text-right tnum">{fixed(d.equal_stats.max_drawdown_pct, 1)}%</td>
-            </tr>
+            {d.mode !== "equal" && (
+              <tr className="border-t border-line text-ink-dim">
+                <td className="py-1 pr-3" title="每只一样多，同样买入持有。优化如果赢不过这一行，就没有产生价值。">等权买入持有（对照）</td>
+                <td className="py-1 px-2 text-right tnum">{signed(d.equal_stats.ann_return_pct, 1, "%")}</td>
+                <td className="py-1 px-2 text-right tnum">{fixed(d.equal_stats.ann_vol_pct, 1)}%</td>
+                <td className="py-1 px-2 text-right tnum">{fixed(d.equal_stats.sharpe, 2)}</td>
+                <td className="py-1 pl-2 text-right tnum">{fixed(d.equal_stats.max_drawdown_pct, 1)}%</td>
+              </tr>
+            )}
           </tbody>
         </table>
 
