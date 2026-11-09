@@ -18,13 +18,11 @@ import type { BuildMode, PortfolioBuild, StockRef } from "../../lib/types";
 import { useSymbolSearch } from "../../lib/useSymbolSearch";
 import { usePersistentState } from "../../lib/usePersistentState";
 import { BUILD_KEY, signature, type CachedBuild } from "../../lib/buildCache";
-import { fixed, signed } from "../../lib/format";
+import { Allocation, useAllocation } from "./Allocation";
 import { Curves } from "./Curves";
 import { Frontier } from "./Frontier";
 import { CorrMatrix } from "./CorrMatrix";
 import { Industries } from "./Industries";
-import { WeightEditor } from "./WeightEditor";
-import type { WeighResult } from "../../lib/types";
 
 const MAX_NAMES = 30;
 
@@ -259,16 +257,15 @@ const TONE: Record<string, string> = {
 function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
   d: PortfolioBuild; market: Market; busy: boolean; stale: boolean;
   onPick: (t: number | null) => void; onSaved: () => void;
-  onSaveWeights: (h: { t: string; n: string; weight_pct: number }[]) => void;
+  onSaveWeights: () => void;
 }) {
-  const a = d.assessment;
-  const r = d.risk;
-  const [tweak, setTweak] = useState<WeighResult | null>(null);
-  // What "存为组合" writes: the optimiser's weights until the editor hands
-  // over its own.
-  const [edited, setEdited] = useState<
-    { t: string; n: string; weight_pct: number }[] | null>(null);
+  const alloc = useAllocation(d);
+  const { tweak } = alloc;
+  const a = tweak?.assessment ?? d.assessment;
   const [saving, setSaving] = useState(false);
+  // Everything the weights feed: faint once they are out of date, fainter
+  // while the new numbers are on their way.
+  const fade = alloc.weighing ? "opacity-40" : alloc.dirty ? "opacity-60" : "";
   return (
     <div className={`flex flex-col gap-3 transition-opacity ${
       busy ? "opacity-50" : ""}`}>
@@ -280,128 +277,42 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
       )}
       {/* The assessment leads, as it did on the page. */}
       <section className={`card p-3 flex flex-col gap-2 border ${TONE[a.tone] ?? ""}`}>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1"
-          data-save-fund>
-          <span className="text-[15px] font-semibold">{a.verdict}</span>
-          <span className="text-[13px] tnum font-semibold">{a.score}/{a.max}</span>
-          <div className="flex-1 min-w-[120px] h-2 rounded-full bg-sunken overflow-hidden">
-            <div className="h-full rounded-full bg-current"
-              style={{ width: `${a.score}%` }} />
+        <div className={`flex flex-col gap-2 transition-opacity ${fade}`}>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="text-[15px] font-semibold">{a.verdict}</span>
+            {tweak && <span className="label">按你的权重</span>}
+            <span className="text-[13px] tnum font-semibold">{a.score}/{a.max}</span>
+            <div className="flex-1 min-w-[120px] h-2 rounded-full bg-sunken overflow-hidden">
+              <div className="h-full rounded-full bg-current"
+                style={{ width: `${a.score}%` }} />
+            </div>
           </div>
+          <p className="text-[12.5px] text-ink leading-snug">{a.summary}</p>
+          <div className="grid gap-1 sm:grid-cols-2 lg:grid-cols-3 text-[12px]">
+            {a.strengths.map((x, i) => (
+              <span key={`s${i}`} className="text-ink-dim">✅ {x}</span>
+            ))}
+            {a.notes.map((x, i) => (
+              <span key={`n${i}`} className="text-ink-mute">📊 {x}</span>
+            ))}
+            {a.warnings.map((x, i) => (
+              <span key={`w${i}`} className="text-up">⚠️ {x}</span>
+            ))}
+          </div>
+        </div>
+        <div className="flex justify-end" data-save-fund>
           <SaveFund d={d} market={market} onSaved={onSaved}
-            holdings={edited ?? d.holdings}
-            open={saving} setOpen={(v) => {
-              setSaving(v);
-              if (!v) setEdited(null);
-            }} />
-        </div>
-        <p className="text-[12.5px] text-ink leading-snug">{a.summary}</p>
-        <div className="grid gap-1 sm:grid-cols-2 lg:grid-cols-3 text-[12px]">
-          {a.strengths.map((x, i) => (
-            <span key={`s${i}`} className="text-ink-dim">✅ {x}</span>
-          ))}
-          {a.notes.map((x, i) => (
-            <span key={`n${i}`} className="text-ink-mute">📊 {x}</span>
-          ))}
-          {a.warnings.map((x, i) => (
-            <span key={`w${i}`} className="text-up">⚠️ {x}</span>
-          ))}
+            holdings={alloc.changed ? alloc.holdings : d.holdings}
+            blocked={alloc.balanced ? null : `权重合计 ${alloc.total.toFixed(2)}%，必须正好 100%`}
+            open={saving} setOpen={setSaving} />
         </div>
       </section>
 
-      <section className="card p-3 flex flex-col gap-2.5">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h3 className="text-[13.5px] font-semibold">
-            🎯 {d.mode === "target"
-              ? `目标年化 ${fixed(d.target_return_pct, 1)}% 的最小方差配置`
-              : `${d.mode_label}配置`}
-          </h3>
-          <span className="label">
-            {d.from} → {d.to} · {d.lookback} 个交易日
-            {d.mode !== "equal" && ` · 上限 ${d.max_weight_pct}%`}
-            {` · 无风险 ${d.rf_pct}%`}
-            {d.duration > 1 && ` · 收益周期 ${d.duration} 天`}
-          </span>
-        </div>
-
-        {d.missing.length > 0 && (
-          <p className="text-[12px] text-up">读不到行情，已排除：{d.missing.join("、")}</p>
-        )}
-
-        <Weights d={d} />
-
-        <table className="w-full text-[12.5px] border-collapse mt-1">
-          <thead>
-            <tr className="text-ink-mute">
-              <th className="text-left font-normal pb-1 pr-3">组合</th>
-              <th className="text-right font-normal pb-1 px-2">年化收益</th>
-              <th className="text-right font-normal pb-1 px-2">年化波动</th>
-              <th className="text-right font-normal pb-1 px-2">夏普</th>
-              <th className="text-right font-normal pb-1 pl-2">最大回撤</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr className="border-t border-line font-medium">
-              <td className="py-1 pr-3" title={`${d.mode === "equal" ? "" : "优化器算出来的："}把各股年化均值按权重加权，再用协方差矩阵算波动。假设每天都调回目标权重。`}>
-                {d.mode === "equal" ? "预期（按权重加权）" : "优化器预期（按权重加权）"}
-              </td>
-              <td className="py-1 px-2 text-right tnum">{signed(d.opt.ann_return_pct, 1, "%")}</td>
-              <td className="py-1 px-2 text-right tnum">{fixed(d.opt.ann_vol_pct, 1)}%</td>
-              <td className="py-1 px-2 text-right tnum">{fixed(d.opt.sharpe, 2)}</td>
-              <td className="py-1 pl-2 text-right tnum text-ink-mute">—</td>
-            </tr>
-            <tr className="border-t border-line text-ink-dim">
-              <td className="py-1 pr-3" title="同一组权重买入后一直持有，在这段真实行情上滚出来的结果。会复利，权重也会随涨跌漂移，所以和上面那行不一样 —— 只有这一行能算出最大回撤。">买入持有实测（同一段行情）</td>
-              <td className="py-1 px-2 text-right tnum">{signed(d.stats.ann_return_pct, 1, "%")}</td>
-              <td className="py-1 px-2 text-right tnum">{fixed(d.stats.ann_vol_pct, 1)}%</td>
-              <td className="py-1 px-2 text-right tnum">{fixed(d.stats.sharpe, 2)}</td>
-              <td className="py-1 pl-2 text-right tnum">{fixed(d.stats.max_drawdown_pct, 1)}%</td>
-            </tr>
-            {d.mode !== "equal" && (
-              <tr className="border-t border-line text-ink-dim">
-                <td className="py-1 pr-3" title="每只一样多，同样买入持有。优化如果赢不过这一行，就没有产生价值。">等权买入持有（对照）</td>
-                <td className="py-1 px-2 text-right tnum">{signed(d.equal_stats.ann_return_pct, 1, "%")}</td>
-                <td className="py-1 px-2 text-right tnum">{fixed(d.equal_stats.ann_vol_pct, 1)}%</td>
-                <td className="py-1 px-2 text-right tnum">{fixed(d.equal_stats.sharpe, 2)}</td>
-                <td className="py-1 pl-2 text-right tnum">{fixed(d.equal_stats.max_drawdown_pct, 1)}%</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-
-        <div className="grid gap-x-4 gap-y-1 sm:grid-cols-2 lg:grid-cols-5 text-[12px] mt-1">
-          <Metric label="有效仓位数" v={fixed(r.enb, 2)}
-            hint="1/Σw²。接近股票只数说明是真的分散，接近 1 说明是一个赌注。" />
-          <Metric label="分散比" v={fixed(r.div_ratio, 2)}
-            hint="加权平均波动 ÷ 组合波动。大于 1 才有分散化收益。" />
-          <Metric label="VaR 95%" v={`${fixed(r.var_95_pct, 2)}%`}
-            hint="95% 的交易日里，单日亏损不会超过这个数。" />
-          <Metric label="CVaR 95%" v={`${fixed(r.cvar_95_pct, 2)}%`}
-            hint="真的跌破 VaR 的那些天，平均亏这么多。" />
-          <Metric label="尾部比 95%" v={fixed(r.tail_95, 2)}
-            hint="上尾 ÷ 下尾。大于 1 表示极端行情里上行空间更大。" />
-          <Metric label="VaR 99%" v={`${fixed(r.var_99_pct, 2)}%`} />
-          <Metric label="CVaR 99%" v={`${fixed(r.cvar_99_pct, 2)}%`} />
-          <Metric label="尾部比 99%" v={fixed(r.tail_99, 2)} />
-          <Metric label="最差单日" v={`${fixed(r.worst_day_pct, 2)}%`} />
-          <Metric label="最差 5 日均值" v={`${fixed(r.avg_worst5_pct, 2)}%`} />
-        </div>
-      </section>
+      <Allocation d={d} a={alloc} fade={fade}
+        onSave={() => { setSaving(true); onSaveWeights(); }} />
 
       <div className="grid gap-3 lg:grid-cols-2 items-start">
-        <section className="card p-3 flex flex-col gap-2">
-          <h3 className="text-[13.5px] font-semibold">🏭 行业分布</h3>
-          <Industries d={d.industries} />
-        </section>
-        <section className="card p-3 flex flex-col gap-2">
-          <h3 className="text-[13.5px] font-semibold">⚖️ 调整权重</h3>
-          <WeightEditor d={d} onResult={setTweak}
-            onSave={(h) => { setEdited(h); setSaving(true); onSaveWeights(h); }} />
-        </section>
-      </div>
-
-      <div className="grid gap-3 lg:grid-cols-2 items-start">
-        <section className="card p-3 flex flex-col gap-2">
+        <section className={`card p-3 flex flex-col gap-2 transition-opacity ${fade}`}>
           <h3 className="text-[13.5px] font-semibold">📉 有效前沿 · 点选目标</h3>
           <Frontier d={d} onPick={onPick} busy={busy}
             custom={tweak && {
@@ -409,13 +320,19 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
               ann_return_pct: tweak.ann_return_pct,
             }} />
         </section>
-        <section className="card p-3 flex flex-col gap-2">
-          <h3 className="text-[13.5px] font-semibold">🔥 相关性矩阵</h3>
-          <CorrMatrix c={d.correlation} holdings={d.holdings} />
-        </section>
+        <div className="flex flex-col gap-3">
+          <section className={`card p-3 flex flex-col gap-2 transition-opacity ${fade}`}>
+            <h3 className="text-[13.5px] font-semibold">🏭 行业分布</h3>
+            <Industries d={tweak?.industries ?? d.industries} />
+          </section>
+          <section className="card p-3 flex flex-col gap-2">
+            <h3 className="text-[13.5px] font-semibold">🔥 相关性矩阵</h3>
+            <CorrMatrix c={d.correlation} holdings={d.holdings} />
+          </section>
+        </div>
       </div>
 
-      <section className="card p-3 flex flex-col gap-2">
+      <section className={`card p-3 flex flex-col gap-2 transition-opacity ${fade}`}>
         <h3 className="text-[13.5px] font-semibold">📈 历史模拟</h3>
         <Curves d={d} tweak={tweak} />
       </section>
@@ -424,114 +341,16 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
 }
 
 /**
- * Weight against risk share, one row each.
- *
- * These come apart badly and the gap is the point. On six A-shares the
- * max-Sharpe book put 30% into one semiconductor name and that single
- * position carried 89% of the portfolio volatility — a number the weights
- * bar alone gives you no way to see.
- */
-function Weights({ d }: { d: PortfolioBuild }) {
-  const held = d.holdings.filter((h) => h.weight_pct > 0);
-  const worst = held.reduce(
-    (a, h) => (h.risk_pct > (a?.risk_pct ?? -1) ? h : a),
-    null as PortfolioBuild["holdings"][number] | null);
-  const lopsided = worst != null && worst.risk_pct - worst.weight_pct >= 15;
-
-  return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex items-center gap-2 text-[11px] text-ink-mute">
-        <span className="w-28 shrink-0" />
-        <span className="hidden md:block w-16 shrink-0" />
-        <span className="flex-1">
-          <span className="inline-flex items-center gap-1.5">
-            <span className="w-3 h-2 rounded-sm inline-block bg-cyan" />权重
-            <span className="w-3 h-2 rounded-sm inline-block ml-2"
-              style={{ background: "#f59e0b" }} />占风险
-          </span>
-        </span>
-        <span className="w-14 text-right">权重</span>
-        <span className="w-14 text-right">风险</span>
-      </div>
-
-      {d.holdings.map((h) => (
-        <div key={h.t} className="flex items-center gap-2 text-[12.5px]">
-          <span className="w-28 shrink-0 truncate" title={h.n}>{h.n}</span>
-          <span className="hidden md:block w-16 shrink-0 font-mono tnum
-            text-[11px] text-ink-mute">{h.t}</span>
-          <div className="flex-1 flex flex-col gap-0.5 min-w-[60px]">
-            <div className="h-2.5 rounded-sm bg-sunken overflow-hidden">
-              <div className="h-full rounded-sm bg-cyan"
-                style={{ width: `${Math.min(100, h.weight_pct)}%` }} />
-            </div>
-            <div className="h-2.5 rounded-sm bg-sunken overflow-hidden">
-              <div className="h-full rounded-sm"
-                style={{ width: `${Math.min(100, h.risk_pct)}%`,
-                         background: "#f59e0b" }} />
-            </div>
-          </div>
-          <span className={`w-14 text-right tnum ${
-            h.weight_pct <= 0 ? "text-ink-mute" : "font-medium"}`}>
-            {fixed(h.weight_pct, 1)}%
-          </span>
-          <span className={`w-14 text-right tnum ${
-            h.risk_pct - h.weight_pct >= 15 ? "text-up font-medium"
-              : "text-ink-dim"}`}>
-            {fixed(h.risk_pct, 1)}%
-          </span>
-        </div>
-      ))}
-
-      {d.parity ? <Parity p={d.parity} /> : lopsided && worst && (
-        <p className="text-[12px] text-brand-ink leading-snug">
-          ⚠️ {worst.n} 只占 {fixed(worst.weight_pct, 1)}% 的仓位，
-          却承担了 {fixed(worst.risk_pct, 1)}% 的组合波动 ——
-          仓位分散不等于风险分散。想让每只承担一样的风险，选「风险平价」。
-        </p>
-      )}
-    </div>
-  );
-}
-
-/** Whether risk parity actually got there — the cap can make it unreachable. */
-function Parity({ p }: { p: NonNullable<PortfolioBuild["parity"]> }) {
-  if (p.reached) {
-    return (
-      <p className="text-[12px] text-up leading-snug">
-        ✅ 每只都承担 {fixed(p.equal_pct, 1)}% 的组合波动，风险真的被均分了。
-        注意权重并不相等 —— 波动小的那只本来就该拿得多。
-      </p>
-    );
-  }
-  return (
-    <p className="text-[12px] text-brand-ink leading-snug">
-      ⚠️ 单只上限挡住了完全的风险平价：目标是每只 {fixed(p.equal_pct, 1)}%，
-      实际落在 {fixed(p.min_pct, 1)}%–{fixed(p.max_pct, 1)}%（相差 {fixed(p.spread_pp, 1)}pp）。
-      把上限放宽可以更接近。
-    </p>
-  );
-}
-
-function Metric({ label, v, hint }: { label: string; v: string; hint?: string }) {
-  return (
-    <span className="flex items-baseline gap-1.5" title={hint}>
-      <span className="text-ink-mute">{label}</span>
-      {hint && <span className="text-ink-mute text-[10px]">ⓘ</span>}
-      <span className="ml-auto tnum font-medium">{v}</span>
-    </span>
-  );
-}
-
-/**
  * Saving, either the optimiser's weights or the ones you edited by hand.
  *
- * `holdings` is what actually gets written — the editor passes its own, so
- * "存为组合" down there saves what is on screen rather than silently
- * reverting to the optimiser's answer.
+ * `holdings` is what actually gets written: the weights in the panel, so
+ * saving never silently reverts to the optimiser's answer.
  */
-function SaveFund({ d, market, onSaved, holdings, open, setOpen }: {
+function SaveFund({ d, market, onSaved, holdings, blocked, open, setOpen }: {
   d: PortfolioBuild; market: Market; onSaved: () => void;
   holdings: { t: string; n: string; weight_pct: number }[];
+  /** Why these weights cannot be saved yet, if they cannot. */
+  blocked: string | null;
   open: boolean; setOpen: (v: boolean) => void;
 }) {
   const [name, setName] = useState("");
@@ -549,13 +368,13 @@ function SaveFund({ d, market, onSaved, holdings, open, setOpen }: {
   if (!open) {
     return (
       <button onClick={() => setOpen(true)}
-        className="ml-auto h-8 px-3 rounded-lg bg-sunken text-[12.5px] font-medium text-ink">
+        className="h-8 px-3 rounded-lg bg-sunken text-[12.5px] font-medium text-ink">
         💾 存为组合
       </button>
     );
   }
   return (
-    <div className="ml-auto flex items-center gap-1.5">
+    <div className="flex flex-wrap items-center justify-end gap-1.5">
       {edited && (
         <span className="text-[12px] text-brand-ink">存你改过的权重</span>
       )}
@@ -563,7 +382,9 @@ function SaveFund({ d, market, onSaved, holdings, open, setOpen }: {
         placeholder={`${market === "CN" ? "A股" : "美股"}组合名…`} autoFocus
         className="h-8 w-40 px-2 rounded-md bg-sunken text-[12.5px] text-ink outline-none
           focus:ring-2 focus:ring-cyan/40" />
-      <button onClick={() => save.mutate()} disabled={!name.trim() || save.isPending}
+      {blocked && <span className="text-[12px] text-up">{blocked}</span>}
+      <button onClick={() => save.mutate()}
+        disabled={!name.trim() || save.isPending || blocked != null}
         className="h-8 px-3 rounded-lg bg-cyan text-white text-[12.5px]
           font-semibold disabled:opacity-60">
         {save.isPending ? "保存中…" : "保存"}

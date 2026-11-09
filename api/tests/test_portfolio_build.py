@@ -638,6 +638,38 @@ def test_an_unbalanced_allocation_is_reported_not_normalised(cn):
     assert pb.weigh(cols, whole, lookback=200)["balanced"] is True
 
 
+def test_the_optimisers_own_weights_price_the_same_by_hand(cn):
+    """The panel swaps build()'s numbers for weigh()'s, so they must agree."""
+    d = pb.build(list(cn), max_weight=0.5, lookback=200, mode="risk_parity")
+    w = {h["t"]: h["weight_pct"] for h in d["holdings"]}
+    out = pb.weigh(list(cn), w, lookback=d["lookback"])
+    assert out["assessment"]["score"] == d["assessment"]["score"]
+    assert out["realised"]["ann_vol_pct"] == pytest.approx(d["stats"]["ann_vol_pct"], abs=0.05)
+    assert out["risk"]["enb"] == pytest.approx(d["risk"]["enb"], abs=0.02)
+    want = {h["t"]: h["risk_pct"] for h in d["holdings"]}
+    for h in out["holdings"]:
+        assert h["risk_pct"] == pytest.approx(want[h["t"]], abs=0.1)
+
+
+def test_moving_weight_moves_the_risk_shares_and_the_score_inputs(cn):
+    cols = list(cn)
+    even = pb.weigh(cols, {c: 25.0 for c in cols}, lookback=200)
+    heavy = pb.weigh(cols, {cols[0]: 70.0, cols[1]: 10.0, cols[2]: 10.0, cols[3]: 10.0},
+                     lookback=200)
+    assert sum(h["risk_pct"] for h in heavy["holdings"]) == pytest.approx(100, abs=0.1)
+    first = lambda r: next(h for h in r["holdings"] if h["t"] == cols[0])["risk_pct"]
+    assert first(heavy) > first(even)
+    assert heavy["risk"]["enb"] < even["risk"]["enb"]
+
+
+def test_a_name_set_to_zero_drops_out_and_the_rest_still_price(cn):
+    cols = list(cn)
+    out = pb.weigh(cols, {cols[0]: 100.0}, lookback=200)
+    assert [h["t"] for h in out["holdings"]] == [cols[0]]
+    assert out["holdings"][0]["risk_pct"] == pytest.approx(100, abs=0.01)
+    assert out["assessment"]["score"] >= 0
+
+
 def test_weighing_rejects_an_empty_allocation(cn):
     with pytest.raises(LookupError, match="大于 0"):
         pb.weigh(list(cn), {c: 0.0 for c in cn}, lookback=200)

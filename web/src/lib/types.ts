@@ -709,8 +709,9 @@ export type WeighResult = {
   realised: { ann_return_pct: Num; ann_vol_pct: Num; sharpe: Num;
               max_drawdown_pct: Num };
   risk: PortfolioBuild["risk"];
+  assessment: PortfolioBuild["assessment"];
   curve: number[];
-  holdings: { t: string; n: string; weight_pct: number }[];
+  holdings: { t: string; n: string; weight_pct: number; risk_pct: number }[];
   industries: IndustryExposure;
   dates: string[];
 };

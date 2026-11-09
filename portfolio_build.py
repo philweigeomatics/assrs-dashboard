@@ -970,12 +970,17 @@ def evaluate(mu: pd.Series, cov: pd.DataFrame, daily: pd.DataFrame,
     """Where an arbitrary set of weights lands — the weight editor's answer."""
     v = w.reindex(mu.index).fillna(0.0).to_numpy()
     ret, vol = performance(v, mu.to_numpy(), cov.to_numpy())
+    sharpe = (ret - rf) / vol if vol > 0 else None
+    metrics = risk_metrics(daily, v, cov)
     return {
         "ann_return_pct": round(ret * 100, 2),
         "ann_vol_pct": round(vol * 100, 2),
-        "sharpe": round((ret - rf) / vol, 3) if vol > 0 else None,
+        "sharpe": round(sharpe, 3) if sharpe is not None else None,
         "realised": stats_of(daily, pd.Series(v, index=mu.index), rf),
-        "risk": risk_metrics(daily, v, cov),
+        "risk": metrics,
+        # Against every name on offer, as build() scores it, so the same
+        # weights get the same score from either route.
+        "assessment": assess(sharpe or 0.0, metrics, len(mu)),
         "curve": curve(daily, pd.Series(v, index=mu.index)),
     }
 
@@ -1011,6 +1016,7 @@ def weigh(symbols: list[str], weights: dict, *, lookback: int = DEFAULT_LOOKBACK
         raise LookupError("权重合计必须大于 0")
 
     names = _names(list(px.columns), market)
+    rc = risk_contributions(w.to_numpy(), cov.to_numpy())
     out = evaluate(mu, cov, daily, w, rf)
     out.update({
         "market": market,
@@ -1019,8 +1025,9 @@ def weigh(symbols: list[str], weights: dict, *, lookback: int = DEFAULT_LOOKBACK
         # should see that, not a normalised answer that hides it.
         "balanced": abs(total - 1.0) <= 0.001,
         "holdings": [{"t": t, "n": names.get(t, t),
-                      "weight_pct": round(float(w[t]) * 100, 2)}
-                     for t in px.columns if w[t] > 0],
+                      "weight_pct": round(float(w[t]) * 100, 2),
+                      "risk_pct": round(float(rc[i]) * 100, 2)}
+                     for i, t in enumerate(px.columns) if w[t] > 0],
         "industries": industries(w, names, market),
         "dates": [str(d.date()) for d in px.index],
     })
