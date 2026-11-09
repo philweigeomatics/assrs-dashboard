@@ -206,6 +206,62 @@ def test_only_the_listed_indices_can_be_asked_for():
         pw.index_history("000905.SH")
 
 
+# ── correlation inside the window ────────────────────────────────────────────
+def corr_of(c, a, b):
+    return c["rows"][c["labels"].index(a)][c["labels"].index(b)]
+
+
+def test_correlation_is_measured_only_inside_the_window():
+    # The second name copies the first for 400 sessions, then mirrors it.
+    r = walk(11).pct_change().fillna(0)
+    flip = pd.Series(np.where(np.arange(len(IDX)) < 400, 1, -1), index=IDX)
+    a = 100 * (1 + r).cumprod()
+    b = 100 * (1 + r * flip).cumprod()
+    frames = {"a": a, "b": b}
+    assert corr_of(pw.window_correlation(frames, IDX[50:350]), "a", "b") == pytest.approx(1)
+    assert corr_of(pw.window_correlation(frames, IDX[450:800]), "a", "b") == pytest.approx(-1)
+
+
+def test_correlation_matches_the_optimiser_when_every_name_is_listed(cn):
+    a, b = str(IDX[200].date()), str(IDX[600].date())
+    syms = ["600519", "000001", "600036"]
+    d = pb.build(syms, max_weight=0.6, mode="equal", start=a, end=b)
+    got = pw.stats(syms, a, b, index_close=walk(7), code="000300.SH",
+                   history=pw.fetch_history)["correlation"]
+    assert set(got["labels"]) == set(syms)
+    for x in syms:
+        for y in syms:
+            assert corr_of(got, x, y) == pytest.approx(corr_of(d["correlation"], x, y), abs=1e-3)
+
+
+def test_a_late_listing_only_blanks_its_own_pairs():
+    frames = {"old1": walk(1), "old2": walk(2), "new": walk(3).iloc[340:]}
+    c = pw.window_correlation(frames, IDX[100:350])     # 10 shared days with "new"
+    assert corr_of(c, "new", "old1") is None and corr_of(c, "old2", "new") is None
+    assert corr_of(c, "old1", "old2") is not None
+
+
+def test_a_late_listing_with_enough_days_uses_the_days_it_shares():
+    frames = {"old": walk(1), "new": walk(3).iloc[300:]}
+    c = pw.window_correlation(frames, IDX[100:400])
+    daily = pd.DataFrame(frames).loc[IDX[300]:IDX[399]].pct_change().iloc[1:]
+    assert corr_of(c, "old", "new") == pytest.approx(daily["old"].corr(daily["new"]), abs=1e-3)
+
+
+def test_a_suspended_day_is_a_flat_day_for_correlation_too():
+    frames = {"held": walk(1).drop(IDX[150:170]), "other": walk(2)}
+    c = pw.window_correlation(frames, IDX[100:401])
+    held = frames["held"].reindex(IDX).ffill().loc[IDX[100]:IDX[400]].pct_change().iloc[1:]
+    other = frames["other"].loc[IDX[100]:IDX[400]].pct_change().iloc[1:]
+    assert corr_of(c, "held", "other") == pytest.approx(held.corr(other), abs=1e-3)
+
+
+def test_a_name_with_no_prices_in_the_window_has_no_correlation():
+    frames = {"old": walk(1), "gone": walk(2).iloc[700:]}
+    c = pw.window_correlation(frames, IDX[100:400])
+    assert corr_of(c, "old", "gone") is None and corr_of(c, "gone", "gone") is None
+
+
 # ── the optimiser on a window ────────────────────────────────────────────────
 def test_the_window_sets_the_optimisers_dates(cn):
     a, b = str(IDX[100].date()), str(IDX[400].date())

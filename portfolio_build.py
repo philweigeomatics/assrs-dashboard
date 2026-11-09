@@ -467,8 +467,8 @@ def assess(sharpe: float, m: dict, n_assets: int) -> dict:
 
 
 # ── presentation ─────────────────────────────────────────────────────────────
-def correlation(rets: pd.DataFrame) -> dict:
-    c = rets.corr()
+def correlation(rets: pd.DataFrame, min_periods: int = 1) -> dict:
+    c = rets.corr(min_periods=min_periods)
     return {"labels": list(c.columns),
             "rows": [[None if v != v else round(float(v), 3) for v in row]
                      for row in c.to_numpy()]}

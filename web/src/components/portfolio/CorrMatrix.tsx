@@ -17,15 +17,15 @@ function cell(v: number | null): string {
   return v >= 0 ? `rgba(6,182,212,${a})` : `rgba(168,85,247,${a})`;
 }
 
-export function CorrMatrix({ c, holdings }: {
+export function CorrMatrix({ c, stocks }: {
   c: PortfolioBuild["correlation"];
-  holdings: PortfolioBuild["holdings"];
+  stocks: { t: string; n: string }[];
 }) {
-  const name = Object.fromEntries(holdings.map((h) => [h.t, h.n]));
+  const name = Object.fromEntries(stocks.map((h) => [h.t, h.n]));
   const short = (t: string) => (name[t] || t).slice(0, 4);
 
   const off = c.rows.flatMap((row, i) =>
-    row.filter((_, j) => j !== i).map((v) => v ?? 0));
+    row.filter((v, j) => j !== i && v != null).map((v) => v as number));
   const avg = off.length ? off.reduce((a, b) => a + b, 0) / off.length : 0;
 
   return (
@@ -46,7 +46,8 @@ export function CorrMatrix({ c, holdings }: {
           <tbody>
             {c.rows.map((row, i) => (
               <tr key={c.labels[i]}>
-                <td className="pr-1.5 text-right text-ink-mute whitespace-nowrap">
+                <td className="sticky left-0 z-10 pr-1.5 text-right text-ink-mute whitespace-nowrap"
+                  style={{ background: "var(--color-panel)" }}>
                   {short(c.labels[i] ?? "")}
                 </td>
                 {row.map((v, j) => (
@@ -56,7 +57,7 @@ export function CorrMatrix({ c, holdings }: {
                         + ` · ${fixed(v, 2)}`}
                       style={{ background: cell(v) }}
                       className="w-9 h-7 flex items-center justify-center tnum">
-                      {i === j ? "" : fixed(v, 1).replace("0.", ".")}
+                      {i === j ? "" : fixed(v, 2).replace("0.", ".")}
                     </div>
                   </td>
                 ))}
@@ -65,14 +66,16 @@ export function CorrMatrix({ c, holdings }: {
           </tbody>
         </table>
       </div>
-      <p className="label leading-snug">
-        非对角线平均 <b className="tnum">{fixed(avg, 2)}</b>。
-        {avg > 0.6
-          ? " 这组股票基本同涨同跌，分散化的空间很小。"
-          : avg > 0.35
-            ? " 相关性偏高，但还有一些分散空间。"
-            : " 相关性不高，分散是真的。"}
-      </p>
+      {off.length > 0 && (
+        <p className="label leading-snug">
+          非对角线平均 <b className="tnum">{fixed(avg, 2)}</b>。
+          {avg > 0.6
+            ? " 这组股票基本同涨同跌，分散化的空间很小。"
+            : avg > 0.35
+              ? " 相关性偏高，但还有一些分散空间。"
+              : " 相关性不高，分散是真的。"}
+        </p>
+      )}
     </div>
   );
 }

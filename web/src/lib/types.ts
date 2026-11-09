@@ -731,6 +731,8 @@ export type PortfolioWindowStats = {
   /** Newest first; `cells[t][i]` is that stock's move over `regimes[i]`. */
   regimes: WindowRegime[];
   cells: Record<string, (number | null)[]>;
+  /** Daily returns over the window; null where a pair shares too few days. */
+  correlation: PortfolioBuild["correlation"];
 };
 
 /** POST /portfolio/simulate — decided weights, replayed further back. */

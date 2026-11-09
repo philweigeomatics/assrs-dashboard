@@ -12,6 +12,7 @@ import type {
 } from "../../lib/types";
 import { fixed, signed } from "../../lib/format";
 import { MIN_WINDOW } from "../../lib/windowRange";
+import { CorrMatrix } from "./CorrMatrix";
 import { legTitle } from "./WindowBrush";
 
 type Num = number | null;
@@ -98,7 +99,18 @@ export function WindowStats({ s, picks, selected, onSnap }: {
         <p className="label leading-snug">窗口较短，年化数字会被放大，先看区间涨跌。</p>
       )}
 
-      <RegimeGrid s={s} name={name} selected={selected} onSnap={onSnap} />
+      <div className="flex flex-col lg:flex-row gap-4 lg:items-start">
+        <div className="min-w-0 lg:flex-1">
+          <RegimeGrid s={s} name={name} selected={selected} onSnap={onSnap} />
+        </div>
+        {s.correlation.labels.length >= 2 && (
+          <div className="min-w-0 lg:max-w-[50%] flex flex-col gap-1">
+            <span className="text-[12.5px] font-medium">本窗口内的相关性（日收益）</span>
+            <CorrMatrix c={s.correlation}
+              stocks={s.correlation.labels.map((t) => ({ t, n: name(t) }))} />
+          </div>
+        )}
+      </div>
     </div>
   );
 }

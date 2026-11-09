@@ -348,7 +348,7 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
           </section>
           <section className="card p-3 flex flex-col gap-2">
             <h3 className="text-[13.5px] font-semibold">🔥 相关性矩阵</h3>
-            <CorrMatrix c={d.correlation} holdings={d.holdings} />
+            <CorrMatrix c={d.correlation} stocks={d.holdings} />
           </section>
         </div>
       </div>

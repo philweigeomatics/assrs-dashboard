@@ -38,8 +38,8 @@ HISTORY_YEARS = 10
 #: did not trade through it.
 LATE_START_DAYS = 20
 
-#: Fewer overlapping days than this and a beta is mostly noise.
-MIN_BETA_DAYS = 20
+#: Fewer overlapping days than this and a beta or correlation is mostly noise.
+MIN_SHARED_DAYS = 20
 
 History = Callable[[str], pd.Series]
 
@@ -169,12 +169,17 @@ EMPTY_STATS = {"from": None, "days": 0, "partial": False, "change_pct": None,
 
 def beta_of(daily: pd.Series, bench: pd.Series) -> float | None:
     both = pd.concat([daily, bench], axis=1, join="inner").dropna()
-    if len(both) < MIN_BETA_DAYS:
+    if len(both) < MIN_SHARED_DAYS:
         return None
     var = float(both.iloc[:, 1].var())
     if var <= 0:
         return None
     return round(float(both.iloc[:, 0].cov(both.iloc[:, 1])) / var, 2)
+
+
+def _on_calendar(close: pd.Series, calendar: pd.DatetimeIndex) -> pd.Series:
+    """Closes on the market's sessions, a suspended day keeping its last price."""
+    return close.reindex(close.index.union(calendar)).ffill().reindex(calendar)
 
 
 def window_stats(close: pd.Series, start, end, rf: float, bench: pd.Series | None,
@@ -189,7 +194,7 @@ def window_stats(close: pd.Series, start, end, rf: float, bench: pd.Series | Non
     """
     start_ts = pd.Timestamp(start)
     if calendar is not None:
-        close = close.reindex(close.index.union(calendar)).ffill().reindex(calendar)
+        close = _on_calendar(close, calendar)
     s = close.loc[start_ts:pd.Timestamp(end)].dropna()
     if len(s) < 2:
         return dict(EMPTY_STATS)
@@ -212,6 +217,20 @@ def leg_return(close: pd.Series, leg: dict) -> float | None:
     if len(s) < 2 or s.index[0] > a + pd.Timedelta(days=LATE_START_DAYS):
         return None
     return round(float(s.iloc[-1] / s.iloc[0] - 1) * 100, 1)
+
+
+def window_correlation(frames: dict[str, pd.Series], calendar: pd.DatetimeIndex) -> dict:
+    """
+    Pairwise correlation of daily returns over the window.
+
+    Suspended days are flat, as in the optimiser, so with every name listed
+    throughout the two matrices are the same. Unlike the optimiser nothing moves
+    the start for everyone: a late listing only affects its own row, and a pair
+    with too little shared history has no number rather than a noisy one.
+    """
+    px = pd.DataFrame({t: _on_calendar(c, calendar) for t, c in frames.items()})
+    return pb.correlation(px.pct_change(fill_method=None).iloc[1:],
+                          min_periods=MIN_SHARED_DAYS)
 
 
 def stats(symbols: list[str], start: str, end: str, *, index_close: pd.Series, code: str,
@@ -243,6 +262,7 @@ def stats(symbols: list[str], start: str, end: str, *, index_close: pd.Series, c
                  for t, c in frames.items()],
         "regimes": legs,
         "cells": {t: [leg_return(c, leg) for leg in legs] for t, c in frames.items()},
+        "correlation": window_correlation(frames, span.index),
     }
 
 
