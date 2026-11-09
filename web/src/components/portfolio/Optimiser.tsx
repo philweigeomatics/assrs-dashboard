@@ -19,6 +19,7 @@ import { useSymbolSearch } from "../../lib/useSymbolSearch";
 import { usePersistentState } from "../../lib/usePersistentState";
 import { BUILD_KEY, signature, type CachedBuild } from "../../lib/buildCache";
 import { Allocation, useAllocation } from "./Allocation";
+import { AnalysisWindow, useAnalysisWindow } from "./AnalysisWindow";
 import { Curves } from "./Curves";
 import { Frontier } from "./Frontier";
 import { CorrMatrix } from "./CorrMatrix";
@@ -67,9 +68,16 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
   const [duration, setDuration] = usePersistentState<number>("assrs.pf.dur", 1);
   const [rf, setRf] = usePersistentState<number>("assrs.pf.rf", 3);
 
+  // A-shares pick a stretch of history; 回看 is what is left when they cannot
+  // (US for now, or the index failing to load).
+  const win = useAnalysisWindow(market === "CN");
+  const useWindow = market === "CN" && win.from != null && win.to != null;
+  const showLookback = market !== "CN" || win.index.isError;
+
   const qc = useQueryClient();
   const sig = signature({ symbols: picked.map((p) => p.t),
-                          maxWeight, lookback, duration, rf, mode });
+                          maxWeight, lookback, duration, rf, mode,
+                          window: useWindow ? `${win.from}~${win.to}` : undefined });
 
   const run = useMutation({
     mutationFn: (t: number | null) => api.portfolioBuild({
@@ -78,6 +86,8 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
       mode: t === null ? mode : "target",
       target_return_pct: t === null ? null : Number((t * 100).toFixed(4)),
       max_weight_pct: maxWeight, lookback, duration, rf_pct: rf,
+      start: useWindow ? win.from ?? null : null,
+      end: useWindow ? win.to ?? null : null,
     }),
     onSuccess: (d) => qc.setQueryData<CachedBuild>(BUILD_KEY, { d, sig }),
   });
@@ -92,7 +102,7 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
     gcTime: Infinity,
   }).data ?? null;
 
-  const ready = picked.length >= 2;
+  const ready = picked.length >= 2 && (useWindow || showLookback);
   const go = (t: number | null) => run.mutate(t);
 
   return (
@@ -115,7 +125,11 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
         </div>
 
         <Picker market={market} picked={picked} onChange={setPicked} />
+      </section>
 
+      {market === "CN" && <AnalysisWindow w={win} picks={picked} rf={rf} />}
+
+      <section className="card p-3 flex flex-col gap-2.5">
         <div className="flex flex-wrap items-center gap-2">
           <span className="label">配置方法</span>
           <div className="flex items-center gap-1 flex-wrap">
@@ -142,14 +156,20 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
               className="w-24 accent-[var(--color-cyan)]" />
             <span className="tnum w-9">{maxWeight}%</span>
           </label>
-          <label className="label flex items-center gap-1.5"
-            title="协方差和预期收益用多少个交易日估计。242 ≈ A 股一年。">
-            回看
-            <select value={lookback} onChange={(e) => setLookback(Number(e.target.value))}
-              className="h-7 px-1.5 rounded-md bg-sunken text-[12.5px] tnum outline-none">
-              {[60, 90, 120, 180, 242].map((d) => <option key={d} value={d}>{d} 天</option>)}
-            </select>
-          </label>
+          {showLookback ? (
+            <label className="label flex items-center gap-1.5"
+              title="协方差和预期收益用多少个交易日估计。242 ≈ A 股一年。">
+              回看
+              <select value={lookback} onChange={(e) => setLookback(Number(e.target.value))}
+                className="h-7 px-1.5 rounded-md bg-sunken text-[12.5px] tnum outline-none">
+                {[60, 90, 120, 180, 242].map((d) => <option key={d} value={d}>{d} 天</option>)}
+              </select>
+            </label>
+          ) : useWindow && (
+            <span className="label tnum" title="在上面的时间窗口里调整">
+              窗口 {win.from} → {win.to}
+            </span>
+          )}
           <label className="label flex items-center gap-1.5"
             title="1=日线，5=周，20=月。只影响协方差矩阵；历史模拟和日度风险指标始终用日收益。">
             收益周期
@@ -169,6 +189,7 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
               font-semibold disabled:opacity-60">
             {run.isPending ? "计算中…"
               : ready ? `🚀 优化（${BUILD_MODES.find((m) => m.id === mode)?.label}）`
+              : picked.length >= 2 ? "读取时间窗口…"
               : "先选两只以上"}
           </button>
         </div>

@@ -1435,6 +1435,9 @@ class BuildReq(BaseModel):
     lookback: int = Field(242, ge=60, le=1000)
     duration: int = Field(1, ge=1, le=30)
     rf_pct: float = Field(3.0, ge=0.0, le=10.0)
+    #: A chosen window of history, in place of the lookback. A-shares only.
+    start: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 
 class WeighReq(BaseModel):
@@ -1442,8 +1445,21 @@ class WeighReq(BaseModel):
     symbols: list[str] = Field(..., min_length=2, max_length=30)
     weights: dict[str, float] = Field(..., min_length=1)
     max_weight_pct: float = Field(30.0, ge=5.0, le=100.0)
-    lookback: int = Field(242, ge=60, le=1000)
+    # Ten years of a window comes back here as its session count.
+    lookback: int = Field(242, ge=60, le=3000)
     duration: int = Field(1, ge=1, le=30)
+    rf_pct: float = Field(3.0, ge=0.0, le=10.0)
+    start: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class WindowStatsReq(BaseModel):
+    """The picked stocks over one window of the index, and over every leg."""
+    symbols: list[str] = Field(..., min_length=1, max_length=30)
+    start: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    index: str = "000300.SH"
+    regime_pct: float = Field(20.0, ge=10.0, le=40.0)
     rf_pct: float = Field(3.0, ge=0.0, le=10.0)
 
 
@@ -1485,10 +1501,12 @@ def portfolio_build_route(req: BuildReq, user: AppUser = Depends(current_user)):
                            else req.target_return_pct / 100.0),
             max_weight=req.max_weight_pct / 100.0,
             lookback=req.lookback, duration=req.duration,
-            rf=req.rf_pct / 100.0, mode=req.mode)
+            rf=req.rf_pct / 100.0, mode=req.mode,
+            start=req.start, end=req.end, history=_stock_history)
 
     key = (tuple(sorted(req.symbols)), req.mode, req.target_return_pct,
-           req.max_weight_pct, req.lookback, req.duration, req.rf_pct)
+           req.max_weight_pct, req.lookback, req.duration, req.rf_pct,
+           req.start, req.end)
     try:
         return _portfolio_cache.get_or_compute(key, run)
     except LookupError as exc:
@@ -1511,13 +1529,62 @@ def portfolio_weigh_route(req: WeighReq, user: AppUser = Depends(current_user)):
         return portfolio_build.weigh(
             req.symbols, req.weights, lookback=req.lookback,
             duration=req.duration, rf=req.rf_pct / 100.0,
-            max_weight=req.max_weight_pct / 100.0)
+            max_weight=req.max_weight_pct / 100.0,
+            start=req.start, end=req.end, history=_stock_history)
 
     key = (tuple(sorted(req.symbols)),
            tuple(sorted((k, round(v, 4)) for k, v in req.weights.items())),
-           req.max_weight_pct, req.lookback, req.duration, req.rf_pct)
+           req.max_weight_pct, req.lookback, req.duration, req.rf_pct,
+           req.start, req.end)
     try:
         return _portfolio_cache.get_or_compute(key, run)
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+def _stock_history(sym: str):
+    """Ten years of one stock, cached per stock so a new pick costs one read."""
+    import portfolio_window
+
+    return _stock_history_cache.get_or_compute(
+        sym, lambda: portfolio_window.fetch_history(sym))
+
+
+def _window_index(code: str):
+    import portfolio_window
+
+    return _window_index_cache.get_or_compute(
+        code, lambda: portfolio_window.index_history(code))
+
+
+@app.get("/portfolio/window/index")
+def portfolio_window_index(code: str = "000300.SH", pct: float = 20.0,
+                           user: AppUser = Depends(current_user)):
+    """Ten years of one major index, cut into up and down legs."""
+    import portfolio_window
+
+    if not 10.0 <= pct <= 40.0:
+        raise HTTPException(422, "拐点幅度只能在 10% 到 40% 之间")
+    try:
+        return portfolio_window.index_view(_window_index(code), code, pct / 100.0)
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.post("/portfolio/window/stats")
+def portfolio_window_stats(req: WindowStatsReq, user: AppUser = Depends(current_user)):
+    """Each stock over the window and over every leg, before any weights exist."""
+    import portfolio_window
+
+    try:
+        return portfolio_window.stats(
+            req.symbols, req.start, req.end, index_close=_window_index(req.index),
+            code=req.index, pct=req.regime_pct / 100.0, rf=req.rf_pct / 100.0,
+            history=_stock_history)
     except LookupError as exc:
         raise HTTPException(422, str(exc))
     except RuntimeError as exc:
@@ -2200,6 +2267,9 @@ _indices_cache = TTLCache(maxsize=1, ttl_s=5 * 60)
 _portfolio_cache = TTLCache(maxsize=20, ttl_s=20 * 60)
 #: Prices for 历史模拟's longer ranges, one entry per (stocks, years).
 _sim_closes_cache = TTLCache(maxsize=12, ttl_s=30 * 60)
+#: The analysis window: ten years per name, so a moved window needs no reads.
+_stock_history_cache = TTLCache(maxsize=300, ttl_s=30 * 60)
+_window_index_cache = TTLCache(maxsize=5, ttl_s=60 * 60)
 #: Macro is monthly and quarterly data — an hour is already generous.
 _macro_cache = TTLCache(maxsize=1, ttl_s=3600)
 #: One entry per (product, liquidity toggle). Settlements are struck once a

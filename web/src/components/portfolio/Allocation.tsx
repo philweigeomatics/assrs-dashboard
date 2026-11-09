@@ -40,6 +40,8 @@ export function useAllocation(d: PortfolioBuild) {
       symbols: d.holdings.map((h) => h.t), weights,
       max_weight_pct: d.max_weight_pct, lookback: d.lookback,
       duration: d.duration, rf_pct: d.rf_pct,
+      start: d.window ? d.from : null,
+      end: d.window ? d.to : null,
     }),
   });
 
@@ -176,6 +178,12 @@ export function Allocation({ d, a, onSave, fade }: {
       {d.missing.length > 0 && (
         <p className="text-[12px] text-up">读不到行情，已排除：{d.missing.join("、")}</p>
       )}
+      {d.limited_by && (
+        <p className="text-[12px] text-brand-ink leading-snug">
+          {d.limited_by.n} 从 {d.limited_by.from} 才有行情，每只股票都要同时有价，
+          所以实际从这天开始算，比你选的窗口短。
+        </p>
+      )}
 
       <div className={a.weighing ? "opacity-40 transition-opacity" : "transition-opacity"}>
         <WeightRows d={d} a={a} name={name} />
@@ -296,6 +304,9 @@ function WeightRows({ d, a, name }: { d: PortfolioBuild; a: AllocationState; nam
       <div className="flex items-center gap-2 text-[11px] text-ink-mute">
         <span className="w-20 sm:w-28 shrink-0" />
         <span className="hidden md:block w-16 shrink-0" />
+        <span className="hidden lg:block w-14 shrink-0 text-right" title="这只股票单独持有，这段时间的年化收益">年化</span>
+        <span className="hidden lg:block w-12 shrink-0 text-right" title="这只股票单独持有，这段时间的年化波动">波动</span>
+        <span className="hidden lg:block w-10 shrink-0 text-right mr-2" title="这只股票单独持有，这段时间的夏普">夏普</span>
         <span className="flex-1">
           <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
             <span className="w-3 h-2 rounded-sm inline-block bg-cyan" />权重
@@ -310,11 +321,27 @@ function WeightRows({ d, a, name }: { d: PortfolioBuild; a: AllocationState; nam
 
       {rows.map((h) => {
         const moved = h.now - h.weight_pct;
+        const solo = h.solo;
         return (
           <div key={h.t} className="flex items-center gap-2 text-[12.5px]">
-            <span className="w-20 sm:w-28 shrink-0 truncate" title={h.n}>{h.n}</span>
+            <div className="w-20 sm:w-28 shrink-0 min-w-0">
+              <span className="block truncate" title={h.n}>{h.n}</span>
+              <span className="lg:hidden block label tnum truncate">
+                年化 {signed(solo.ann_return_pct, 0, "%")} · 夏普 {fixed(solo.sharpe, 1)}
+              </span>
+            </div>
             <span className="hidden md:block w-16 shrink-0 font-mono tnum
               text-[11px] text-ink-mute">{h.t}</span>
+            <span className={`hidden lg:block w-14 shrink-0 text-right tnum text-[12px] ${
+              (solo.ann_return_pct ?? 0) >= 0 ? "text-up" : "text-down"}`}>
+              {signed(solo.ann_return_pct, 1, "%")}
+            </span>
+            <span className="hidden lg:block w-12 shrink-0 text-right tnum text-[12px] text-ink-dim">
+              {fixed(solo.ann_vol_pct, 1)}%
+            </span>
+            <span className="hidden lg:block w-10 shrink-0 text-right tnum text-[12px] text-ink-dim mr-2">
+              {fixed(solo.sharpe, 2)}
+            </span>
             <div className="flex-1 flex flex-col gap-0.5 min-w-[60px]">
               <input type="range" min={0} max={100} step={0.5} value={h.now}
                 onChange={(e) => a.set(h.t, Number(e.target.value))}

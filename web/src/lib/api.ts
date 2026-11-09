@@ -12,6 +12,8 @@ import type {
   MacroBoard,
   PortfolioBuild,
   PortfolioSimulation,
+  PortfolioWindowIndex,
+  PortfolioWindowStats,
   WatchBoard,
   QtSymbolActivity,
   QtTradedSymbols,
@@ -253,7 +255,17 @@ export const api = {
   portfolioBuild: (body: {
     symbols: string[]; mode: string; target_return_pct: number | null;
     max_weight_pct: number; lookback: number; duration: number; rf_pct: number;
+    start: string | null; end: string | null;
   }) => call<PortfolioBuild>("/portfolio/build", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }),
+  portfolioWindowIndex: (code: string, pct: number) =>
+    call<PortfolioWindowIndex>(`/portfolio/window/index?code=${encodeURIComponent(code)}&pct=${pct}`),
+  portfolioWindowStats: (body: {
+    symbols: string[]; start: string; end: string; index: string;
+    regime_pct: number; rf_pct: number;
+  }) => call<PortfolioWindowStats>("/portfolio/window/stats", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   }),
@@ -267,6 +279,7 @@ export const api = {
   portfolioWeigh: (body: {
     symbols: string[]; weights: Record<string, number>;
     max_weight_pct: number; lookback: number; duration: number; rf_pct: number;
+    start: string | null; end: string | null;
   }) => call<WeighResult>("/portfolio/weigh", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

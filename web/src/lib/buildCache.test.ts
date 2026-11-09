@@ -37,6 +37,7 @@ describe("signature", () => {
       { lookback: 120 }, { duration: 5 }, { rf: 2 },
       // Changing the objective changes the answer.
       { mode: "risk_parity" }, { mode: "min_variance" }, { mode: "equal" },
+      { window: "2024-09-24~2025-09-24" },
     ]) {
       expect(signature({ ...base, ...diff })).not.toBe(signature(base));
     }

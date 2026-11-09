@@ -634,9 +634,16 @@ export type PortfolioBuild = {
   lookback: number; duration: number;
   from: string; to: string;
   missing: string[];
+  /** True when a chosen window of history replaced the lookback. */
+  window: boolean;
+  /** The stock whose late listing moved the window's start, if one did. */
+  limited_by: { t: string; n: string; from: string } | null;
   holdings: { t: string; n: string; weight_pct: number;
               /** Share of portfolio volatility this position carries. */
-              risk_pct: number }[];
+              risk_pct: number;
+              /** This stock alone over the same days. */
+              solo: { ann_return_pct: Num; ann_vol_pct: Num; sharpe: Num;
+                      max_drawdown_pct: Num } }[];
   /** Only in risk-parity mode: how close to equal the shares actually came. */
   parity: { equal_pct: Num; max_pct: Num; min_pct: Num;
             spread_pp: Num; reached: boolean } | null;
@@ -681,6 +688,49 @@ export type IndustryExposure = {
   top_pct: number;
   tone: "good" | "warn" | "bad";
   note: string;
+};
+
+/** One up or down leg of an index. Hindsight: see `confirmed`. */
+export type WindowRegime = {
+  from: string; to: string;
+  kind: "up" | "down";
+  change_pct: number;
+  sessions: number;
+  /** The day the turn at the end of this leg could first have been known. */
+  confirmed: string | null;
+  open: boolean;
+};
+
+/** GET /portfolio/window/index */
+export type PortfolioWindowIndex = {
+  code: string; label: string;
+  dates: string[]; closes: number[];
+  regimes: WindowRegime[];
+};
+
+export type WindowStockStats = {
+  from: string | null;
+  days: number;
+  /** Listed partway through the window, so it covers less of it. */
+  partial: boolean;
+  change_pct: Num;
+  ann_return_pct: Num;
+  ann_vol_pct: Num;
+  sharpe: Num;
+  max_drawdown_pct: Num;
+  beta: Num;
+};
+
+/** POST /portfolio/window/stats */
+export type PortfolioWindowStats = {
+  from: string; to: string;
+  sessions: number;
+  missing: string[];
+  index: WindowStockStats & { code: string; label: string };
+  rows: (WindowStockStats & { t: string })[];
+  /** Newest first; `cells[t][i]` is that stock's move over `regimes[i]`. */
+  regimes: WindowRegime[];
+  cells: Record<string, (number | null)[]>;
 };
 
 /** POST /portfolio/simulate — decided weights, replayed further back. */

@@ -136,6 +136,16 @@ def load_closes(symbols: list[str], lookback: int) -> pd.DataFrame:
     return px
 
 
+def closes_for(syms: list[str], lookback: int, start: str | None,
+               end: str | None, history=None) -> pd.DataFrame:
+    """The closes to fit on: a chosen window if there is one, else the lookback."""
+    if start is None:
+        return load_closes(syms, lookback)
+    import portfolio_window as pw
+
+    return pw.window_closes(syms, start, end, history or pw.fetch_history)
+
+
 def moments(px: pd.DataFrame, duration: int = 1) -> tuple:
     """
     (period returns, annualised means, annualised covariance, daily returns).
@@ -742,7 +752,8 @@ def reference_marks(mu: pd.Series, cov: pd.DataFrame, *,
 def build(symbols: list[str], *, target_return: float | None = None,
           max_weight: float = 0.30, lookback: int = DEFAULT_LOOKBACK,
           duration: int = 1, rf: float = 0.03,
-          mode: str | None = None) -> dict:
+          mode: str | None = None, start: str | None = None,
+          end: str | None = None, history=None) -> dict:
     """
     Weights, the frontier they came off, the risk metrics and the assessment.
 
@@ -753,6 +764,8 @@ def build(symbols: list[str], *, target_return: float | None = None,
 
     A `target_return` with no mode still means 目标收益, so the frontier
     keeps working without the caller saying so twice.
+
+    `start` replaces the lookback with a chosen window of history.
     """
     import markets
 
@@ -761,7 +774,7 @@ def build(symbols: list[str], *, target_return: float | None = None,
         raise LookupError("至少需要两只股票")
     market = market_of(syms)
 
-    px = load_closes(syms, lookback)
+    px = closes_for(syms, lookback, start, end, history)
     rets, mu, cov, daily = moments(px, duration)
     if rets.empty or len(mu) < 2:
         raise LookupError("可用收益率数据不足")
@@ -781,6 +794,7 @@ def build(symbols: list[str], *, target_return: float | None = None,
     equal = pd.Series(1.0 / px.shape[1], index=px.columns)
     bench, bench_label = benchmark_closes(market, px.index)
     metrics = risk_metrics(daily, w_full.to_numpy(), cov)
+    late = px.attrs.get("limited_by")
 
     out = {
         "market": market,
@@ -792,12 +806,17 @@ def build(symbols: list[str], *, target_return: float | None = None,
         "lookback": int(len(daily)), "duration": int(duration),
         "from": str(px.index[0].date()), "to": str(px.index[-1].date()),
         "missing": px.attrs.get("missing", []),
+        "window": start is not None,
+        "limited_by": ({"t": late[0], "n": names.get(late[0], late[0]), "from": late[1]}
+                       if late else None),
         "holdings": _to_hundred(
             [{"t": t, "n": names.get(t, t),
               "weight_pct": round(float(w.get(t, 0.0)) * 100, 2),
               # A weight is not a risk: this is the share of
               # portfolio volatility the position actually carries.
-              "risk_pct": round(float(rc[i]) * 100, 2)}
+              "risk_pct": round(float(rc[i]) * 100, 2),
+              # On its own over the same days: what to weigh the weight against.
+              "solo": stats_of(daily, pd.Series({t: 1.0}), rf)}
              for i, t in enumerate(px.columns)]),
         # From the annualised moments, so the dot sits exactly on the frontier.
         "opt": {"ann_return_pct": round(ann_ret * 100, 2),
@@ -986,7 +1005,8 @@ def evaluate(mu: pd.Series, cov: pd.DataFrame, daily: pd.DataFrame,
 
 
 def weigh(symbols: list[str], weights: dict, *, lookback: int = DEFAULT_LOOKBACK,
-          duration: int = 1, rf: float = 0.03, max_weight: float = 0.30) -> dict:
+          duration: int = 1, rf: float = 0.03, max_weight: float = 0.30,
+          start: str | None = None, end: str | None = None, history=None) -> dict:
     """
     Hand-set weights, priced on the same history the optimiser used.
 
@@ -1003,7 +1023,7 @@ def weigh(symbols: list[str], weights: dict, *, lookback: int = DEFAULT_LOOKBACK
         raise LookupError("至少需要两只股票")
     market = market_of(syms)
 
-    px = load_closes(syms, lookback)
+    px = closes_for(syms, lookback, start, end, history)
     rets, mu, cov, daily = moments(px, duration)
     if rets.empty or len(mu) < 2:
         raise LookupError("可用收益率数据不足")

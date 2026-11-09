@@ -23,6 +23,8 @@ export type BuildInputs = {
   rf: number;
   /** Changing the objective changes the answer, so it belongs here. */
   mode: string;
+  /** The chosen stretch of history, when one replaces the lookback. */
+  window?: string;
 };
 
 /**
@@ -36,5 +38,5 @@ export type BuildInputs = {
  */
 export function signature(i: BuildInputs): string {
   return `${[...i.symbols].sort().join(",")}|${i.maxWeight}|${i.lookback}`
-    + `|${i.duration}|${i.rf}|${i.mode}`;
+    + `|${i.duration}|${i.rf}|${i.mode}|${i.window ?? ""}`;
 }

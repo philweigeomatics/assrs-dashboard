@@ -115,6 +115,9 @@ export function Curves({ d, tweak }: { d: PortfolioBuild; tweak: WeighResult | n
 
   // Where the optimiser's window begins, when the replay starts before it.
   const fitted = long && !isEqual ? dates.indexOf(d.from) : -1;
+  // A window can end before today, and then the days after it are unseen too.
+  const fittedEnd = long && !isEqual ? dates.indexOf(d.to) : -1;
+  const endsEarly = fittedEnd >= 0 && fittedEnd < dates.length - 1;
   const benchLabel = d.benchmark ? d.benchmark.label : "基准";
 
   return (
@@ -138,8 +141,8 @@ export function Curves({ d, tweak }: { d: PortfolioBuild; tweak: WeighResult | n
           ? isEqual
             ? `每只一样多，权重不是从这段行情里算出来的，所以这条线可以直接和${benchLabel}比；不过股票本身是今天选的，仍然带着后见之明。`
             : `用最终权重回看这段历史。优化就是在这段数据上做的，所以这条线一定好看 —— 等权和${benchLabel}画在一起才读得出来。`
-          : `权重不变，只把回放拉长。${fitted > 0
-              ? "虚线右边是算权重用的那段；左边的行情优化器没见过，更能说明这组权重的成色，不过股票本身是今天选的，仍然带着后见之明。"
+          : `权重不变，只把回放拉长。${fitted > 0 || endsEarly
+              ? `${endsEarly ? "两条虚线之间" : "虚线右边"}是算权重用的那段；其余的行情优化器没见过，更能说明这组权重的成色，不过股票本身是今天选的，仍然带着后见之明。`
               : ""}`}
         {" "}每天按同一组权重计算，从起点的 0% 复利；股票含分红，{benchLabel}是价格指数、不含分红。
         {!tweak && " 在上面的配置里改权重、点「计算」，这里会多一条你的权重的线。"}
@@ -186,6 +189,11 @@ export function Curves({ d, tweak }: { d: PortfolioBuild; tweak: WeighResult | n
               stroke="var(--color-ink-mute)" strokeDasharray="4 4"
               vectorEffect="non-scaling-stroke" />
           )}
+          {endsEarly && (
+            <line x1={x(fittedEnd)} x2={x(fittedEnd)} y1={0} y2={VH}
+              stroke="var(--color-ink-mute)" strokeDasharray="4 4"
+              vectorEffect="non-scaling-stroke" />
+          )}
           {drawn.map((s) => (
             <path key={s.key} d={path(s.values)} fill="none" stroke={s.colour}
               strokeWidth={s.key === "opt" || s.key === "mine" ? 1.8 : 1.3}
@@ -198,6 +206,14 @@ export function Curves({ d, tweak }: { d: PortfolioBuild; tweak: WeighResult | n
               ? { left: `${(fitted / (n - 1)) * 100}%` }
               : { right: `${(1 - fitted / (n - 1)) * 100}%` }}>
             {d.from} 起算权重
+          </span>
+        )}
+        {endsEarly && (
+          <span className="absolute top-4 label font-mono tnum px-1 whitespace-nowrap"
+            style={fittedEnd / (n - 1) < 0.7
+              ? { left: `${(fittedEnd / (n - 1)) * 100}%` }
+              : { right: `${(1 - fittedEnd / (n - 1)) * 100}%` }}>
+            {d.to} 止
           </span>
         )}
       </div>
