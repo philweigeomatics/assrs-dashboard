@@ -7,7 +7,6 @@
 
 /** The optimiser needs 60 sessions of returns before a covariance means anything. */
 export const MIN_WINDOW = 60;
-export const DEFAULT_WINDOW = 242;
 
 export type Range = [number, number];
 export type SavedWindow = { from: string; to: string | null };
@@ -17,6 +16,18 @@ const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v
 /** The latest `sessions` days, or all of them if there are fewer. */
 export function lastSessions(n: number, sessions: number): Range {
   return [Math.max(0, n - 1 - sessions), n - 1];
+}
+
+/**
+ * The latest `years` calendar years. Counted in dates, not sessions: a year is
+ * about 242 sessions in Shanghai and 252 in New York.
+ */
+export function lastYears(dates: string[], years: number): Range {
+  const n = dates.length;
+  if (n === 0) return [0, 0];
+  const last = dates[n - 1]!;
+  const from = `${Number(last.slice(0, 4)) - years}${last.slice(4)}`;
+  return [Math.min(lowerBound(dates, from), Math.max(0, n - 1 - MIN_WINDOW)), n - 1];
 }
 
 /** First position on or after `date`; `dates.length` if there is none. */
@@ -40,7 +51,7 @@ export function resolveRange(dates: string[], saved: SavedWindow | null): Range 
   const n = dates.length;
   if (n === 0) return [0, 0];
   if (!saved || (saved.to && saved.to < dates[0]!) || saved.from > dates[n - 1]!) {
-    return lastSessions(n, DEFAULT_WINDOW);
+    return lastYears(dates, 1);
   }
   let i = Math.min(lowerBound(dates, saved.from), n - 1);
   let j = n - 1;

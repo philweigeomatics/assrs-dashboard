@@ -40,7 +40,8 @@ def path(*knots):
 @pytest.fixture
 def cn(monkeypatch):
     frames = {"600519": walk(1), "000001": walk(2), "600036": walk(3),
-              "688981": walk(4).iloc[500:]}
+              "688981": walk(4).iloc[500:], "AAPL": walk(21), "MSFT": walk(22),
+              "^GSPC": walk(23)}
 
     class Fake:
         def fetch_closes_since(self, code, start):
@@ -195,15 +196,45 @@ def test_a_stock_that_cannot_be_read_is_named(cn):
     assert out["missing"] == ["999999"]
 
 
-def test_us_stocks_are_refused_for_now(cn):
-    with pytest.raises(LookupError):
+def test_us_stocks_read_against_a_us_index(cn):
+    a, b = str(IDX[100].date()), str(IDX[400].date())
+    out = pw.stats(["US:AAPL", "US:MSFT"], a, b, index_close=walk(23), code="^GSPC",
+                   history=pw.fetch_history)
+    assert [r["t"] for r in out["rows"]] == ["US:AAPL", "US:MSFT"]
+    assert out["index"]["label"] == "标普500"
+    assert out["correlation"]["labels"] == ["US:AAPL", "US:MSFT"]
+
+
+def test_stocks_and_index_must_share_a_market(cn):
+    with pytest.raises(LookupError, match="同一个市场"):
         pw.stats(["US:AAPL", "US:MSFT"], "2023-01-01", "2024-01-01",
                  index_close=walk(7), code="000300.SH", history=pw.fetch_history)
+    with pytest.raises(LookupError, match="同一个市场"):
+        pw.stats(["600519", "000001"], "2023-01-01", "2024-01-01",
+                 index_close=walk(7), code="^GSPC", history=pw.fetch_history)
+
+
+def test_a_us_index_comes_from_the_us_market(cn):
+    got = pw.index_history("^GSPC")
+    assert got.iloc[-1] == pytest.approx(cn["^GSPC"].iloc[-1])
 
 
 def test_only_the_listed_indices_can_be_asked_for():
     with pytest.raises(LookupError):
         pw.index_history("000905.SH")
+    with pytest.raises(LookupError):
+        pw.index_history("^VIX")
+
+
+def test_every_index_belongs_to_one_market():
+    assert set(pw.INDEX_MARKET.values()) == {"CN", "US"}
+    assert len(pw.INDICES) == sum(len(v) for v in pw.MARKET_INDICES.values())
+
+
+def test_a_us_window_fits_the_optimiser(cn):
+    a, b = str(IDX[200].date()), str(IDX[600].date())
+    d = pb.build(["US:AAPL", "US:MSFT"], max_weight=0.8, mode="equal", start=a, end=b)
+    assert d["window"] is True and d["from"] == a and d["to"] == b
 
 
 # ── correlation inside the window ────────────────────────────────────────────

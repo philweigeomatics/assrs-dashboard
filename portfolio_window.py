@@ -1,5 +1,5 @@
 """
-Choosing the stretch of history a portfolio is judged on. A-shares only.
+Choosing the stretch of history a portfolio is judged on. A-shares and US.
 
 A "last N days" lookback can only ever describe the most recent stretch, and
 that stretch may be one regime or the tail of two. This reads ten years of a
@@ -22,15 +22,26 @@ import pandas as pd
 
 import portfolio_build as pb
 
-#: The indices a window can be read against. An allow-list because an open
-#: parameter is an open Tushare call on someone else's quota.
-INDICES = {
-    "000001.SH": "上证指数",
-    "399001.SZ": "深证成指",
-    "399006.SZ": "创业板指",
-    "000300.SH": "沪深300",
-    "000688.SH": "科创50",
+#: The indices a window can be read against, per market. An allow-list
+#: because an open parameter is an open Tushare or Yahoo call.
+MARKET_INDICES = {
+    "CN": {
+        "000001.SH": "上证指数",
+        "399001.SZ": "深证成指",
+        "399006.SZ": "创业板指",
+        "000300.SH": "沪深300",
+        "000688.SH": "科创50",
+    },
+    "US": {
+        "^GSPC": "标普500",
+        "^IXIC": "纳斯达克综合",
+        "^NDX": "纳斯达克100",
+        "^DJI": "道琼斯",
+        "^RUT": "罗素2000",
+    },
 }
+INDICES = {code: label for idx in MARKET_INDICES.values() for code, label in idx.items()}
+INDEX_MARKET = {code: m for m, idx in MARKET_INDICES.items() for code in idx}
 
 HISTORY_YEARS = 10
 
@@ -60,6 +71,14 @@ def index_history(code: str) -> pd.Series:
     """Ten years of one major index's closes."""
     if code not in INDICES:
         raise LookupError(f"没有这个指数：{code}")
+    if INDEX_MARKET[code] == "US":
+        import markets
+
+        close = markets.get("US").fetch_closes_since(code, _history_start().date())
+        if close is None or close.dropna().empty:
+            raise RuntimeError(f"{INDICES[code]} 行情读取失败")
+        return _clean(close)
+
     import data_manager
 
     df = data_manager.get_index_data_live(
@@ -241,8 +260,12 @@ def stats(symbols: list[str], start: str, end: str, *, index_close: pd.Series, c
     syms = list(dict.fromkeys(markets.canonical(s) for s in symbols))
     if not syms:
         raise LookupError("没有可用的标的")
-    if pb.market_of(syms) != "CN":
-        raise LookupError("时间窗口分析目前只支持 A 股")
+    market = pb.market_of(syms)
+    if market not in MARKET_INDICES:
+        raise LookupError("时间窗口分析目前只支持 A 股和美股")
+    if INDEX_MARKET.get(code) != market:
+        # Two calendars: every holiday on either side would be a flat day.
+        raise LookupError(f"{INDICES.get(code, code)} 和这些股票不在同一个市场")
 
     frames, missing, why = _load(syms, history)
     if not frames:
@@ -299,5 +322,5 @@ def window_closes(symbols: list[str], start: str, end: str | None,
     return px
 
 
-__all__ = ["INDICES", "fetch_history", "index_history", "index_view", "regimes",
+__all__ = ["INDEX_MARKET", "INDICES", "MARKET_INDICES", "fetch_history", "index_history", "index_view", "regimes",
            "stats", "turning_points", "window_closes", "window_stats"]

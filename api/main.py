@@ -2269,7 +2269,7 @@ _portfolio_cache = TTLCache(maxsize=20, ttl_s=20 * 60)
 _sim_closes_cache = TTLCache(maxsize=12, ttl_s=30 * 60)
 #: The analysis window: ten years per name, so a moved window needs no reads.
 _stock_history_cache = TTLCache(maxsize=300, ttl_s=30 * 60)
-_window_index_cache = TTLCache(maxsize=5, ttl_s=60 * 60)
+_window_index_cache = TTLCache(maxsize=10, ttl_s=60 * 60)
 #: Macro is monthly and quarterly data — an hour is already generous.
 _macro_cache = TTLCache(maxsize=1, ttl_s=3600)
 #: One entry per (product, liquidity toggle). Settlements are struck once a

@@ -3,6 +3,8 @@
  *
  * The window is what the optimiser fits to, so it lives above the panel: the
  * page needs the two dates whether or not this card has finished loading.
+ * Each market keeps its own index and window: their calendars differ, and an
+ * A-share regime means nothing to a US book.
  */
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
@@ -12,21 +14,35 @@ import { usePersistentState } from "../../lib/usePersistentState";
 import { resolveRange, toSaved, type Range, type SavedWindow } from "../../lib/windowRange";
 import { WindowBrush } from "./WindowBrush";
 import { WindowStats } from "./WindowStats";
+import type { Market } from "./Optimiser";
 
-const INDICES = [
-  { code: "000300.SH", label: "沪深300" },
-  { code: "000001.SH", label: "上证指数" },
-  { code: "399001.SZ", label: "深证成指" },
-  { code: "399006.SZ", label: "创业板指" },
-  { code: "000688.SH", label: "科创50" },
-];
+const INDICES: Record<Market, { code: string; label: string }[]> = {
+  CN: [
+    { code: "000300.SH", label: "沪深300" },
+    { code: "000001.SH", label: "上证指数" },
+    { code: "399001.SZ", label: "深证成指" },
+    { code: "399006.SZ", label: "创业板指" },
+    { code: "000688.SH", label: "科创50" },
+  ],
+  US: [
+    { code: "^GSPC", label: "标普500" },
+    { code: "^IXIC", label: "纳斯达克综合" },
+    { code: "^NDX", label: "纳斯达克100" },
+    { code: "^DJI", label: "道琼斯" },
+    { code: "^RUT", label: "罗素2000" },
+  ],
+};
+
+/** A-shares keep the keys they were first saved under. */
+const KEY: Record<Market, string> = { CN: "assrs.pf.win", US: "assrs.pf.us.win" };
 
 const THRESHOLDS = [15, 20, 25, 30];
 
-export function useAnalysisWindow(enabled: boolean) {
-  const [code, setCode] = usePersistentState<string>("assrs.pf.win.index", "000300.SH");
-  const [pct, setPct] = usePersistentState<number>("assrs.pf.win.pct", 20);
-  const [saved, setSaved] = usePersistentState<SavedWindow | null>("assrs.pf.win", null);
+export function useAnalysisWindow(market: Market, enabled: boolean) {
+  const [code, setCode] = usePersistentState<string>(
+    `${KEY[market]}.index`, INDICES[market][0]!.code);
+  const [pct, setPct] = usePersistentState<number>(`${KEY[market]}.pct`, 20);
+  const [saved, setSaved] = usePersistentState<SavedWindow | null>(KEY[market], null);
 
   const index = useQuery({
     queryKey: ["portfolio", "window", code, pct],
@@ -40,7 +56,7 @@ export function useAnalysisWindow(enabled: boolean) {
   const dates = index.data?.dates ?? null;
   const range: Range | null = dates ? resolveRange(dates, saved) : null;
   return {
-    code, setCode, pct, setPct, index, range,
+    market, code, setCode, pct, setPct, index, range,
     from: dates && range ? dates[range[0]] : null,
     to: dates && range ? dates[range[1]] : null,
     commit: (r: Range) => { if (dates) setSaved(toSaved(dates, r)); },
@@ -81,7 +97,7 @@ export function AnalysisWindow({ w, picks, rf }: {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
         <h3 className="text-[13.5px] font-semibold">🗓️ 时间窗口</h3>
         <div className="flex items-center gap-0.5 flex-wrap">
-          {INDICES.map((i) => (
+          {INDICES[w.market].map((i) => (
             <button key={i.code} onClick={() => w.setCode(i.code)}
               className={`h-7 px-2.5 rounded-md text-[12.5px] font-medium transition-colors ${
                 w.code === i.code ? "bg-elevated text-ink" : "text-ink-mute hover:text-ink"}`}>

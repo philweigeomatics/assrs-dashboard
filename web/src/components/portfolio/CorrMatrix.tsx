@@ -22,7 +22,10 @@ export function CorrMatrix({ c, stocks }: {
   stocks: { t: string; n: string }[];
 }) {
   const name = Object.fromEntries(stocks.map((h) => [h.t, h.n]));
-  const short = (t: string) => (name[t] || t).slice(0, 4);
+  // Four characters is a whole Chinese name but a quarter of an English one,
+  // so US names go by their ticker.
+  const short = (t: string) =>
+    (t.startsWith("US:") ? t.slice(3) : (name[t] || t).slice(0, 4));
 
   const off = c.rows.flatMap((row, i) =>
     row.filter((v, j) => j !== i && v != null).map((v) => v as number));

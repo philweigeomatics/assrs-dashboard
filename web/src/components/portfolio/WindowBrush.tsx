@@ -10,20 +10,21 @@ import { useMemo, useRef, useState } from "react";
 import type { PortfolioWindowIndex, WindowRegime } from "../../lib/types";
 import { signed } from "../../lib/format";
 import {
-  MIN_WINDOW, lastSessions, moveWindow, resizeEnd, resizeStart, type Range,
+  MIN_WINDOW, lastSessions, lastYears, moveWindow, resizeEnd, resizeStart, type Range,
 } from "../../lib/windowRange";
 
 const VW = 1000;
 const VH = 170;
 const HANDLE_PX = 10;
 
-const PRESETS = [
-  { label: "60天", sessions: 60 },
-  { label: "120天", sessions: 120 },
-  { label: "1年", sessions: 242 },
-  { label: "3年", sessions: 726 },
-  { label: "5年", sessions: 1210 },
-  { label: "全部", sessions: Infinity },
+/** Days are trading sessions; years are calendar years, so they mean the same in either market. */
+const PRESETS: { label: string; pick: (dates: string[]) => Range }[] = [
+  { label: "60天", pick: (d) => lastSessions(d.length, 60) },
+  { label: "120天", pick: (d) => lastSessions(d.length, 120) },
+  { label: "1年", pick: (d) => lastYears(d, 1) },
+  { label: "3年", pick: (d) => lastYears(d, 3) },
+  { label: "5年", pick: (d) => lastYears(d, 5) },
+  { label: "全部", pick: (d) => lastSessions(d.length, Infinity) },
 ];
 
 type Drag = { mode: "start" | "end" | "move" | "none"; x: number; k: number; base: Range; moved: boolean };
@@ -138,7 +139,7 @@ export function WindowBrush({ data, range, onCommit }: {
         </span>
         <div className="ml-auto flex items-center gap-0.5">
           {PRESETS.map((p) => (
-            <button key={p.label} onClick={() => onCommit(lastSessions(n, p.sessions))}
+            <button key={p.label} onClick={() => onCommit(p.pick(dates))}
               className="h-6 px-2 rounded-md text-[12px] text-ink-mute hover:text-ink hover:bg-elevated">
               {p.label}
             </button>

@@ -68,11 +68,13 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
   const [duration, setDuration] = usePersistentState<number>("assrs.pf.dur", 1);
   const [rf, setRf] = usePersistentState<number>("assrs.pf.rf", 3);
 
-  // A-shares pick a stretch of history; 回看 is what is left when they cannot
-  // (US for now, or the index failing to load).
-  const win = useAnalysisWindow(market === "CN");
-  const useWindow = market === "CN" && win.from != null && win.to != null;
-  const showLookback = market !== "CN" || win.index.isError;
+  // Both markets pick a stretch of history on their own index; 回看 is what is
+  // left when that index fails to load.
+  const cnWin = useAnalysisWindow("CN", market === "CN");
+  const usWin = useAnalysisWindow("US", market === "US");
+  const win = market === "CN" ? cnWin : usWin;
+  const useWindow = win.from != null && win.to != null;
+  const showLookback = win.index.isError;
 
   const qc = useQueryClient();
   const sig = signature({ symbols: picked.map((p) => p.t),
@@ -127,7 +129,7 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
         <Picker market={market} picked={picked} onChange={setPicked} />
       </section>
 
-      {market === "CN" && <AnalysisWindow w={win} picks={picked} rf={rf} />}
+      <AnalysisWindow w={win} picks={picked} rf={rf} />
 
       <section className="card p-3 flex flex-col gap-2.5">
         <div className="flex flex-wrap items-center gap-2">
@@ -332,7 +334,7 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
       <Allocation d={d} a={alloc} fade={fade}
         onSave={() => { setSaving(true); onSaveWeights(); }} />
 
-      <div className="grid gap-3 lg:grid-cols-2 items-start">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 items-start">
         <section className={`card p-3 flex flex-col gap-2 transition-opacity ${fade}`}>
           <h3 className="text-[13.5px] font-semibold">📉 有效前沿 · 点选目标</h3>
           <Frontier d={d} onPick={onPick} busy={busy}
