@@ -1463,6 +1463,19 @@ class WindowStatsReq(BaseModel):
     rf_pct: float = Field(3.0, ge=0.0, le=10.0)
 
 
+class IndustryTrackReq(BaseModel):
+    """One stock against a few industry indexes, on the window index's calendar."""
+    symbol: str = Field(..., min_length=1, max_length=20)
+    industries: list[str] = Field(..., min_length=1, max_length=8)
+    #: The window index: its sessions are the calendar every series lands on.
+    index: str = "000300.SH"
+    freq: str = Field("W", pattern=r"^[WD]$")
+    #: The ten-year tracks. Off when only the window's numbers are wanted.
+    series: bool = True
+    start: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
 class SimulateReq(BaseModel):
     """
     Weights already decided, run over a longer history. `weights` is the
@@ -1585,6 +1598,41 @@ def portfolio_window_stats(req: WindowStatsReq, user: AppUser = Depends(current_
             req.symbols, req.start, req.end, index_close=_window_index(req.index),
             code=req.index, pct=req.regime_pct / 100.0, rf=req.rf_pct / 100.0,
             history=_stock_history)
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+def _industry_history(code: str):
+    import industry_track
+
+    return _industry_cache.get_or_compute(code, lambda: industry_track.industry_history(code))
+
+
+def _industry_members(code: str):
+    import industry_track
+
+    return _industry_member_cache.get_or_compute(code, lambda: industry_track.members(code))
+
+
+@app.post("/portfolio/window/industry")
+def portfolio_window_industry(req: IndustryTrackReq, user: AppUser = Depends(current_user)):
+    """行业轨迹 — which industry one stock has traded with, and when it switched."""
+    import industry_track
+    import portfolio_build
+    import portfolio_window
+
+    try:
+        market = portfolio_build.market_of([markets.canonical(req.symbol)])
+        if portfolio_window.INDEX_MARKET.get(req.index) != market:
+            raise LookupError(
+                f"{portfolio_window.INDICES.get(req.index, req.index)} 和 {req.symbol} 不在同一个市场")
+        return industry_track.track(
+            req.symbol, req.industries, calendar=_window_index(req.index).index,
+            freq=req.freq, start=req.start, end=req.end, series=req.series,
+            history=_stock_history, industry=_industry_history,
+            membership=_industry_members)
     except LookupError as exc:
         raise HTTPException(422, str(exc))
     except RuntimeError as exc:
@@ -2270,6 +2318,9 @@ _sim_closes_cache = TTLCache(maxsize=12, ttl_s=30 * 60)
 #: The analysis window: ten years per name, so a moved window needs no reads.
 _stock_history_cache = TTLCache(maxsize=300, ttl_s=30 * 60)
 _window_index_cache = TTLCache(maxsize=10, ttl_s=60 * 60)
+#: 行业轨迹: ten years per industry index, and who is in each (monthly data).
+_industry_cache = TTLCache(maxsize=60, ttl_s=60 * 60)
+_industry_member_cache = TTLCache(maxsize=60, ttl_s=12 * 60 * 60)
 #: Macro is monthly and quarterly data — an hour is already generous.
 _macro_cache = TTLCache(maxsize=1, ttl_s=3600)
 #: One entry per (product, liquidity toggle). Settlements are struck once a

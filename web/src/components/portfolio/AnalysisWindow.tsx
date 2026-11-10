@@ -14,6 +14,7 @@ import { usePersistentState } from "../../lib/usePersistentState";
 import { resolveRange, toSaved, type Range, type SavedWindow } from "../../lib/windowRange";
 import { WindowBrush } from "./WindowBrush";
 import { WindowStats } from "./WindowStats";
+import { IndustryTrack } from "./IndustryTrack";
 import type { Market } from "./Optimiser";
 
 const INDICES: Record<Market, { code: string; label: string }[]> = {
@@ -147,6 +148,12 @@ export function AnalysisWindow({ w, picks, rf }: {
             <WindowStats s={stats.data} picks={picks} selected={{ from, to }} onSnap={snap} />
           )}
         </div>
+      )}
+
+      {/* Keyed by market: each market's stock and industries are saved apart. */}
+      {picks.length > 0 && from && to && index.data && (
+        <IndustryTrack key={w.market} market={w.market} index={w.code} picks={picks}
+          from={from} to={to} />
       )}
     </section>
   );

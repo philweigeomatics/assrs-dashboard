@@ -735,6 +735,35 @@ export type PortfolioWindowStats = {
   correlation: PortfolioBuild["correlation"];
 };
 
+/** POST /portfolio/window/industry — 行业轨迹, see industry_track.py. */
+export type IndustryTrack = {
+  symbol: string;
+  market: string;
+  freq: "W" | "D";
+  /** Rolling span, in `unit`s: 26 周 or 60 日. */
+  span: number;
+  unit: string;
+  market_proxy: { code: string; label: string };
+  industries: { code: string; label: string }[];
+  /** Asked for but did not load. */
+  failed: string[];
+  listed: string;
+  /** Weight % if a constituent, false if known not to be, null if unknown (US: always). */
+  member: Record<string, number | false | null>;
+  /** With `series`: every array is on `dates`, the window index's sessions. */
+  dates?: string[];
+  close?: (number | null)[];
+  raw?: Record<string, (number | null)[]>;
+  ex?: Record<string, (number | null)[]>;
+  market_raw?: (number | null)[];
+  /** With start and end: daily returns inside the window. */
+  window?: {
+    from: string; to: string; days: number;
+    market_raw: number | null;
+    rows: Record<string, { raw: number | null; ex: number | null }>;
+  };
+};
+
 /** POST /portfolio/simulate — decided weights, replayed further back. */
 export type PortfolioSimulation = {
   from: string; to: string;

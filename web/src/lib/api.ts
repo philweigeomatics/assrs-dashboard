@@ -14,6 +14,7 @@ import type {
   PortfolioSimulation,
   PortfolioWindowIndex,
   PortfolioWindowStats,
+  IndustryTrack,
   WatchBoard,
   QtSymbolActivity,
   QtTradedSymbols,
@@ -266,6 +267,13 @@ export const api = {
     symbols: string[]; start: string; end: string; index: string;
     regime_pct: number; rf_pct: number;
   }) => call<PortfolioWindowStats>("/portfolio/window/stats", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }),
+  portfolioIndustryTrack: (body: {
+    symbol: string; industries: string[]; index: string; freq: "W" | "D";
+    series: boolean; start?: string; end?: string;
+  }) => call<IndustryTrack>("/portfolio/window/industry", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   }),
