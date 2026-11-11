@@ -1485,7 +1485,12 @@ class SimulateReq(BaseModel):
     symbols: list[str] = Field(..., min_length=2, max_length=30)
     weights: dict[str, float] = Field(..., min_length=1)
     mine: dict[str, float] | None = None
-    years: int = Field(..., ge=1, le=10)
+    #: Saved candidates, by the page's id. Each one gets its own line.
+    candidates: dict[str, dict[str, float]] | None = Field(None, max_length=8)
+    #: 0 with `start` replays exactly that window — the optimiser's own.
+    years: int = Field(..., ge=0, le=10)
+    start: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 
 class RebalanceReq(BaseModel):
@@ -1649,11 +1654,16 @@ def portfolio_simulate_route(req: SimulateReq, user: AppUser = Depends(current_u
     """
     import portfolio_build
 
+    if req.years == 0 and req.start is None:
+        raise HTTPException(422, "years=0 需要给出 start")
+    start = req.start if req.years == 0 else None
+    end = req.end if req.years == 0 else None
     try:
         px = _sim_closes_cache.get_or_compute(
-            (tuple(sorted(req.symbols)), req.years),
-            lambda: portfolio_build.sim_closes(req.symbols, req.years))
-        return portfolio_build.simulate(px, req.weights, req.mine)
+            (tuple(sorted(req.symbols)), req.years, start, end),
+            lambda: portfolio_build.sim_closes(req.symbols, req.years,
+                                               start=start, end=end))
+        return portfolio_build.simulate(px, req.weights, req.mine, req.candidates)
     except LookupError as exc:
         raise HTTPException(422, str(exc))
     except RuntimeError as exc:

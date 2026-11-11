@@ -964,3 +964,34 @@ def test_the_benchmark_is_asked_for_far_enough_back(old):
     out = pb.simulate(px, {"600519": 50, "000001": 50})
     assert asked["days"] >= (pd.Timestamp.today() - px.index[0]).days
     assert out["benchmark"]["curve"][0] == 0.0
+
+
+# ── 候选组合 side by side ─────────────────────────────────────────────────────
+def test_candidates_each_get_a_line_on_the_same_arithmetic(old):
+    px = pb.sim_closes(list(old), 2)
+    out = pb.simulate(px, {"600519": 50, "000001": 50},
+                      candidates={"a": {"600519": 70, "000001": 30}, "b": {"000001": 100}})
+    daily = px.pct_change(fill_method=None).dropna(how="any")
+    assert out["candidates"]["a"] == pb.curve(daily, pd.Series({"600519": 0.7, "000001": 0.3}))
+    s = px["000001"]
+    assert out["candidates"]["b"][-1] == pytest.approx((s.iloc[-1] / s.iloc[0] - 1) * 100, abs=1e-2)
+    assert len(out["candidates"]["a"]) == len(out["dates"])
+    assert pb.simulate(px, {"600519": 50, "000001": 50})["candidates"] == {}
+
+
+def test_a_given_window_is_replayed_exactly(old):
+    px = pb.sim_closes(list(old), 0, start="2024-10-14", end="2025-06-30")
+    assert str(px.index[0].date()) == "2024-10-14"
+    assert str(px.index[-1].date()) == "2025-06-30"
+    assert px.attrs["limited_by"] is None
+
+
+def test_no_window_and_no_offered_range_is_refused(old):
+    with pytest.raises(LookupError):
+        pb.sim_closes(list(old), 0)
+
+
+def test_a_candidate_with_no_weight_is_refused(old):
+    px = pb.sim_closes(list(old), 1)
+    with pytest.raises(LookupError):
+        pb.simulate(px, {"600519": 50, "000001": 50}, candidates={"x": {"600519": 0}})

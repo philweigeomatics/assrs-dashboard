@@ -288,6 +288,9 @@ export const api = {
   portfolioSimulate: (body: {
     symbols: string[]; weights: Record<string, number>;
     mine: Record<string, number> | null; years: number;
+    /** With years 0, replay exactly this window — the optimiser's own. */
+    start?: string | null; end?: string | null;
+    candidates?: Record<string, Record<string, number>> | null;
   }) => call<PortfolioSimulation>("/portfolio/simulate", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

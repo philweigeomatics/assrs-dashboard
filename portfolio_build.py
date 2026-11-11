@@ -1064,10 +1064,13 @@ SIM_YEARS = (1, 2, 3, 5, 10)
 SIM_SLACK_DAYS = 20
 
 
-def sim_closes(symbols: list[str], years: int) -> pd.DataFrame:
+def sim_closes(symbols: list[str], years: int, *, start: str | None = None,
+               end: str | None = None) -> pd.DataFrame:
     """
     Aligned adjusted closes for the last `years`, independent of the
-    optimiser's lookback.
+    optimiser's lookback — or, given `start` (and maybe `end`), for exactly
+    that stretch, which is how saved candidates get replayed over the
+    optimiser's own window.
 
     A separate read because load_closes goes through fetch_ohlcv, which is
     pinned to the 3-year window the signals are calibrated on. Every name has
@@ -1079,13 +1082,14 @@ def sim_closes(symbols: list[str], years: int) -> pd.DataFrame:
 
     import markets
 
-    if years not in SIM_YEARS:
+    if start is None and years not in SIM_YEARS:
         raise LookupError(f"模拟区间只能是 {SIM_YEARS} 年")
     syms = list(dict.fromkeys(markets.canonical(s) for s in symbols))
     if len(syms) < 2:
         raise LookupError("至少需要两只股票")
     market_of(syms)
-    start = (pd.Timestamp.today().normalize() - pd.DateOffset(years=years)).date()
+    start = (pd.Timestamp(start).date() if start is not None else
+             (pd.Timestamp.today().normalize() - pd.DateOffset(years=years)).date())
 
     def fetch(sym: str):
         try:
@@ -1105,6 +1109,8 @@ def sim_closes(symbols: list[str], years: int) -> pd.DataFrame:
             why.append(err or f"{sym}: 没有返回行情")
             continue
         close = close[close.index >= pd.Timestamp(start)]
+        if end is not None:
+            close = close[close.index <= pd.Timestamp(end)]
         frames[sym] = close.rename(sym)
     if not frames:
         raise RuntimeError("行情读取失败 — " + "；".join(why[:3]))
@@ -1123,9 +1129,13 @@ def sim_closes(symbols: list[str], years: int) -> pd.DataFrame:
     return px
 
 
-def simulate(px: pd.DataFrame, weights: dict, mine: dict | None = None) -> dict:
+def simulate(px: pd.DataFrame, weights: dict, mine: dict | None = None,
+             candidates: dict[str, dict] | None = None) -> dict:
     """
     Weights fixed in advance, run over the closes given.
+
+    `candidates` are weight sets saved on the page to be compared side by
+    side, keyed by the page's own id; each gets a line on the same dates.
 
     Same arithmetic as the curves in build() and weigh(), so the lines stay
     comparable with the ones drawn over the optimiser's window: each day is
@@ -1157,6 +1167,7 @@ def simulate(px: pd.DataFrame, weights: dict, mine: dict | None = None) -> dict:
         "dates": [str(d.date()) for d in px.index],
         "curve": curve(daily, book(weights)),
         "mine_curve": curve(daily, book(mine)) if mine else None,
+        "candidates": {k: curve(daily, book(v)) for k, v in (candidates or {}).items()},
         "equal_curve": curve(daily, equal),
         "benchmark": _rebased(bench, bench_label),
     }

@@ -12,7 +12,7 @@
  * blocked until it is exactly 100%, the same rule the Streamlit page had.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api, ApiError } from "../../lib/api";
 import type { PortfolioBuild, WeighResult } from "../../lib/types";
@@ -79,6 +79,15 @@ export function useAllocation(d: PortfolioBuild) {
       setW((prev) => ({ ...prev, [t]: Math.max(0, Math.min(100, v)) })),
     spread: () => setW(equalWeights(d.holdings.map((h) => h.t))),
     restore: () => { setW(start); backToStart(); },
+    /** Put a saved set of weights in the panel and calculate it straight away. */
+    load: (weights: WeightDraft) => {
+      const next = Object.fromEntries(d.holdings.map((h) => [h.t, weights[h.t] ?? 0]));
+      setW(next);
+      if (sameWeights(next, start)) { backToStart(); return; }
+      run.mutate(next, {
+        onSuccess: (res) => { setTweak(res); setCalculated(next); },
+      });
+    },
     calculate: () => {
       if (total <= 0 || run.isPending) return;
       const sent = { ...w };
@@ -112,12 +121,14 @@ const METRICS: { label: string; hint?: string; get: (r: Risk) => string }[] = [
   { label: "最差 5 日均值", get: (r) => `${fixed(r.avg_worst5_pct, 2)}%` },
 ];
 
-export function Allocation({ d, a, onSave, fade }: {
+export function Allocation({ d, a, onSave, fade, candidates }: {
   d: PortfolioBuild;
   a: AllocationState;
   onSave: () => void;
   /** Dims what the draft has made out of date. */
   fade: string;
+  /** The 候选 strip, kept in the sticky bar next to 计算. */
+  candidates?: ReactNode;
 }) {
   const { tweak } = a;
   const name = d.mode === "target" ? "目标组合" : d.mode_label;
@@ -217,6 +228,8 @@ export function Allocation({ d, a, onSave, fade }: {
             💾 存为组合
           </button>
         </div>
+
+        {candidates}
 
         {a.weighing ? (
           <p className="text-[12.5px] font-medium text-cyan">⏳ 按新的权重计算中，下面的数字马上更新…</p>

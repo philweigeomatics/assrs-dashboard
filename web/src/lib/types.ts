@@ -774,6 +774,8 @@ export type PortfolioSimulation = {
   dates: string[];
   curve: number[];
   mine_curve: number[] | null;
+  /** One line per saved candidate, by its id. */
+  candidates?: Record<string, number[]>;
   equal_curve: number[];
   benchmark: { label: string; curve: (number | null)[] } | null;
 };

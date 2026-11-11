@@ -11,7 +11,7 @@
  * before any of the charts.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../lib/api";
 import type { BuildMode, PortfolioBuild, StockRef } from "../../lib/types";
@@ -24,6 +24,7 @@ import { Curves } from "./Curves";
 import { Frontier } from "./Frontier";
 import { CorrMatrix } from "./CorrMatrix";
 import { Industries } from "./Industries";
+import { CandidateBar, useCandidates, type CandidatesState } from "./Candidates";
 
 const MAX_NAMES = 30;
 
@@ -75,6 +76,8 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
   const win = market === "CN" ? cnWin : usWin;
   const useWindow = win.from != null && win.to != null;
   const showLookback = win.index.isError;
+
+  const cands = useCandidates(market);
 
   const qc = useQueryClient();
   const sig = signature({ symbols: picked.map((p) => p.t),
@@ -202,7 +205,7 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
       </section>
 
       {kept && (
-        <Result d={kept.d} market={market} busy={run.isPending}
+        <Result d={kept.d} market={market} busy={run.isPending} cands={cands}
           stale={kept.sig !== sig} onPick={go} onSaved={onSaved}
           onSaveWeights={() => {
             // Scroll the save box into view: it lives in the assessment
@@ -277,12 +280,16 @@ const TONE: Record<string, string> = {
   bad: "text-up border-up/50 bg-up/10",
 };
 
-function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
+function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights, cands }: {
   d: PortfolioBuild; market: Market; busy: boolean; stale: boolean;
   onPick: (t: number | null) => void; onSaved: () => void;
   onSaveWeights: () => void;
+  cands: CandidatesState;
 }) {
   const alloc = useAllocation(d);
+  // The candidate last loaded or saved: 更新 writes over this one.
+  const [activeId, setActiveId] = useState<string | null>(null);
+  useEffect(() => { setActiveId(null); }, [d]);
   const { tweak } = alloc;
   const a = tweak?.assessment ?? d.assessment;
   const [saving, setSaving] = useState(false);
@@ -332,7 +339,9 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
       </section>
 
       <Allocation d={d} a={alloc} fade={fade}
-        onSave={() => { setSaving(true); onSaveWeights(); }} />
+        onSave={() => { setSaving(true); onSaveWeights(); }}
+        candidates={<CandidateBar d={d} a={alloc} cands={cands}
+          activeId={activeId} setActiveId={setActiveId} />} />
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 items-start">
         <section className={`card p-3 flex flex-col gap-2 transition-opacity ${fade}`}>
@@ -357,7 +366,7 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights }: {
 
       <section className={`card p-3 flex flex-col gap-2 transition-opacity ${fade}`}>
         <h3 className="text-[13.5px] font-semibold">📈 历史模拟</h3>
-        <Curves d={d} tweak={tweak} />
+        <Curves d={d} tweak={tweak} cands={cands.list} activeId={activeId} />
       </section>
     </div>
   );

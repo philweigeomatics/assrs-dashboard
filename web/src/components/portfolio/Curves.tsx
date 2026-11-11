@@ -10,13 +10,22 @@
  * which days the weights are fitted to, so lengthening it would change the
  * weights. Here the weights stay as they are and only the replay gets longer,
  * and the days left of the dashed line are ones the optimiser never saw.
+ *
+ * Saved 候选 join them, each in its own colour, and the table underneath
+ * scores every line over exactly the days drawn — that table is where
+ * candidates actually get compared.
  */
 
+import { useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../../lib/api";
 import type { PortfolioBuild, WeighResult } from "../../lib/types";
-import { signed } from "../../lib/format";
+import { fixed, signed } from "../../lib/format";
 import { usePersistentState } from "../../lib/usePersistentState";
+import {
+  colourOf, curveStats, matching, type Candidate, type CurveStats,
+} from "../../lib/candidates";
+import { weightsOf } from "../../lib/weightDraft";
 
 const VW = 1000;
 const VH = 190;
@@ -36,21 +45,36 @@ const RANGES = [
 const pcts = (rows: { t: string; weight_pct: number }[]) =>
   Object.fromEntries(rows.filter((h) => h.weight_pct > 0).map((h) => [h.t, h.weight_pct]));
 
-export function Curves({ d, tweak }: { d: PortfolioBuild; tweak: WeighResult | null }) {
+export function Curves({ d, tweak, cands = [], activeId = null }: {
+  d: PortfolioBuild; tweak: WeighResult | null;
+  cands?: Candidate[]; activeId?: string | null;
+}) {
   const [years, setYears] = usePersistentState<number>("assrs.pf.sim.years", 0);
-  const symbols = d.holdings.map((h) => h.t);
+  const [hidden, setHidden] = useState<Set<string>>(() => new Set());
+  // A candidate may hold a name the current list does not: it is priced too.
+  const symbols = [...new Set([...d.holdings.map((h) => h.t),
+    ...cands.flatMap((c) => Object.keys(c.weights))])];
   const weights = pcts(d.holdings);
-  const mine = tweak ? pcts(tweak.holdings) : null;
+  const mine = tweak && years > 0 ? pcts(tweak.holdings) : null;
+  const book = cands.length ? Object.fromEntries(cands.map((c) => [c.id, c.weights])) : null;
+  // Over the optimiser's window the other lines are already in hand, so the
+  // request is only for the candidates, replayed over exactly those days.
+  const span = years === 0 ? { start: d.from, end: d.to } : { start: null, end: null };
 
   const sim = useQuery({
-    queryKey: ["portfolio", "simulate", symbols, weights, mine, years],
-    queryFn: () => api.portfolioSimulate({ symbols, weights, mine, years }),
-    enabled: years > 0,
+    queryKey: ["portfolio", "simulate", symbols, weights, mine, years, span, book],
+    queryFn: () => api.portfolioSimulate({
+      symbols, weights, mine, years, ...span, candidates: book }),
+    enabled: years > 0 || book != null,
     staleTime: 10 * 60_000,
     retry: false,
     placeholderData: keepPreviousData,
   });
-  const long = years > 0 ? sim.data ?? null : null;
+  const got = years > 0 || book != null ? sim.data ?? null : null;
+  const long = years > 0 ? got : null;
+  // A placeholder from a longer range is rebased to a different day, so its
+  // candidate lines cannot be laid on the window's.
+  const candResp = years > 0 ? got : sim.isPlaceholderData ? null : got;
 
   const dates = long?.dates ?? d.dates;
   const opt = long?.curve ?? d.curve;
@@ -68,11 +92,33 @@ export function Curves({ d, tweak }: { d: PortfolioBuild; tweak: WeighResult | n
   // no window its weights came from.
   const isEqual = d.mode === "equal";
 
-  const series = [
-    { key: "opt", label: d.mode === "target" ? "目标组合" : d.mode_label, values: opt, colour: "var(--color-cyan)" },
+  // When the draft is exactly a saved candidate, that candidate's line is it.
+  const active = cands.find((c) => c.id === activeId) ?? null;
+  const mineIs = tweak ? matching(cands, weightsOf(tweak.holdings)) : null;
+  if (mineIs) own = null;
+  const mineLabel = active ? `${active.name}（改动中）` : "你的权重";
+
+  type Line = { key: string; label: string; values: number[]; colour: string; waiting?: boolean };
+  const candLines: Line[] = cands.map((c) => {
+    const line = candResp?.candidates?.[c.id];
+    let values: number[] = [];
+    if (line && candResp) {
+      const at = new Map(candResp.dates.map((t, i) => [t, line[i]]));
+      values = dates.map((t) => at.get(t) ?? NaN);
+    }
+    return { key: `c:${c.id}`, label: c.name, values, colour: colourOf(cands, c.id),
+             waiting: !line };
+  });
+
+  // Likewise the optimiser's own answer, once it has been saved under a name.
+  const optIs = matching(cands, weights);
+
+  const series: Line[] = [
+    ...(optIs ? [] : [{ key: "opt", label: d.mode === "target" ? "目标组合" : d.mode_label, values: opt, colour: "var(--color-cyan)" }]),
     ...(own
-      ? [{ key: "mine", label: tweak && !tweak.balanced ? `你的权重（合计 ${tweak.sum_pct}%）` : "你的权重", values: own, colour: MINE }]
+      ? [{ key: "mine", label: tweak && !tweak.balanced ? `${mineLabel}（合计 ${tweak.sum_pct}%）` : mineLabel, values: own, colour: MINE }]
       : []),
+    ...candLines,
     ...(isEqual ? [] : [{ key: "eq", label: "等权重", values: equal, colour: "#a855f7" }]),
     ...(bench
       ? [{
@@ -82,12 +128,20 @@ export function Curves({ d, tweak }: { d: PortfolioBuild; tweak: WeighResult | n
         }]
       : []),
   ];
-  // Yours is drawn last, so it stays visible where it crosses the others.
-  const drawn = [...series.filter((s) => s.key !== "mine"), ...series.filter((s) => s.key === "mine")];
+  const shown = series.filter((s) => !hidden.has(s.key));
+  // Yours and the candidates are drawn last, so they stay visible where they
+  // cross the others.
+  const order = (k: string) => (k === "mine" ? 2 : k.startsWith("c:") ? 1 : 0);
+  const drawn = [...shown].sort((a, b) => order(a.key) - order(b.key));
+  const toggle = (k: string) => setHidden((h) => {
+    const next = new Set(h);
+    if (next.has(k)) next.delete(k); else next.add(k);
+    return next;
+  });
 
   let lo = Infinity;
   let hi = -Infinity;
-  for (const s of series) {
+  for (const s of shown) {
     for (const v of s.values) {
       if (!Number.isFinite(v)) continue;
       lo = Math.min(lo, v);
@@ -131,8 +185,10 @@ export function Curves({ d, tweak }: { d: PortfolioBuild; tweak: WeighResult | n
             {r.label}
           </button>
         ))}
-        {years > 0 && sim.isFetching && (
-          <span className="label ml-1">读取 {years} 年行情…</span>
+        {sim.isFetching && (
+          <span className="label ml-1">
+            {years > 0 ? `读取 ${years} 年行情…` : "计算候选…"}
+          </span>
         )}
       </div>
 
@@ -145,33 +201,39 @@ export function Curves({ d, tweak }: { d: PortfolioBuild; tweak: WeighResult | n
               ? `${endsEarly ? "两条虚线之间" : "虚线右边"}是算权重用的那段；其余的行情优化器没见过，更能说明这组权重的成色，不过股票本身是今天选的，仍然带着后见之明。`
               : ""}`}
         {" "}每天按同一组权重计算，从起点的 0% 复利；股票含分红，{benchLabel}是价格指数、不含分红。
-        {!tweak && " 在上面的配置里改权重、点「计算」，这里会多一条你的权重的线。"}
+        {!tweak && !cands.length && " 在上面的配置里改权重、点「计算」，这里会多一条你的权重的线；存成候选的每一组也各有一条。"}
       </p>
 
-      {years > 0 && sim.isError && (
+      {(years > 0 || book) && sim.isError && (
         <p className="text-[12.5px] text-up">
-          {(sim.error as ApiError).message} —— 下面还是优化窗口的结果。
+          {(sim.error as ApiError).message} —— {years > 0 ? "下面还是优化窗口的结果。" : "候选的线画不出来。"}
         </p>
       )}
-      {long?.limited_by && (
+      {got?.limited_by && (
         <p className="text-[12px] text-brand-ink leading-snug">
-          {long.limited_by.n} 从 {long.limited_by.from} 才有行情，每只股票都要同时有价，
+          {got.limited_by.n} 从 {got.limited_by.from} 才有行情，每只股票都要同时有价，
           所以模拟最早只能从这天开始。
         </p>
       )}
-      {long && long.missing.length > 0 && (
-        <p className="text-[12px] text-up">读不到行情，这段模拟里没有算：{long.missing.join("、")}</p>
+      {got && got.missing.length > 0 && (
+        <p className="text-[12px] text-up">读不到行情，这段模拟里没有算：{got.missing.join("、")}</p>
       )}
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px]">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
         {series.map((s) => {
           const last = [...s.values].reverse().find((v) => Number.isFinite(v));
+          const off = hidden.has(s.key);
           return (
-            <span key={s.key} className="flex items-center gap-1.5">
+            <button key={s.key} onClick={() => toggle(s.key)}
+              title={off ? "点一下显示" : "点一下隐藏"}
+              className={`flex items-center gap-1.5 rounded px-1 -mx-1 hover:bg-elevated ${
+                off ? "opacity-40" : ""}`}>
               <span className="w-4 h-[3px] rounded-full" style={{ background: s.colour }} />
-              <span>{s.label}</span>
-              <span className="tnum font-medium">{signed(last ?? null, 1, "%")}</span>
-            </span>
+              <span className={off ? "line-through" : ""}>{s.label}</span>
+              <span className="tnum font-medium">
+                {s.waiting ? "…" : signed(last ?? null, 1, "%")}
+              </span>
+            </button>
           );
         })}
       </div>
@@ -222,6 +284,85 @@ export function Curves({ d, tweak }: { d: PortfolioBuild; tweak: WeighResult | n
         <span>{dates[0]}</span>
         <span>{dates[n - 1]}</span>
       </div>
+
+      <Scores rows={series.filter((s) => !s.waiting)
+        .map((s) => ({ key: s.key, label: s.label, colour: s.colour,
+                       off: hidden.has(s.key), st: curveStats(s.values, d.rf_pct) }))}
+        bench={bench ? "bm" : null} />
+    </div>
+  );
+}
+
+type ScoreRow = { key: string; label: string; colour: string; off: boolean; st: CurveStats };
+
+const COLS: {
+  k: keyof CurveStats; label: string; hi: boolean;
+  fmt: (v: number | null) => string; hint?: string;
+}[] = [
+  { k: "total", label: "区间收益", hi: true, fmt: (v) => signed(v, 1, "%") },
+  { k: "ann", label: "年化", hi: true, fmt: (v) => signed(v, 1, "%") },
+  { k: "vol", label: "波动", hi: false, fmt: (v) => `${fixed(v, 1)}%` },
+  { k: "sharpe", label: "夏普", hi: true, fmt: (v) => fixed(v, 2) },
+  { k: "maxdd", label: "最大回撤", hi: true, fmt: (v) => `${fixed(v, 1)}%`,
+    hint: "从此前最高点算起的最大跌幅。越接近 0 越好。" },
+];
+
+/**
+ * Every line, scored over the days on the chart. The best in each column is
+ * starred among the portfolios — the index is listed for reference but never
+ * wins, since it is what they are trying to beat.
+ */
+function Scores({ rows, bench }: { rows: ScoreRow[]; bench: string | null }) {
+  const contenders = rows.filter((r) => r.key !== bench && !r.off);
+  const best: Partial<Record<keyof CurveStats, number>> = {};
+  for (const c of COLS) {
+    const vals = contenders.map((r) => r.st[c.k]).filter((v): v is number => v != null);
+    if (vals.length >= 2) best[c.k] = c.hi ? Math.max(...vals) : Math.min(...vals);
+  }
+  return (
+    <div className="flex flex-col gap-1 mt-1">
+      <div className="overflow-x-auto">
+        <table className="w-full text-[12.5px] border-collapse min-w-[440px]">
+          <thead>
+            <tr className="text-ink-mute">
+              <th className="text-left font-normal pb-1 pr-3">图上这段行情</th>
+              {COLS.map((c) => (
+                <th key={c.k} title={c.hint}
+                  className="text-right font-normal pb-1 px-2 whitespace-nowrap">{c.label}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.key} className={`border-t border-line ${r.off ? "opacity-40" : ""} ${
+                r.key === bench ? "text-ink-dim" : ""}`}>
+                <td className="py-1 pr-3">
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full shrink-0"
+                      style={{ background: r.colour }} />
+                    <span className="truncate max-w-[180px]">{r.label}</span>
+                  </span>
+                </td>
+                {COLS.map((c) => {
+                  const v = r.st[c.k];
+                  const top = !r.off && r.key !== bench && v != null && best[c.k] === v;
+                  return (
+                    <td key={c.k} className={`py-1 px-2 text-right tnum whitespace-nowrap ${
+                      top ? "font-semibold text-cyan" : ""}`}>
+                      {c.fmt(v)}{top && " ★"}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="label leading-snug">
+        ★ 是每一列里组合中最好的那个{bench ? "，基准只作参照" : ""}；点图例可以隐藏一条线，隐藏的不参与比较。
+        年化按每年 242 个交易日，夏普扣掉无风险利率，和上面「买入持有实测」同一个算法。
+        优化窗口里的成绩一定偏好看 —— 切到更长的区间，看优化器没见过的行情里谁还站得住。
+      </p>
     </div>
   );
 }
