@@ -1681,6 +1681,59 @@ export type EcoWeek = {
   total: number;
 };
 
+/** One index's session for a release: closed with its move, or still ahead. */
+export type EcoReaction = {
+  /** The session's date on that exchange's own calendar. */
+  day: string;
+  /** Close-to-close %, once the session has closed. */
+  ret?: number;
+  /** |ret| ÷ the mean |ret| of the 60 sessions before — 1.0 is a normal day. */
+  x?: number | null;
+  done: boolean;
+};
+
+export type EcoIndexMeta = { code: string; label: string; market: "US" | "CN" };
+
+/** GET /calendar/economic/reaction — keyed like the client's keyOf(event). */
+export type EcoReactionWeek = {
+  indexes: EcoIndexMeta[];
+  reactions: Record<string, Record<string, EcoReaction | null>>;
+  failed: { code: string; reason: string }[];
+};
+
+export type EcoHistoryRow = {
+  at: string;
+  event: string;
+  value: string | null;
+  forecast: string | null;
+  prev: string | null;
+  surprise: number | null;
+  /** Above (1), below (−1) or at (0) forecast; direction, not good or bad. */
+  dir: -1 | 0 | 1 | null;
+  react: Record<string, EcoReaction | null>;
+};
+
+export type EcoHistorySummary = {
+  n: number;
+  mean_x: number | null;
+  mean_abs: number | null;
+  /** Share of sessions that closed up. */
+  up: number | null;
+  above: { n: number; ret: number | null };
+  below: { n: number; ret: number | null };
+};
+
+/** GET /calendar/economic/history — one series, every stored release. */
+export type EcoHistory = {
+  country: string;
+  series: string;
+  indexes: EcoIndexMeta[];
+  /** Newest first. */
+  rows: EcoHistoryRow[];
+  summary: Record<string, EcoHistorySummary>;
+  failed: { code: string; reason: string }[];
+};
+
 /** GET /calendar/earnings — watchlist disclosure dates for one period. */
 export type EarningsRow = {
   t: string; code: string; n: string;

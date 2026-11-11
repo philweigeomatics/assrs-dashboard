@@ -86,6 +86,22 @@ jobs:
         run: |
           python leverage_cycle.py
 
+      # 6c. 宏观数据 → 指数: re-read the last two weeks and next ten days of US and
+      #     China releases into eco_release (actuals arrive after the scheduled
+      #     row was first stored). ~8 Tushare calls.
+      - name: Store economic releases
+        if: always()
+        timeout-minutes: 10
+        env:
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python eco_impact.py
+
       - name: Scan all watchlists for Today's Alerts
         if: always()
         timeout-minutes: 90

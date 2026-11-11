@@ -2458,6 +2458,104 @@ def calendar_economic(start: str | None = None,
         raise HTTPException(503, str(exc))
 
 
+#: A series' history is a database read plus ten years of each index; the
+#: answer only changes when a session closes or a release lands.
+_eco_history_cache = TTLCache(maxsize=80, ttl_s=30 * 60)
+
+
+def _eco_boards(codes: str | None):
+    """The indexes a release is read against, each ready to map instants."""
+    import eco_impact
+
+    wanted = [c.strip() for c in (codes or "").split(",") if c.strip()] \
+        or list(eco_impact.DEFAULT_CODES)
+    bad = [c for c in wanted if c not in eco_impact.INDEXES]
+    if bad or len(wanted) > 4:
+        raise HTTPException(422, f"指数只能从 {', '.join(eco_impact.INDEXES)} 里选，最多 4 个")
+    now_ns = time.time_ns()
+    boards, failed = [], []
+    for code in dict.fromkeys(wanted):
+        try:
+            boards.append(eco_impact.Board(code, _window_index(code), now_ns=now_ns))
+        except (LookupError, RuntimeError) as exc:
+            failed.append({"code": code, "reason": str(exc)[:120]})
+    if not boards:
+        raise HTTPException(503, "指数行情读取失败：" + "；".join(f["reason"] for f in failed))
+    return boards, failed
+
+
+@app.get("/calendar/economic/reaction")
+def calendar_eco_reaction(start: str | None = None, codes: str | None = None,
+                          user: AppUser = Depends(current_user)):
+    """
+    For each US and China release in a week: the session it lands on in each
+    index, and that session's move once it has closed.
+
+    Read from the same day cache as the week itself, so asking after the week
+    has loaded costs no eco_cal calls.
+    """
+    import calendar_data
+    import eco_impact
+    from datetime import date
+
+    try:
+        begin = date.fromisoformat(start) if start else date.today()
+    except ValueError:
+        raise HTTPException(422, f"start 应是 YYYY-MM-DD：{start}")
+    boards, failed = _eco_boards(codes)
+    try:
+        events = calendar_data.economic(begin)["events"]
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    return {**eco_impact.week(events, boards), "failed": failed}
+
+
+@app.get("/calendar/economic/history")
+def calendar_eco_history(country: str, event: str, codes: str | None = None,
+                         user: AppUser = Depends(current_user)):
+    """
+    Every stored release of one series — 美国CPI月率 for five years, say — with
+    each index's reaction session, and how big those sessions were against a
+    normal day.
+
+    The last few days are also read live from the day cache, so a release from
+    this morning is in its own history before the nightly top-up stores it.
+    """
+    import calendar_data
+    import eco_impact
+    from datetime import datetime, timedelta
+
+    if country not in eco_impact.COUNTRIES or not event.startswith(country):
+        raise HTTPException(422, f"只有{'、'.join(eco_impact.COUNTRIES)}的数据有历史")
+    series = eco_impact.series_of(event)
+    boards, failed = _eco_boards(codes)
+
+    def build():
+        try:
+            stored = eco_impact.load_series(country, series)
+        except LookupError as exc:
+            raise HTTPException(503, str(exc))
+        live = []
+        today = datetime.now(eco_impact.BJ).date()
+        for k in range(3):
+            try:
+                day = calendar_data.eco_day(today - timedelta(days=k))
+            except RuntimeError:
+                continue
+            live += [e for e in day if e.get("country") == country
+                     and eco_impact.series_of(e.get("event")) == series]
+        out = eco_impact.history(live + stored, boards)
+        return {**out, "country": country, "series": series, "failed": failed}
+
+    key = (country, series, tuple(b.code for b in boards))
+    hit = _eco_history_cache.peek(key)
+    if hit:
+        return hit
+    out = build()
+    _eco_history_cache.put(key, out)
+    return out
+
+
 @app.get("/calendar/earnings")
 def calendar_earnings(period: str | None = None,
                       user: AppUser = Depends(current_user)):
