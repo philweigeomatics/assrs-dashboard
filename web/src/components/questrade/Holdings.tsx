@@ -20,6 +20,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import type { QtBook, QtHolding } from "../../lib/types";
 import { fixed, moveClass, signed } from "../../lib/format";
+import { HoldingHistory } from "./HoldingHistory";
 
 /** North America: green up, red down — the opposite of the A-share pages. */
 const NA = false;
@@ -44,14 +45,22 @@ const SECTIONS: { group: string; title: string }[] = [
   { group: "other", title: "其他" },
 ];
 
-export function Holdings({ book }: { book: QtBook }) {
-  const [open, setOpen] = useState<Set<string>>(new Set());
+function useToggleSet() {
+  const [set, setSet] = useState<Set<string>>(new Set());
   const toggle = (s: string) =>
-    setOpen((prev) => {
+    setSet((prev) => {
       const next = new Set(prev);
       next.has(s) ? next.delete(s) : next.add(s);
       return next;
     });
+  return [set, toggle] as const;
+}
+
+export function Holdings({ book }: { book: QtBook }) {
+  const [open, toggle] = useToggleSet();
+  // The transaction panel is its own toggle: opening a name's history should
+  // not also unfold its account split, and vice versa.
+  const [hist, toggleHist] = useToggleSet();
 
   const total = book.totals.market_value || 1;
   const sections = SECTIONS
@@ -94,7 +103,9 @@ export function Holdings({ book }: { book: QtBook }) {
               </tr>
               {s.rows.map((h) => (
                 <Row key={h.symbol} h={h} base={book.base}
-                  open={open.has(h.symbol)} onToggle={() => toggle(h.symbol)} />
+                  open={open.has(h.symbol)} onToggle={() => toggle(h.symbol)}
+                  history={hist.has(h.symbol)}
+                  onHistory={() => toggleHist(h.symbol)} />
               ))}
             </tbody>
           );
@@ -115,12 +126,13 @@ function Th({ children, right, title }: {
   );
 }
 
-function Row({ h, base, open, onToggle }: {
+function Row({ h, base, open, onToggle, history, onHistory }: {
   h: QtHolding; base: string; open: boolean; onToggle: () => void;
+  history: boolean; onHistory: () => void;
 }) {
   return (
     <>
-      <tr className="border-b border-line/60 hover:bg-sunken">
+      <tr className={`border-b border-line/60 hover:bg-sunken ${history ? "bg-sunken/60" : ""}`}>
         <td className="px-2 py-1 whitespace-nowrap">
           {h.yahoo ? (
             // Straight into the technical-analysis page for that instrument.
@@ -130,6 +142,14 @@ function Row({ h, base, open, onToggle }: {
             <span className="font-mono font-semibold text-ink-mute"
               title="无法匹配行情源，未纳入风险分析">{h.symbol}</span>
           )}
+          <button onClick={onHistory} aria-expanded={history}
+            title={history ? "收起交易记录" : "交易记录：每笔买卖与现价对比、股息等"}
+            aria-label={`${h.symbol} 交易记录`}
+            className={`ml-1.5 inline-flex items-center justify-center w-5 h-5 rounded
+              align-[-4px] transition-colors ${history
+                ? "bg-cyan text-white" : "text-ink-mute hover:text-cyan hover:bg-cyan/10"}`}>
+            <HistoryIcon />
+          </button>
         </td>
         <td className="px-2 py-1 max-w-[220px] truncate" title={h.name}>{h.name}</td>
         <td className="px-2 py-1 whitespace-nowrap">
@@ -174,7 +194,27 @@ function Row({ h, base, open, onToggle }: {
           <td />
         </tr>
       ))}
+
+      {history && (
+        <tr className="border-b border-line">
+          <td colSpan={10} className="p-0">
+            <HoldingHistory h={h} />
+          </td>
+        </tr>
+      )}
     </>
+  );
+}
+
+/** A receipt with a clock hand: "what I did with this, and when". */
+function HistoryIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor"
+      strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9" />
+      <path d="M2.5 2.5v2.5H5" />
+      <path d="M8 5v3l2 1.5" />
+    </svg>
   );
 }
 

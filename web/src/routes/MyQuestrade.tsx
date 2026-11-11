@@ -231,6 +231,7 @@ export function MyQuestrade() {
               <p className="label">
                 同一只股票跨账户合并为一行；点「N 个账户」展开可看各账户的数量与成本。
                 均价按成本加权 —— 各账户的 ACB 请看展开行。
+                代码旁的 ↺ 展开这只的交易记录：每笔买卖与现价对比，以及股息等其他记录。
               </p>
               <Body q={book}>
                 {book.data && book.data.holdings.length > 0
