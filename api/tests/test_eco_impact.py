@@ -199,33 +199,37 @@ def test_x_needs_enough_history():
     assert r["ret"] is not None and r["x"] is None
 
 
-# ── the week ─────────────────────────────────────────────────────────────────
-def _ev(at, country, event, **kw):
-    t = pd.Timestamp(at).tz_convert("Asia/Shanghai")
-    return {"at": at, "date": t.strftime("%Y-%m-%d"), "time": t.strftime("%H:%M"),
-            "country": country, "event": event, **kw}
+# ── which country a row belongs to ───────────────────────────────────────────
+@pytest.mark.parametrize("event, country, ok", [
+    ("美国CPI月率(%)(月度)(十月)", "美国", True),
+    # The Fed's decision is a US release that is not named 美国.
+    ("美联储利率决议", "美国", True),
+    ("美联储FOMC货币政策会议纪要", "美国", True),
+    ("个人消费支出价格指数", "美国", True),
+    # eco_cal's 美国 and 中国 filters leak other countries' rows.
+    ("OPEC沙特阿拉伯原油产量", "美国", False),
+    ("国际货币基金组织年会", "美国", False),
+    ("澳大利亚出口月率", "中国", False),
+    ("英国贸易帐", "中国", False),
+    ("中国CPI年率(%)(年度)(十月)", "中国", True),
+    ("中国CPI年率(%)(年度)(十月)", "美国", False),
+])
+def test_belongs(event, country, ok):
+    assert ei.belongs(event, country) is ok
 
 
-def test_week_maps_only_us_and_china_with_a_time():
-    evs = [
-        _ev("2026-11-10T08:30:00-05:00", "美国", "美国CPI月率(%)(十月)"),
-        _ev("2026-11-11T09:30:00+08:00", "中国", "中国CPI年率(%)(十月)"),
-        _ev("2026-11-10T10:00:00+01:00", "德国", "德国ZEW经济景气指数"),
-        {**_ev("2026-11-10T08:30:00-05:00", "美国", "美国假日"), "at": None},
-        # eco_cal's country filter leaks; a row whose name is another
-        # country's is not this country's release.
-        _ev("2026-11-11T08:30:00+08:00", "中国", "澳大利亚失业率"),
-    ]
-    out = ei.week(evs, [board("^GSPC", US_DAYS), board("000300.SH", CN_DAYS)])
-    assert [i["code"] for i in out["indexes"]] == ["^GSPC", "000300.SH"]
-    assert len(out["reactions"]) == 2
-    cpi = out["reactions"][ei.event_key(evs[0])]
-    assert cpi["^GSPC"]["day"] == "2026-11-10" and cpi["000300.SH"]["day"] == "2026-11-11"
+def test_ohlc_payload():
+    df = pd.DataFrame({"Open": [1.0, 2.0], "High": [2.0, 3.0], "Low": [0.5, 1.5],
+                       "Close": [1.5649, 2.0]},
+                      index=pd.DatetimeIndex(["2026-11-09", "2026-11-10"]))
+    out = ei.ohlc_payload("^GSPC", df)
+    assert out["dates"] == ["2026-11-09", "2026-11-10"]
+    assert out["c"] == [1.56, 2.0] and out["label"] == "标普500" and out["market"] == "US"
 
 
-def test_event_key_matches_the_client():
-    e = _ev("2026-11-10T08:30:00-05:00", "美国", "美国CPI月率(%)(十月)")
-    assert ei.event_key(e) == "2026-11-10|21:30|美国|美国CPI月率(%)(十月)"
+def test_index_ohlc_rejects_unknown_codes():
+    with pytest.raises(LookupError):
+        ei.index_ohlc("AAPL")
 
 
 # ── one series' history ──────────────────────────────────────────────────────
@@ -292,12 +296,17 @@ def test_rows_from_frame():
          "fore_value": None, "pre_value": None},
         {"date": "20261110", "time": "08:30", "event": "澳大利亚就业人数", "value": "1K",
          "fore_value": None, "pre_value": None},
+        {"date": "20261029", "time": "02:00", "event": "美联储利率决议", "value": "4.00%",
+         "fore_value": "4.00%", "pre_value": "4.00%"},
     ])
     rows = ei.rows_from_frame(df, "美国")
     assert rows == [{
         "country": "美国", "event": "美国CPI月率(%)(十月)", "series": "美国CPI月率(%)",
         "at": "2026-11-10T21:30:00+08:00", "value": "0.3%", "forecast": "0.2%",
-        "prev": "0.4%"}]
+        "prev": "0.4%"}, {
+        "country": "美国", "event": "美联储利率决议", "series": "美联储利率决议",
+        "at": "2026-10-29T02:00:00+08:00", "value": "4.00%", "forecast": "4.00%",
+        "prev": "4.00%"}]
 
 
 def test_fetch_range_halves_a_full_page():

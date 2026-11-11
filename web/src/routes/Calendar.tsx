@@ -15,17 +15,18 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
-import type { EarningsCalendar, EarningsRow, EcoEvent, EcoIndexMeta, EcoReaction,
-  EcoWeek } from "../lib/types";
+import type { EarningsCalendar, EarningsRow, EcoEvent, EcoWeek }
+  from "../lib/types";
 import { NavBar } from "../components/NavBar";
 import { usePersistentState } from "../lib/usePersistentState";
-import { moveClass, signed } from "../lib/format";
+import { signed } from "../lib/format";
 import { cellDate, monthGrid, parseMonth, safeMonth, shiftMonth }
   from "../lib/monthGrid";
 import { localClock, localDay, localMonday, offBeijing, viewerZone, zoneLabel }
   from "../lib/localDay";
 import { EcoRead } from "../components/market/EcoRead";
-import { EcoHistory } from "../components/market/EcoHistory";
+import { EcoIndexChart, type EcoPick } from "../components/market/EcoIndexChart";
+import { hasHistory, seriesOf } from "../lib/ecoSeries";
 
 const VIEWS = [
   { id: "eco", label: "🌍 经济数据" },
@@ -40,21 +41,6 @@ const ALL = "__all__";
 //: a reading of anything in particular.
 const MAX_PICK = 40;
 
-//: The indexes a US or China release is read against — one of each market.
-//: Matches eco_impact.INDEXES.
-const US_INDEX = [
-  { code: "^GSPC", label: "标普500", short: "标普" },
-  { code: "^NDX", label: "纳指100", short: "纳指" },
-];
-const CN_INDEX = [
-  { code: "000300.SH", label: "沪深300", short: "沪深" },
-  { code: "000001.SH", label: "上证指数", short: "上证" },
-  { code: "399006.SZ", label: "创业板指", short: "创业" },
-];
-const SHORT: Record<string, string> = Object.fromEntries(
-  [...US_INDEX, ...CN_INDEX].map((i) => [i.code, i.short]));
-const MAPPED = ["美国", "中国"];
-
 // Both of these used to go through toISOString(), which converts to UTC
 // first — so local midnight anywhere east of Greenwich landed on the previous
 // day and the whole week was off by one. See lib/localDay.
@@ -66,6 +52,9 @@ export function Calendar() {
   const [view, setView] = usePersistentState<View>("assrs.cal.view", "eco");
   const [offset, setOffset] = useState(0);
   const [period, setPeriod] = useState<string | null>(null);
+  // The release whose history is marked on the index chart under the week.
+  const [pick, setPick] = usePersistentState<EcoPick | null>(
+    "assrs.cal.pick", { country: "美国", event: "美联储利率决议" });
 
   const start = useMemo(() => {
     const d = monday(new Date());
@@ -116,9 +105,12 @@ export function Calendar() {
                   <Step onClick={() => setOffset(offset + 1)}>下周 →</Step>
                 </div>
               } />
-            <Body q={eco}>{eco.data && <EcoWeekView d={eco.data} />}</Body>
+            <Body q={eco}>
+              {eco.data && <EcoWeekView d={eco.data} pick={pick} onPick={setPick} />}
+            </Body>
           </section>
         )}
+        {view === "eco" && <EcoIndexChart pick={pick} setPick={setPick} />}
 
         {view === "earn" && (
           <section className="card p-3 flex flex-col gap-2">
@@ -201,7 +193,10 @@ function Body({ q, children }: {
 /** Key an event by what identifies it on the server, not by array position. */
 const keyOf = (e: EcoEvent) => `${e.date}|${e.time}|${e.country}|${e.event}`;
 
-function EcoWeekView({ d }: { d: EcoWeek }) {
+function EcoWeekView({ d, pick, onPick }: {
+  d: EcoWeek; pick: EcoPick | null; onPick: (p: EcoPick) => void;
+}) {
+  const pickedSeries = pick ? `${pick.country}|${seriesOf(pick.event)}` : null;
   const [country, setCountry] = useState<string>(ALL);
   const [showBeijing, setShowBeijing] = usePersistentState<boolean>(
     "assrs.cal.bjtime", false);
@@ -215,21 +210,6 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
     if (p[k]) { const { [k]: _drop, ...rest } = p; return rest; }
     return { ...p, [k]: e };
   });
-
-  // 指数反应: one US and one China index, each release mapped to the first
-  // session that closed after it on that exchange.
-  const [showReact, setShowReact] = usePersistentState<boolean>("assrs.cal.react", true);
-  const [usIdx, setUsIdx] = usePersistentState<string>("assrs.cal.idx.us", US_INDEX[0]!.code);
-  const [cnIdx, setCnIdx] = usePersistentState<string>("assrs.cal.idx.cn", CN_INDEX[0]!.code);
-  const codes = [usIdx, cnIdx];
-  const react = useQuery({
-    queryKey: ["cal", "ecoReact", d.from, codes],
-    queryFn: () => api.ecoReaction(d.from, codes),
-    enabled: showReact,
-    staleTime: 10 * 60_000,
-    retry: 1,
-  });
-  const [hist, setHist] = useState<EcoEvent | null>(null);
 
   const read = useMutation({
     mutationFn: () => api.ecoExplain(chosen.map((e) => ({
@@ -316,20 +296,6 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
               className="text-[12px] text-ink-mute hover:text-ink">清空</button>
           </>
         )}
-        <label className="label flex items-center gap-1.5 cursor-pointer"
-          title="美国和中国的数据，标出它落在哪个交易日，以及那天指数的涨跌">
-          <input type="checkbox" checked={showReact}
-            onChange={(e) => setShowReact(e.target.checked)}
-            className="accent-[var(--color-cyan)]" />
-          指数反应
-        </label>
-        {showReact && (
-          <span className="flex items-center gap-1">
-            <IndexPick value={usIdx} set={setUsIdx} options={US_INDEX} label="美股指数" />
-            <IndexPick value={cnIdx} set={setCnIdx} options={CN_INDEX} label="A股指数" />
-            {react.isFetching && <span className="label">…</span>}
-          </span>
-        )}
         {!beijing && (
           <label className="label flex items-center gap-1.5 cursor-pointer"
             title="同时显示 Tushare 原始的北京时间，方便对账">
@@ -346,14 +312,6 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
       )}
       {read.data && (
         <EcoRead d={read.data} onClose={() => read.reset()} />
-      )}
-      {showReact && react.isError && (
-        <p className="text-[12px] text-up">指数反应读取失败：{(react.error as ApiError).message}</p>
-      )}
-      {hist && (
-        <EcoHistory key={`${hist.country}|${hist.event}|${codes.join()}`}
-          country={hist.country} event={hist.event} codes={codes}
-          onClose={() => setHist(null)} />
       )}
 
       <div className="grid gap-2 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7
@@ -401,7 +359,23 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
                           </span>
                         )}
                       </div>
-                      <span className="leading-snug" title={e.event}>{e.event}</span>
+                      {hasHistory(e.country, e.event) ? (
+                        // A link, not a label: it puts this series' history on
+                        // the chart below instead of ticking the box.
+                        <button type="button"
+                          onClick={(ev) => {
+                            ev.preventDefault();
+                            onPick({ country: e.country, event: e.event });
+                          }}
+                          title="在下面的指数图上标出这项数据过去每次发布的位置"
+                          className={`leading-snug text-left hover:text-cyan ${
+                            pickedSeries === `${e.country}|${seriesOf(e.event)}`
+                              ? "text-cyan font-medium" : ""}`}>
+                          {e.event}
+                        </button>
+                      ) : (
+                        <span className="leading-snug" title={e.event}>{e.event}</span>
+                      )}
                       {(e.value || e.forecast || e.prev) && (
                         <div className="flex flex-wrap gap-x-2 text-[11px] tnum">
                           {e.value && (
@@ -415,12 +389,6 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
                           )}
                         </div>
                       )}
-                      {showReact && MAPPED.includes(e.country)
-                        && e.event.startsWith(e.country) && (
-                        <ReactLine r={react.data?.reactions[keyOf(e)]}
-                          indexes={react.data?.indexes ?? []}
-                          onHistory={() => setHist(e)} />
-                      )}
                     </label>
                   );
                 })}
@@ -429,14 +397,6 @@ function EcoWeekView({ d }: { d: EcoWeek }) {
           </div>
         ))}
       </div>
-      <p className="label leading-snug">
-        <b>指数反应</b>：美国和中国的数据，标出它落在每个指数的哪个交易日 ——
-        发布之后<b>第一个收盘</b>的那天，按那个交易所自己的日期。美国盘前的数据，
-        标普是当天，A股收盘早已过去，所以是第二天；中国早上的数据两边都是当天；
-        A股收盘后（如 16:00 的社融）发布的，算 A股的下一个交易日。
-        后面的 × 是那天的波动相当于普通一天的几倍，≥1.5× 才标出。
-        点「历史」看这项数据五年来每次发布后的反应。
-      </p>
       <p className="label leading-snug">
         时间已换算成<b>你所在时区</b>
         {zone ? ` ${zone}` : ""}{offset ? `（${offset}）` : ""} ——
@@ -710,62 +670,5 @@ function StockLink({ r }: { r: EarningsRow }) {
         {r.t}
       </span>
     </Link>
-  );
-}
-
-function IndexPick({ value, set, options, label }: {
-  value: string; set: (v: string) => void;
-  options: { code: string; label: string }[]; label: string;
-}) {
-  return (
-    <select value={value} onChange={(e) => set(e.target.value)} aria-label={label}
-      className="h-7 px-1.5 rounded-lg bg-sunken text-[12.5px] outline-none
-        focus:ring-2 focus:ring-cyan/40">
-      {options.map((o) => <option key={o.code} value={o.code}>{o.label}</option>)}
-    </select>
-  );
-}
-
-/**
- * Under a US or China release: the session it lands on for each index, with
- * that session's move once it has closed. The date is the exchange's own, so
- * a US morning release shows a different date for 沪深300 than for 标普500.
- */
-function ReactLine({ r, indexes, onHistory }: {
-  r: Record<string, EcoReaction | null> | undefined;
-  indexes: EcoIndexMeta[];
-  onHistory: () => void;
-}) {
-  return (
-    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[10.5px] tnum">
-      {r && indexes.map((ix) => {
-        const x = r[ix.code];
-        if (!x) return null;
-        const day = x.day.slice(5).replace("-", "/");
-        return (
-          <span key={ix.code} className="whitespace-nowrap"
-            title={x.done
-              ? `${ix.label} ${x.day} 收盘涨跌 ${signed(x.ret, 2, "%")}`
-                + (x.x != null ? `，相当于普通一天的 ${x.x.toFixed(1)} 倍` : "")
-              : `${ix.label} 的反应在 ${x.day} 这个交易日，尚未收盘`}>
-            <span className="text-ink-mute">{SHORT[ix.code] ?? ix.label} {day}</span>{" "}
-            {x.done ? (
-              <>
-                <span className={moveClass(x.ret)}>{signed(x.ret, 2, "%")}</span>
-                {x.x != null && x.x >= 1.5 && (
-                  <b className="ml-0.5 text-ink">{x.x.toFixed(1)}×</b>
-                )}
-              </>
-            ) : <span className="text-ink-mute">待定</span>}
-          </span>
-        );
-      })}
-      <button type="button"
-        onClick={(ev) => { ev.preventDefault(); ev.stopPropagation(); onHistory(); }}
-        className="ml-auto text-cyan hover:underline shrink-0"
-        title="这项数据过去每次发布后的指数反应">
-        历史
-      </button>
-    </div>
   );
 }

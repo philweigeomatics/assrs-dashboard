@@ -9,7 +9,7 @@ import type {
   EarningsCalendar,
   EcoRead,
   EcoWeek,
-  EcoReactionWeek,
+  EcoIndexBars,
   EcoHistory,
   MacroBoard,
   PortfolioBuild,
@@ -245,13 +245,12 @@ export const api = {
     }),
   ecoCalendar: (start: string) =>
     call<EcoWeek>(`/calendar/economic?start=${start}`),
-  ecoReaction: (start: string, codes: string[]) =>
-    call<EcoReactionWeek>(
-      `/calendar/economic/reaction?start=${start}&codes=${encodeURIComponent(codes.join(","))}`),
-  ecoHistory: (country: string, event: string, codes: string[]) =>
+  ecoIndex: (code: string) =>
+    call<EcoIndexBars>(`/calendar/economic/index?code=${encodeURIComponent(code)}`),
+  ecoHistory: (country: string, event: string, code: string) =>
     call<EcoHistory>(
       `/calendar/economic/history?country=${encodeURIComponent(country)}`
-      + `&event=${encodeURIComponent(event)}&codes=${encodeURIComponent(codes.join(","))}`),
+      + `&event=${encodeURIComponent(event)}&code=${encodeURIComponent(code)}`),
   earningsCalendar: (period: string | null) =>
     call<EarningsCalendar>(
       `/calendar/earnings${period ? `?period=${period}` : ""}`),

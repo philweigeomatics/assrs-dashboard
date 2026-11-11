@@ -69,10 +69,21 @@ NY = ZoneInfo("America/New_York")
 TABLE = "eco_release"
 MIGRATION = "supabase/migrations/20261111_eco_release.sql"
 
-#: The countries whose releases are kept and mapped. eco_cal's country filter
-#: is loose — asking for 中国 also returns 澳大利亚 and 英国 rows — so a row is
-#: kept only when its event name starts with the country asked for.
+#: The countries whose releases are kept and mapped.
 COUNTRIES = ("美国", "中国")
+
+#: eco_cal's country filter is loose both ways. Asking for 中国 also returns
+#: 澳大利亚 and 英国 trade rows labelled 中国; asking for 美国 returns OPEC
+#: and IMF rows. And the most important US release is not named 美国 at all:
+#: it is 美联储利率决议. So a row belongs to a country by its name's prefix.
+PREFIXES = {
+    "美国": ("美国", "美联储", "个人消费支出", "亚特兰大联储", "达拉斯联储", "ADP"),
+    "中国": ("中国",),
+}
+
+
+def belongs(event: str, country: str) -> bool:
+    return str(event or "").startswith(PREFIXES.get(country, (country,)))
 
 #: Indexes a release can be read against: (label, market). An allow-list,
 #: because each one is ten years of prices fetched on demand.
@@ -315,26 +326,42 @@ class Board:
         return {"code": self.code, "label": self.label, "market": self.market}
 
 
-def event_key(e: dict) -> str:
-    """The client's key for an event: what identifies it on the server."""
-    return f"{e.get('date')}|{e.get('time')}|{e.get('country')}|{e.get('event')}"
+# ── the index itself ─────────────────────────────────────────────────────────
+#: Daily bars kept for the chart: the stored history starts 2021-11, and the
+#: normal-day baseline needs 60 sessions before the first release.
+OHLC_YEARS = 6
 
 
-def mapped(e: dict) -> bool:
-    """Only US and China releases are mapped, and only ones with a time."""
-    c = e.get("country")
-    return bool(e.get("at")) and c in COUNTRIES and str(e.get("event", "")).startswith(c)
+def index_ohlc(code: str) -> pd.DataFrame:
+    """Daily Open/High/Low/Close for one allowed index, oldest first."""
+    if code not in INDEXES:
+        raise LookupError(f"没有这个指数：{code}")
+    label, market = INDEXES[code]
+    if market == "US":
+        import markets
+        df = markets.get("US").fetch_ohlcv(code, years=OHLC_YEARS)
+    else:
+        import data_manager
+        start = (date.today() - timedelta(days=365 * OHLC_YEARS)).strftime("%Y%m%d")
+        df = data_manager.get_index_data_live(code, start_date=start)
+    if df is None or df.empty or "Close" not in df:
+        raise RuntimeError(f"{label} 行情读取失败")
+    df = df[["Open", "High", "Low", "Close"]].dropna(subset=["Close"]).copy()
+    df.index = pd.DatetimeIndex(df.index)
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+    return df.sort_index()
 
 
-def week(events: list[dict], boards: list[Board]) -> dict:
-    """Each mapped release in a week → its session on each index."""
-    out = {}
-    for e in events:
-        if not mapped(e):
-            continue
-        t = _ns(e["at"])
-        out[event_key(e)] = {b.code: b.react(t) for b in boards}
-    return {"indexes": [b.meta() for b in boards], "reactions": out}
+def ohlc_payload(code: str, df: pd.DataFrame) -> dict:
+    label, market = INDEXES[code]
+
+    def col(name):
+        return [round(float(v), 2) for v in df[name]]
+
+    return {"code": code, "label": label, "market": market,
+            "dates": [d.strftime("%Y-%m-%d") for d in df.index],
+            "o": col("Open"), "h": col("High"), "l": col("Low"), "c": col("Close")}
 
 
 # ── one series' history ──────────────────────────────────────────────────────
@@ -447,7 +474,7 @@ def rows_from_frame(df: pd.DataFrame | None, country: str) -> list[dict]:
         event = _clean(r.get("event")) or ""
         clock = _clean(r.get("time"))
         day = str(r.get("date") or "")
-        if not event.startswith(country) or not clock or len(day) != 8:
+        if not belongs(event, country) or not clock or len(day) != 8:
             continue
         try:
             hh, mm = (int(x) for x in clock.split(":")[:2])

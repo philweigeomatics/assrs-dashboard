@@ -1694,11 +1694,10 @@ export type EcoReaction = {
 
 export type EcoIndexMeta = { code: string; label: string; market: "US" | "CN" };
 
-/** GET /calendar/economic/reaction — keyed like the client's keyOf(event). */
-export type EcoReactionWeek = {
-  indexes: EcoIndexMeta[];
-  reactions: Record<string, Record<string, EcoReaction | null>>;
-  failed: { code: string; reason: string }[];
+/** GET /calendar/economic/index — daily candles for the chart under the calendar. */
+export type EcoIndexBars = {
+  code: string; label: string; market: "US" | "CN";
+  dates: string[]; o: number[]; h: number[]; l: number[]; c: number[];
 };
 
 export type EcoHistoryRow = {
@@ -1723,7 +1722,7 @@ export type EcoHistorySummary = {
   below: { n: number; ret: number | null };
 };
 
-/** GET /calendar/economic/history — one series, every stored release. */
+/** GET /calendar/economic/history — one series, every stored release, one index. */
 export type EcoHistory = {
   country: string;
   series: string;
@@ -1731,7 +1730,6 @@ export type EcoHistory = {
   /** Newest first. */
   rows: EcoHistoryRow[];
   summary: Record<string, EcoHistorySummary>;
-  failed: { code: string; reason: string }[];
 };
 
 /** GET /calendar/earnings — watchlist disclosure dates for one period. */
