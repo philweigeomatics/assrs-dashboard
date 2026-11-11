@@ -97,3 +97,77 @@ export function summarise(rows: ActivityRow[], now: Num, ccy: string): LotSummar
     avg_sell: sold ? proceeds / sold : null,
   };
 }
+
+/**
+ * Everything one ticker has made or lost, from the cash that actually moved.
+ *
+ *   total = today's market value + every cash flow on record
+ *
+ * Buys are cash out (commission included), sells and dividends are cash in,
+ * fees and withholding are cash out — Questrade's `net` on each row already
+ * carries the sign and the commission. Nothing is estimated: no cost-base
+ * method, no FX assumption. That only works when the records cover every
+ * share now held, so `complete` says whether they do; when shares came in
+ * before the window or by transfer, their cost is not on record and the
+ * total would overstate the gain.
+ *
+ * The trading part is then split into what is still open (Questrade's own
+ * unrealised P&L on the shares held) and the remainder, which is what the
+ * sells locked in.
+ */
+export type TotalReturn = {
+  total: number;
+  /** total ÷ every dollar that went into buying it. */
+  pct: Num;
+  invested: number;
+  value: number;
+  unrealised: Num;
+  realised: Num;
+  dividends: number;
+  /** Fees, withholding and any other cash row tagged with this symbol. */
+  other: number;
+  /** Shares the records account for, vs shares held. */
+  covered: number;
+  held: number;
+  complete: boolean;
+  /** Rows in another currency, left out rather than mixed in. */
+  skipped: number;
+};
+
+/** Types whose quantity is a real change of holding with its cash on record. */
+const COUNTED = new Set(["Trades", "Dividends", "Corporate actions"]);
+
+export function totalReturn(rows: ActivityRow[], h: {
+  price: Num; quantity: number; currency: string; open_pnl: Num;
+}): TotalReturn {
+  let flows = 0, trading = 0, dividends = 0, other = 0, invested = 0;
+  let covered = 0, skipped = 0;
+  for (const r of rows) {
+    if (r.currency !== h.currency) { skipped += 1; continue; }
+    const net = r.net ?? 0;
+    flows += net;
+    if (r.type === "Trades") {
+      trading += net;
+      if ((r.quantity ?? 0) > 0) invested += -net;
+    } else if (r.type === "Dividends") {
+      dividends += net;
+    } else {
+      other += net;
+    }
+    if (COUNTED.has(r.type)) covered += r.quantity ?? 0;
+  }
+  const complete = Math.abs(covered - h.quantity) < 1e-6;
+  // With a gap, value only the shares whose cost is on record.
+  const shares = complete ? h.quantity : Math.max(0, covered);
+  const value = h.price != null && Number.isFinite(h.price) ? shares * h.price : 0;
+  const total = value + flows;
+  const unrealised = complete && h.open_pnl != null ? h.open_pnl : null;
+  return {
+    total,
+    pct: invested > 0 ? total / invested * 100 : null,
+    invested, value,
+    unrealised,
+    realised: unrealised == null ? null : value + trading - unrealised,
+    dividends, other, covered, held: h.quantity, complete, skipped,
+  };
+}

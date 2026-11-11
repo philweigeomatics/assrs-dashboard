@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lotOf, summarise, type ActivityRow } from "./lots";
+import { lotOf, summarise, totalReturn, type ActivityRow } from "./lots";
 
 const row = (over: Partial<ActivityRow>): ActivityRow => ({
   date: "2026-01-02", settled: "2026-01-03", type: "Trades", type_label: "买卖",
@@ -61,5 +61,58 @@ describe("summarise", () => {
     const s = summarise([row({ type: "Dividends", quantity: 0, price: 0 })], 100, "CAD");
     expect(s.avg_buy).toBeNull();
     expect(s.buy_pnl).toBeNull();
+  });
+});
+
+describe("totalReturn", () => {
+  const h = { price: 120, quantity: 15, currency: "CAD", open_pnl: 280 };
+  const rows = [
+    row({ quantity: 10, price: 100, net: -1005 }),
+    row({ quantity: 10, price: 105, net: -1055 }),
+    row({ quantity: -5, price: 130, net: 645, action: "Sell" }),
+    row({ type: "Dividends", quantity: 0, price: 0, net: 30 }),
+    row({ type: "Fees and rebates", quantity: 0, price: 0, net: -2 }),
+  ];
+
+  it("adds market value to every cash flow", () => {
+    const t = totalReturn(rows, h);
+    expect(t.complete).toBe(true);
+    expect(t.value).toBeCloseTo(1800);
+    // 1800 - 1005 - 1055 + 645 + 30 - 2
+    expect(t.total).toBeCloseTo(413);
+    expect(t.invested).toBeCloseTo(2060);
+    expect(t.pct).toBeCloseTo(413 / 2060 * 100);
+    expect(t.dividends).toBeCloseTo(30);
+    expect(t.other).toBeCloseTo(-2);
+  });
+
+  it("splits trading into what is open and what the sells locked in", () => {
+    const t = totalReturn(rows, h);
+    expect(t.unrealised).toBeCloseTo(280);
+    // trading = 1800 - 1005 - 1055 + 645 = 385; realised = 385 - 280
+    expect(t.realised).toBeCloseTo(105);
+    expect(t.unrealised! + t.realised! + t.dividends + t.other).toBeCloseTo(t.total);
+  });
+
+  it("flags shares whose cost is not on record and values only the rest", () => {
+    const t = totalReturn(rows, { ...h, quantity: 25 });
+    expect(t.complete).toBe(false);
+    expect(t.covered).toBe(15);
+    expect(t.value).toBeCloseTo(1800);
+    expect(t.unrealised).toBeNull();
+    expect(t.realised).toBeNull();
+  });
+
+  it("does not count a transfer-in as covered", () => {
+    const t = totalReturn([...rows,
+      row({ type: "Other", quantity: 10, price: 0, net: 0 })], { ...h, quantity: 25 });
+    expect(t.complete).toBe(false);
+  });
+
+  it("leaves other-currency rows out", () => {
+    const t = totalReturn([...rows, row({ type: "Dividends", quantity: 0, price: 0,
+      net: 9, currency: "USD" })], h);
+    expect(t.skipped).toBe(1);
+    expect(t.dividends).toBeCloseTo(30);
   });
 });

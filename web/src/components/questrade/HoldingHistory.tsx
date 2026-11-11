@@ -1,10 +1,10 @@
 /**
  * 交易记录 — opened under one holding's row, for resizing that position.
  *
- * The question is "which of the shares I hold were bought above today's
- * price, and by how much?", so the buys and sells are laid against the
- * current price twice: on a price ladder (where each fill sits relative to
- * now and to the position's average cost) and in the table, fill by fill.
+ * Two questions: "what has this name made me, all in?" — the total return
+ * at the top, dividends and closed trades included — and "which of the
+ * shares I hold were bought above today's price?", which the table answers
+ * fill by fill.
  *
  * Dividends, fees and the rest are listed too — a filter away — but get no
  * price comparison: there is no price on a dividend to compare.
@@ -18,7 +18,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../../lib/api";
 import type { QtHolding, QtSymbolActivity } from "../../lib/types";
 import { fixed, moveClass, signed } from "../../lib/format";
-import { lotOf, summarise, type ActivityRow } from "../../lib/lots";
+import { lotOf, summarise, totalReturn, type ActivityRow } from "../../lib/lots";
 
 /** North America: green up, red down — same as the holdings table. */
 const NA = false;
@@ -76,7 +76,7 @@ export function HoldingHistory({ h }: { h: QtHolding }) {
       {q.isError && (
         <p className="text-[12px] text-up">{(q.error as ApiError).message}</p>
       )}
-      {q.data && <Body d={q.data} h={h} type={type} years={years} />}
+      {q.data && <Body d={q.data} h={h} type={type} years={years} onYears={setYears} />}
     </div>
   );
 }
@@ -105,19 +105,15 @@ function TypeFilter({ d, value, onChange }: {
   );
 }
 
-function Body({ d, h, type, years }: {
+function Body({ d, h, type, years, onYears }: {
   d: QtSymbolActivity; h: QtHolding; type: string; years: number;
+  onYears: (y: number) => void;
 }) {
   const rows = useMemo(
     () => (type === ALL ? d.rows : d.rows.filter((r) => r.type === type)),
     [d.rows, type]);
   const s = useMemo(() => summarise(d.rows, h.price, h.currency), [d.rows, h]);
   const showTrades = type === ALL || type === "Trades";
-
-  // Fewer shares on record than are held means the rest came in before the
-  // window (or by transfer), and the averages above leave them out.
-  const net = s.bought - s.sold;
-  const missing = h.quantity - net;
 
   if (d.rows.length === 0) {
     return (
@@ -129,6 +125,8 @@ function Body({ d, h, type, years }: {
 
   return (
     <>
+      <Total d={d} h={h} years={years} onYears={onYears} />
+
       {showTrades && s.buys + s.sells > 0 && (
         <>
           <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-[12px]">
@@ -145,28 +143,15 @@ function Body({ d, h, type, years }: {
             <Stat label="持仓均价" v={cash(h.avg_cost, h.currency)}
               note="Questrade 成本" />
             {s.buys > 0 && s.buy_pnl != null && (
-              <span className="flex items-baseline gap-1.5"
-                title="每笔买入 ×（现价 − 成交价）之和，不扣除之后卖出的部分，也不含佣金。">
-                <span className="label">买入按现价</span>
+              <span className="flex items-baseline gap-1.5">
+                <span className="label">买入</span>
                 <span className="text-down tnum">{s.below} 笔低于现价</span>
                 <span className="text-ink-mute">·</span>
                 <span className="text-up tnum">{s.above} 笔高于现价</span>
-                <span className={`tnum font-medium ${moveClass(s.buy_pnl, NA)}`}>
-                  {cash(s.buy_pnl, h.currency, 0)}
-                </span>
               </span>
             )}
           </div>
-          <Ladder rows={d.rows} h={h} />
         </>
-      )}
-
-      {showTrades && missing > 1e-6 && (
-        <p className="text-[11.5px] text-ink-dim">
-          记录里净买入 {fixed(net, net % 1 ? 4 : 0)} 股，目前持有
-          {" "}{fixed(h.quantity, h.quantity % 1 ? 4 : 0)} 股 ——
-          另外 {fixed(missing, missing % 1 ? 4 : 0)} 股是更早买入或转入的，不在近 {years} 年的记录里。
-        </p>
       )}
 
       <Table rows={rows} h={h} />
@@ -270,81 +255,108 @@ function Table({ rows, h }: { rows: ActivityRow[]; h: QtHolding }) {
 }
 
 /**
- * Every fill on one price axis, with today's price and the position's
- * average cost drawn across it. Buys sit above the axis, sells below; size
- * is the share count. Green is a fill that looks right from today (a buy
- * below the current price, a sell above it), red the opposite.
+ * 总回报 — the whole of what this ticker has made, in one number.
+ *
+ * Today's market value plus every cash flow on record: buys (with their
+ * commission) out, sells and dividends in, fees and withholding out. Then
+ * the same number taken apart into what is still open, what the sells
+ * locked in, dividends, and the rest — so the parts add up to the total.
  */
-function Ladder({ rows, h }: { rows: ActivityRow[]; h: QtHolding }) {
-  const lots = rows
-    .map((r) => ({ r, lot: lotOf(r, h.price, h.currency) }))
-    .filter((x): x is { r: ActivityRow; lot: NonNullable<ReturnType<typeof lotOf>> } =>
-      !!x.lot && x.r.currency === h.currency);
-  if (lots.length === 0 || h.price == null) return null;
+function Total({ d, h, years, onYears }: {
+  d: QtSymbolActivity; h: QtHolding; years: number; onYears: (y: number) => void;
+}) {
+  const t = useMemo(() => totalReturn(d.rows, h), [d.rows, h]);
+  // Always shown when records are missing: that gap is the thing to say.
+  if (t.complete && t.invested <= 0 && t.dividends === 0) return null;
+  const traded = t.invested > 0 || t.value > 0;
+  const ccy = h.currency;
+  const gap = t.held - t.covered;
+  const longer = SPANS.find((y) => y > years);
 
-  const W = 640, H = 78, PAD = 18, MID = 44;
-  const prices = [...lots.map((x) => x.lot.price), h.price,
-    ...(h.avg_cost != null ? [h.avg_cost] : [])];
-  let lo = Math.min(...prices), hi = Math.max(...prices);
-  const span = hi - lo || hi * 0.1 || 1;
-  lo -= span * 0.06; hi += span * 0.06;
-  const x = (p: number) => PAD + (p - lo) / (hi - lo) * (W - PAD * 2);
-  const maxQ = Math.max(...lots.map((l) => l.lot.quantity));
-  const rad = (q: number) => 3 + Math.sqrt(q / maxQ) * 6;
-
-  const good = "var(--color-down)", bad = "var(--color-up)";
-  const now = h.price;
   return (
-    <div className="flex flex-col gap-0.5">
-    <span className="label text-[11px]">
-      轴线上方为买入、下方为卖出（虚线圈），圈越大股数越多；绿色 = 从今天看是对的
-      （买在现价以下 / 卖在现价以上），红色相反。悬停可看每笔详情。
-    </span>
-    <svg viewBox={`0 0 ${W} ${H}`} width="100%" className="max-w-[760px] h-auto"
-      role="img" aria-label={`${h.symbol} 每笔成交价与现价`}>
-      <line x1={PAD} x2={W - PAD} y1={MID} y2={MID} stroke="var(--color-line)" />
-      <text x={PAD} y={H - 3} fontSize="10" fill="var(--color-ink-mute)">
-        {cash(lo, h.currency)}
-      </text>
-      <text x={W - PAD} y={H - 3} fontSize="10" textAnchor="end" fill="var(--color-ink-mute)">
-        {cash(hi, h.currency)}
-      </text>
+    <div className="flex flex-col gap-1.5 rounded-lg bg-panel px-3 py-2">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className="text-[12.5px] font-semibold">
+          {t.complete ? "总回报" : "有记录部分的回报"}
+        </span>
+        <span className={`text-[18px] font-semibold tnum ${moveClass(t.total, NA)}`}>
+          {cash(t.total, ccy, 0)}
+        </span>
+        {t.pct != null && (
+          <span className={`text-[13px] font-medium tnum ${moveClass(t.total, NA)}`}>
+            {signed(t.pct, 1)}%
+          </span>
+        )}
+        {t.invested > 0 && (
+          <span className="label tnum"
+            title="累计买入花掉的现金（含佣金）。卖了又买的部分会重复计入，所以回报率偏保守。">
+            相对累计买入 {cash(t.invested, ccy, 0)}
+          </span>
+        )}
+      </div>
 
-      {h.avg_cost != null && (
-        <g>
-          <line x1={x(h.avg_cost)} x2={x(h.avg_cost)} y1={14} y2={H - 14}
-            stroke="var(--color-cyan)" strokeDasharray="3 3" />
-          <text x={x(h.avg_cost)} y={H - 3} fontSize="10" textAnchor="middle"
-            fill="var(--color-cyan)">均价 {fixed(h.avg_cost, 2)}</text>
-        </g>
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[12px]">
+        <span className="label">=</span>
+        {t.unrealised != null && t.realised != null ? (
+          <>
+            <Part label="浮动盈亏（持有中）" v={t.unrealised} ccy={ccy}
+              title="现在持有的股份，按 Questrade 的持仓成本算的浮动盈亏" />
+            <Plus />
+            <Part label="已实现（卖出）" v={t.realised} ccy={ccy}
+              title="卖出已经锁定的盈亏，含买卖佣金" />
+            <Plus />
+          </>
+        ) : traded ? (
+          <>
+            <Part label="买卖（含现市值）" v={t.total - t.dividends - t.other}
+              ccy={ccy} title="有记录的股份现市值 + 全部买卖现金流（含佣金）" />
+            <Plus />
+          </>
+        ) : null}
+        <Part label="股息" v={t.dividends} ccy={ccy} title="到账股息，已扣预扣税" />
+        {Math.abs(t.other) >= 0.005 && (
+          <>
+            <Plus />
+            <Part label="费用及其他" v={t.other} ccy={ccy}
+              title="费用、返还和其他带这个代码的现金记录" />
+          </>
+        )}
+      </div>
+
+      {!t.complete && (
+        <p className="text-[11.5px] text-ink-dim">
+          近 {years} 年的记录只覆盖 {fixed(t.covered, t.covered % 1 ? 4 : 0)} 股，
+          目前持有 {fixed(t.held, t.held % 1 ? 4 : 0)} 股。
+          {gap > 0 && <>另外 {fixed(gap, gap % 1 ? 4 : 0)} 股是更早买入或转入的，成本不在记录里，所以没算进去。</>}
+          {longer && (
+            <button onClick={() => onYears(longer)} className="ml-1 text-cyan">
+              查近 {longer} 年 →
+            </button>
+          )}
+        </p>
       )}
-      <line x1={x(now)} x2={x(now)} y1={10} y2={H - 14}
-        stroke="var(--color-ink)" strokeWidth="1.5" />
-      <text x={x(now)} y={9} fontSize="10" textAnchor="middle" fontWeight="600"
-        fill="var(--color-ink)">现价 {fixed(now, 2)}</text>
-
-      {lots.map(({ r, lot }, i) => {
-        const cx = x(lot.price);
-        const ok = lot.side === "buy" ? lot.price <= now : lot.price >= now;
-        const rr = rad(lot.quantity);
-        const y = lot.side === "buy" ? MID - 3 - rr : MID + 3 + rr;
-        return (
-          <circle key={i} cx={cx} cy={y} r={rr}
-            fill={ok ? good : bad} fillOpacity={0.35}
-            stroke={ok ? good : bad} strokeWidth={lot.side === "sell" ? 1.5 : 1}
-            strokeDasharray={lot.side === "sell" ? "2 1.5" : undefined}>
-            <title>
-              {`${r.date} ${lot.side === "buy" ? "买入" : "卖出"} `
-                + `${fixed(lot.quantity, lot.quantity % 1 ? 4 : 0)} 股 @ `
-                + `${cash(lot.price, r.currency)} · ${r.account}`
-                + (lot.vs_now_pct == null ? "" : `\n现价相对 ${signed(lot.vs_now_pct, 1)}%`)}
-            </title>
-          </circle>
-        );
-      })}
-    </svg>
+      {t.skipped > 0 && (
+        <p className="label">另有 {t.skipped} 条非 {ccy} 记录没有计入（不同货币不相加）。</p>
+      )}
     </div>
   );
+}
+
+function Part({ label, v, ccy, title }: {
+  label: string; v: number; ccy: string; title?: string;
+}) {
+  return (
+    <span className="flex items-baseline gap-1" title={title}>
+      <span className="label">{label}</span>
+      <span className={`tnum font-medium ${moveClass(v, NA)}`}>
+        {v > 0 ? "+" : ""}{cash(v, ccy, 0)}
+      </span>
+    </span>
+  );
+}
+
+function Plus() {
+  return <span className="text-ink-mute">+</span>;
 }
 
 function Stat({ label, v, note, tone }: {
