@@ -874,3 +874,63 @@ def trade_marks(app_user_id: int, symbol: str,
     return {"symbol": got["symbol"], "marks": marks,
             "years": got["years"], "accounts": got["accounts"]}
 
+
+
+# ── one instrument's price, for the transaction chart ────────────────────────
+def _window_start(span: int) -> str:
+    """1 January of the oldest year the activity search covers."""
+    return f"{_years(span=span)[-1]}-01-01"
+
+
+def _shape_history(df: pd.DataFrame, start: str) -> dict:
+    """
+    Closes, dividends and splits out of one `Ticker.history(actions=True)`.
+
+    The closes are NOT dividend-adjusted: the chart puts your own fill prices
+    on them, and a fill is a real price. A dividend-adjusted series sits below
+    every old fill by the distributions paid since, which on a monthly payer
+    like QMAX makes every buy look worse than it was. Yahoo does back-adjust
+    `Close` for splits, so the splits come along for the client to restate
+    fills made before one.
+
+    Dividends are keyed by ex-date, which is when the price drops — not the
+    day the cash arrives, typically a week or so later.
+    """
+    if df is None or df.empty:
+        return {"start": start, "closes": [], "dividends": [], "splits": []}
+    df = df.copy()
+    idx = pd.to_datetime(df.index)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    df.index = idx.normalize()
+    df = df[df.index >= pd.Timestamp(start)]
+
+    closes = [[d.date().isoformat(), round(float(v), 4)]
+              for d, v in df["Close"].items() if v == v and v > 0]
+    divs = []
+    if "Dividends" in df:
+        for d, v in df["Dividends"].items():
+            if v and v == v and v > 0:
+                divs.append({"ex_date": d.date().isoformat(), "amount": round(float(v), 6)})
+    splits = []
+    if "Stock Splits" in df:
+        for d, v in df["Stock Splits"].items():
+            if v and v == v and v > 0 and v != 1:
+                splits.append({"date": d.date().isoformat(), "ratio": float(v)})
+    return {"start": start, "closes": closes, "dividends": divs, "splits": splits}
+
+
+def price_history(yahoo: str, span: int = SEARCH_YEARS) -> dict:
+    """Daily closes over the same window the activity search covers."""
+    import yfinance as yf
+
+    start = _window_start(span)
+    # A few days early, so the first close on or after 1 January is in.
+    df = yf.Ticker(yahoo).history(
+        start=(pd.Timestamp(start) - pd.Timedelta(days=7)).date().isoformat(),
+        interval="1d", auto_adjust=False, actions=True)
+    out = _shape_history(df, start)
+    if not out["closes"]:
+        raise LookupError(f"{yahoo} 没有读到行情")
+    out["symbol"] = yahoo
+    return out

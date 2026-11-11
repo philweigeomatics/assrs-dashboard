@@ -2963,6 +2963,40 @@ def questrade_trade_marks(ticker: str = TICKER,
     return out
 
 
+#: Market data, not anyone's account: shared across users, kept for hours.
+_qt_price_cache = TTLCache(maxsize=200, ttl_s=3 * 3600)
+
+
+@app.get("/questrade/price/{ticker}")
+def questrade_price(ticker: str = TICKER,
+                    years: int = Query(3, ge=1, le=10),
+                    user: AppUser = Depends(current_user)):
+    """
+    Raw daily closes, dividend ex-dates and splits for one holding, over the
+    same calendar window as the activity search — the backdrop the holdings
+    panel draws your own buys, sells and dividends on.
+    """
+    from api import questrade_api
+
+    try:
+        market, code = markets.parse(ticker)
+    except LookupError as exc:
+        raise HTTPException(422, str(exc))
+    if market.conv.code == "CN":
+        raise HTTPException(422, "Questrade 只有北美标的")
+
+    key = (code.upper(), int(years))
+    cached = _qt_price_cache.peek(key)
+    if cached:
+        return cached
+    try:
+        out = questrade_api.price_history(code, int(years))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    _qt_price_cache.put(key, out)
+    return out
+
+
 @app.get("/questrade/transactions")
 def questrade_transactions(year: int = Query(..., ge=2000, le=2100),
                            user: AppUser = Depends(current_user)):

@@ -16,9 +16,12 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../../lib/api";
-import type { QtHolding, QtSymbolActivity } from "../../lib/types";
+import type { QtHolding, QtPriceHistory, QtSymbolActivity } from "../../lib/types";
 import { fixed, moveClass, signed } from "../../lib/format";
-import { lotOf, summarise, totalReturn, type ActivityRow } from "../../lib/lots";
+import { lotOf, summarise, totalReturn, type ActivityRow, type TotalReturn }
+  from "../../lib/lots";
+import { localDay } from "../../lib/localDay";
+import { HoldingChart } from "./HoldingChart";
 
 /** North America: green up, red down — same as the holdings table. */
 const NA = false;
@@ -42,6 +45,15 @@ export function HoldingHistory({ h }: { h: QtHolding }) {
     queryKey: ["qt", "activity", h.symbol, years],
     queryFn: () => api.qtActivity(h.symbol, years),
     staleTime: 6 * 3600_000,
+  });
+  // Same window as the activity, for the chart and for pricing shares held
+  // before it. Market data — a failure here costs the chart, not the panel.
+  const px = useQuery({
+    queryKey: ["qt", "price", h.yahoo, h.currency, years],
+    queryFn: () => api.qtPrice(`${h.currency === "CAD" ? "CA" : "US"}:${h.yahoo}`, years),
+    enabled: !!h.yahoo,
+    staleTime: 3 * 3600_000,
+    retry: 1,
   });
   // A name that was only ever transferred in has no trades; don't leave the
   // filter pointing at a type with nothing in it.
@@ -76,7 +88,11 @@ export function HoldingHistory({ h }: { h: QtHolding }) {
       {q.isError && (
         <p className="text-[12px] text-up">{(q.error as ApiError).message}</p>
       )}
-      {q.data && <Body d={q.data} h={h} type={type} years={years} onYears={setYears} />}
+      {q.data && (
+        <Body d={q.data} h={h} type={type} years={years} onYears={setYears}
+          px={px.data} pxState={!h.yahoo ? "none" : px.isPending ? "loading"
+            : px.isError ? (px.error as ApiError).message : "ok"} />
+      )}
     </div>
   );
 }
@@ -105,10 +121,15 @@ function TypeFilter({ d, value, onChange }: {
   );
 }
 
-function Body({ d, h, type, years, onYears }: {
+function Body({ d, h, type, years, onYears, px, pxState }: {
   d: QtSymbolActivity; h: QtHolding; type: string; years: number;
   onYears: (y: number) => void;
+  px: QtPriceHistory | undefined; pxState: string;
 }) {
+  const today = localDay(new Date());
+  const t = useMemo(() => totalReturn(d.rows, h, {
+    today, closes: px?.closes, dividends: px?.dividends,
+  }), [d.rows, h, today, px]);
   const rows = useMemo(
     () => (type === ALL ? d.rows : d.rows.filter((r) => r.type === type)),
     [d.rows, type]);
@@ -125,7 +146,18 @@ function Body({ d, h, type, years, onYears }: {
 
   return (
     <>
-      <Total d={d} h={h} years={years} onYears={onYears} />
+      <div className="grid gap-3 lg:grid-cols-[260px_minmax(0,1fr)] items-start">
+        <Total t={t} h={h} years={years} onYears={onYears} />
+        {px ? (
+          <HoldingChart px={px} rows={d.rows} h={h} pending={t.pending} today={today} />
+        ) : (
+          <p className="label py-10 text-center rounded-lg bg-panel">
+            {pxState === "loading" ? "行情读取中…"
+              : pxState === "none" ? "这只无法匹配行情源，画不了价格图。"
+              : `行情读取失败：${pxState}`}
+          </p>
+        )}
+      </div>
 
       {showTrades && s.buys + s.sells > 0 && (
         <>
@@ -255,79 +287,96 @@ function Table({ rows, h }: { rows: ActivityRow[]; h: QtHolding }) {
 }
 
 /**
- * 总回报 — the whole of what this ticker has made, in one number.
+ * 总回报 — what this ticker has made, in dollars and as a rate.
  *
- * Today's market value plus every cash flow on record: buys (with their
- * commission) out, sells and dividends in, fees and withholding out. Then
- * the same number taken apart into what is still open, what the sells
- * locked in, dividends, and the rest — so the parts add up to the total.
+ * The dollars are today's market value plus every cash flow on record, taken
+ * apart into parts that add back up. The rate is money-weighted (XIRR): it
+ * credits a dollar only for the time it was actually invested, so a top-up
+ * made last month does not dilute the return the way "gain ÷ everything ever
+ * bought" does. Under a year it is given for the period, not annualised —
+ * a 3% month annualised to 40% describes nothing.
  */
-function Total({ d, h, years, onYears }: {
-  d: QtSymbolActivity; h: QtHolding; years: number; onYears: (y: number) => void;
+function Total({ t, h, years, onYears }: {
+  t: TotalReturn; h: QtHolding; years: number; onYears: (y: number) => void;
 }) {
-  const t = useMemo(() => totalReturn(d.rows, h), [d.rows, h]);
-  // Always shown when records are missing: that gap is the thing to say.
-  if (t.complete && t.invested <= 0 && t.dividends === 0) return null;
-  const traded = t.invested > 0 || t.value > 0;
   const ccy = h.currency;
-  const gap = t.held - t.covered;
   const longer = SPANS.find((y) => y > years);
+  const title = t.mode === "full" ? "总回报"
+    : t.mode === "window" ? `近 ${years} 年窗口回报` : "有记录部分的回报";
+  const trading = t.total - t.dividends - t.pending_total - t.other;
 
   return (
-    <div className="flex flex-col gap-1.5 rounded-lg bg-panel px-3 py-2">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <span className="text-[12.5px] font-semibold">
-          {t.complete ? "总回报" : "有记录部分的回报"}
+    <div className="flex flex-col gap-2 rounded-lg bg-panel px-3 py-2.5 self-start w-full
+      max-w-[380px]">
+      <div className="flex flex-col">
+        <span className="text-[12px] font-semibold text-ink-dim">{title}</span>
+        <span className={`text-[22px] leading-tight font-semibold tnum ${moveClass(t.total, NA)}`}>
+          {t.total > 0 ? "+" : ""}{cash(t.total, ccy, 0)}
         </span>
-        <span className={`text-[18px] font-semibold tnum ${moveClass(t.total, NA)}`}>
-          {cash(t.total, ccy, 0)}
-        </span>
-        {t.pct != null && (
-          <span className={`text-[13px] font-medium tnum ${moveClass(t.total, NA)}`}>
-            {signed(t.pct, 1)}%
-          </span>
-        )}
-        {t.invested > 0 && (
-          <span className="label tnum"
-            title="累计买入花掉的现金（含佣金）。卖了又买的部分会重复计入，所以回报率偏保守。">
-            相对累计买入 {cash(t.invested, ccy, 0)}
-          </span>
-        )}
       </div>
 
-      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[12px]">
-        <span className="label">=</span>
+      {t.mwr != null && (
+        <div className="flex flex-col"
+          title={"资金加权回报（XIRR）：让每一笔现金流按发生日期折现后合计为零的那个收益率。"
+            + "\n钱投入的时间越短，对回报率的权重越小 —— 上个月才加的仓不会稀释整体回报。"}>
+          <span className="label">
+            资金加权回报{t.mwr_annualised ? "（年化）" : "（持有期，未年化）"}
+          </span>
+          <span className={`text-[16px] font-semibold tnum ${moveClass(t.mwr, NA)}`}>
+            {signed(t.mwr, 1)}%
+          </span>
+          <span className="label tnum">
+            {t.since} 起 · {span(t.days)}
+          </span>
+        </div>
+      )}
+
+      <div className="flex flex-col gap-0.5 text-[12px] border-t border-line pt-1.5">
         {t.unrealised != null && t.realised != null ? (
           <>
             <Part label="浮动盈亏（持有中）" v={t.unrealised} ccy={ccy}
               title="现在持有的股份，按 Questrade 的持仓成本算的浮动盈亏" />
-            <Plus />
             <Part label="已实现（卖出）" v={t.realised} ccy={ccy}
               title="卖出已经锁定的盈亏，含买卖佣金" />
-            <Plus />
           </>
-        ) : traded ? (
-          <>
-            <Part label="买卖（含现市值）" v={t.total - t.dividends - t.other}
-              ccy={ccy} title="有记录的股份现市值 + 全部买卖现金流（含佣金）" />
-            <Plus />
-          </>
-        ) : null}
-        <Part label="股息" v={t.dividends} ccy={ccy} title="到账股息，已扣预扣税" />
-        {Math.abs(t.other) >= 0.005 && (
-          <>
-            <Plus />
-            <Part label="费用及其他" v={t.other} ccy={ccy}
-              title="费用、返还和其他带这个代码的现金记录" />
-          </>
+        ) : (t.invested > 0 || t.value > 0) && (
+          <Part label={t.mode === "window" ? "买卖（含期初与现市值）" : "买卖（含现市值）"}
+            v={trading} ccy={ccy}
+            title="现市值 + 全部买卖现金流（含佣金）" />
         )}
+        <Part label="股息（已到账）" v={t.dividends} ccy={ccy} title="到账股息，已扣预扣税" />
+        {t.pending_total > 0 && (
+          <Part label="股息（已除息，待到账）" v={t.pending_total} ccy={ccy} est
+            title={t.pending.map((p) => `${p.ex_date} 除息：每股 ${cash(p.per_share, ccy, 4)}`
+              + ` × ${fixed(p.shares, 0)} 股`).join("\n")
+              + "\n除息日股价已经扣掉了这笔股息，但钱还没到账 —— 不加回来，回报会被低估。"} />
+        )}
+        {Math.abs(t.other) >= 0.005 && (
+          <Part label="费用及其他" v={t.other} ccy={ccy}
+            title="费用、返还和其他带这个代码的现金记录" />
+        )}
+        <div className="flex justify-between gap-2 border-t border-line pt-1 mt-0.5">
+          <span className="label">累计投入</span>
+          <span className="tnum text-ink-dim">{cash(t.invested, ccy, 0)}</span>
+        </div>
       </div>
 
-      {!t.complete && (
-        <p className="text-[11.5px] text-ink-dim">
-          近 {years} 年的记录只覆盖 {fixed(t.covered, t.covered % 1 ? 4 : 0)} 股，
-          目前持有 {fixed(t.held, t.held % 1 ? 4 : 0)} 股。
-          {gap > 0 && <>另外 {fixed(gap, gap % 1 ? 4 : 0)} 股是更早买入或转入的，成本不在记录里，所以没算进去。</>}
+      {t.mode === "window" && t.opening && (
+        <p className="text-[11px] text-ink-dim leading-snug">
+          有 {fixed(t.opening.shares, t.opening.shares % 1 ? 4 : 0)} 股在 {years} 年窗口之前就持有，
+          按 {t.opening.date} 收盘价 {cash(t.opening.price, ccy)} 当作期初投入。
+          这是窗口内的回报，不是自首次买入以来的。
+          {longer && (
+            <button onClick={() => onYears(longer)} className="ml-1 text-cyan">
+              查近 {longer} 年 →
+            </button>
+          )}
+        </p>
+      )}
+      {t.mode === "partial" && (
+        <p className="text-[11px] text-ink-dim leading-snug">
+          记录覆盖 {fixed(t.covered, t.covered % 1 ? 4 : 0)} 股，目前持有
+          {" "}{fixed(t.held, t.held % 1 ? 4 : 0)} 股，差额没法定价，所以只算有记录的部分，不给回报率。
           {longer && (
             <button onClick={() => onYears(longer)} className="ml-1 text-cyan">
               查近 {longer} 年 →
@@ -342,21 +391,24 @@ function Total({ d, h, years, onYears }: {
   );
 }
 
-function Part({ label, v, ccy, title }: {
-  label: string; v: number; ccy: string; title?: string;
-}) {
-  return (
-    <span className="flex items-baseline gap-1" title={title}>
-      <span className="label">{label}</span>
-      <span className={`tnum font-medium ${moveClass(v, NA)}`}>
-        {v > 0 ? "+" : ""}{cash(v, ccy, 0)}
-      </span>
-    </span>
-  );
+function span(days: number): string {
+  if (days < 60) return `${Math.round(days)} 天`;
+  const months = Math.round(days / 30.44);
+  const y = Math.floor(months / 12), m = months % 12;
+  return y ? `${y} 年${m ? ` ${m} 个月` : ""}` : `${m} 个月`;
 }
 
-function Plus() {
-  return <span className="text-ink-mute">+</span>;
+function Part({ label, v, ccy, title, est }: {
+  label: string; v: number; ccy: string; title?: string; est?: boolean;
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-2" title={title}>
+      <span className="label">{label}</span>
+      <span className={`tnum font-medium ${moveClass(v, NA)}`}>
+        {est ? "≈ " : ""}{v > 0 ? "+" : ""}{cash(v, ccy, 0)}
+      </span>
+    </div>
+  );
 }
 
 function Stat({ label, v, note, tone }: {

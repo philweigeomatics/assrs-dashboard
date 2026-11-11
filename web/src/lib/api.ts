@@ -19,6 +19,7 @@ import type {
   IndustryTrack,
   WatchBoard,
   QtSymbolActivity,
+  QtPriceHistory,
   QtTradedSymbols,
   QtTradeMarks,
   QtTransactions,
@@ -343,6 +344,9 @@ export const api = {
   qtActivity: (symbol: string, years: number) =>
     call<QtSymbolActivity>(
       `/questrade/activity?symbol=${encodeURIComponent(symbol)}&years=${years}`),
+  qtPrice: (ticker: string, years: number) =>
+    call<QtPriceHistory>(
+      `/questrade/price/${encodeURIComponent(ticker)}?years=${years}`),
   qtTradeMarks: (ticker: string, years: number) =>
     call<QtTradeMarks>(
       `/questrade/trade-marks/${encodeURIComponent(ticker)}?years=${years}`),

@@ -98,6 +98,65 @@ export function summarise(rows: ActivityRow[], now: Num, ccy: string): LotSummar
   };
 }
 
+/** A dated cash flow, from the investor's side: money out is negative. */
+export type Flow = { date: string; amount: number };
+
+const YEAR_MS = 365 * 86400e3;
+
+/**
+ * The money-weighted return (XIRR): the one annual rate at which every cash
+ * flow, discounted to its own date, nets to zero. Annual, as a fraction.
+ *
+ * Solved by bisection rather than Newton: a ticker's flows can be a dozen
+ * buys, sells and dividends in any order, and bisection cannot wander off
+ * to a nonsense root the way Newton can from a bad first guess.
+ */
+export function xirr(flows: Flow[]): Num {
+  const fs = flows.filter((f) => f.amount !== 0 && Number.isFinite(f.amount) && f.date);
+  if (!fs.some((f) => f.amount < 0) || !fs.some((f) => f.amount > 0)) return null;
+  const t0 = Math.min(...fs.map((f) => Date.parse(f.date)));
+  const ts = fs.map((f) => ({ t: (Date.parse(f.date) - t0) / YEAR_MS, a: f.amount }));
+  if (!ts.some((f) => f.t > 0)) return null;
+  const npv = (r: number) => {
+    const l = Math.log1p(r);
+    return ts.reduce((acc, f) => acc + f.a * Math.exp(-f.t * l), 0);
+  };
+  let lo = -0.9999, hi = 10;
+  let flo = npv(lo), fhi = npv(hi);
+  while (flo * fhi > 0 && hi < 1e6) { hi *= 10; fhi = npv(hi); }
+  if (flo * fhi > 0) return null;
+  for (let i = 0; i < 300 && hi - lo > 1e-12; i++) {
+    const mid = (lo + hi) / 2;
+    const fm = npv(mid);
+    if (fm === 0) return mid;
+    if (flo * fm < 0) { hi = mid; fhi = fm; } else { lo = mid; flo = fm; }
+  }
+  return (lo + hi) / 2;
+}
+
+/** Types whose quantity is a real change of holding with its cash on record. */
+const COUNTED = new Set(["Trades", "Dividends", "Corporate actions"]);
+
+/** How far back an unpaid ex-date is still worth looking for. */
+const PENDING_DAYS = 45;
+/** A payment dated a little before the ex-date still counts as that one. */
+const PAY_SLACK_DAYS = 3;
+
+const dayDiff = (a: string, b: string) => (Date.parse(b) - Date.parse(a)) / 86400e3;
+
+export type PendingDividend = {
+  ex_date: string; per_share: number; shares: number; amount: number;
+};
+
+export type ReturnContext = {
+  /** Local "YYYY-MM-DD" — the date today's market value is counted on. */
+  today: string;
+  /** Raw closes, ascending, from the start of the activity window. */
+  closes?: [string, number][];
+  /** Ex-dates and per-share amounts. */
+  dividends?: { ex_date: string; amount: number }[];
+};
+
 /**
  * Everything one ticker has made or lost, from the cash that actually moved.
  *
@@ -105,25 +164,39 @@ export function summarise(rows: ActivityRow[], now: Num, ccy: string): LotSummar
  *
  * Buys are cash out (commission included), sells and dividends are cash in,
  * fees and withholding are cash out — Questrade's `net` on each row already
- * carries the sign and the commission. Nothing is estimated: no cost-base
- * method, no FX assumption. That only works when the records cover every
- * share now held, so `complete` says whether they do; when shares came in
- * before the window or by transfer, their cost is not on record and the
- * total would overstate the gain.
+ * carries the sign and the commission.
  *
- * The trading part is then split into what is still open (Questrade's own
- * unrealised P&L on the shares held) and the remainder, which is what the
- * sells locked in.
+ * Three ways it can come out, in `mode`:
+ *  - "full": the records cover every share held. Exact, and split into what
+ *    is still open (Questrade's own open P&L) and what the sells locked in.
+ *  - "window": some shares were held before the window opened. They are
+ *    counted as bought at the first close of the window, so this is the
+ *    return over the window — a standard way to measure a period — not
+ *    since the first purchase.
+ *  - "partial": the gap cannot be priced (no price history, or more shares
+ *    on record than are held). Only the recorded shares are totalled, and no
+ *    rate is given.
+ *
+ * Dividends are counted when the cash lands, which is what a money-weighted
+ * return wants. But the price drops on the ex-date, a week or so before the
+ * cash arrives, so in that gap the market value has already lost the
+ * dividend and the records do not have it yet. Monthly payers (QMAX, KLIP)
+ * sit in that gap a quarter of the time. Any ex-date in the last 45 days
+ * with no payment since is added back as 待到账, at the per-share amount
+ * times the shares held going into the ex-date.
  */
 export type TotalReturn = {
+  mode: "full" | "window" | "partial";
   total: number;
-  /** total ÷ every dollar that went into buying it. */
-  pct: Num;
+  /** Money that went in: every buy, plus the opening position in "window". */
   invested: number;
   value: number;
+  opening: { date: string; price: number; shares: number; value: number } | null;
   unrealised: Num;
   realised: Num;
   dividends: number;
+  pending: PendingDividend[];
+  pending_total: number;
   /** Fees, withholding and any other cash row tagged with this symbol. */
   other: number;
   /** Shares the records account for, vs shares held. */
@@ -132,20 +205,28 @@ export type TotalReturn = {
   complete: boolean;
   /** Rows in another currency, left out rather than mixed in. */
   skipped: number;
+  /** Money-weighted return, %. Annualised only over a year or more. */
+  mwr: Num;
+  mwr_annualised: boolean;
+  /** From the first cash flow to today. */
+  days: number;
+  since: string | null;
 };
-
-/** Types whose quantity is a real change of holding with its cash on record. */
-const COUNTED = new Set(["Trades", "Dividends", "Corporate actions"]);
 
 export function totalReturn(rows: ActivityRow[], h: {
   price: Num; quantity: number; currency: string; open_pnl: Num;
-}): TotalReturn {
-  let flows = 0, trading = 0, dividends = 0, other = 0, invested = 0;
+}, ctx: ReturnContext): TotalReturn {
+  const flows: Flow[] = [];
+  let trading = 0, dividends = 0, other = 0, invested = 0;
   let covered = 0, skipped = 0;
-  for (const r of rows) {
-    if (r.currency !== h.currency) { skipped += 1; continue; }
+  const mine = rows.filter((r) => {
+    if (r.currency === h.currency) return true;
+    skipped += 1;
+    return false;
+  });
+  for (const r of mine) {
     const net = r.net ?? 0;
-    flows += net;
+    if (net) flows.push({ date: r.date, amount: net });
     if (r.type === "Trades") {
       trading += net;
       if ((r.quantity ?? 0) > 0) invested += -net;
@@ -156,18 +237,66 @@ export function totalReturn(rows: ActivityRow[], h: {
     }
     if (COUNTED.has(r.type)) covered += r.quantity ?? 0;
   }
-  const complete = Math.abs(covered - h.quantity) < 1e-6;
-  // With a gap, value only the shares whose cost is on record.
-  const shares = complete ? h.quantity : Math.max(0, covered);
-  const value = h.price != null && Number.isFinite(h.price) ? shares * h.price : 0;
-  const total = value + flows;
-  const unrealised = complete && h.open_pnl != null ? h.open_pnl : null;
+
+  /** Shares held going into `day`: today's, less every change since. */
+  const heldBefore = (day: string) => h.quantity - mine
+    .filter((r) => COUNTED.has(r.type) && r.date >= day)
+    .reduce((acc, r) => acc + (r.quantity ?? 0), 0);
+
+  const price = h.price != null && Number.isFinite(h.price) ? h.price : null;
+  const gap = h.quantity - covered;
+  const complete = Math.abs(gap) < 1e-6;
+  const first = ctx.closes?.[0];
+  const mode: TotalReturn["mode"] = complete ? "full"
+    : gap > 0 && first && price != null ? "window" : "partial";
+
+  let opening: TotalReturn["opening"] = null;
+  if (mode === "window") {
+    const [date, close] = first!;
+    opening = { date, price: close, shares: gap, value: gap * close };
+    flows.push({ date, amount: -opening.value });
+    invested += opening.value;
+  }
+
+  const pending: PendingDividend[] = [];
+  for (const d of ctx.dividends ?? []) {
+    const age = dayDiff(d.ex_date, ctx.today);
+    if (age < 0 || age > PENDING_DAYS) continue;
+    const paid = mine.some((r) => r.type === "Dividends" && (r.net ?? 0) > 0
+      && dayDiff(d.ex_date, r.date) >= -PAY_SLACK_DAYS);
+    if (paid) continue;
+    const shares = heldBefore(d.ex_date);
+    if (shares > 1e-9) {
+      pending.push({ ex_date: d.ex_date, per_share: d.amount, shares,
+                     amount: shares * d.amount });
+    }
+  }
+  const pending_total = pending.reduce((a, p) => a + p.amount, 0);
+
+  const shares = mode === "partial" ? Math.max(0, Math.min(covered, h.quantity)) : h.quantity;
+  const value = price != null ? shares * price : 0;
+  const recorded = flows.reduce((a, f) => a + f.amount, 0);
+  const total = value + pending_total + recorded;
+
+  const unrealised = mode === "full" && h.open_pnl != null ? h.open_pnl : null;
+
+  let mwr: Num = null, annualised = false, days = 0;
+  const since = flows.length ? flows.map((f) => f.date).sort()[0] ?? null : null;
+  if (since) days = Math.max(0, dayDiff(since, ctx.today));
+  if (mode !== "partial" && since && days > 0) {
+    const r = xirr([...flows, { date: ctx.today, amount: value + pending_total }]);
+    if (r != null) {
+      annualised = days >= 365;
+      mwr = (annualised ? r : Math.pow(1 + r, days / 365) - 1) * 100;
+    }
+  }
+
   return {
-    total,
-    pct: invested > 0 ? total / invested * 100 : null,
-    invested, value,
+    mode, total, invested, value, opening,
     unrealised,
     realised: unrealised == null ? null : value + trading - unrealised,
-    dividends, other, covered, held: h.quantity, complete, skipped,
+    dividends, pending, pending_total, other,
+    covered, held: h.quantity, complete, skipped,
+    mwr, mwr_annualised: annualised, days, since,
   };
 }

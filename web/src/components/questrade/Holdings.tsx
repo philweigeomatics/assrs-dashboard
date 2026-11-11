@@ -16,7 +16,7 @@
  * currency (which is the only way to add the book up).
  */
 
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import type { QtBook, QtHolding } from "../../lib/types";
 import { fixed, moveClass, signed } from "../../lib/format";
@@ -67,8 +67,22 @@ export function Holdings({ book }: { book: QtBook }) {
     .map((s) => ({ ...s, rows: book.holdings.filter((h) => h.group === s.group) }))
     .filter((s) => s.rows.length > 0);
 
+  // The history panel lives in a full-width table row, so on a narrow screen
+  // it would be as wide as the table and its right half off-screen. It is
+  // pinned to the scroll box's visible width instead, carried in a CSS var.
+  const scroller = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const set = () => el.style.setProperty("--qt-visible-w", `${el.clientWidth}px`);
+    set();
+    const ro = new ResizeObserver(set);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   return (
-    <div className="overflow-auto rounded-lg border border-line">
+    <div ref={scroller} className="overflow-auto rounded-lg border border-line">
       <table className="w-full border-collapse text-[12.5px]">
         <thead className="sticky top-0 z-10 bg-panel">
           <tr className="border-b border-line text-ink-mute">
@@ -198,7 +212,9 @@ function Row({ h, base, open, onToggle, history, onHistory }: {
       {history && (
         <tr className="border-b border-line">
           <td colSpan={10} className="p-0">
-            <HoldingHistory h={h} />
+            <div className="sticky left-0" style={{ width: "var(--qt-visible-w, 100%)" }}>
+              <HoldingHistory h={h} />
+            </div>
           </td>
         </tr>
       )}

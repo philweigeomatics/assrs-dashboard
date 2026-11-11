@@ -1807,6 +1807,19 @@ export type QtSymbolActivity = {
   last: string | null;
 };
 
+/**
+ * GET /questrade/price/{ticker} — raw daily closes (split- but NOT
+ * dividend-adjusted, so fills can sit on them), dividend ex-dates and splits,
+ * from 1 January of the oldest year the activity search covers.
+ */
+export type QtPriceHistory = {
+  symbol: string;
+  start: string;
+  closes: [string, number][];
+  dividends: { ex_date: string; amount: number }[];
+  splits: { date: string; ratio: number }[];
+};
+
 /** GET /questrade/trade-marks/{ticker} — your own fills, for the price chart. */
 export type QtTradeMarks = {
   symbol: string;
