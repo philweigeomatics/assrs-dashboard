@@ -108,6 +108,14 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
   }).data ?? null;
 
   const ready = picked.length >= 2 && (useWindow || showLookback);
+
+  // The window is the last part of the signature. Moving only the window
+  // leaves the weights meaningful — they are what gets tested on the new
+  // stretch — so it is told apart from changing anything else.
+  const head = (s: string) => s.slice(0, s.lastIndexOf("|"));
+  const tail = (s: string) => s.slice(s.lastIndexOf("|") + 1);
+  const movedWindow = kept != null && useWindow && tail(kept.sig) !== tail(sig);
+  const view = movedWindow ? { from: win.from!, to: win.to! } : null;
   const go = (t: number | null) => run.mutate(t);
 
   return (
@@ -206,7 +214,7 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
 
       {kept && (
         <Result d={kept.d} market={market} busy={run.isPending} cands={cands}
-          stale={kept.sig !== sig} onPick={go} onSaved={onSaved}
+          stale={head(kept.sig) !== head(sig)} view={view} onPick={go} onSaved={onSaved}
           onSaveWeights={() => {
             // Scroll the save box into view: it lives in the assessment
             // card at the top, a long way from the editor.
@@ -280,8 +288,10 @@ const TONE: Record<string, string> = {
   bad: "text-up border-up/50 bg-up/10",
 };
 
-function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights, cands }: {
+function Result({ d, market, busy, stale, view, onPick, onSaved, onSaveWeights, cands }: {
   d: PortfolioBuild; market: Market; busy: boolean; stale: boolean;
+  /** The 时间窗口 now selected, when it is not the one the weights came from. */
+  view: { from: string; to: string } | null;
   onPick: (t: number | null) => void; onSaved: () => void;
   onSaveWeights: () => void;
   cands: CandidatesState;
@@ -303,6 +313,14 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights, cands 
         <p className="card px-3 py-2 text-[12.5px] text-brand-ink
           border border-brand-ink/40 bg-brand-ink/5">
           输入改过了 —— 下面还是上一次的结果，重新算一次才对得上。
+        </p>
+      )}
+      {!stale && view && (
+        <p className="card px-3 py-2 text-[12.5px] leading-snug text-ink
+          border border-cyan/40 bg-cyan/5">
+          时间窗口换成了 {view.from} → {view.to}。权重、评分和前沿图还是在 {d.from} → {d.to} 上算的；
+          下面的📈 历史模拟已经把这些权重和所有候选放到新窗口里回放，可以直接比谁在新窗口里更好。
+          要在新窗口上重新优化，点「🚀 优化」。
         </p>
       )}
       {/* The assessment leads, as it did on the page. */}
@@ -366,7 +384,7 @@ function Result({ d, market, busy, stale, onPick, onSaved, onSaveWeights, cands 
 
       <section className={`card p-3 flex flex-col gap-2 transition-opacity ${fade}`}>
         <h3 className="text-[13.5px] font-semibold">📈 历史模拟</h3>
-        <Curves d={d} tweak={tweak} cands={cands.list} activeId={activeId} />
+        <Curves d={d} tweak={tweak} cands={cands.list} activeId={activeId} view={view} />
       </section>
     </div>
   );

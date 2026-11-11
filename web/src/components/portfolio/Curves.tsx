@@ -45,9 +45,11 @@ const RANGES = [
 const pcts = (rows: { t: string; weight_pct: number }[]) =>
   Object.fromEntries(rows.filter((h) => h.weight_pct > 0).map((h) => [h.t, h.weight_pct]));
 
-export function Curves({ d, tweak, cands = [], activeId = null }: {
+export function Curves({ d, tweak, cands = [], activeId = null, view = null }: {
   d: PortfolioBuild; tweak: WeighResult | null;
   cands?: Candidate[]; activeId?: string | null;
+  /** The 时间窗口 selected now, when it differs from the one the weights were fitted on. */
+  view?: { from: string; to: string } | null;
 }) {
   const [years, setYears] = usePersistentState<number>("assrs.pf.sim.years", 0);
   const [hidden, setHidden] = useState<Set<string>>(() => new Set());
@@ -55,26 +57,32 @@ export function Curves({ d, tweak, cands = [], activeId = null }: {
   const symbols = [...new Set([...d.holdings.map((h) => h.t),
     ...cands.flatMap((c) => Object.keys(c.weights))])];
   const weights = pcts(d.holdings);
-  const mine = tweak && years > 0 ? pcts(tweak.holdings) : null;
+  // 时间窗口 follows the window picked above. Moved away from the one the
+  // weights were fitted on, every line is replayed over the new stretch with
+  // the weights unchanged — which is the test that matters.
+  const moved = years === 0 && view != null;
+  const mine = tweak && (years > 0 || moved) ? pcts(tweak.holdings) : null;
   const book = cands.length ? Object.fromEntries(cands.map((c) => [c.id, c.weights])) : null;
-  // Over the optimiser's window the other lines are already in hand, so the
-  // request is only for the candidates, replayed over exactly those days.
-  const span = years === 0 ? { start: d.from, end: d.to } : { start: null, end: null };
+  // Over the optimiser's own window the other lines are already in hand, so
+  // the request is only for the candidates, replayed over exactly those days.
+  const span = years > 0 ? { start: null, end: null }
+    : moved ? { start: view.from, end: view.to }
+    : { start: d.from, end: d.to };
 
   const sim = useQuery({
     queryKey: ["portfolio", "simulate", symbols, weights, mine, years, span, book],
     queryFn: () => api.portfolioSimulate({
       symbols, weights, mine, years, ...span, candidates: book }),
-    enabled: years > 0 || book != null,
+    enabled: years > 0 || moved || book != null,
     staleTime: 10 * 60_000,
     retry: false,
     placeholderData: keepPreviousData,
   });
-  const got = years > 0 || book != null ? sim.data ?? null : null;
-  const long = years > 0 ? got : null;
+  const got = years > 0 || moved || book != null ? sim.data ?? null : null;
+  const long = years > 0 || moved ? got : null;
   // A placeholder from a longer range is rebased to a different day, so its
   // candidate lines cannot be laid on the window's.
-  const candResp = years > 0 ? got : sim.isPlaceholderData ? null : got;
+  const candResp = long ? got : sim.isPlaceholderData ? null : got;
 
   const dates = long?.dates ?? d.dates;
   const opt = long?.curve ?? d.curve;
@@ -112,9 +120,12 @@ export function Curves({ d, tweak, cands = [], activeId = null }: {
 
   // Likewise the optimiser's own answer, once it has been saved under a name.
   const optIs = matching(cands, weights);
+  // A candidate saved from an earlier run often carries the method's name.
+  const method = d.mode === "target" ? "目标组合" : d.mode_label;
+  const optLabel = cands.some((c) => c.name === method) ? `${method}（本次优化）` : method;
 
   const series: Line[] = [
-    ...(optIs ? [] : [{ key: "opt", label: d.mode === "target" ? "目标组合" : d.mode_label, values: opt, colour: "var(--color-cyan)" }]),
+    ...(optIs ? [] : [{ key: "opt", label: optLabel, values: opt, colour: "var(--color-cyan)" }]),
     ...(own
       ? [{ key: "mine", label: tweak && !tweak.balanced ? `${mineLabel}（合计 ${tweak.sum_pct}%）` : mineLabel, values: own, colour: MINE }]
       : []),
@@ -167,11 +178,17 @@ export function Curves({ d, tweak, cands = [], activeId = null }: {
     return out;
   };
 
-  // Where the optimiser's window begins, when the replay starts before it.
-  const fitted = long && !isEqual ? dates.indexOf(d.from) : -1;
-  // A window can end before today, and then the days after it are unseen too.
-  const fittedEnd = long && !isEqual ? dates.indexOf(d.to) : -1;
-  const endsEarly = fittedEnd >= 0 && fittedEnd < dates.length - 1;
+  // Which of the days drawn the weights were fitted on: shaded, because the
+  // lines are bound to look good there and nowhere else is that promised.
+  let f0 = -1;
+  let f1 = -1;
+  if (long && !isEqual) {
+    f0 = dates.findIndex((t) => t >= d.from);
+    for (let i = n - 1; i >= 0; i--) if (dates[i]! <= d.to) { f1 = i; break; }
+  }
+  const overlap = f0 >= 0 && f1 >= f0;
+  const inside = overlap && f0 === 0 && f1 === n - 1;
+  const shade = overlap && !inside;
   const benchLabel = d.benchmark ? d.benchmark.label : "基准";
 
   return (
@@ -179,34 +196,37 @@ export function Curves({ d, tweak, cands = [], activeId = null }: {
       <div className="flex flex-wrap items-center gap-1">
         {RANGES.map((r) => (
           <button key={r.years} onClick={() => setYears(r.years)}
-            title={r.years ? `权重不变，回放最近 ${r.years} 年` : "算权重用的那段行情"}
+            title={r.years ? `权重不变，回放最近 ${r.years} 年`
+              : d.window ? "跟着上面选中的时间窗口走" : "算权重用的那段行情"}
             className={`h-7 px-2.5 rounded-md text-[12px] font-medium transition-colors ${
               years === r.years ? "bg-elevated text-ink" : "text-ink-mute hover:text-ink"}`}>
-            {r.label}
+            {r.years === 0 && d.window ? "时间窗口" : r.label}
           </button>
         ))}
         {sim.isFetching && (
           <span className="label ml-1">
-            {years > 0 ? `读取 ${years} 年行情…` : "计算候选…"}
+            {years > 0 ? `读取 ${years} 年行情…` : moved ? "按新窗口回放…" : "计算候选…"}
           </span>
         )}
       </div>
 
       <p className="label leading-snug">
-        {years === 0
+        {years === 0 && !moved
           ? isEqual
             ? `每只一样多，权重不是从这段行情里算出来的，所以这条线可以直接和${benchLabel}比；不过股票本身是今天选的，仍然带着后见之明。`
             : `用最终权重回看这段历史。优化就是在这段数据上做的，所以这条线一定好看 —— 等权和${benchLabel}画在一起才读得出来。`
-          : `权重不变，只把回放拉长。${fitted > 0 || endsEarly
-              ? `${endsEarly ? "两条虚线之间" : "虚线右边"}是算权重用的那段；其余的行情优化器没见过，更能说明这组权重的成色，不过股票本身是今天选的，仍然带着后见之明。`
-              : ""}`}
+          : `权重不变，${moved ? `按上面选中的 ${view.from} → ${view.to} 回放` : "只把回放拉长"}。${
+              isEqual ? ""
+              : inside ? `这段全在算权重用的 ${d.from} → ${d.to} 里面，所以本次优化的线一定好看；从别的窗口存下来的候选不受这个影响。`
+              : overlap ? `浅色那段是算权重用的 ${d.from} → ${d.to}；其余的行情优化器没见过，更能说明这组权重的成色，不过股票本身是今天选的，仍然带着后见之明。`
+              : `这段行情完全在算权重用的 ${d.from} → ${d.to} 之外，优化器一天也没见过 —— 这是对这组权重最干净的检验，不过股票本身是今天选的，仍然带着后见之明。`}`}
         {" "}每天按同一组权重计算，从起点的 0% 复利；股票含分红，{benchLabel}是价格指数、不含分红。
         {!tweak && !cands.length && " 在上面的配置里改权重、点「计算」，这里会多一条你的权重的线；存成候选的每一组也各有一条。"}
       </p>
 
-      {(years > 0 || book) && sim.isError && (
+      {(years > 0 || moved || book) && sim.isError && (
         <p className="text-[12.5px] text-up">
-          {(sim.error as ApiError).message} —— {years > 0 ? "下面还是优化窗口的结果。" : "候选的线画不出来。"}
+          {(sim.error as ApiError).message} —— {years > 0 || moved ? "下面还是优化窗口的结果。" : "候选的线画不出来。"}
         </p>
       )}
       {got?.limited_by && (
@@ -246,13 +266,17 @@ export function Curves({ d, tweak, cands = [], activeId = null }: {
             <line x1={0} x2={VW} y1={y(0)} y2={y(0)} stroke="var(--color-line-bright)"
               vectorEffect="non-scaling-stroke" />
           )}
-          {fitted > 0 && (
-            <line x1={x(fitted)} x2={x(fitted)} y1={0} y2={VH}
+          {shade && (
+            <rect x={x(f0)} width={Math.max(1, x(f1) - x(f0))} y={0} height={VH}
+              fill="var(--color-cyan)" opacity={0.07} />
+          )}
+          {shade && f0 > 0 && (
+            <line x1={x(f0)} x2={x(f0)} y1={0} y2={VH}
               stroke="var(--color-ink-mute)" strokeDasharray="4 4"
               vectorEffect="non-scaling-stroke" />
           )}
-          {endsEarly && (
-            <line x1={x(fittedEnd)} x2={x(fittedEnd)} y1={0} y2={VH}
+          {shade && f1 < n - 1 && (
+            <line x1={x(f1)} x2={x(f1)} y1={0} y2={VH}
               stroke="var(--color-ink-mute)" strokeDasharray="4 4"
               vectorEffect="non-scaling-stroke" />
           )}
@@ -262,20 +286,12 @@ export function Curves({ d, tweak, cands = [], activeId = null }: {
               vectorEffect="non-scaling-stroke" />
           ))}
         </svg>
-        {fitted > 0 && (
+        {shade && (
           <span className="absolute top-0 label font-mono tnum px-1 whitespace-nowrap"
-            style={fitted / (n - 1) < 0.7
-              ? { left: `${(fitted / (n - 1)) * 100}%` }
-              : { right: `${(1 - fitted / (n - 1)) * 100}%` }}>
-            {d.from} 起算权重
-          </span>
-        )}
-        {endsEarly && (
-          <span className="absolute top-4 label font-mono tnum px-1 whitespace-nowrap"
-            style={fittedEnd / (n - 1) < 0.7
-              ? { left: `${(fittedEnd / (n - 1)) * 100}%` }
-              : { right: `${(1 - fittedEnd / (n - 1)) * 100}%` }}>
-            {d.to} 止
+            style={f0 / (n - 1) < 0.6
+              ? { left: `${(f0 / (n - 1)) * 100}%` }
+              : { right: `${(1 - f1 / (n - 1)) * 100}%` }}>
+            算权重 {d.from} → {d.to}
           </span>
         )}
       </div>

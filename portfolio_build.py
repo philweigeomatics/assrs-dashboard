@@ -1129,6 +1129,26 @@ def sim_closes(symbols: list[str], years: int, *, start: str | None = None,
     return px
 
 
+def window_of(px: pd.DataFrame, start: str, end: str | None = None) -> pd.DataFrame:
+    """
+    The stretch [start, end] of closes already read, with `attrs` rewritten
+    for it — so moving the 时间窗口 replays from one cached read instead of
+    one call per stock every time.
+
+    A stock that started late only cut this window short if it started after
+    the window did.
+    """
+    sub = px.loc[pd.Timestamp(start):pd.Timestamp(end) if end else None].copy()
+    if len(sub) < 2:
+        raise LookupError(f"{start} → {end or '今天'} 这段里这些股票没有共同的交易日")
+    limited = px.attrs.get("limited_by")
+    late = limited is not None and \
+        pd.Timestamp(limited[1]) > pd.Timestamp(start) + pd.Timedelta(days=SIM_SLACK_DAYS)
+    sub.attrs = {"missing": px.attrs.get("missing", []), "asked_from": str(start),
+                 "limited_by": limited if late else None}
+    return sub
+
+
 def simulate(px: pd.DataFrame, weights: dict, mine: dict | None = None,
              candidates: dict[str, dict] | None = None) -> dict:
     """

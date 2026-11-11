@@ -1656,13 +1656,24 @@ def portfolio_simulate_route(req: SimulateReq, user: AppUser = Depends(current_u
 
     if req.years == 0 and req.start is None:
         raise HTTPException(422, "years=0 需要给出 start")
-    start = req.start if req.years == 0 else None
-    end = req.end if req.years == 0 else None
+    syms = tuple(sorted(req.symbols))
+    longest = max(portfolio_build.SIM_YEARS)
     try:
-        px = _sim_closes_cache.get_or_compute(
-            (tuple(sorted(req.symbols)), req.years, start, end),
-            lambda: portfolio_build.sim_closes(req.symbols, req.years,
-                                               start=start, end=end))
+        if req.years:
+            px = _sim_closes_cache.get_or_compute(
+                (syms, req.years), lambda: portfolio_build.sim_closes(req.symbols, req.years))
+        else:
+            # A window is cut from the longest read, which the 10年 button
+            # shares — dragging the 时间窗口 around then costs no new reads.
+            full = _sim_closes_cache.get_or_compute(
+                (syms, longest), lambda: portfolio_build.sim_closes(req.symbols, longest))
+            if req.start >= str(full.attrs.get("asked_from")):
+                px = portfolio_build.window_of(full, req.start, req.end)
+            else:
+                px = _sim_closes_cache.get_or_compute(
+                    (syms, 0, req.start, req.end),
+                    lambda: portfolio_build.sim_closes(req.symbols, 0,
+                                                       start=req.start, end=req.end))
         return portfolio_build.simulate(px, req.weights, req.mine, req.candidates)
     except LookupError as exc:
         raise HTTPException(422, str(exc))

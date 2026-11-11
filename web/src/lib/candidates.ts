@@ -31,13 +31,13 @@ export const MAX_CANDIDATES = 8;
  * Red and green are left out because on these pages they mean up and down.
  */
 export const CANDIDATE_COLOURS = [
-  "#3b82f6", "#ec4899", "#0d9488", "#a16207",
-  "#6366f1", "#f97316", "#0ea5e9", "#be185d",
+  "#ec4899", "#a16207", "#6366f1", "#f97316",
+  "#3b82f6", "#be185d", "#0d9488", "#eab308",
 ];
 
 export const colourOf = (list: Candidate[], id: string) =>
   CANDIDATE_COLOURS[Math.max(0, list.findIndex((c) => c.id === id)) % CANDIDATE_COLOURS.length]
-  ?? "#3b82f6";
+  ?? "#ec4899";
 
 /** Only what is actually held, rounded the way the inputs are. */
 export const heldOnly = (w: WeightDraft): WeightDraft =>

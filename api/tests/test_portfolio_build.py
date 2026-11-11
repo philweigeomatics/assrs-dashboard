@@ -995,3 +995,28 @@ def test_a_candidate_with_no_weight_is_refused(old):
     px = pb.sim_closes(list(old), 1)
     with pytest.raises(LookupError):
         pb.simulate(px, {"600519": 50, "000001": 50}, candidates={"x": {"600519": 0}})
+
+
+# ── replaying a moved 时间窗口 out of one long read ──────────────────────────
+def test_a_window_cut_from_the_long_read_matches_reading_it_directly(old):
+    full = pb.sim_closes(list(old), 10)
+    cut = pb.window_of(full, "2022-03-01", "2023-06-30")
+    direct = pb.sim_closes(list(old), 0, start="2022-03-01", end="2023-06-30")
+    assert list(cut.index) == list(direct.index)
+    w = {"600519": 60, "000001": 40}
+    assert pb.simulate(cut, w)["curve"] == pb.simulate(direct, w)["curve"]
+    assert cut.attrs["asked_from"] == "2022-03-01" and cut.attrs["limited_by"] is None
+
+
+def test_a_late_listing_only_limits_windows_that_start_before_it(old):
+    old["300750"] = long_walk(3, "2021-06-01")
+    full = pb.sim_closes(list(old), 10)
+    assert full.attrs["limited_by"][0] == "300750"
+    assert pb.window_of(full, "2020-01-02", "2022-01-04").attrs["limited_by"][0] == "300750"
+    assert pb.window_of(full, "2023-01-03", "2024-01-02").attrs["limited_by"] is None
+
+
+def test_an_empty_window_is_refused(old):
+    full = pb.sim_closes(list(old), 1)
+    with pytest.raises(LookupError):
+        pb.window_of(full, "2010-01-04", "2010-06-30")
