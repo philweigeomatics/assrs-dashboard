@@ -445,6 +445,60 @@ def seasonality_view(ticker: str = TICKER, years: int = Query(3),
         raise HTTPException(503, str(exc))
 
 
+_zones_cache = TTLCache(maxsize=40, ttl_s=6 * 3600)
+
+
+@app.get("/zones/{ticker}")
+def price_zones_view(ticker: str = TICKER, user: AppUser = Depends(current_user)):
+    """
+    价值区间: the price ranges the stock spent most of the last five years in
+    (from listing when younger), when it was in each, and — A-shares — what
+    P/E the market paid there.
+
+    Its own five-year read, not the analysis frame: the indicators stay on
+    their 3-year window and regime anchor, which this view does not touch.
+    Cached six hours.
+    """
+    import time
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    import price_zones
+    market, code = markets.parse(ticker)
+    zone = "Asia/Shanghai" if market.conv.code == "CN" else "America/New_York"
+    today = datetime.now(ZoneInfo(zone)).date()
+
+    def load():
+        start = price_zones.start_date(today)
+        df = None
+        for attempt in range(2):
+            df = market.fetch_ohlcv_since(code, start)
+            if df is not None:
+                break
+            time.sleep(1.5 * (attempt + 1))
+        if df is None:
+            raise RuntimeError(f"price data for {ticker} could not be fetched — try again")
+        pe = None
+        try:
+            fund = market.fetch_fundamentals(
+                code, df.index.min().strftime("%Y%m%d"), df.index.max().strftime("%Y%m%d"))
+            if fund is not None and "PE_TTM" in fund.columns:
+                pe = fund["PE_TTM"]
+        except Exception:                                       # noqa: BLE001
+            pe = None                         # the zones stand without it
+        out = price_zones.build(df, asked_from=start, pe=pe)
+        return {"ticker": markets.canonical(ticker), "market": market.conv.code,
+                "up_is_red": market.conv.up_is_red,
+                "currency_symbol": market.conv.currency_symbol,
+                "has_pe": pe is not None, **out}
+
+    try:
+        return _zones_cache.get_or_compute((markets.canonical(ticker), today.isoformat()), load)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
 @app.post("/simulate/{ticker}")
 def simulate(req: SimReq, ticker: str = TICKER, user: AppUser = Depends(current_user)):
     """

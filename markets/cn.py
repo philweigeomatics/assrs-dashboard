@@ -74,6 +74,15 @@ class CNMarket(Market):
             symbol, start_date=start.strftime("%Y%m%d"))
         return None if df is None or df.empty else df["Close"]
 
+    def fetch_ohlcv_since(self, symbol: str, start) -> pd.DataFrame | None:
+        import data_manager
+        df = data_manager.get_single_stock_data_live(
+            symbol, start_date=start.strftime("%Y%m%d"))
+        if df is None or df.empty:
+            return None
+        keep = [c for c in ("Open", "High", "Low", "Close", "Volume") if c in df.columns]
+        return df[keep]
+
     def fetch_benchmark_since(self, start) -> pd.Series | None:
         import data_manager
         idx = data_manager.get_index_data_live(

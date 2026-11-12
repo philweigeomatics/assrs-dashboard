@@ -16,6 +16,7 @@ import { SectorPanel } from "../components/SectorPanel";
 import { CompareStats } from "../components/CompareStats";
 import { EquityBriefPanel } from "../components/EquityBriefPanel";
 import { SeasonalityPanel } from "../components/SeasonalityPanel";
+import { PriceZonesPanel } from "../components/PriceZonesPanel";
 import { RiskRadarPanel } from "../components/RiskRadarPanel";
 
 const VIEWS = [
@@ -189,6 +190,10 @@ export function TechnicalAnalysis() {
         )}
 
         {/* Every market: it needs only adjusted closes and the index. */}
+        {/* Its own five-year read, like 季节性: the indicators above stay on
+            their 3-year, regime-anchored window. */}
+        {analysis.data && <PriceZonesPanel ticker={analysis.data.ticker} />}
+
         {analysis.data && <SeasonalityPanel ticker={analysis.data.ticker} />}
 
         {/* Closed until asked for: the AI half costs a DeepSeek call per

@@ -2250,3 +2250,27 @@ export type IndexRulesBody = {
   name: string; method: IndexMethod; rebalance: IndexRebalance; cap_pct: number | null; base_date: string;
   bench?: string | null;
 };
+
+/** 价值区间 — /zones/{ticker}. */
+export type ZonePeriod = { from: string; to: string; sessions: number; days: number; avg: number | null };
+export type PriceZone = {
+  id: number; rank: number;
+  lo: number; hi: number; peak: number;
+  days: number; share: number;
+  recent_days: number; recent_share: number;
+  visits: number; longest: number;
+  first: string | null; last: string | null;
+  pe: number | null; pe_price: number | null;
+  periods: ZonePeriod[];
+};
+export type PriceZones = {
+  ticker: string; market: string; up_is_red: boolean; currency_symbol: string; has_pe: boolean;
+  asked_from: string; start: string; profile_start: string; end: string;
+  listed_late: boolean; ipo_skipped: number; sessions: number;
+  dates: string[]; close: (number | null)[];
+  profile: { price: (number | null)[]; time: (number | null)[]; volume: (number | null)[] };
+  value_area: { lo: number; hi: number; poc: number; share: number };
+  settled: number;
+  zones: PriceZone[];
+  now: { close: number; date: string; pe: number | null; zone: number | null; above: number | null; below: number | null };
+};

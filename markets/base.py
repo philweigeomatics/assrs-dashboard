@@ -108,5 +108,19 @@ class Market:
             return None
         return df.loc[df.index >= pd.Timestamp(start), "Close"]
 
+    def fetch_ohlcv_since(self, symbol: str, start) -> pd.DataFrame | None:
+        """
+        Adjusted daily bars from `start` (a date) to today — for views that
+        need more history than the 3-year window the signals are calibrated
+        on (价值区间 reads five years). A stock listed after `start` simply
+        starts at its first session.
+        """
+        import datetime as _dt
+        years = _dt.date.today().year - start.year + 1
+        df = self.fetch_ohlcv(symbol, years=years)
+        if df is None or df.empty:
+            return None
+        return df.loc[df.index >= pd.Timestamp(start)]
+
     def fetch_benchmark_since(self, start) -> pd.Series | None:
         return self.fetch_closes_since(self.conv.benchmark, start)
