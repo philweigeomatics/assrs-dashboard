@@ -31,6 +31,7 @@ import { useSymbolSearch } from "../../lib/useSymbolSearch";
 import { IndexCompare } from "./IndexCompare";
 import { usePersistentState } from "../../lib/usePersistentState";
 import { fixed, moveClass, signed } from "../../lib/format";
+import { liveFor, useIndexLive, type LiveRead } from "../../lib/indexLive";
 
 const MARKETS = [{ v: "CN", label: "A 股" }, { v: "US", label: "美股" }] as const;
 const WINDOWS: { v: IndexWindow; label: string }[] = [
@@ -352,15 +353,25 @@ function Body({ d }: { d: CustomIndexDetail }) {
   const red = d.index.market === "CN";
   const s = d.stats;
   const b = d.bench_ret;
+  // US indexes move with the session: the headline is the live level and
+  // today's change against the last stored close, until today's is stored.
+  const live = useIndexLive(d.index.market === "US");
+  const lv = liveFor(live.data, d.index.id, d.as_of);
+  const chg = lv ? lv.chg : s.ret["1d"];
   return (
     <>
       <section className="card p-3 flex flex-col gap-3">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <span className="text-[22px] font-semibold tnum">{fixed(s.level, 2)}</span>
-          <span className={`text-[15px] font-semibold tnum ${moveClass(s.ret["1d"], red)}`}>{signed(s.ret["1d"], 2, "%")}</span>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="text-[22px] font-semibold tnum">{fixed(lv ? lv.level : s.level, 2)}</span>
+          <span className={`text-[15px] font-semibold tnum ${moveClass(chg, red)}`}>{signed(chg, 2, "%")}</span>
+          {lv ? <LiveBadge lv={lv} red={red} /> : (
+            <span className="label" title="每天收盘后存下的点位与它较前一个交易日的涨跌">{d.as_of} 收盘</span>
+          )}
+        </div>
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 -mt-2">
           <span className="label">
             {d.method_label} · {d.hold ? "不调仓" : `${d.rebalance_label}调仓`}
-            {d.index.cap_pct ? ` · 单只上限 ${d.index.cap_pct}%` : ""} · 对比 {d.bench_label} · 起始 {d.start} = 1000 · 截至 {d.as_of}
+            {d.index.cap_pct ? ` · 单只上限 ${d.index.cap_pct}%` : ""} · 对比 {d.bench_label} · 起始 {d.start} = 1000 · {lv ? `下面各区间截至 ${d.as_of} 收盘` : `截至 ${d.as_of}`}
             {d.next_rebalance ? ` · 下次调仓 ${d.next_rebalance} 后首个交易日` : ""}
           </span>
         </div>
@@ -374,12 +385,13 @@ function Body({ d }: { d: CustomIndexDetail }) {
           <Tile k="年化波动" v={s.vol != null ? `${fixed(s.vol, 0)}%` : "—"}
             sub={s.d200 != null ? `偏离 200 日 ${signed(s.d200, 1, "%")}` : "不足 200 日"} />
         </div>
-        <Split d={d} />
+        <Split d={d} lv={lv} />
+        <DailyBars d={d} lv={lv} />
         {d.bench_note && <p className="label text-brand-ink">{d.bench_note}</p>}
         <LevelChart d={d} />
       </section>
 
-      <Members d={d} />
+      <Members d={d} lv={lv} />
       <Events d={d} />
       <p className="label leading-snug">
         全收益指数（复权价，分红再投资）。每个交易日收盘后存下当天的点位，已存的日子不再重算。成分变化、调仓都在当日收盘生效，点位连续；停牌股按停牌前价格计入且不参与调仓；
@@ -405,12 +417,14 @@ function Body({ d }: { d: CustomIndexDetail }) {
  * where each move happened. Compounded over a window the two show where an
  * index makes and loses its moves. And the members' turnover.
  */
-function Split({ d }: { d: CustomIndexDetail }) {
+function Split({ d, lv }: { d: CustomIndexDetail; lv: LiveRead | null }) {
   const red = d.index.market === "CN";
   const s = d.stats;
   const wins = (["1d", "1m", "3m", "1y"] as const).filter((k) => s.split?.[k]);
   if (!wins.length && s.amount == null) return null;
-  const label = { "1d": "今日", "1m": "1 月", "3m": "3 月", "1y": "1 年" };
+  // Built from stored opens and closes: while the session is live, its
+  // single day is the last stored one, so it is named by its date.
+  const label = { "1d": lv ? d.as_of.slice(5) : "今日", "1m": "1 月", "3m": "3 月", "1y": "1 年" };
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px] tnum">
       {wins.length > 0 && <span className="label" title="开盘跳空 = 开盘价 vs 前一日收盘价（休市期间的消息在开盘时一次反映）；盘中 = 收盘价 vs 开盘价。都只用交易时段的价格，两者相乘就是当日涨跌">开盘跳空 / 盘中</span>}
@@ -431,6 +445,101 @@ function Split({ d }: { d: CustomIndexDetail }) {
           {s.amount_x20 != null && <span className={`ml-1 ${s.amount_x20 >= 1.5 ? "font-semibold" : "label"}`}>×{fixed(s.amount_x20, 2)}</span>}
         </span>
       )}
+    </div>
+  );
+}
+
+/** "● 盘中" with the session's path so far, or the close not yet stored. */
+function LiveBadge({ lv, red }: { lv: LiveRead; red: boolean }) {
+  return (
+    <span className="flex items-center gap-2 flex-wrap">
+      <IntradaySpark lv={lv} red={red} />
+      <span className="text-[12px] leading-tight">
+        {lv.open
+          ? <span className="font-semibold text-cyan">● 盘中 · 纽约 {lv.as_of}</span>
+          : <span className="font-semibold text-ink-dim">{lv.session} 收盘 · 尚未入库</span>}
+        <span className="label block">
+          较 {lv.ref_date} 收盘 {fixed(lv.ref_level, 2)}{lv.open ? " · 每分钟更新" : " · 纽约 17 点后存下"}
+        </span>
+      </span>
+    </span>
+  );
+}
+
+function IntradaySpark({ lv, red }: { lv: LiveRead; red: boolean }) {
+  const vs = lv.levels;
+  const ref = lv.ref_level;
+  if (vs.length < 2 || ref == null) return null;
+  const W = 150, H = 34;
+  const nums = vs.filter((v): v is number => v != null);
+  const lo = Math.min(ref, ...nums), hi = Math.max(ref, ...nums);
+  const span = hi - lo || 1;
+  // The x axis is the whole session, 9:30 to 16:00, so a morning read is a
+  // short line on the left rather than a full-width one.
+  const mins = (t: string) => { const [h, m] = t.split(":").map(Number); return (h! - 9) * 60 + m! - 30; };
+  const x = (i: number) => (Math.min(390, Math.max(0, mins(lv.times[i] ?? "09:30"))) / 390) * W;
+  const y = (v: number) => H - 2 - ((v - lo) / span) * (H - 4);
+  const up = lv.level >= ref;
+  const stroke = up === red ? "var(--color-up)" : "var(--color-down)";
+  return (
+    <svg width={W} height={H} className="block shrink-0" aria-label="今日盘中走势">
+      <line x1={0} x2={W} y1={y(ref)} y2={y(ref)} stroke="var(--color-ink-mute)" strokeDasharray="2 3" strokeWidth={1} />
+      <path d={linePath(vs, x, y)} fill="none" stroke={stroke} strokeWidth={1.5} />
+    </svg>
+  );
+}
+
+/**
+ * Day over day: each of the last sessions' change against the one before,
+ * from the stored closes — and today's, live, as an outlined bar at the end
+ * while the US session runs.
+ */
+const DAILY_BARS = 30;
+
+function DailyBars({ d, lv }: { d: CustomIndexDetail; lv: LiveRead | null }) {
+  const red = d.index.market === "CN";
+  const [hover, setHover] = useState<number | null>(null);
+  const { dates, level } = d.chart;
+  const bars: { date: string; v: number; live?: boolean }[] = [];
+  for (let i = Math.max(1, level.length - DAILY_BARS); i < level.length; i++) {
+    const a = level[i - 1], c = level[i];
+    if (a != null && c != null && a !== 0) bars.push({ date: dates[i]!, v: (c / a - 1) * 100 });
+  }
+  if (lv) bars.push({ date: `${lv.session}${lv.open ? " 盘中" : ""}`, v: lv.chg, live: true });
+  if (bars.length < 2) return null;
+  const max = Math.max(...bars.map((x) => Math.abs(x.v)), 0.5);
+  const ups = bars.filter((x) => x.v > 0).length, downs = bars.filter((x) => x.v < 0).length;
+  const colour = (v: number) => ((v > 0) === red ? "var(--color-up)" : "var(--color-down)");
+  const h = hover != null ? bars[hover] : null;
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex flex-wrap items-baseline gap-x-3 text-[12.5px]">
+        <span className="font-semibold">每日涨跌</span>
+        <span className="label">近 {bars.length} 个交易日 · 涨 {ups} 天 / 跌 {downs} 天</span>
+        <span className="ml-auto tnum">
+          {h ? <>{h.date} <b className={moveClass(h.v, red)}>{signed(h.v, 2, "%")}</b></>
+             : <span className="label">移到柱子上看当天</span>}
+        </span>
+      </div>
+      <div className="flex items-stretch gap-[2px] h-16" onMouseLeave={() => setHover(null)}>
+        {bars.map((x, i) => {
+          const pct = (Math.abs(x.v) / max) * 50;
+          return (
+            <div key={x.date} className="flex-1 min-w-0 relative" onMouseEnter={() => setHover(i)}
+              title={`${x.date} ${signed(x.v, 2, "%")}`}>
+              <div className="absolute left-0 right-0 top-1/2 h-px bg-line" />
+              <div className="absolute left-0 right-0 rounded-[1px]"
+                style={{
+                  height: `${Math.max(pct, 1)}%`,
+                  ...(x.v >= 0 ? { bottom: "50%" } : { top: "50%" }),
+                  background: x.live ? "transparent" : colour(x.v),
+                  border: x.live ? `1.5px solid ${colour(x.v)}` : undefined,
+                  opacity: hover == null || hover === i ? 1 : 0.55,
+                }} />
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -527,7 +636,7 @@ function LevelChart({ d }: { d: CustomIndexDetail }) {
 }
 
 // ── members ──────────────────────────────────────────────────────────────────
-function Members({ d }: { d: CustomIndexDetail }) {
+function Members({ d, lv }: { d: CustomIndexDetail; lv: LiveRead | null }) {
   const qc = useQueryClient();
   const red = d.index.market === "CN";
   const [win, setWin] = usePersistentState<IndexWindow>("assrs.index.window", "1m");
@@ -555,8 +664,13 @@ function Members({ d }: { d: CustomIndexDetail }) {
   const live = d.members.filter((m) => !["removed", "delisted"].includes(m.status));
   const gone = d.members.filter((m) => ["removed", "delisted"].includes(m.status));
   const rows = showGone ? [...live, ...gone] : live;
-  const maxC = Math.max(0.01, ...d.members.map((m) => Math.abs(m.contrib[win] ?? 0)));
-  const sum = d.members.reduce((a, m) => a + (m.contrib[win] ?? 0), 0);
+  // While the US session runs, 今日 is the live session's: each member against
+  // the stored close the index's live level is measured from. Members the
+  // live read could not price (halted, not yet joined) show no move.
+  const day = (m: IndexMember) => (lv ? lv.members[m.ticker]?.chg ?? null : m.ret_1d);
+  const part = (m: IndexMember) => (lv && win === "1d" ? lv.members[m.ticker]?.contrib ?? null : m.contrib[win]);
+  const maxC = Math.max(0.01, ...d.members.map((m) => Math.abs(part(m) ?? 0)));
+  const sum = d.members.reduce((a, m) => a + (part(m) ?? 0), 0);
 
   return (
     <section className="card p-3 flex flex-col gap-2">
@@ -577,7 +691,9 @@ function Members({ d }: { d: CustomIndexDetail }) {
               <th className="sticky left-0 z-10 bg-panel font-normal py-1">成分</th>
               <th className="font-normal">状态</th>
               <th className="font-normal" title="今天的实际权重；竖线 = 下次调仓要调回的目标">权重 · 目标</th>
-              <th className="font-normal text-right pr-2">今日</th>
+              <th className="font-normal text-right pr-2" title={lv ? `较 ${lv.ref_date} 收盘${lv.open ? `，纽约 ${lv.as_of}` : ""}` : undefined}>
+                今日{lv?.open && <span className="text-cyan"> ●</span>}
+              </th>
               <th className="font-normal" title="对指数涨跌的贡献（百分点）">贡献 · {WINDOWS.find((w) => w.v === win)!.label}</th>
               <th className="font-normal">加入</th>
               <th className="font-normal" />
@@ -597,8 +713,8 @@ function Members({ d }: { d: CustomIndexDetail }) {
                 <td className="py-1.5 pr-2">
                   <WeightBar w={m.weight} t={m.target} />
                 </td>
-                <td className={`py-1.5 pr-2 text-right ${moveClass(m.ret_1d, red)}`}>{signed(m.ret_1d, 2, "%")}</td>
-                <td className="py-1.5 pr-2"><ContribBar v={m.contrib[win]} max={maxC} red={red} /></td>
+                <td className={`py-1.5 pr-2 text-right ${moveClass(day(m), red)}`}>{signed(day(m), 2, "%")}</td>
+                <td className="py-1.5 pr-2"><ContribBar v={part(m)} max={maxC} red={red} /></td>
                 <td className="py-1.5 pr-2 label whitespace-nowrap">{m.added_on}{m.removed_on ? ` → ${m.removed_on}` : ""}</td>
                 <td className="py-1.5 whitespace-nowrap text-right">
                   {(m.status === "active" || m.status === "halted") && (

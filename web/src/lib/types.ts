@@ -1077,7 +1077,9 @@ export type IndexLive = {
   open: boolean; session: string | null; as_of: string | null; now: string; ttl: number;
   times?: string[];
   indexes: { id: number; name: string; ref_date?: string; ref_level?: number | null; level?: number | null;
-             chg?: number | null; levels?: (number | null)[]; missing?: string[]; error?: string }[];
+             chg?: number | null; levels?: (number | null)[]; missing?: string[]; error?: string;
+             /** Each held member's move so far today (%) and its contribution to the index (percentage points). */
+             members?: Record<string, { chg: number | null; contrib: number | null }> }[];
 };
 
 // ── 信用与债务 ──────────────────────────────────────────────────────────────────
@@ -2149,6 +2151,8 @@ export type EtfRow = {
   spark: (number | null)[]; spark_ma200: (number | null)[];
   /** Set on 我的指数 rows: the 自建指数 this row reads. */
   index_id?: number; method?: string;
+  /** Set on a US 我的指数 row while its price and 1-day change are the live session's, not a stored close. */
+  live?: { open: boolean; as_of: string | null; session: string; ref_date: string };
   /** Set when the readings use the same rules replayed from earlier than the index starts. */
   extended_from?: string | null;
   /** 我的指数 only: what 相对 is measured against when it is the index's own comparison. */

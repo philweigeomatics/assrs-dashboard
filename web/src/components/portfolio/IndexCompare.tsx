@@ -17,6 +17,7 @@ import { api } from "../../lib/api";
 import type { IndexCompare as Compare, IndexLive } from "../../lib/types";
 import { fixed, moveClass, signed } from "../../lib/format";
 import { usePersistentState } from "../../lib/usePersistentState";
+import { useIndexLive } from "../../lib/indexLive";
 
 const PALETTE = ["#0062cc", "#ff9500", "#8e44ad", "#16a085", "#b45309", "#d63384", "#5b6770", "#2e86de", "#6c8e00", "#c0392b"];
 type Range = "today" | "1m" | "3m" | "ytd" | "1y" | "all";
@@ -40,11 +41,7 @@ export function IndexCompare() {
   const cmp = useQuery({ queryKey: ["idx", "compare"], queryFn: api.indexCompare, staleTime: 10 * 60_000 });
   const hasUS = (cmp.data?.indexes ?? []).some((x) => x.market === "US");
   const [range, setRange] = usePersistentState<Range>("assrs.index.cmpRange", "3m");
-  const live = useQuery({
-    queryKey: ["idx", "live"], queryFn: api.indexLive, enabled: hasUS,
-    // Once a minute while the session is open; the server fetches Yahoo at most that often.
-    refetchInterval: (q) => (q.state.data?.open ? 60_000 : false), staleTime: 50_000,
-  });
+  const live = useIndexLive(hasUS);
   const [hidden, setHidden] = usePersistentState<number[]>("assrs.index.cmpHidden", []);
 
   if (cmp.isPending) return <section className="card p-6 label text-center">读取全部自建指数…</section>;

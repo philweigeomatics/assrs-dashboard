@@ -38,6 +38,7 @@ import { MacroPanel } from "../components/market/MacroPanel";
 import { CommodityPanel } from "../components/market/CommodityPanel";
 import { IndustryBoard } from "../components/market/IndustryBoard";
 import { usePersistentState } from "../lib/usePersistentState";
+import { useIndexLive, withLive } from "../lib/indexLive";
 import type { BoardMarket, CreditBoard, LeverageCycle as Cycle, RiskBoard } from "../lib/types";
 import { useSize } from "../lib/useSize";
 import { signed } from "../lib/format";
@@ -111,6 +112,9 @@ export function Dashboard() {
   // The user's own indexes in that market, read from their stored records.
   const mine = useQuery({ queryKey: ["idx", "board", boardMkt], queryFn: () => api.indexBoard(boardMkt),
     staleTime: 15 * 60_000, retry: false, enabled: on("sectors") });
+  // US indexes during the session: their price and 1-day change live.
+  const live = useIndexLive(on("sectors") && boardMkt === "US" && !!mine.data?.rows.length);
+  const mineNow = boardMkt === "US" ? withLive(mine.data, live.data) : mine.data;
   const board = boardMkt === "US" ? usEtf : cnIdx;
   const rotation = useQuery({ queryKey: ["mkt", "rotation", freq],
     queryFn: () => api.rotation(freq), staleTime: 60 * 60_000, enabled: on("sectors") });
@@ -195,7 +199,7 @@ export function Dashboard() {
             }
             q={board}>
             {board.data && <IndustryBoard key={boardMkt} d={board.data} market={boardMkt}
-              mine={mine.data} mineLoading={mine.isPending}
+              mine={mineNow} mineLoading={mine.isPending}
               mineError={mine.isError ? (mine.error as Error).message : null} />}
           </Panel>
 

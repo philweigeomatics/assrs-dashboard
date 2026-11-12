@@ -231,7 +231,11 @@ function EtfRowView({ r, market, open, onToggle, groupBreak }: {
         </td>
         <td className="py-1.5 pr-2 text-right whitespace-nowrap">
           <div>{fixed(r.price, 2)}</div>
-          <div className={`text-[11px] ${moveClass(r.ret["1d"], red)}`}>{signed(r.ret["1d"], 1, "%")}</div>
+          <div className={`text-[11px] ${moveClass(r.ret["1d"], red)}`}
+            title={r.live ? `${r.live.open ? `盘中，纽约 ${r.live.as_of}` : `${r.live.session} 收盘，尚未入库`} · 较 ${r.live.ref_date} 收盘。其余各列按已存的收盘计算` : undefined}>
+            {r.live && <span className={r.live.open ? "text-cyan" : "text-ink-mute"}>{r.live.open ? "● " : "◦ "}</span>}
+            {signed(r.ret["1d"], r.live ? 2 : 1, "%")}
+          </div>
         </td>
         <td className="py-1.5 pr-2"><Spark r={r} /></td>
         <td className="py-1.5 pr-2">

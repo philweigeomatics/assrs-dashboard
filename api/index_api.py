@@ -1401,6 +1401,10 @@ def live(user_id: int) -> dict:
         ref_close = daily.loc[ref]
         level = pd.Series(float(st.get("cash") or 0.0), bars.index)
         missing = []
+        ref_level = sum(float(v) for v in st["v"].values()) + float(st.get("cash") or 0.0)
+        # Each member's move so far today, and what it added to the index in
+        # percentage points — the members table's 今日 columns, live.
+        moves = {}
         for t, v in st["v"].items():
             p0 = ref_close.get(t)
             path = bars[t].ffill() if t in bars.columns else None
@@ -1408,11 +1412,14 @@ def live(user_id: int) -> dict:
                 missing.append(t)                         # carried at its close: flat
                 level += float(v)
                 continue
-            level += float(v) * (path.fillna(p0) / float(p0))
-        ref_level = sum(float(v) for v in st["v"].values()) + float(st.get("cash") or 0.0)
+            rel = path.fillna(p0) / float(p0)
+            level += float(v) * rel
+            moves[t] = {"chg": _num((rel.iloc[-1] - 1) * 100, 2),
+                        "contrib": _num(float(v) * (rel.iloc[-1] - 1) / ref_level * 100, 3) if ref_level else None}
         out.append({"id": iid, "name": r["name"], "ref_date": ref_d, "ref_level": _num(ref_level, 2),
                     "level": _num(level.iloc[-1], 2), "chg": _num((level.iloc[-1] / ref_level - 1) * 100, 2),
-                    "levels": [_num(v, 2) for v in level.to_numpy()], "missing": missing})
+                    "levels": [_num(v, 2) for v in level.to_numpy()], "missing": missing,
+                    "members": moves})
     return {**base, "open": open_, "session": str(session.date()), "as_of": times[-1] if times else None,
             "times": times, "indexes": sorted(out, key=lambda x: x["name"])}
 
