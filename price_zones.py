@@ -414,6 +414,12 @@ def build(df: pd.DataFrame, *, asked_from: date, pe: pd.Series | None = None,
             "peg1": _num(zpeg1, 3), "peg1_price": at_today(zpeg1, peg1_now),
             "peg3": _num(zpeg3, 3), "peg3_price": at_today(zpeg3, peg3_now),
             "g1": _num(zg1), "g3": _num(zg3),
+            # Read the other way: today's PE priced at the zone's PEG implies
+            # the market expects PE_now / PEG_then percent growth a year.
+            # Needs no current growth at all, so it still answers when
+            # today's growth is negative and today's PEG means nothing.
+            "peg1_implied": _num(pe_now / (zpeg1 * 100)) if pe_now and zpeg1 else None,
+            "peg3_implied": _num(pe_now / (zpeg3 * 100)) if pe_now and zpeg3 else None,
             "periods": periods,
         })
         if len(zones) == MAX_ZONES:

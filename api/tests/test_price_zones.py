@@ -192,6 +192,23 @@ def test_peg_is_pe_over_growth_and_skips_slow_growers():
     assert z["peg1"] == pytest.approx(0.8) and z["g1"] == pytest.approx(0.25)
     assert z["peg1_price"] == pytest.approx(out["now"]["close"], rel=1e-3)
     assert z["peg3"] is None and z["peg3_price"] is None
+    # Today's PE of 20 at the zone's PEG of 0.8 is a bet on 25% growth.
+    assert z["peg1_implied"] == pytest.approx(0.25)
+    assert z["peg3_implied"] is None
+
+
+def test_implied_growth_needs_no_current_growth():
+    df = frame(two_levels())
+    pe = pd.Series(20.0, index=df.index)
+    # 25% growth while the stock sat in its first zone, a loss of growth now.
+    growth = pd.DataFrame({"end_date": ["20201231", "20250101"], "ttm": [1.0, 1.0],
+                           "g1": [0.25, -0.10], "g3": [np.nan, np.nan]},
+                          index=[pd.Timestamp("2020-01-01"), pd.Timestamp("2025-01-01")])
+    out = Z.build(df, asked_from=ASKED, pe=pe, growth=growth)
+    first = next(z for z in out["zones"] if z["first"] == "2021-11-15")
+    assert out["now"]["peg1"] is None                       # shrinking: PEG does not apply
+    assert first["peg1"] == pytest.approx(0.8)
+    assert first["peg1_implied"] == pytest.approx(0.25)     # yet the bet is still readable
 
 
 def test_no_growth_data_leaves_peg_out():

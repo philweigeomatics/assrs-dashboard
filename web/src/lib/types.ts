@@ -2270,6 +2270,8 @@ export type PriceZone = {
   peg3: number | null; peg3_price: number | null;
   /** Median earnings growth (fraction) the market could see while in the zone. */
   g1: number | null; g3: number | null;
+  /** Growth (fraction) today's PE implies if priced at the zone's PEG: PE_now / (PEG_then × 100). */
+  peg1_implied: number | null; peg3_implied: number | null;
   periods: ZonePeriod[];
 };
 export type PriceZones = {

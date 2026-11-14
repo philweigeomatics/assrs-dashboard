@@ -24,7 +24,9 @@ const NUMERALS = ["①", "②", "③", "④", "⑤"];
 const tag = (z: PriceZone) => NUMERALS[z.rank - 1] ?? `#${z.rank}`;
 
 const pct = (v: number, nd = 0) => `${(v * 100).toFixed(nd)}%`;
-const signedPct = (v: number | null | undefined) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(0)}%`);
+// One decimal under 10%: 4.9% growth must not read "+5%" beside "below 5%".
+const signedPct = (v: number | null | undefined) =>
+  (v == null ? "—" : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(Math.abs(v) < 0.1 ? 1 : 0)}%`);
 
 /**
  * Which multiple the zones are read in. PE is what the market paid for the
@@ -40,6 +42,8 @@ const BASES: { v: Basis; label: string; hint: string }[] = [
 ];
 const growthOf = (b: Basis) => (b === "peg3" ? "g3" : "g1") as "g1" | "g3";
 const fmtMult = (b: Basis, v: number | null) => (v == null ? "—" : b === "pe" ? `${v.toFixed(1)}×` : v.toFixed(2));
+/** "1年" or "3年" — which growth a PEG basis reads. */
+const span = (b: Basis) => (b === "peg3" ? "三年复合" : "近一年");
 const quarter = (e: string | null) => (e ? `${e.slice(0, 4)}${{ "0331": "Q1", "0630": "H1", "0930": "Q3", "1231": "年报" }[e.slice(4)] ?? e.slice(4)}` : "");
 
 export function PriceZonesPanel({ ticker }: { ticker: string }) {
@@ -179,7 +183,9 @@ function Body({ d }: { d: PriceZones }) {
             增速是当时<b>已经公布</b>的：每份财报从公告的第二天起才算数，用首次公布的数字，不用事后修订的。
             近一年 = 滚动 12 个月归母净利润同比；三年 = 滚动 12 个月利润的三年复合增速，单独一年的大起大落影响小。
             增速为负或低于 5% 时 PEG 不适用（1% 的增速会把 10 倍市盈率变成 PEG 10，没有意义），这些日子不计入区间的 PEG。
-            “按今天增速折算”：如果市场今天付当时那个 PEG，股价该是多少——增速比当时慢了，这个价就会低于当时的价格。
+            “隐含增速”反过来读：今天的市盈率 ÷ 当时的 PEG = 如果市场还按那时给增长定价，现价在押利润每年涨多少。
+            拿它和实际增速比——押得比实际高，按那时的标准现在偏贵；押得比实际低，偏便宜。
+            它不需要今天的增速，所以利润在下滑、现在的 PEG 不适用时也照样能读。
             只有 A 股有：美股的免费数据只有最近五个季度的利润。
           </p>
           <p>
@@ -376,7 +382,11 @@ function ZoneTable({ d, sel, setSel, money, basis }: {
               <th className="px-1 py-1 font-normal text-right" title="在区间内时市场看得到的利润增速（中位数）">当时增速</th>
               <th className="px-1 py-1 font-normal text-right" title="在区间内时的 PEG 中位数（增速低于 5% 的日子不计）">当时PEG</th>
               <th className="px-1 py-1 font-normal text-right"
-                title={`按现在的增速和盈利（PEG ${fmtMult(basis, d.now[basis])}），付当时的 PEG 对应的股价`}>按今天增速</th>
+                title={`今天的价格、今天的盈利和${span(basis)}增速（${signedPct(d.now[g])}）算出的 PEG；增速低于 5% 时不适用`}>现在PEG</th>
+              <th className="px-1 py-1 font-normal text-right"
+                title={`如果今天还按当时的 PEG 定价，今天 ${fmtMult("pe", d.now.pe)} 的市盈率等于在押多少年增速：市盈率 ÷ 当时PEG。对比实际${span(basis)} ${signedPct(d.now[g])}`}>
+                隐含增速 <span className="text-ink-dim">vs 实际 {signedPct(d.now[g])}</span>
+              </th>
             </>}
           </tr>
         </thead>
@@ -403,8 +413,13 @@ function ZoneTable({ d, sel, setSel, money, basis }: {
                 <td className="px-1 py-1.5 text-right">{signedPct(z[g])}</td>
                 <td className="px-1 py-1.5 text-right">{fmtMult(basis, z[basis])}</td>
                 <td className="px-1 py-1.5 text-right whitespace-nowrap">
-                  {z[`${basis}_price` as "peg1_price" | "peg3_price"] != null
-                    ? <b>{money(z[`${basis}_price` as "peg1_price" | "peg3_price"])}</b> : "—"}
+                  {d.now[basis] != null ? fmtMult(basis, d.now[basis]) : <span className="label">不适用</span>}
+                  {d.now[basis] != null && z[basis] != null && (
+                    <span className="label ml-1">{d.now[basis]! >= z[basis]! ? "↑" : "↓"}{Math.abs(d.now[basis]! / z[basis]! * 100 - 100).toFixed(0)}%</span>
+                  )}
+                </td>
+                <td className="px-1 py-1.5 text-right whitespace-nowrap">
+                  <Implied v={z[`${basis}_implied` as "peg1_implied" | "peg3_implied"]} actual={d.now[g]} />
                 </td>
               </>}
             </tr>
@@ -414,10 +429,29 @@ function ZoneTable({ d, sel, setSel, money, basis }: {
       <p className="label mt-1 px-1">
         点一行看它的每一段停留；图上会把那几段时间标出来。按价格从高到低排，圈号是停留时间的名次。
         {d.has_pe && d.now.pe == null && " 现在亏损（没有市盈率），所以没法按今天的盈利折算。"}
-        {peg && d.now.pe != null && d.now[basis] == null &&
-          ` 现在${basis === "peg3" ? "三年复合" : "近一年"}利润增速 ${signedPct(d.now[g])}，低于 5%，PEG 不适用，所以没法按今天的增速折算。`}
+        {peg && <>
+          {" "}隐含增速 = 今天的市盈率 ÷ 当时的 PEG：如果市场今天还按那时的标准给增长定价，现价等于在押利润每年涨多少。
+          比实际增速高，说明按那时的标准现价已经押了更快的增长；比实际低，说明押得比实际保守。
+          {d.now.pe != null && d.now[basis] == null && ` 现在${span(basis)}利润增速 ${signedPct(d.now[g])}，低于 5%，现在的 PEG 不适用，但隐含增速照样能读。`}
+        </>}
       </p>
     </div>
+  );
+}
+
+/** The growth today's PE implies at a zone's PEG, set against the growth there actually is. */
+function Implied({ v, actual }: { v: number | null; actual: number | null }) {
+  if (v == null) return <>—</>;
+  const gap = actual != null ? v - actual : null;
+  return (
+    <span title={gap != null ? `比实际增速${gap >= 0 ? "高" : "低"} ${Math.abs(gap * 100).toFixed(0)} 个百分点` : undefined}>
+      <b>{signedPct(v)}</b>
+      {gap != null && (
+        <span className={`ml-1 text-[11.5px] ${Math.abs(gap) < 0.03 ? "text-ink-mute" : gap > 0 ? "text-brand-ink" : "text-cyan"}`}>
+          {Math.abs(gap) < 0.03 ? "≈ 实际" : gap > 0 ? "押得比实际高" : "押得比实际低"}
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -441,10 +475,13 @@ function Stays({ z, d, money, basis }: {
         )}
         {peg && then != null && (
           <span className="label">
-            {" "}· 当时利润增速 {signedPct(z[g])}，PEG {fmtMult(basis, then)}；
-            {now != null && price != null
-              ? <>今天增速 {signedPct(d.now[g])}，PEG {fmtMult(basis, now)}；按今天的增速和盈利，同样的 PEG 对应 {money(price)}</>
-              : <>今天增速 {signedPct(d.now[g])}，PEG 不适用</>}
+            {" "}· 当时{span(basis)}利润增速 {signedPct(z[g])}，市场付 PEG {fmtMult(basis, then)}。
+            今天市盈率 {fmtMult("pe", d.now.pe)}、{span(basis)}增速 {signedPct(d.now[g])}，
+            PEG {now != null ? fmtMult(basis, now) : "不适用"}。
+            {z[`${basis}_implied` as "peg1_implied" | "peg3_implied"] != null && <>
+              按当时的 PEG，今天的市盈率等于在押利润每年增长 {signedPct(z[`${basis}_implied` as "peg1_implied" | "peg3_implied"])}
+              {price != null && <>；按今天的增速付当时的 PEG，股价是 {money(price)}</>}。
+            </>}
           </span>
         )}
       </div>
