@@ -4787,6 +4787,36 @@ def fetch_cashflow(ticker: str, periods: int = 8) -> "pd.DataFrame":
         return _pd.DataFrame()
 
 
+def fetch_profit_history(ticker: str, start_date: str) -> "pd.DataFrame":
+    """
+    归母净利润 (cumulative year to date) for every report since `start_date`
+    (YYYYMMDD), with each report's announcement date — one income() call.
+
+    Columns ann_date, end_date, profit. Every announcement of a period is
+    kept, restatements included; the caller decides which one counts (the
+    价值区间 growth series takes the first, as the market saw it). Empty on
+    any failure: growth is an addition to that view, never a reason for it
+    to fail.
+    """
+    import pandas as _pd
+    if not init_tushare():
+        return _pd.DataFrame()
+    try:
+        df = TUSHARE_API.income(
+            ts_code=get_tushare_ticker(ticker), start_date=start_date,
+            end_date=datetime.today().strftime("%Y%m%d"),
+            fields="ts_code,ann_date,f_ann_date,end_date,report_type,n_income_attr_p",
+        )
+        if df is None or df.empty:
+            return _pd.DataFrame()
+        if "report_type" in df.columns:
+            df = df[df["report_type"].astype(str) == "1"]
+        return df.rename(columns={"n_income_attr_p": "profit"})[["ann_date", "end_date", "profit"]]
+    except Exception as exc:
+        print(f"[data_manager] fetch_profit_history({ticker}): {exc}")
+        return _pd.DataFrame()
+
+
 def fetch_full_fina_indicator(ticker: str, periods: int = 8) -> "pd.DataFrame":
     """
     Wider field-set version of fina_indicator for the Equity Brief.

@@ -129,3 +129,72 @@ def test_value_area_holds_seventy_percent_around_the_most_visited_price():
     assert va["share"] >= Z.VALUE_AREA
     assert va["lo"] <= va["poc"] <= va["hi"]
     assert 9 < va["poc"] < 11
+
+
+# ── PEG: growth as the market could see it ────────────────────────────────────
+def reports(profits: dict[str, float], ann: dict[str, str] | None = None) -> pd.DataFrame:
+    """Cumulative year-to-date profits by period end, announced a month after by default."""
+    rows = []
+    for e, v in profits.items():
+        a = (ann or {}).get(e) or (pd.Timestamp(e) + pd.Timedelta(days=30)).strftime("%Y%m%d")
+        rows.append({"ann_date": a, "end_date": e, "profit": v})
+    return pd.DataFrame(rows)
+
+
+def test_ttm_from_cumulative_quarters():
+    # 2023: 25 a quarter (FY 100). 2024: 30 a quarter.
+    r = reports({"20231231": 100, "20240331": 30, "20240630": 60, "20240930": 90, "20241231": 120,
+                 "20230331": 25, "20230630": 50, "20230930": 75})
+    t = Z._ttm_profits(r).set_index("end_date")["ttm"]
+    assert t["20240331"] == pytest.approx(105)          # 30 + 100 - 25
+    assert t["20240930"] == pytest.approx(115)          # 90 + 100 - 75
+    assert t["20241231"] == pytest.approx(120)
+    assert "20230331" not in t.index                    # no 2022 to complete it
+
+
+def test_growth_counts_from_the_day_after_announcement():
+    yrs = {f"{y}1231": 100 * 1.2 ** (y - 2019) for y in range(2019, 2025)}
+    g = Z.profit_growth(reports(yrs))
+    last = g.iloc[-1]
+    assert last["end_date"] == "20241231"
+    assert last["g1"] == pytest.approx(0.2)
+    assert last["g3"] == pytest.approx(0.2)
+    assert g.index[-1] == pd.Timestamp("20241231") + pd.Timedelta(days=31)
+
+
+def test_the_first_announcement_counts_not_the_restatement():
+    r = reports({"20221231": 100, "20231231": 120})
+    r = pd.concat([r, pd.DataFrame([{"ann_date": "20240901", "end_date": "20231231", "profit": 150}])])
+    g = Z.profit_growth(r)
+    assert g.iloc[-1]["g1"] == pytest.approx(0.2)
+
+
+def test_a_late_report_does_not_step_growth_back():
+    r = reports({"20221231": 100, "20231231": 120, "20230331": 30, "20240331": 33},
+                ann={"20231231": "20240420", "20240331": "20240410"})
+    g = Z.profit_growth(r)
+    # Q1 2024 needs FY2023 for its TTM, so it only exists once FY2023 is out;
+    # FY2023 announced after Q1 2024 must not replace the later period.
+    assert list(g["end_date"])[-1] >= "20231231"
+    assert g["end_date"].is_monotonic_increasing
+
+
+def test_peg_is_pe_over_growth_and_skips_slow_growers():
+    df = frame(two_levels())
+    pe = pd.Series(20.0, index=df.index)
+    growth = pd.DataFrame({"end_date": ["20201231"], "ttm": [1.0], "g1": [0.25], "g3": [0.02]},
+                          index=[pd.Timestamp("2020-01-01")])
+    out = Z.build(df, asked_from=ASKED, pe=pe, growth=growth)
+    assert out["has_growth"]
+    assert out["now"]["peg1"] == pytest.approx(0.8)       # 20 / 25
+    assert out["now"]["peg3"] is None                     # 2% growth: PEG does not apply
+    z = out["zones"][0]
+    assert z["peg1"] == pytest.approx(0.8) and z["g1"] == pytest.approx(0.25)
+    assert z["peg1_price"] == pytest.approx(out["now"]["close"], rel=1e-3)
+    assert z["peg3"] is None and z["peg3_price"] is None
+
+
+def test_no_growth_data_leaves_peg_out():
+    out = Z.build(frame(two_levels()), asked_from=ASKED, pe=pd.Series(20.0, index=frame(two_levels()).index))
+    assert not out["has_growth"]
+    assert out["now"]["peg1"] is None and all(z["peg1"] is None for z in out["zones"])

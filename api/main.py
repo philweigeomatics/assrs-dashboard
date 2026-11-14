@@ -460,7 +460,7 @@ def price_zones_view(ticker: str = TICKER, user: AppUser = Depends(current_user)
     Cached six hours.
     """
     import time
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
     import price_zones
     market, code = markets.parse(ticker)
@@ -485,7 +485,21 @@ def price_zones_view(ticker: str = TICKER, user: AppUser = Depends(current_user)
                 pe = fund["PE_TTM"]
         except Exception:                                       # noqa: BLE001
             pe = None                         # the zones stand without it
-        out = price_zones.build(df, asked_from=start, pe=pe)
+        # Earnings growth for the PEG columns: A-share reports from Tushare,
+        # from four years before the window so the three-year rate exists on
+        # its first day. North America has no history of this on Yahoo's
+        # free feed (about five quarters), so no PEG there.
+        growth = None
+        if market.conv.code == "CN" and pe is not None:
+            try:
+                import data_manager
+                rows = data_manager.fetch_profit_history(
+                    code, (start - timedelta(days=round(365.25 * 4) + 120)).strftime("%Y%m%d"))
+                if rows is not None and not rows.empty:
+                    growth = price_zones.profit_growth(rows)
+            except Exception:                                   # noqa: BLE001
+                growth = None
+        out = price_zones.build(df, asked_from=start, pe=pe, growth=growth)
         return {"ticker": markets.canonical(ticker), "market": market.conv.code,
                 "up_is_red": market.conv.up_is_red,
                 "currency_symbol": market.conv.currency_symbol,

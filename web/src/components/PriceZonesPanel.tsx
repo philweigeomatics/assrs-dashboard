@@ -24,6 +24,23 @@ const NUMERALS = ["①", "②", "③", "④", "⑤"];
 const tag = (z: PriceZone) => NUMERALS[z.rank - 1] ?? `#${z.rank}`;
 
 const pct = (v: number, nd = 0) => `${(v * 100).toFixed(nd)}%`;
+const signedPct = (v: number | null | undefined) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(0)}%`);
+
+/**
+ * Which multiple the zones are read in. PE is what the market paid for the
+ * earnings; PEG is what it paid per point of the growth it could see — on
+ * the last year's growth, or the three-year rate one good or bad year does
+ * not swing.
+ */
+type Basis = "pe" | "peg1" | "peg3";
+const BASES: { v: Basis; label: string; hint: string }[] = [
+  { v: "pe", label: "PE", hint: "市盈率（TTM）" },
+  { v: "peg1", label: "PEG · 1年", hint: "市盈率 ÷ 近一年利润增速（TTM 同比）" },
+  { v: "peg3", label: "PEG · 3年", hint: "市盈率 ÷ 三年利润复合增速，不受单独一年的好坏左右" },
+];
+const growthOf = (b: Basis) => (b === "peg3" ? "g3" : "g1") as "g1" | "g3";
+const fmtMult = (b: Basis, v: number | null) => (v == null ? "—" : b === "pe" ? `${v.toFixed(1)}×` : v.toFixed(2));
+const quarter = (e: string | null) => (e ? `${e.slice(0, 4)}${{ "0331": "Q1", "0630": "H1", "0930": "Q3", "1231": "年报" }[e.slice(4)] ?? e.slice(4)}` : "");
 
 export function PriceZonesPanel({ ticker }: { ticker: string }) {
   const [open, setOpen] = usePersistentState("assrs.zones.open", false);
@@ -74,6 +91,9 @@ function Body({ d }: { d: PriceZones }) {
   const selected = d.zones.find((z) => z.id === sel) ?? null;
   const byId = (id: number | null) => d.zones.find((z) => z.id === id) ?? null;
 
+  const [basisPref, setBasis] = usePersistentState<Basis>("assrs.zones.basis", "pe");
+  const basis: Basis = basisPref !== "pe" && !d.has_growth ? "pe" : basisPref;
+
   const inZone = byId(d.now.zone);
   const above = byId(d.now.above);
   const below = byId(d.now.below);
@@ -99,6 +119,29 @@ function Body({ d }: { d: PriceZones }) {
           {!inZone && !above && below && <>，比区间 <ZoneTag z={below} /> 的下沿低 {pct(1 - d.now.close / below.lo)}。</>}
           {!inZone && !above && !below && "。"}
         </p>
+        {d.has_pe && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <div className="flex rounded-md bg-sunken p-0.5" role="tablist" aria-label="估值口径">
+              {BASES.map((b) => {
+                const off = b.v !== "pe" && !d.has_growth;
+                return (
+                  <button key={b.v} disabled={off} onClick={() => setBasis(b.v)}
+                    title={off ? "读不到这只股票的历史利润，算不了增速" : b.hint}
+                    className={`h-6 px-2.5 rounded text-[12px] whitespace-nowrap disabled:opacity-40 ${
+                      basis === b.v ? "bg-panel shadow-sm font-semibold" : "text-ink-mute hover:text-ink"}`}>{b.label}</button>
+                );
+              })}
+            </div>
+            <span className="label">
+              现在 PE {fmtMult("pe", d.now.pe)}
+              {d.has_growth && <>
+                {" "}· 利润增速 近一年 {signedPct(d.now.g1)} / 三年复合 {signedPct(d.now.g3)}
+                {d.now.growth_period && `（截至 ${quarter(d.now.growth_period)}）`}
+                {" "}· PEG {fmtMult("peg1", d.now.peg1)} / {fmtMult("peg3", d.now.peg3)}
+              </>}
+            </span>
+          </div>
+        )}
         {flat && (
           <p className="text-brand-ink">
             这只股票这几年基本在单边走，没在哪个价位久待（停留最多的区间也只占 {pct(d.settled)} 的时间）——
@@ -110,12 +153,12 @@ function Body({ d }: { d: PriceZones }) {
       <Chart d={d} selected={selected} money={money} />
 
       {d.zones.length > 0 ? (
-        <ZoneTable d={d} sel={sel} setSel={setSel} money={money} />
+        <ZoneTable d={d} sel={sel} setSel={setSel} money={money} basis={basis} />
       ) : (
         <p className="label">没有找到明显的停留区间。</p>
       )}
 
-      {selected && <Stays z={selected} d={d} money={money} />}
+      {selected && <Stays z={selected} d={d} money={money} basis={basis} />}
 
       <details className="text-[12px] text-ink-mute">
         <summary className="cursor-pointer hover:text-ink">怎么读、能不能当“真实价值”</summary>
@@ -130,6 +173,14 @@ function Body({ d }: { d: PriceZones }) {
             公司盈利变了，同一个价格就是另一种估值——所以表里给了每个区间当时的市盈率中位数，
             以及“按现在的盈利折算”：如果市场今天还付当时那个市盈率，股价该是多少。盈利涨了很多的股票，旧区间按今天的盈利会高出一大截，
             那个折算价往往比旧价格更接近“市场认可的价值”。
+          </p>
+          <p>
+            <b>PEG：</b>市盈率 ÷ 利润增速（百分数）。同样 30 倍市盈率，增速 5% 的公司很贵，增速 40% 的不算贵——PEG 把增长算进去。
+            增速是当时<b>已经公布</b>的：每份财报从公告的第二天起才算数，用首次公布的数字，不用事后修订的。
+            近一年 = 滚动 12 个月归母净利润同比；三年 = 滚动 12 个月利润的三年复合增速，单独一年的大起大落影响小。
+            增速为负或低于 5% 时 PEG 不适用（1% 的增速会把 10 倍市盈率变成 PEG 10，没有意义），这些日子不计入区间的 PEG。
+            “按今天增速折算”：如果市场今天付当时那个 PEG，股价该是多少——增速比当时慢了，这个价就会低于当时的价格。
+            只有 A 股有：美股的免费数据只有最近五个季度的利润。
           </p>
           <p>
             <b>注意：</b>区间是事后统计，不保证价格会回去；近一年停留得多的区间更能代表现在的共识。
@@ -300,10 +351,12 @@ function Chart({ d, selected, money }: {
 }
 
 // ── table ──────────────────────────────────────────────────────────────────
-function ZoneTable({ d, sel, setSel, money }: {
+function ZoneTable({ d, sel, setSel, money, basis }: {
   d: PriceZones; sel: number | null; setSel: (v: number | null) => void;
-  money: (v: number | null) => string;
+  money: (v: number | null) => string; basis: Basis;
 }) {
+  const peg = basis !== "pe";
+  const g = growthOf(basis);
   return (
     <div className="overflow-x-auto -mx-1">
       <table className="w-full text-[12.5px] tabular-nums">
@@ -314,10 +367,16 @@ function ZoneTable({ d, sel, setSel, money }: {
             <th className="px-1 py-1 font-normal text-right" title="最近 242 个交易日里在区间内的比例">近一年</th>
             <th className="px-1 py-1 font-normal text-right" title="停留了几段 · 最长一段多少个交易日">几段 · 最长</th>
             <th className="px-1 py-1 font-normal text-right">最近一次</th>
-            {d.has_pe && <>
+            {d.has_pe && !peg && <>
               <th className="px-1 py-1 font-normal text-right" title="在区间内时的市盈率(TTM)中位数">当时PE</th>
               <th className="px-1 py-1 font-normal text-right"
                 title={`按现在的盈利（PE ${d.now.pe ?? "—"}×），付当时的市盈率对应的股价`}>按今天盈利</th>
+            </>}
+            {d.has_pe && peg && <>
+              <th className="px-1 py-1 font-normal text-right" title="在区间内时市场看得到的利润增速（中位数）">当时增速</th>
+              <th className="px-1 py-1 font-normal text-right" title="在区间内时的 PEG 中位数（增速低于 5% 的日子不计）">当时PEG</th>
+              <th className="px-1 py-1 font-normal text-right"
+                title={`按现在的增速和盈利（PEG ${fmtMult(basis, d.now[basis])}），付当时的 PEG 对应的股价`}>按今天增速</th>
             </>}
           </tr>
         </thead>
@@ -334,10 +393,18 @@ function ZoneTable({ d, sel, setSel, money }: {
               <td className="px-1 py-1.5 text-right">{z.recent_days ? pct(z.recent_share) : "—"}</td>
               <td className="px-1 py-1.5 text-right whitespace-nowrap">{z.visits} 段 · {z.longest} 天</td>
               <td className="px-1 py-1.5 text-right whitespace-nowrap">{z.last ?? "—"}</td>
-              {d.has_pe && <>
-                <td className="px-1 py-1.5 text-right">{z.pe != null ? `${z.pe.toFixed(1)}×` : "—"}</td>
+              {d.has_pe && !peg && <>
+                <td className="px-1 py-1.5 text-right">{fmtMult("pe", z.pe)}</td>
                 <td className="px-1 py-1.5 text-right whitespace-nowrap">
                   {z.pe_price != null ? <b>{money(z.pe_price)}</b> : "—"}
+                </td>
+              </>}
+              {d.has_pe && peg && <>
+                <td className="px-1 py-1.5 text-right">{signedPct(z[g])}</td>
+                <td className="px-1 py-1.5 text-right">{fmtMult(basis, z[basis])}</td>
+                <td className="px-1 py-1.5 text-right whitespace-nowrap">
+                  {z[`${basis}_price` as "peg1_price" | "peg3_price"] != null
+                    ? <b>{money(z[`${basis}_price` as "peg1_price" | "peg3_price"])}</b> : "—"}
                 </td>
               </>}
             </tr>
@@ -347,20 +414,37 @@ function ZoneTable({ d, sel, setSel, money }: {
       <p className="label mt-1 px-1">
         点一行看它的每一段停留；图上会把那几段时间标出来。按价格从高到低排，圈号是停留时间的名次。
         {d.has_pe && d.now.pe == null && " 现在亏损（没有市盈率），所以没法按今天的盈利折算。"}
+        {peg && d.now.pe != null && d.now[basis] == null &&
+          ` 现在${basis === "peg3" ? "三年复合" : "近一年"}利润增速 ${signedPct(d.now[g])}，低于 5%，PEG 不适用，所以没法按今天的增速折算。`}
       </p>
     </div>
   );
 }
 
-function Stays({ z, d, money }: { z: PriceZone; d: PriceZones; money: (v: number | null) => string }) {
+function Stays({ z, d, money, basis }: {
+  z: PriceZone; d: PriceZones; money: (v: number | null) => string; basis: Basis;
+}) {
+  const peg = basis !== "pe";
+  const g = growthOf(basis);
+  const then = peg ? z[basis] : z.pe;
+  const now = peg ? d.now[basis] : d.now.pe;
+  const price = peg ? z[`${basis}_price` as "peg1_price" | "peg3_price"] : z.pe_price;
   return (
     <div className="flex flex-col gap-1.5">
       <div className="text-[13px]">
         区间 <ZoneTag z={z} /> {money(z.lo)} – {money(z.hi)} 的 {z.visits} 段停留
-        {z.pe != null && d.now.pe != null && z.pe_price != null && (
+        {!peg && then != null && now != null && price != null && (
           <span className="label">
-            {" "}· 当时市场付 {z.pe.toFixed(1)}× 市盈率，今天是 {d.now.pe.toFixed(1)}×；
-            按今天的盈利，同样的估值对应 {money(z.pe_price)}
+            {" "}· 当时市场付 {fmtMult("pe", then)} 市盈率，今天是 {fmtMult("pe", now)}；
+            按今天的盈利，同样的估值对应 {money(price)}
+          </span>
+        )}
+        {peg && then != null && (
+          <span className="label">
+            {" "}· 当时利润增速 {signedPct(z[g])}，PEG {fmtMult(basis, then)}；
+            {now != null && price != null
+              ? <>今天增速 {signedPct(d.now[g])}，PEG {fmtMult(basis, now)}；按今天的增速和盈利，同样的 PEG 对应 {money(price)}</>
+              : <>今天增速 {signedPct(d.now[g])}，PEG 不适用</>}
           </span>
         )}
       </div>

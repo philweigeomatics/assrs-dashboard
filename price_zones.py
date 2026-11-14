@@ -16,6 +16,13 @@ That is not intrinsic value, and the module is careful not to pretend it is:
   ¥40 at 15× after profits double. So each zone carries the median PE the
   market paid while it was there, and what that PE is worth on today's
   earnings. The PE-adjusted price is often the more honest "value range".
+* PE alone punishes a company for growing: 30x earnings is dear for a
+  business growing 5% and cheap for one growing 40%. So each zone also
+  carries its median PEG -- the PE divided by the earnings growth the market
+  could see that day -- on two growth measures: the trailing-twelve-month
+  profit against a year earlier, and the three-year compound rate, which a
+  one-off year does not swing. Growth is point in time: each report counts
+  from the day after it was announced, never from the quarter it covers.
 * A stock that trended for five years has no consensus — it was never at any
   price long. The profile says so (no zone holds much of the time) instead of
   inventing ranges.
@@ -67,6 +74,7 @@ GAP_SESSIONS = 5        # an excursion this short does not end a stay
 MIN_STAY = 10           # sessions; shorter is passing through, not staying
 VALUE_AREA = 0.70       # the classic Market Profile value area
 RECENT_SESSIONS = 242   # "the last year"
+MIN_GROWTH = 0.05       # PEG only where earnings grow at least 5% a year
 
 
 def start_date(today: date, years: int = LOOKBACK_YEARS) -> date:
@@ -212,7 +220,103 @@ def stays(inside: np.ndarray, gap: int = GAP_SESSIONS, min_len: int = MIN_STAY) 
     return [(a, b) for a, b in runs if b - a + 1 >= min_len]
 
 
-def build(df: pd.DataFrame, *, asked_from: date, pe: pd.Series | None = None) -> dict:
+def _ttm_profits(rows: pd.DataFrame) -> pd.DataFrame:
+    """
+    Trailing-twelve-month profit at each report, from the cumulative
+    year-to-date figures A-share reports give: Q1, H1 and Q3 are each the
+    year so far, so TTM = this year so far + last full year - last year to
+    the same point. A full-year report is its own TTM.
+
+    `rows`: ann_date, end_date (YYYYMMDD), profit. Each period keeps its
+    FIRST announcement -- a later restatement was not what the market saw.
+    """
+    r = rows.copy()
+    r["end_date"] = r["end_date"].astype(str).str[:8]
+    r["ann"] = pd.to_datetime(r["ann_date"].astype(str).str[:8], format="%Y%m%d", errors="coerce")
+    r["profit"] = pd.to_numeric(r["profit"], errors="coerce")
+    r = r.dropna(subset=["ann", "profit"]).sort_values(["end_date", "ann"])
+    r = r.drop_duplicates("end_date", keep="first").set_index("end_date")
+    out = []
+    for e, row in r.iterrows():
+        y, md = int(e[:4]), e[4:]
+        if md == "1231":
+            ttm = float(row["profit"])
+        else:
+            fy, same = f"{y - 1}1231", f"{y - 1}{md}"
+            if fy not in r.index or same not in r.index:
+                continue
+            ttm = float(row["profit"]) + float(r.at[fy, "profit"]) - float(r.at[same, "profit"])
+        out.append({"end_date": e, "ann": row["ann"], "ttm": ttm})
+    return pd.DataFrame(out)
+
+
+def profit_growth(rows: pd.DataFrame) -> pd.DataFrame:
+    """
+    Point-in-time earnings growth: one row per report, indexed by the first
+    day it could be known (the day after its announcement), with
+
+      g1 -- TTM profit against the TTM a year earlier
+      g3 -- the three-year compound rate of TTM profit
+
+    as fractions, NaN where a base is missing or not positive (growth from a
+    loss is not a rate). A report announced after a later period's -- a late
+    annual after the next Q1 -- does not step the series back.
+    """
+    t = _ttm_profits(rows)
+    if t.empty:
+        return pd.DataFrame(columns=["end_date", "ttm", "g1", "g3"])
+    ttm = dict(zip(t["end_date"], t["ttm"]))
+
+    def back(e: str, years: int):
+        return ttm.get(f"{int(e[:4]) - years}{e[4:]}")
+
+    g1, g3 = [], []
+    for e, v in zip(t["end_date"], t["ttm"]):
+        b1, b3 = back(e, 1), back(e, 3)
+        g1.append(v / b1 - 1 if b1 and b1 > 0 else np.nan)
+        g3.append((v / b3) ** (1 / 3) - 1 if b3 and b3 > 0 and v > 0 else np.nan)
+    t = t.assign(g1=g1, g3=g3)
+    t["from"] = t["ann"] + pd.Timedelta(days=1)
+    t = t.sort_values(["from", "end_date"])
+    t = t[t["end_date"] >= t["end_date"].cummax()]          # never step back
+    t = t.drop_duplicates("from", keep="last").set_index("from")
+    return t[["end_date", "ttm", "g1", "g3"]]
+
+
+def _peg(pe, g):
+    """
+    PE / growth in percent, where PE is positive and growth at least
+    MIN_GROWTH; NaN elsewhere. Below that floor the ratio is arithmetic, not
+    a valuation: 1% growth turns a PE of 10 into a PEG of 10, and a bank or
+    a utility is not "ten times overvalued" for growing slowly on purpose.
+    """
+    if pe is None or g is None:
+        return None
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = pe / (g * 100)
+    out[~((pe > 0) & (g >= MIN_GROWTH))] = np.nan
+    return out
+
+
+def _median_in(arr, inside: np.ndarray, days: int):
+    """Median over a zone's sessions, when at least half of them have a value."""
+    if arr is None:
+        return None
+    vals = arr[inside]
+    vals = vals[~np.isnan(vals)]
+    return float(np.median(vals)) if len(vals) and len(vals) >= 0.5 * days else None
+
+
+def _latest(arr, within: int = 5):
+    """The last value, if it is from the last few sessions -- a stale reading is not "now"."""
+    if arr is None:
+        return None
+    ok = np.flatnonzero(~np.isnan(arr))
+    return float(arr[ok[-1]]) if len(ok) and ok[-1] >= len(arr) - within else None
+
+
+def build(df: pd.DataFrame, *, asked_from: date, pe: pd.Series | None = None,
+          growth: pd.DataFrame | None = None) -> dict:
     """
     The 价值区间 payload for one stock's adjusted daily bars `df`
     (Open/High/Low/Close/Volume, date-indexed, oldest first).
@@ -249,13 +353,29 @@ def build(df: pd.DataFrame, *, asked_from: date, pe: pd.Series | None = None) ->
             pe_al = p.reindex(body.index).to_numpy(dtype=float)
 
     last_close = float(close[-1])
-    pe_now = None
-    if pe_al is not None:
-        tail = pd.Series(pe_al).dropna()
-        # Only "now" if the last reading is recent — a stock that went
-        # loss-making has no current P/E, and a stale one would mislead.
-        if not tail.empty and tail.index[-1] >= len(pe_al) - 5:
-            pe_now = float(tail.iloc[-1])
+    # Only "now" if the last reading is recent: a stock that went
+    # loss-making has no current P/E, and a stale one would mislead.
+    pe_now = _latest(pe_al)
+
+    # Growth as the market knew it each day: the latest report announced
+    # before that session, carried until the next.
+    g1_al = g3_al = None
+    g_now = {"g1": None, "g3": None, "end_date": None}
+    if growth is not None and not growth.empty:
+        al = growth.reindex(growth.index.union(body.index)).ffill().reindex(body.index)
+        g1_al = al["g1"].to_numpy(dtype=float)
+        g3_al = al["g3"].to_numpy(dtype=float)
+        last = al.iloc[-1]
+        g_now = {"g1": _num(last["g1"]), "g3": _num(last["g3"]),
+                 "end_date": None if pd.isna(last["end_date"]) else str(last["end_date"])}
+    peg1_al, peg3_al = _peg(pe_al, g1_al), _peg(pe_al, g3_al)
+    peg1_now = _latest(peg1_al)
+    peg3_now = _latest(peg3_al)
+
+    def at_today(then, now):
+        # A zone's multiple on today's numbers: price x (then / now), because
+        # price / multiple is the same per-share base on both sides.
+        return _num(last_close * then / now, 3) if then and now else None
 
     zones = []
     for z in find_zones(time, base, step):
@@ -265,12 +385,11 @@ def build(df: pd.DataFrame, *, asked_from: date, pe: pd.Series | None = None) ->
             continue
         runs = stays(inside)
         recent = inside[-RECENT_SESSIONS:]
-        zpe = None
-        if pe_al is not None:
-            vals = pe_al[inside]
-            vals = vals[~np.isnan(vals)]
-            if len(vals) >= 0.5 * days:
-                zpe = float(np.median(vals))
+        zpe = _median_in(pe_al, inside, days)
+        zpeg1 = _median_in(peg1_al, inside, days)
+        zpeg3 = _median_in(peg3_al, inside, days)
+        zg1 = _median_in(g1_al, inside, days)
+        zg3 = _median_in(g3_al, inside, days)
         periods = [{
             "from": body.index[a].strftime("%Y-%m-%d"),
             "to": body.index[b].strftime("%Y-%m-%d"),
@@ -290,7 +409,11 @@ def build(df: pd.DataFrame, *, asked_from: date, pe: pd.Series | None = None) ->
             # The zone's PE on today's earnings: what the stock would cost if
             # the market paid what it paid then. Price × (PE_then / PE_now)
             # because price / PE is earnings per share.
-            "pe_price": _num(last_close * zpe / pe_now, 3) if zpe and pe_now else None,
+            "pe_price": at_today(zpe, pe_now),
+            # PEG: the PE the market paid per point of growth it could see.
+            "peg1": _num(zpeg1, 3), "peg1_price": at_today(zpeg1, peg1_now),
+            "peg3": _num(zpeg3, 3), "peg3_price": at_today(zpeg3, peg3_now),
+            "g1": _num(zg1), "g3": _num(zg3),
             "periods": periods,
         })
         if len(zones) == MAX_ZONES:
@@ -340,5 +463,7 @@ def build(df: pd.DataFrame, *, asked_from: date, pe: pd.Series | None = None) ->
         "settled": _num(max((z["share"] or 0) for z in zones) if zones else 0.0),
         "zones": zones,
         "now": {"close": _num(last_close, 3), "date": d.index[-1].strftime("%Y-%m-%d"),
-                "pe": _num(pe_now, 2), **where},
+                "pe": _num(pe_now, 2), "peg1": _num(peg1_now, 3), "peg3": _num(peg3_now, 3),
+                "g1": g_now["g1"], "g3": g_now["g3"], "growth_period": g_now["end_date"], **where},
+        "has_growth": bool(growth is not None and not growth.empty),
     }

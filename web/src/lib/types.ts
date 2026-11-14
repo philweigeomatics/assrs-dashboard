@@ -2265,6 +2265,11 @@ export type PriceZone = {
   visits: number; longest: number;
   first: string | null; last: string | null;
   pe: number | null; pe_price: number | null;
+  /** Median PEG while in the zone — on 1-year TTM growth and on the 3-year compound rate — and that PEG on today's numbers. */
+  peg1: number | null; peg1_price: number | null;
+  peg3: number | null; peg3_price: number | null;
+  /** Median earnings growth (fraction) the market could see while in the zone. */
+  g1: number | null; g3: number | null;
   periods: ZonePeriod[];
 };
 export type PriceZones = {
@@ -2276,5 +2281,10 @@ export type PriceZones = {
   value_area: { lo: number; hi: number; poc: number; share: number };
   settled: number;
   zones: PriceZone[];
-  now: { close: number; date: string; pe: number | null; zone: number | null; above: number | null; below: number | null };
+  has_growth: boolean;
+  now: { close: number; date: string; pe: number | null;
+         peg1: number | null; peg3: number | null; g1: number | null; g3: number | null;
+         /** The report period the current growth is from, YYYYMMDD. */
+         growth_period: string | null;
+         zone: number | null; above: number | null; below: number | null };
 };
