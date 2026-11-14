@@ -315,6 +315,83 @@ def _latest(arr, within: int = 5):
     return float(arr[ok[-1]]) if len(ok) and ok[-1] >= len(arr) - within else None
 
 
+def _stay_values(a, b, inside, pe, g1, g3, peg1, peg3) -> dict:
+    """Medians of each valuation series over the sessions of one stay that closed inside the zone."""
+    m = np.zeros(len(inside), bool)
+    m[a:b + 1] = inside[a:b + 1]
+
+    days = int(m.sum())
+
+    def med(arr, nd):
+        # Same rule as the zone's: a median only when at least half the
+        # stay's sessions have a value — a PEG from three days of a
+        # 250-day stay is not that stay's PEG.
+        v = _median_in(arr, m, days)
+        return _num(v, nd) if v is not None else None
+
+    return {"pe": med(pe, 2), "g1": med(g1, 4), "g3": med(g3, 4),
+            "peg1": med(peg1, 3), "peg3": med(peg3, 3)}
+
+
+def report_table(rows: pd.DataFrame, since: date | None = None) -> list[dict]:
+    """
+    Every report behind the growth series, with the arithmetic laid out so
+    it can be checked against the reports themselves:
+
+      profit   year-to-date 归母净利润, as first announced
+      ytd_yoy  that against the same months a year earlier — the 累计同比
+               reports and data sites quote
+      ttm      trailing twelve months (this year so far + last full year −
+               last year to the same point)
+      g1       TTM against the TTM a year earlier
+      g3       three-year compound rate: (TTM / base3_ttm)^(1/3) − 1,
+               base3 being the same period three years earlier
+      effective  the first day it counted; `replaced_by` names a later
+               period announced the same day, which counted instead
+
+    Newest first; from `since` (a date) when given.
+    """
+    r = rows.copy()
+    r["end_date"] = r["end_date"].astype(str).str[:8]
+    r["ann_date"] = r["ann_date"].astype(str).str[:8]
+    r["profit"] = pd.to_numeric(r["profit"], errors="coerce")
+    r = r.dropna(subset=["profit"]).sort_values(["end_date", "ann_date"])
+    r = r.drop_duplicates("end_date", keep="first").set_index("end_date")
+    ttm = dict(zip(*[_ttm_profits(rows)[c] for c in ("end_date", "ttm")])) if len(r) else {}
+    used = profit_growth(rows)
+    used_ends = set(used["end_date"]) if not used.empty else set()
+
+    def ago(e, k):
+        return f"{int(e[:4]) - k}{e[4:]}"
+
+    out = []
+    for e, row in r.iterrows():
+        prev = r["profit"].get(ago(e, 1))
+        t, t1, t3 = ttm.get(e), ttm.get(ago(e, 1)), ttm.get(ago(e, 3))
+        ann = row["ann_date"]
+        eff = (pd.Timestamp(ann) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        same_day = [x for x, y in r["ann_date"].items() if y == ann and x > e]
+        out.append({
+            "end_date": e, "ann_date": f"{ann[:4]}-{ann[4:6]}-{ann[6:]}", "effective": eff,
+            "profit": _num(row["profit"], 0),
+            "ytd_yoy": _num(row["profit"] / prev - 1) if prev and prev > 0 else None,
+            "ttm": _num(t, 0), "ttm_prev": _num(t1, 0),
+            "g1": _num(t / t1 - 1) if t is not None and t1 and t1 > 0 else None,
+            "base3_end": ago(e, 3) if t3 is not None else None, "base3_ttm": _num(t3, 0),
+            "g3": _num((t / t3) ** (1 / 3) - 1) if t is not None and t > 0 and t3 and t3 > 0 else None,
+            "used": e in used_ends,
+            "replaced_by": max(same_day) if same_day and e not in used_ends else None,
+        })
+    out.reverse()
+    if since is not None:
+        cut = since.strftime("%Y%m%d")
+        # Keep the report in force at the window's start, and everything after.
+        keep = [x for x in out if x["effective"].replace("-", "") >= cut]
+        older = [x for x in out if x["effective"].replace("-", "") < cut and x["used"]]
+        out = keep + older[:1]
+    return out
+
+
 def build(df: pd.DataFrame, *, asked_from: date, pe: pd.Series | None = None,
           growth: pd.DataFrame | None = None) -> dict:
     """
@@ -396,6 +473,9 @@ def build(df: pd.DataFrame, *, asked_from: date, pe: pd.Series | None = None,
             "sessions": int(b - a + 1),
             "days": int(inside[a:b + 1].sum()),
             "avg": _num(close[a:b + 1].mean(), 3),
+            # The same medians as the zone's, over this one stay — so the
+            # zone's figure can be traced to the stays it is made of.
+            **_stay_values(a, b, inside, pe_al, g1_al, g3_al, peg1_al, peg3_al),
         } for a, b in runs]
         zones.append({
             "lo": _num(z["lo"], 3), "hi": _num(z["hi"], 3), "peak": _num(z["peak"], 3),
@@ -472,4 +552,12 @@ def build(df: pd.DataFrame, *, asked_from: date, pe: pd.Series | None = None,
                 "pe": _num(pe_now, 2), "peg1": _num(peg1_now, 3), "peg3": _num(peg3_now, 3),
                 "g1": g_now["g1"], "g3": g_now["g3"], "growth_period": g_now["end_date"], **where},
         "has_growth": bool(growth is not None and not growth.empty),
+        # Each day's PE, growth (as known that day) and PEG, aligned to
+        # `dates` — the values every median above is taken from. The IPO
+        # weeks left out of the profile are None.
+        "valuation": None if pe_al is None else {
+            k: [None] * skip + [_num(v, 4) for v in arr]
+            for k, arr in (("pe", pe_al), ("g1", g1_al), ("g3", g3_al),
+                           ("peg1", peg1_al), ("peg3", peg3_al)) if arr is not None
+        },
     }

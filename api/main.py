@@ -489,7 +489,7 @@ def price_zones_view(ticker: str = TICKER, user: AppUser = Depends(current_user)
         # from four years before the window so the three-year rate exists on
         # its first day. North America has no history of this on Yahoo's
         # free feed (about five quarters), so no PEG there.
-        growth = None
+        growth, reports = None, []
         if market.conv.code == "CN" and pe is not None:
             try:
                 import data_manager
@@ -497,9 +497,13 @@ def price_zones_view(ticker: str = TICKER, user: AppUser = Depends(current_user)
                     code, (start - timedelta(days=round(365.25 * 4) + 120)).strftime("%Y%m%d"))
                 if rows is not None and not rows.empty:
                     growth = price_zones.profit_growth(rows)
+                    reports = price_zones.report_table(rows, since=start)
             except Exception:                                   # noqa: BLE001
-                growth = None
+                growth, reports = None, []
         out = price_zones.build(df, asked_from=start, pe=pe, growth=growth)
+        # The reports behind the growth, with their arithmetic, so every
+        # number on the page can be checked against the company's filings.
+        out["reports"] = reports
         return {"ticker": markets.canonical(ticker), "market": market.conv.code,
                 "up_is_red": market.conv.up_is_red,
                 "currency_symbol": market.conv.currency_symbol,

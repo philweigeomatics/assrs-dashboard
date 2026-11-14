@@ -2256,7 +2256,19 @@ export type IndexRulesBody = {
 };
 
 /** 价值区间 — /zones/{ticker}. */
-export type ZonePeriod = { from: string; to: string; sessions: number; days: number; avg: number | null };
+export type ZonePeriod = {
+  from: string; to: string; sessions: number; days: number; avg: number | null;
+  /** Medians over this stay's sessions inside the zone (null when under half have a value). */
+  pe?: number | null; g1?: number | null; g3?: number | null; peg1?: number | null; peg3?: number | null;
+};
+/** One report behind the growth series, with its arithmetic. Profits in yuan. */
+export type ZoneReport = {
+  end_date: string; ann_date: string; effective: string;
+  profit: number | null; ytd_yoy: number | null;
+  ttm: number | null; ttm_prev: number | null; g1: number | null;
+  base3_end: string | null; base3_ttm: number | null; g3: number | null;
+  used: boolean; replaced_by: string | null;
+};
 export type PriceZone = {
   id: number; rank: number;
   lo: number; hi: number; peak: number;
@@ -2284,6 +2296,9 @@ export type PriceZones = {
   settled: number;
   zones: PriceZone[];
   has_growth: boolean;
+  /** Each day's PE, growth as known that day, and PEG — aligned to `dates`. */
+  valuation: Record<"pe" | "g1" | "g3" | "peg1" | "peg3", (number | null)[]> | null;
+  reports: ZoneReport[];
   now: { close: number; date: string; pe: number | null;
          peg1: number | null; peg3: number | null; g1: number | null; g3: number | null;
          /** The report period the current growth is from, YYYYMMDD. */

@@ -12,7 +12,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api";
-import type { PriceZone, PriceZones } from "../lib/types";
+import type { PriceZone, PriceZones, ZoneReport } from "../lib/types";
 import { usePersistentState } from "../lib/usePersistentState";
 import { useSize } from "../lib/useSize";
 
@@ -44,6 +44,14 @@ const growthOf = (b: Basis) => (b === "peg3" ? "g3" : "g1") as "g1" | "g3";
 const fmtMult = (b: Basis, v: number | null) => (v == null ? "—" : b === "pe" ? `${v.toFixed(1)}×` : v.toFixed(2));
 /** "1年" or "3年" — which growth a PEG basis reads. */
 const span = (b: Basis) => (b === "peg3" ? "三年复合" : "近一年");
+const yi = (v: number | null | undefined) => (v == null ? "—" : `${(v / 1e8).toFixed(2)}亿`);
+const pct1 = (v: number | null | undefined) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%`);
+/** The report in force on `date`: the latest one counted, effective on or before it. */
+function reportOn(reports: ZoneReport[], date: string): ZoneReport | null {
+  let best: ZoneReport | null = null;
+  for (const r of reports) if (r.used && r.effective <= date && (!best || r.effective > best.effective)) best = r;
+  return best;
+}
 const quarter = (e: string | null) => (e ? `${e.slice(0, 4)}${{ "0331": "Q1", "0630": "H1", "0930": "Q3", "1231": "年报" }[e.slice(4)] ?? e.slice(4)}` : "");
 
 export function PriceZonesPanel({ ticker }: { ticker: string }) {
@@ -146,6 +154,7 @@ function Body({ d }: { d: PriceZones }) {
             </span>
           </div>
         )}
+        {d.has_pe && d.has_growth && basis !== "pe" && <Formula d={d} basis={basis} />}
         {flat && (
           <p className="text-brand-ink">
             这只股票这几年基本在单边走，没在哪个价位久待（停留最多的区间也只占 {pct(d.settled)} 的时间）——
@@ -155,6 +164,7 @@ function Body({ d }: { d: PriceZones }) {
       </div>
 
       <Chart d={d} selected={selected} money={money} />
+      {d.valuation && <ValuationChart d={d} selected={selected} basis={basis} money={money} />}
 
       {d.zones.length > 0 ? (
         <ZoneTable d={d} sel={sel} setSel={setSel} money={money} basis={basis} />
@@ -163,6 +173,8 @@ function Body({ d }: { d: PriceZones }) {
       )}
 
       {selected && <Stays z={selected} d={d} money={money} basis={basis} />}
+
+      {d.reports.length > 0 && <Reports d={d} />}
 
       <details className="text-[12px] text-ink-mute">
         <summary className="cursor-pointer hover:text-ink">怎么读、能不能当“真实价值”</summary>
@@ -379,8 +391,8 @@ function ZoneTable({ d, sel, setSel, money, basis }: {
                 title={`按现在的盈利（PE ${d.now.pe ?? "—"}×），付当时的市盈率对应的股价`}>按今天盈利</th>
             </>}
             {d.has_pe && peg && <>
-              <th className="px-1 py-1 font-normal text-right" title="在区间内时市场看得到的利润增速（中位数）">当时增速</th>
-              <th className="px-1 py-1 font-normal text-right" title="在区间内时的 PEG 中位数（增速低于 5% 的日子不计）">当时PEG</th>
+              <th className="px-1 py-1 font-normal text-right" title="区间内每个交易日当时已公布的利润增速，取中位数。不是某一天的数——点一行，下面列出每段停留各自的数">当时增速<span className="text-ink-dim">·中位</span></th>
+              <th className="px-1 py-1 font-normal text-right" title="区间内每个交易日的 PEG（当天市盈率 ÷ 当天已知增速），取中位数；增速低于 5% 的日子不计">当时PEG<span className="text-ink-dim">·中位</span></th>
               <th className="px-1 py-1 font-normal text-right"
                 title={`今天的价格、今天的盈利和${span(basis)}增速（${signedPct(d.now[g])}）算出的 PEG；增速低于 5% 时不适用`}>现在PEG</th>
               <th className="px-1 py-1 font-normal text-right"
@@ -492,10 +504,211 @@ function Stays({ z, d, money, basis }: {
           {z.periods.map((p) => (
             <span key={p.from} className="rounded-md bg-sunken px-2 py-1 text-[12px] tabular-nums">
               {p.from} → {p.to} · {p.sessions} 天 · 均价 {money(p.avg)}
+              {basis === "pe" && p.pe != null && <> · PE {fmtMult("pe", p.pe)}</>}
+              {basis !== "pe" && (p[growthOf(basis)] != null || p[basis] != null) && (
+                <> · 增速 {signedPct(p[growthOf(basis)])} · PEG {p[basis] != null ? fmtMult(basis, p[basis]!) : "不适用"}</>
+              )}
             </span>
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The arithmetic behind today's PEG, with the numbers in it — and, because a
+ * report quotes 累计同比 (this year so far against last year so far), how
+ * that differs from the trailing-twelve-month growth used here.
+ */
+function Formula({ d, basis }: { d: PriceZones; basis: Basis }) {
+  const r = d.reports.find((x) => x.used) ?? null;
+  const g = d.now[growthOf(basis)];
+  const pe = d.now.pe;
+  return (
+    <div className="rounded-lg bg-sunken px-2.5 py-2 text-[12.5px] leading-relaxed">
+      <div>
+        <b>PEG = 市盈率 ÷ 增速（百分数）</b>：
+        {pe != null && g != null
+          ? <> {fmtMult("pe", pe)} ÷ {(g * 100).toFixed(1)} = <b>{d.now[basis] != null ? fmtMult(basis, d.now[basis]) : `${(pe / (g * 100)).toFixed(2)}（增速低于 5%，不适用）`}</b></>
+          : " —"}
+        {r && <span className="label"> · 增速来自 {quarter(r.end_date)} 报告（{r.ann_date} 公布，{r.effective} 起算）</span>}
+      </div>
+      {r && basis === "peg1" && r.ttm != null && r.ttm_prev != null && (
+        <div className="label">
+          近一年 = 滚动 12 个月归母净利润 {yi(r.ttm)} ÷ 一年前的滚动 12 个月 {yi(r.ttm_prev)} − 1 = {pct1(r.g1)}
+        </div>
+      )}
+      {r && basis === "peg3" && r.ttm != null && r.base3_ttm != null && (
+        <div className="label">
+          三年复合 = ( 滚动 12 个月 {yi(r.ttm)} ÷ 三年前同期（{quarter(r.base3_end)}）的滚动 12 个月 {yi(r.base3_ttm)} )^(1/3) − 1 = {pct1(r.g3)}
+        </div>
+      )}
+      {r && r.ytd_yoy != null && !r.end_date.endsWith("1231") && (
+        <div className="label">
+          财报里常说的“累计同比 {pct1(r.ytd_yoy)}”是今年到 {quarter(r.end_date)} 对去年同期（{yi(r.profit)}），只比今年这几个月；
+          这里用滚动 12 个月，四个季度对四个季度，和滚动市盈率（PE TTM）对得上。每一步的数见下方「财报明细」。
+        </div>
+      )}
+    </div>
+  );
+}
+
+const VH = 96;
+
+/**
+ * Each day's growth (as known that day) and PEG — or PE — on the same time
+ * axis as the price chart, so "when" has an answer: every zone median is a
+ * median of these lines over the days the price sat in the zone.
+ */
+function ValuationChart({ d, selected, basis, money }: {
+  d: PriceZones; selected: PriceZone | null; basis: Basis; money: (v: number | null) => string;
+}) {
+  const [ref, size] = useSize<HTMLDivElement>();
+  const [hover, setHover] = useState<number | null>(null);
+  const v = d.valuation!;
+  const W = Math.max(size.w, 300);
+  const histW = Math.min(170, Math.round(W * 0.24));
+  const x0 = PAD.l, x1 = W - histW - PAD.r - 8;
+  const n = d.dates.length;
+  const X = (i: number) => x0 + (n <= 1 ? 0 : (i / (n - 1)) * (x1 - x0));
+  const idx = useMemo(() => new Map(d.dates.map((t, i) => [t, i])), [d.dates]);
+
+  const peg = basis !== "pe";
+  const g = growthOf(basis);
+  const panes = peg
+    ? [{ key: g, label: `增速 · ${span(basis)}`, arr: v[g], fmt: (x: number) => pct1(x), lo: -0.5, hi: 1.5, ref: [0, 0.05] },
+       { key: basis, label: `PEG · ${span(basis)}`, arr: v[basis], fmt: (x: number) => x.toFixed(2), lo: 0, hi: 4, ref: [1] }]
+    : [{ key: "pe", label: "市盈率 TTM", arr: v.pe, fmt: (x: number) => `${x.toFixed(1)}×`, lo: 0, hi: 200, ref: [] as number[] }];
+
+  const H2 = panes.length * (VH + 8) + 22;
+  const h = hover;
+  const rep = h != null ? reportOn(d.reports, d.dates[h]!) : null;
+
+  return (
+    <div ref={ref} className="w-full relative select-none">
+      <div className="flex flex-wrap gap-x-3 text-[12px] tabular-nums min-h-[18px] pl-[52px]">
+        {h != null ? <>
+          <span className="font-semibold">{d.dates[h]}</span>
+          <span>收盘 {money(d.close[h] ?? null)}</span>
+          <span>PE {fmtMult("pe", v.pe[h] ?? null)}</span>
+          {peg && <span>增速 {pct1(v[g][h])}</span>}
+          {peg && <span>PEG {v[basis][h] != null ? fmtMult(basis, v[basis][h]!) : "不适用"}</span>}
+          {peg && rep && <span className="label">用 {quarter(rep.end_date)} 报告（{rep.ann_date} 公布）</span>}
+        </> : <span className="label">移到图上看某一天：当天的市盈率、当时已公布的增速、PEG，和用的是哪份报告</span>}
+      </div>
+      {size.w > 0 && (
+        <svg width={W} height={H2} className="block"
+          onMouseLeave={() => setHover(null)}
+          onMouseMove={(e) => {
+            const r = (e.currentTarget as SVGSVGElement).getBoundingClientRect();
+            const mx = e.clientX - r.left;
+            if (mx < x0 || mx > x1) return setHover(null);
+            setHover(Math.round(((mx - x0) / (x1 - x0)) * (n - 1)));
+          }}>
+          {panes.map((p, k) => {
+            const top = 4 + k * (VH + 8), bot = top + VH;
+            const vals = p.arr.filter((x): x is number => x != null);
+            // Clamped: a write-down year's −90% or a recovery's +300% would
+            // flatten every other day into a line on the floor.
+            const lo = Math.max(p.lo, Math.min(...vals, ...p.ref, 0));
+            const hi = Math.min(p.hi, Math.max(...vals, ...p.ref) * 1.05);
+            const Y = (x: number) => bot - ((Math.min(hi, Math.max(lo, x)) - lo) / (hi - lo || 1)) * (bot - top);
+            let path = "";
+            p.arr.forEach((x, i) => {
+              if (x == null) { path += " "; return; }
+              const cmd = path === "" || path.endsWith(" ") ? "M" : "L";
+              path += `${cmd}${X(i).toFixed(1)},${Y(x).toFixed(1)}`;
+            });
+            const now = [...p.arr].reverse().find((x) => x != null) ?? null;
+            return (
+              <g key={p.key}>
+                <rect x={x0} y={top} width={x1 - x0} height={VH} fill="var(--color-sunken)" opacity={0.5} />
+                {selected?.periods.map((s) => {
+                  const a = idx.get(s.from), b = idx.get(s.to);
+                  return a == null || b == null ? null :
+                    <rect key={s.from} x={X(a)} width={Math.max(1, X(b) - X(a))} y={top} height={VH}
+                      fill={colourOf(selected)} opacity={0.14} />;
+                })}
+                {p.ref.map((r) => (
+                  <g key={r}>
+                    <line x1={x0} x2={x1} y1={Y(r)} y2={Y(r)} stroke="var(--color-ink-mute)"
+                      strokeDasharray={r === 0 ? undefined : "3 3"} opacity={0.6} />
+                    {/* 0% and the 5% floor sit a few pixels apart: only 0 gets an axis label. */}
+                    {r !== 0.05 && <text x={x0 - 6} y={Y(r) + 4} fontSize={10.5} textAnchor="end" fill="var(--color-ink-mute)">{r === 0 && peg && p.key !== basis ? "0" : p.fmt(r)}</text>}
+                  </g>
+                ))}
+                <text x={x0 - 6} y={top + 10} fontSize={10.5} textAnchor="end" fill="var(--color-ink-mute)">{p.fmt(hi)}</text>
+                <path d={path.replace(/ /g, "")} fill="none" stroke="var(--color-ink-dim)" strokeWidth={1.3} />
+                <text x={x1 + 10} y={top + 14} fontSize={11.5} fill="var(--color-ink)" fontWeight={600}>{p.label}</text>
+                <text x={x1 + 10} y={top + 30} fontSize={11.5} fill="var(--color-ink-mute)">
+                  现在 {now != null ? p.fmt(now) : "不适用"}
+                </text>
+                {h != null && <line x1={X(h)} x2={X(h)} y1={top} y2={bot} stroke="var(--color-ink-mute)" />}
+              </g>
+            );
+          })}
+          {peg && <>
+            <text x={x1 + 10} y={4 + 46} fontSize={10.5} fill="var(--color-ink-mute)">虚线 = 5% 门槛</text>
+            <text x={x1 + 10} y={4 + 2 * (VH + 8) + 8} fontSize={10.5} fill="var(--color-ink-mute)">
+              增速低于 5% 时 PEG 断开
+            </text>
+          </>}
+        </svg>
+      )}
+    </div>
+  );
+}
+
+/** Every report the growth is built from, with each step of the arithmetic, newest first. */
+function Reports({ d }: { d: PriceZones }) {
+  const [open, setOpen] = usePersistentState("assrs.zones.reports", true);
+  return (
+    <div className="flex flex-col gap-1">
+      <button onClick={() => setOpen(!open)} className="self-start text-[13px] font-semibold hover:text-cyan">
+        📄 财报明细：增速每一步怎么算的 <span className="label font-normal">（{d.reports.length} 份报告，归母净利润，首次公布的数字）{open ? " ▲" : " ▼"}</span>
+      </button>
+      {open && (
+        <div className="overflow-x-auto max-h-80 overflow-y-auto -mx-1 border border-line rounded-lg">
+          <table className="w-full text-[12px] tabular-nums">
+            <thead className="sticky top-0 bg-panel">
+              <tr className="label text-right whitespace-nowrap">
+                <th className="px-1.5 py-1 font-normal text-left">报告期</th>
+                <th className="px-1.5 py-1 font-normal text-left" title="公布日的第二天起，这份报告的增速才算数">公布 → 起算</th>
+                <th className="px-1.5 py-1 font-normal" title="年初到报告期末的累计归母净利润">累计利润</th>
+                <th className="px-1.5 py-1 font-normal" title="累计利润 ÷ 去年同期累计利润 − 1：财报和行情软件常说的“同比”">累计同比</th>
+                <th className="px-1.5 py-1 font-normal" title="滚动 12 个月 = 今年累计 + 去年全年 − 去年同期累计">滚动12个月</th>
+                <th className="px-1.5 py-1 font-normal">一年前滚动</th>
+                <th className="px-1.5 py-1 font-normal" title="滚动12个月 ÷ 一年前滚动 − 1">近一年</th>
+                <th className="px-1.5 py-1 font-normal">三年前同期滚动</th>
+                <th className="px-1.5 py-1 font-normal" title="(滚动12个月 ÷ 三年前同期滚动)^(1/3) − 1">三年复合</th>
+              </tr>
+            </thead>
+            <tbody>
+              {d.reports.map((r) => (
+                <tr key={r.end_date} className={`border-t border-line text-right whitespace-nowrap ${r.used ? "" : "text-ink-mute"}`}>
+                  <td className="px-1.5 py-1 text-left font-semibold">{quarter(r.end_date)}</td>
+                  <td className="px-1.5 py-1 text-left">
+                    {r.ann_date} → {r.effective}
+                    {r.replaced_by && <span className="label" title="同一天还公布了更新的报告期，那天起用它"> · 同日公布 {quarter(r.replaced_by)}，用后者</span>}
+                  </td>
+                  <td className="px-1.5 py-1">{yi(r.profit)}</td>
+                  <td className="px-1.5 py-1">{pct1(r.ytd_yoy)}</td>
+                  <td className="px-1.5 py-1">{yi(r.ttm)}</td>
+                  <td className="px-1.5 py-1">{yi(r.ttm_prev)}</td>
+                  <td className="px-1.5 py-1 font-semibold">{pct1(r.g1)}</td>
+                  <td className="px-1.5 py-1">{r.base3_end ? <>{yi(r.base3_ttm)} <span className="label">{quarter(r.base3_end)}</span></> : "—"}</td>
+                  <td className="px-1.5 py-1 font-semibold">{pct1(r.g3)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="label">
+        数据来自 Tushare 利润表（合并报表，归母净利润），每个报告期用第一次公布的数字，事后修订不算。
+        一次性的大额减值会让某一年的利润很低，紧接着的增速就会很高；它三年后还会成为“三年前同期”，把三年复合拉高——看这张表就能看出来。
+      </p>
     </div>
   );
 }

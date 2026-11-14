@@ -215,3 +215,41 @@ def test_no_growth_data_leaves_peg_out():
     out = Z.build(frame(two_levels()), asked_from=ASKED, pe=pd.Series(20.0, index=frame(two_levels()).index))
     assert not out["has_growth"]
     assert out["now"]["peg1"] is None and all(z["peg1"] is None for z in out["zones"])
+
+
+def test_report_table_shows_each_step():
+    # 2022–2025 annuals plus Q3s; Q3 2025 YTD 90 vs 60 a year earlier.
+    r = reports({"20211231": 80, "20221231": 100, "20231231": 100, "20241231": 100,
+                 "20220930": 70, "20230930": 75, "20240930": 60, "20250930": 90},
+                ann={"20241231": "20250425"})
+    tab = Z.report_table(r)
+    q3 = next(x for x in tab if x["end_date"] == "20250930")
+    assert q3["ytd_yoy"] == pytest.approx(0.5)                # 累计同比: 90 / 60
+    assert q3["ttm"] == pytest.approx(130)                    # 90 + 100 - 60
+    assert q3["ttm_prev"] == pytest.approx(85)                # 60 + 100 - 75
+    assert q3["g1"] == pytest.approx(130 / 85 - 1, abs=1e-4)
+    assert q3["base3_end"] is None                            # Q3 2022 has no 2021 Q3 to complete its TTM
+    assert q3["base3_ttm"] is None
+    assert q3["g3"] is None
+    assert tab[0]["end_date"] == "20250930"                   # newest first
+    assert q3["effective"] == (pd.Timestamp(q3["ann_date"]) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def test_a_report_announced_with_a_later_one_is_marked_replaced():
+    r = reports({"20231231": 100, "20241231": 110, "20240331": 25, "20250331": 30},
+                ann={"20241231": "20250425", "20250331": "20250425"})
+    tab = {x["end_date"]: x for x in Z.report_table(r)}
+    assert tab["20250331"]["used"]
+    assert not tab["20241231"]["used"] and tab["20241231"]["replaced_by"] == "20250331"
+
+
+def test_stays_carry_their_own_medians():
+    df = frame(two_levels())
+    pe = pd.Series(20.0, index=df.index)
+    growth = pd.DataFrame({"end_date": ["20201231"], "ttm": [1.0], "g1": [0.25], "g3": [np.nan]},
+                          index=[pd.Timestamp("2020-01-01")])
+    out = Z.build(df, asked_from=ASKED, pe=pe, growth=growth)
+    st = out["zones"][0]["periods"][0]
+    assert st["pe"] == pytest.approx(20) and st["g1"] == pytest.approx(0.25) and st["peg1"] == pytest.approx(0.8)
+    assert st["peg3"] is None
+    assert len(out["valuation"]["peg1"]) == len(out["dates"])
