@@ -71,3 +71,7 @@ body {
   backdrop-filter: blur(2px);
   border-radius: 8px;
 }
+
+/* A row that scrolls sideways under a thumb without drawing a scrollbar. */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }

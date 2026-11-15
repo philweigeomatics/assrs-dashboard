@@ -72,7 +72,7 @@ export function Watchlist() {
       <main className="max-w-[1100px] mx-auto px-3 py-3 flex flex-col gap-3">
         <section className="card p-3 flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-[14.5px] font-semibold">⭐ 自选股</h2>
+            <h2 className="hidden lg:block text-[14.5px] font-semibold">⭐ 自选股</h2>
             <div className="flex rounded-lg bg-sunken p-0.5">
               {TABS.map((t) => (
                 <button key={t.id} onClick={() => setTab(t.id)}

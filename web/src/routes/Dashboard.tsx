@@ -270,7 +270,7 @@ function Glance({ risk, cycle, credit, onGo }: {
 }) {
   const chip = (label: string, value: string | null, warn: number, go: Tab, title: string) => (
     <button key={label} onClick={() => onGo(go)} title={title}
-      className={`h-8 px-2.5 rounded-lg text-[12.5px] whitespace-nowrap flex items-center gap-1.5 ${
+      className={`h-8 px-2.5 shrink-0 rounded-lg text-[12.5px] whitespace-nowrap flex items-center gap-1.5 ${
         warn >= 2 ? "bg-brand text-white" : warn === 1 ? "bg-brand/15 text-brand-ink" : "bg-sunken text-ink-dim"}`}>
       <span className="opacity-80">{label}</span>
       <b className="font-semibold">{value ?? "…"}</b>
@@ -278,8 +278,8 @@ function Glance({ risk, cycle, credit, onGo }: {
   );
   const flags = risk?.flags ?? 0;
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      <span className="label mr-0.5">一览</span>
+    <div className="flex lg:flex-wrap items-center gap-1.5 max-w-full overflow-x-auto no-scrollbar">
+      <span className="label mr-0.5 shrink-0">一览</span>
       {chip("🚦 市场风险", risk ? `${flags} 项提示` : null, flags >= 3 ? 2 : flags > 0 ? 1 : 0,
         "today", "今日 → 市场风险：流动性、杠杆、情绪、估值、波动中有几项在提示风险")}
       {chip("💳 杠杆周期", cycle?.stage_label ?? null, cycle && cycle.stage !== "none" && cycle.stage !== "right" ? 1 : 0,

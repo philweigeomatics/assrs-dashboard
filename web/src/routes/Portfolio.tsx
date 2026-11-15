@@ -50,11 +50,11 @@ export function Portfolio() {
       <NavBar />
       <main className="max-w-[1500px] mx-auto px-3 py-3 flex flex-col gap-3">
         <section className="card p-3 flex flex-wrap items-center gap-x-3 gap-y-2">
-          <h2 className="text-[14px] font-semibold">💼 组合</h2>
-          <div className="flex items-center gap-1">
+          <h2 className="hidden lg:block text-[14px] font-semibold">💼 组合</h2>
+          <div className="flex items-center gap-1 max-w-full overflow-x-auto no-scrollbar">
             {SECTIONS.map((x) => (
               <button key={x.id} onClick={() => setTab(x.id)}
-                className={`h-8 px-3 rounded-lg text-[13px] font-medium transition-colors ${
+                className={`h-8 px-3 shrink-0 whitespace-nowrap rounded-lg text-[13px] font-medium transition-colors ${
                   tab === x.id ? "bg-elevated text-ink" : "text-ink-mute hover:text-ink"
                 }`}>
                 {x.label}
