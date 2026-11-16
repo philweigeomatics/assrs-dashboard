@@ -412,3 +412,52 @@ def test_turnover_is_the_members_held_through_the_session():
     assert r["amount"].loc[d] == pytest.approx(3e6)
     assert r["amount"].loc["2025-04-15"] == pytest.approx(4e6)  # D joins at this close, not before it
     assert r["amount"].loc["2025-04-16"] == pytest.approx(5e6)
+
+
+# ── candles ──────────────────────────────────────────────────────────────────
+def _candle_case():
+    days = [{"d": "2025-01-02", "open": None, "close": 1000.0},
+            {"d": "2025-01-03", "open": 1010.0, "close": 1020.0}]
+    states = {"2025-01-02": {"v": {"A": 600.0, "B": 400.0}, "p": {"A": 10.0, "B": 20.0}, "cash": 0.0},
+              "2025-01-03": {"v": {"A": 624.0, "B": 396.0}, "p": {"A": 10.4, "B": 19.8}, "cash": 0.0}}
+    cal = pd.to_datetime(["2025-01-02", "2025-01-03"])
+    closes = pd.DataFrame({"A": [10.0, 10.4], "B": [20.0, 19.8]}, cal)
+    highs = pd.DataFrame({"A": [10.0, 10.6], "B": [20.0, 20.4]}, cal)
+    lows = pd.DataFrame({"A": [10.0, 9.9], "B": [20.0, 19.5]}, cal)
+    return days, states, highs, lows, closes
+
+
+def test_a_candle_is_yesterdays_holdings_at_each_members_high_and_low():
+    days, states, highs, lows, closes = _candle_case()
+    r = C.candle_range(days, states, highs, lows, closes)
+    assert r["open"][0] == r["high"][0] == r["low"][0] == 1000.0       # the start day is one price
+    assert r["open"][1] == 1010.0
+    assert r["high"][1] == pytest.approx(600 * 1.06 + 400 * 1.02)       # 1044
+    assert r["low"][1] == pytest.approx(600 * 0.99 + 400 * 0.975)       # 984
+    assert r["partial"] == []
+
+
+def test_a_candle_always_contains_its_open_and_close():
+    days, states, highs, lows, closes = _candle_case()
+    days[1]["close"] = 1100.0                                           # above every member's high
+    days[1]["open"] = None                                              # no open: yesterday's close
+    r = C.candle_range(days, states, highs, lows, closes)
+    assert r["open"][1] == 1000.0 and r["high"][1] == 1100.0 and r["low"][1] <= 1000.0
+
+
+def test_a_member_without_a_bar_moves_by_its_stored_close_and_is_flagged():
+    days, states, highs, lows, closes = _candle_case()
+    r = C.candle_range(days, states, highs.drop(columns=["B"]), lows.drop(columns=["B"]),
+                       closes.drop(columns=["B"]))
+    assert r["high"][1] == pytest.approx(600 * 1.06 + 400 * 0.99)       # B: 19.8 / 20, high = low = close
+    assert r["low"][1] == pytest.approx(600 * 0.99 + 400 * 0.99)
+    assert r["partial"] == ["2025-01-03"]
+
+
+def test_a_halted_member_does_not_move_and_is_not_flagged():
+    days, states, highs, lows, closes = _candle_case()
+    for f in (highs, lows, closes):
+        f.loc["2025-01-03", "B"] = np.nan
+    states["2025-01-03"]["p"]["B"] = 20.0
+    r = C.candle_range(days, states, highs, lows, closes)
+    assert r["high"][1] == pytest.approx(600 * 1.06 + 400) and r["partial"] == []

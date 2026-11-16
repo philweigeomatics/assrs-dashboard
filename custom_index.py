@@ -391,6 +391,80 @@ def build(closes: pd.DataFrame, members: list[dict], *, method: str, rebalance: 
     }
 
 
+def candle_range(days: list[dict], states: dict[str, dict], highs: pd.DataFrame | None,
+                 lows: pd.DataFrame | None, closes: pd.DataFrame | None) -> dict:
+    """
+    Each stored day's open, high and low, for a candle.
+
+    The open is the stored one (yesterday's holdings at this morning's
+    prices). The high and low follow the same rule: what was held at the
+    previous close, each holding moved by its member's high (low) against
+    its previous close —
+
+        high = cash + Σ value × member high ÷ member previous close
+
+    Members rarely top out at the same minute, so this is the most the index
+    COULD have reached: an upper bound on the high and a lower bound on the
+    low — the convention for an index computed from daily bars. A member
+    with no high that day (halted, or no longer on Yahoo) moves by its close
+    as stored, so its wick is just its close. The range always contains the
+    open and close.
+
+    `partial` lists the days where some held member had no high/low.
+    """
+    n = len(days)
+    o, h, lo = [None] * n, [None] * n, [None] * n
+    partial: list[str] = []
+    px = closes.sort_index().ffill() if closes is not None and not closes.empty else None
+    for k, day in enumerate(days):
+        c = day["close"]
+        op = day.get("open")
+        if k == 0 or c is None:
+            o[k] = h[k] = lo[k] = c                  # the start day: a single price
+            continue
+        prev_d = days[k - 1]["d"]
+        st = states.get(prev_d) or {}
+        vals = st.get("v") or {}
+        if op is None or not math.isfinite(float(op)):
+            op = days[k - 1]["close"]
+        if not vals:
+            o[k], h[k], lo[k] = op, max(op, c), min(op, c)
+            continue
+        today_p = (states.get(day["d"]) or {}).get("p", {})
+        prev_p = st.get("p", {})
+        d, pd_ = pd.Timestamp(day["d"]), pd.Timestamp(prev_d)
+        cash = float(st.get("cash") or 0.0)
+        hi_sum = lo_sum = cash
+        miss = False
+        for t, v in vals.items():
+            v = float(v)
+            base = None
+            if px is not None and t in px.columns and pd_ in px.index:
+                base = px.at[pd_, t]
+            hv = highs.at[d, t] if highs is not None and t in highs.columns and d in highs.index else np.nan
+            lv = lows.at[d, t] if lows is not None and t in lows.columns and d in lows.index else np.nan
+            if base is not None and pd.notna(base) and base > 0 and pd.notna(hv) and pd.notna(lv):
+                hi_sum += v * float(hv) / float(base)
+                lo_sum += v * float(lv) / float(base)
+                continue
+            # No bar: a halted member does not move; one Yahoo dropped moves
+            # by its stored close.
+            a, b = prev_p.get(t), today_p.get(t)
+            r = float(b) / float(a) if a and b else 1.0
+            hi_sum += v * r
+            lo_sum += v * r
+            traded = (closes is not None and t in closes.columns and d in closes.index
+                      and pd.notna(closes.at[d, t]))
+            if traded or closes is None or t not in closes.columns:
+                miss = True
+        o[k] = float(op)
+        h[k] = max(hi_sum, o[k], float(c))
+        lo[k] = min(lo_sum, o[k], float(c))
+        if miss:
+            partial.append(day["d"])
+    return {"open": o, "high": h, "low": lo, "partial": partial}
+
+
 # ── reading it ───────────────────────────────────────────────────────────────
 def contribution(level: pd.Series, dv: pd.DataFrame, days: int | None) -> dict[str, float]:
     """

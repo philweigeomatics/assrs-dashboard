@@ -458,7 +458,8 @@ def _cn_closes(codes: list[str], start: date) -> dict:
     # Strict: a stored index must not keep a day computed from a missing chunk.
     bars = watchlist_board.cn_daily(list(ts), start.strftime("%Y%m%d"), end.strftime("%Y%m%d"),
                                     chunk=per_call, workers=4, strict=True)
-    frame = {f: pd.DataFrame({ts[k]: v[f] for k, v in bars.items()}) for f in ("close", "open", "amount")}
+    frame = {f: pd.DataFrame({ts[k]: v[f] for k, v in bars.items() if f in v})
+             for f in ("close", "open", "high", "low", "amount")}
     for f in frame.values():
         if not f.empty:
             f.index = pd.to_datetime(f.index, format="%Y%m%d")
@@ -467,6 +468,7 @@ def _cn_closes(codes: list[str], start: date) -> dict:
     if idx is None or idx.empty:
         raise RuntimeError("沪深300 指数数据暂时读取不到 — 请稍后重试")
     return {"close": frame["close"].sort_index(), "open": frame["open"].sort_index(),
+            "high": frame["high"].sort_index(), "low": frame["low"].sort_index(),
             "amount": frame["amount"].sort_index(), "bench": idx["Close"]}
 
 
@@ -484,7 +486,7 @@ def _us_closes(tickers: list[str], start: date) -> dict:
         if raw is None or raw.empty:
             return {}
         out = {}
-        for f in ("Close", "Open", "Volume"):
+        for f in ("Close", "Open", "High", "Low", "Volume"):
             df = raw[f] if isinstance(raw.columns, pd.MultiIndex) else raw[[f]].rename(columns={f: codes[0]})
             df = df.copy()
             if df.index.tz is not None:
@@ -510,6 +512,7 @@ def _us_closes(tickers: list[str], start: date) -> dict:
     have = [c for c in codes if c in closes.columns and closes[c].notna().any()]
     pick = lambda df: pd.DataFrame({f"US:{c}": df[c] for c in have if c in df.columns}).sort_index()
     return {"close": pick(closes), "open": pick(got["Open"]),
+            "high": pick(got["High"]), "low": pick(got["Low"]),
             "amount": pick(got["Volume"] * closes), "bench": closes["SPY"].dropna()}
 
 
@@ -1315,17 +1318,18 @@ def _us_intraday(tickers: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     import yfinance as yf
 
-    def norm(df):
+    def norm(df, f="Close"):
         if df is None or df.empty:
             return pd.DataFrame()
-        c = df["Close"] if isinstance(df.columns, pd.MultiIndex) else df[["Close"]].rename(columns={"Close": codes[0]})
+        c = df[f] if isinstance(df.columns, pd.MultiIndex) else df[[f]].rename(columns={f: codes[0]})
         c = c.copy()
         c.columns = [f"US:{x}" for x in c.columns]
         return c
 
     codes = [t.split(":", 1)[1] for t in tickers]
-    bars = norm(yf.download(" ".join(codes), period="1d", interval="5m", auto_adjust=False,
-                            prepost=False, progress=False, threads=True))
+    raw = yf.download(" ".join(codes), period="1d", interval="5m", auto_adjust=False,
+                      prepost=False, progress=False, threads=True)
+    bars = norm(raw)
     daily = norm(yf.download(" ".join(codes), period="7d", interval="1d", auto_adjust=False,
                              progress=False, threads=True))
     if len(bars) and bars.index.tz is not None:
@@ -1333,7 +1337,15 @@ def _us_intraday(tickers: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
     if len(daily) and daily.index.tz is not None:
         daily.index = daily.index.tz_localize(None)
     daily.index = daily.index.normalize()
-    return bars, daily
+    # Each member's session so far — first bar's open, highest high, lowest
+    # low — for today's candle, the same three numbers a daily bar has.
+    sess = {}
+    if len(bars):
+        for f in ("Open", "High", "Low"):
+            x = norm(raw, f)
+            x.index = bars.index
+            sess[f.lower()] = x
+    return bars, daily, sess
 
 
 @_guard
@@ -1380,7 +1392,9 @@ def live(user_id: int) -> dict:
     if not held:
         return base
     key = tuple(sorted(held))
-    bars, daily = _live_cache.get_or_compute(key, lambda: _us_intraday(list(key)))
+    got = _live_cache.get_or_compute(key, lambda: _us_intraday(list(key)))
+    bars, daily = got[0], got[1]
+    sess = got[2] if len(got) > 2 else {}
     if bars.empty:
         return base
     session = bars.index[0].normalize()
@@ -1405,6 +1419,7 @@ def live(user_id: int) -> dict:
         # Each member's move so far today, and what it added to the index in
         # percentage points — the members table's 今日 columns, live.
         moves = {}
+        rel_ohl = {"open": {}, "high": {}, "low": {}}
         for t, v in st["v"].items():
             p0 = ref_close.get(t)
             path = bars[t].ffill() if t in bars.columns else None
@@ -1414,14 +1429,78 @@ def live(user_id: int) -> dict:
                 continue
             rel = path.fillna(p0) / float(p0)
             level += float(v) * rel
+            for f, frame in sess.items():
+                s_ = frame[t].dropna() if t in frame.columns else pd.Series(dtype=float)
+                if len(s_):
+                    x = s_.iloc[0] if f == "open" else (s_.max() if f == "high" else s_.min())
+                    rel_ohl[f][t] = float(x) / float(p0)
             moves[t] = {"chg": _num((rel.iloc[-1] - 1) * 100, 2),
                         "contrib": _num(float(v) * (rel.iloc[-1] - 1) / ref_level * 100, 3) if ref_level else None}
         out.append({"id": iid, "name": r["name"], "ref_date": ref_d, "ref_level": _num(ref_level, 2),
                     "level": _num(level.iloc[-1], 2), "chg": _num((level.iloc[-1] / ref_level - 1) * 100, 2),
                     "levels": [_num(v, 2) for v in level.to_numpy()], "missing": missing,
-                    "members": moves})
+                    "members": moves,
+                    "bar": _live_bar(st, rel_ohl, [float(v) for v in level.to_numpy() if pd.notna(v)])})
     return {**base, "open": open_, "session": str(session.date()), "as_of": times[-1] if times else None,
             "times": times, "indexes": sorted(out, key=lambda x: x["name"])}
+
+
+def _live_bar(st: dict, rel: dict[str, dict[str, float]], path: list[float]) -> dict | None:
+    """
+    Today's candle, by the same rule as every stored one (C.candle_range):
+    what was held at the last close, at each member's session open, high and
+    low so far. A member without a bar yet counts as unchanged.
+    """
+    if not path:
+        return None
+    cash = float(st.get("cash") or 0.0)
+    v = {t: float(x) for t, x in st.get("v", {}).items()}
+    o = cash + sum(x * rel["open"].get(t, 1.0) for t, x in v.items())
+    h = cash + sum(x * rel["high"].get(t, 1.0) for t, x in v.items())
+    lo = cash + sum(x * rel["low"].get(t, 1.0) for t, x in v.items())
+    c = path[-1]
+    return {"open": _num(o, 2), "high": _num(max(h, o, c, *path), 2), "low": _num(min(lo, o, c, *path), 2)}
+
+
+_candle_cache = _Cache(maxsize=100, ttl_s=6 * 3600)
+
+
+def _all_states(index_id: int) -> dict[str, dict]:
+    df = _db().read_all(DAY, filters={"index_id": int(index_id)}, columns="d,state", order_by="d")
+    out = {}
+    for r in (df.to_dict("records") if df is not None and not df.empty else []):
+        s = r["state"]
+        out[str(r["d"])[:10]] = json.loads(s) if isinstance(s, str) else (s or {})
+    return out
+
+
+@_guard
+def candles(user_id: int, index_id: int) -> dict:
+    """
+    The stored index as daily candles: open and close as stored, high and low
+    from the members' own highs and lows (C.candle_range). Prices are
+    downloaded here — the stored record has no highs or lows — once per
+    index per stored day, kept six hours.
+    """
+    idx = _own(user_id, index_id)
+    days = _days(index_id)
+    if not days:
+        raise LookupError("指数还没有存下的点位 — 先打开一次指数")
+
+    def build():
+        states = _all_states(index_id)
+        tickers = sorted({t for s in states.values() for t in s.get("v", {})})
+        start = pd.Timestamp(days[0]["d"]).date() - timedelta(days=10)
+        bars = _prices(idx["market"], tickers, start) if tickers else {}
+        rng = C.candle_range(days, states, bars.get("high"), bars.get("low"), bars.get("close"))
+        return {"dates": [d["d"] for d in days],
+                "open": [_num(v, 2) for v in rng["open"]], "high": [_num(v, 2) for v in rng["high"]],
+                "low": [_num(v, 2) for v in rng["low"]], "close": [_num(d["close"], 2) for d in days],
+                "amount": [_num(d.get("amount"), 0) for d in days],
+                "partial": rng["partial"]}
+
+    out = _candle_cache.get_or_compute((int(index_id), days[-1]["d"], len(days)), build)
+    return {**out, "market": idx["market"], "up_is_red": idx["market"] == "CN"}
 
 
 def refresh_all() -> list[dict]:

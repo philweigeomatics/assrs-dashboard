@@ -133,7 +133,8 @@ def cn_daily(codes: list[str], start: str, end: str, chunk: int = CHUNK, workers
         if strict and (adj is None or adj.empty):
             raise RuntimeError(f"复权因子读取不到：{joined[:40]}")
 
-        cols = [c for c in ("ts_code", "trade_date", "open", "close", "amount") if c in px.columns]
+        cols = [c for c in ("ts_code", "trade_date", "open", "high", "low", "close", "amount")
+                if c in px.columns]
         px = px[cols].copy()
         if adj is not None and not adj.empty:
             px = px.merge(adj[["ts_code", "trade_date", "adj_factor"]],
@@ -154,6 +155,8 @@ def cn_daily(codes: list[str], start: str, end: str, chunk: int = CHUNK, workers
             scale = (factor / latest) if latest else 1.0
             df = pd.DataFrame({
                 "open": pd.to_numeric(g["open"], errors="coerce") * scale if "open" in g else np.nan,
+                "high": pd.to_numeric(g["high"], errors="coerce") * scale if "high" in g else np.nan,
+                "low": pd.to_numeric(g["low"], errors="coerce") * scale if "low" in g else np.nan,
                 "close": pd.to_numeric(g["close"], errors="coerce") * scale,
                 # Tushare's amount is in thousands of yuan.
                 "amount": pd.to_numeric(g["amount"], errors="coerce") * 1000 if "amount" in g else np.nan,

@@ -21,6 +21,8 @@ export type LiveRead = {
   open: boolean; session: string; as_of: string | null;
   times: string[]; levels: (number | null)[];
   members: Record<string, { chg: number | null; contrib: number | null }>;
+  /** Today's candle so far, when every part of it is known. */
+  bar: { open: number; high: number; low: number } | null;
 };
 
 export function useIndexLive(enabled: boolean) {
@@ -42,6 +44,8 @@ export function liveFor(live: IndexLive | undefined, id: number, storedAsOf: str
     level: x.level, chg: x.chg, ref_date: x.ref_date, ref_level: x.ref_level ?? null,
     open: live.open, session: live.session, as_of: live.as_of,
     times: live.times ?? [], levels: x.levels ?? [], members: x.members ?? {},
+    bar: x.bar && x.bar.open != null && x.bar.high != null && x.bar.low != null
+      ? { open: x.bar.open, high: x.bar.high, low: x.bar.low } : null,
   };
 }
 

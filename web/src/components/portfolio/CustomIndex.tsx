@@ -32,6 +32,7 @@ import { IndexCompare } from "./IndexCompare";
 import { usePersistentState } from "../../lib/usePersistentState";
 import { fixed, moveClass, signed } from "../../lib/format";
 import { liveFor, useIndexLive, type LiveRead } from "../../lib/indexLive";
+import { IndexKChart, MA_LINES, movingAverage, type MaN } from "./IndexKChart";
 
 const MARKETS = [{ v: "CN", label: "A 股" }, { v: "US", label: "美股" }] as const;
 const WINDOWS: { v: IndexWindow; label: string }[] = [
@@ -386,9 +387,8 @@ function Body({ d }: { d: CustomIndexDetail }) {
             sub={s.d200 != null ? `偏离 200 日 ${signed(s.d200, 1, "%")}` : "不足 200 日"} />
         </div>
         <Split d={d} lv={lv} />
-        <DailyBars d={d} lv={lv} />
         {d.bench_note && <p className="label text-brand-ink">{d.bench_note}</p>}
-        <LevelChart d={d} />
+        <IndexChart d={d} lv={lv} />
       </section>
 
       <Members d={d} lv={lv} />
@@ -489,61 +489,6 @@ function IntradaySpark({ lv, red }: { lv: LiveRead; red: boolean }) {
   );
 }
 
-/**
- * Day over day: each of the last sessions' change against the one before,
- * from the stored closes — and today's, live, as an outlined bar at the end
- * while the US session runs.
- */
-const DAILY_BARS = 30;
-
-function DailyBars({ d, lv }: { d: CustomIndexDetail; lv: LiveRead | null }) {
-  const red = d.index.market === "CN";
-  const [hover, setHover] = useState<number | null>(null);
-  const { dates, level } = d.chart;
-  const bars: { date: string; v: number; live?: boolean }[] = [];
-  for (let i = Math.max(1, level.length - DAILY_BARS); i < level.length; i++) {
-    const a = level[i - 1], c = level[i];
-    if (a != null && c != null && a !== 0) bars.push({ date: dates[i]!, v: (c / a - 1) * 100 });
-  }
-  if (lv) bars.push({ date: `${lv.session}${lv.open ? " 盘中" : ""}`, v: lv.chg, live: true });
-  if (bars.length < 2) return null;
-  const max = Math.max(...bars.map((x) => Math.abs(x.v)), 0.5);
-  const ups = bars.filter((x) => x.v > 0).length, downs = bars.filter((x) => x.v < 0).length;
-  const colour = (v: number) => ((v > 0) === red ? "var(--color-up)" : "var(--color-down)");
-  const h = hover != null ? bars[hover] : null;
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="flex flex-wrap items-baseline gap-x-3 text-[12.5px]">
-        <span className="font-semibold">每日涨跌</span>
-        <span className="label">近 {bars.length} 个交易日 · 涨 {ups} 天 / 跌 {downs} 天</span>
-        <span className="ml-auto tnum">
-          {h ? <>{h.date} <b className={moveClass(h.v, red)}>{signed(h.v, 2, "%")}</b></>
-             : <span className="label">移到柱子上看当天</span>}
-        </span>
-      </div>
-      <div className="flex items-stretch gap-[2px] h-16" onMouseLeave={() => setHover(null)}>
-        {bars.map((x, i) => {
-          const pct = (Math.abs(x.v) / max) * 50;
-          return (
-            <div key={x.date} className="flex-1 min-w-0 relative" onMouseEnter={() => setHover(i)}
-              title={`${x.date} ${signed(x.v, 2, "%")}`}>
-              <div className="absolute left-0 right-0 top-1/2 h-px bg-line" />
-              <div className="absolute left-0 right-0 rounded-[1px]"
-                style={{
-                  height: `${Math.max(pct, 1)}%`,
-                  ...(x.v >= 0 ? { bottom: "50%" } : { top: "50%" }),
-                  background: x.live ? "transparent" : colour(x.v),
-                  border: x.live ? `1.5px solid ${colour(x.v)}` : undefined,
-                  opacity: hover == null || hover === i ? 1 : 0.55,
-                }} />
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 function money(v: number, market: "CN" | "US") {
   if (market === "CN") return v >= 1e8 ? `${fixed(v / 1e8, 1)} 亿` : `${fixed(v / 1e4, 0)} 万`;
   return v >= 1e9 ? `$${fixed(v / 1e9, 2)}B` : `$${fixed(v / 1e6, 0)}M`;
@@ -565,15 +510,63 @@ function linePath(vs: (number | null)[], x: (i: number) => number, y: (v: number
   return s;
 }
 
-function LevelChart({ d }: { d: CustomIndexDetail }) {
+/**
+ * The index from its start: as a line (with its benchmark) or as daily
+ * candles, with the 50-, 120- and 200-day averages switchable on either —
+ * price above a rising 200-day and the shorter ones stacked above the
+ * longer is a market going up; the reverse, one going down.
+ */
+function IndexChart({ d, lv }: { d: CustomIndexDetail; lv: LiveRead | null }) {
+  const [mode, setMode] = usePersistentState<"k" | "line">("assrs.idx.chartMode", "k");
+  const [mas, setMas] = usePersistentState<MaN[]>("assrs.idx.mas", [50, 120, 200]);
+  const lv_ = d.chart.level.filter((v): v is number => v != null);
+  // A tripled index squashes its first year flat on a linear axis; on a log
+  // axis equal heights are equal percentages, which is how a level is read.
+  const [log, setLog] = useState(lv_.length > 0 && Math.max(...lv_) / Math.min(...lv_) > 2.5);
+  const toggle = (n: MaN) => setMas(mas.includes(n) ? mas.filter((x) => x !== n) : [...mas, n].sort((a, b) => a - b));
+  return (
+    <div className="flex flex-col gap-1.5 min-w-0">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+        <div className="flex rounded-md bg-sunken p-0.5">
+          {([["k", "K 线"], ["line", "走势线"]] as const).map(([v, label]) => (
+            <button key={v} onClick={() => setMode(v)}
+              className={`h-7 px-2.5 rounded text-[12.5px] ${mode === v ? "bg-panel shadow-sm font-semibold" : "text-ink-mute"}`}>{label}</button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1" role="group" aria-label="均线">
+          {MA_LINES.map((m) => {
+            const on = mas.includes(m.n);
+            return (
+              <button key={m.n} onClick={() => toggle(m.n)} aria-pressed={on}
+                title={`${m.n} 日均线 — 点击${on ? "隐藏" : "显示"}`}
+                className={`h-7 px-2 rounded-md text-[12px] flex items-center gap-1.5 border transition-colors ${
+                  on ? "border-line bg-panel font-semibold" : "border-transparent text-ink-mute"}`}>
+                <span className="w-3 h-[2px] rounded" style={{ background: on ? m.color : "var(--color-line-bright)" }} />
+                MA{m.n}
+              </button>
+            );
+          })}
+        </div>
+        <div className="ml-auto flex rounded-md bg-sunken p-0.5">
+          {([[true, "对数"], [false, "线性"]] as const).map(([v, label]) => (
+            <button key={label} onClick={() => setLog(v)}
+              className={`h-6 px-2 rounded text-[12px] ${log === v ? "bg-panel shadow-sm font-semibold" : "text-ink-mute"}`}>{label}</button>
+          ))}
+        </div>
+      </div>
+      {mode === "k" ? <IndexKChart d={d} lv={lv} mas={mas} log={log} /> : <LevelChart d={d} mas={mas} log={log} />}
+    </div>
+  );
+}
+
+function LevelChart({ d, mas, log }: { d: CustomIndexDetail; mas: MaN[]; log: boolean }) {
   const c = d.chart, n = c.dates.length, W = 1000, H = 260;
   const box = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<number | null>(null);
-  const vals = [...c.level, ...(c.bench ?? []), ...c.ma200].filter((v): v is number => v != null);
+  const lines = useMemo(() => MA_LINES.filter((m) => mas.includes(m.n))
+    .map((m) => ({ ...m, vs: movingAverage(c.level, m.n) })), [c.level, mas]);
+  const vals = [...c.level, ...(c.bench ?? []), ...lines.flatMap((l) => l.vs)].filter((v): v is number => v != null);
   const lo = Math.min(...vals), hi = Math.max(...vals);
-  // A tripled index squashes its first year flat on a linear axis; on a log
-  // axis equal heights are equal percentages, which is how a level is read.
-  const [log, setLog] = useState(hi / lo > 2.5);
   const tf = (v: number) => (log ? Math.log(v) : v);
   const x = (i: number) => (i / Math.max(1, n - 1)) * W;
   const y = (v: number) => H - 6 - ((tf(v) - tf(lo)) / (tf(hi) - tf(lo) || 1)) * (H - 12);
@@ -591,14 +584,7 @@ function LevelChart({ d }: { d: CustomIndexDetail }) {
       <div className="flex flex-wrap items-center gap-3 text-[12px]">
         <span className="flex items-center gap-1"><span className="w-4 h-[2px]" style={{ background: lineColor }} />{d.index.name}</span>
         {c.bench && <span className="flex items-center gap-1"><span className="w-4 border-t-2 border-dotted border-ink-mute" />{d.bench_label}（同起点）</span>}
-        <span className="flex items-center gap-1"><span className="w-4 border-t-2 border-dashed" style={{ borderColor: "#b45309" }} />200 日线</span>
         {liveAt > 0 && <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-sunken border border-line" />回溯（假设）· {d.live_from} 起实盘</span>}
-        <div className="ml-auto flex rounded-md bg-sunken p-0.5">
-          {([[true, "对数"], [false, "线性"]] as const).map(([v, label]) => (
-            <button key={label} onClick={() => setLog(v)}
-              className={`h-6 px-2 rounded text-[12px] ${log === v ? "bg-panel shadow-sm font-semibold" : "text-ink-mute"}`}>{label}</button>
-          ))}
-        </div>
       </div>
       <div className="flex gap-1">
         <div className="flex flex-col justify-between label font-mono tnum text-right w-12 shrink-0 py-0.5" style={{ height: H }}>
@@ -610,7 +596,9 @@ function LevelChart({ d }: { d: CustomIndexDetail }) {
             {liveAt > 0 && <line x1={x(liveAt)} x2={x(liveAt)} y1={0} y2={H} stroke="var(--color-line-bright)" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />}
             <line x1={0} x2={W} y1={y(1000)} y2={y(1000)} stroke="var(--color-line)" vectorEffect="non-scaling-stroke" />
             {c.bench && <path d={linePath(c.bench, x, y)} fill="none" stroke="var(--color-ink-mute)" strokeDasharray="2 3" strokeWidth={1.2} vectorEffect="non-scaling-stroke" />}
-            <path d={linePath(c.ma200, x, y)} fill="none" stroke="#b45309" strokeDasharray="6 4" strokeWidth={1.2} vectorEffect="non-scaling-stroke" />
+            {lines.map((l) => (
+              <path key={l.n} d={linePath(l.vs, x, y)} fill="none" stroke={l.color} strokeWidth={1.1} vectorEffect="non-scaling-stroke" />
+            ))}
             <path d={linePath(c.level, x, y)} fill="none" stroke={lineColor} strokeWidth={1.8} vectorEffect="non-scaling-stroke" />
             {hover != null && <line x1={x(hover)} x2={x(hover)} y1={0} y2={H} stroke="var(--color-ink-mute)" vectorEffect="non-scaling-stroke" />}
           </svg>
@@ -626,6 +614,7 @@ function LevelChart({ d }: { d: CustomIndexDetail }) {
               <div className="font-mono">{c.dates[hover]}{liveAt > 0 && hover < liveAt ? " · 回溯" : ""}</div>
               <div>{d.index.name} <b className="tnum">{fixed(c.level[hover], 2)}</b></div>
               {c.bench && <div className="text-ink-mute">{d.bench_label} {fixed(c.bench[hover], 2)}</div>}
+              {lines.map((l) => <div key={l.n} style={{ color: l.color }}>MA{l.n} {fixed(l.vs[hover], 2)}</div>)}
             </div>
           )}
         </div>

@@ -33,7 +33,7 @@ import type {
   Breadth, Heatmap, Leverage, LeverageCycle, CreditBoard, RiskBoard, Rotation, TopList, Wyckoff,
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
   ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, PriceZones, Seasonality, Seesaw, Swing, ChainResult, SectorCycle, CyclePairDetail, UsEtfBoard, UsEtfDetail,
-  CustomIndexList, CustomIndexDetail, IndexRulesBody, BoardMarket, MineBoard, IndexCompare, IndexLive,
+  CustomIndexList, CustomIndexDetail, IndexCandles, IndexRulesBody, BoardMarket, MineBoard, IndexCompare, IndexLive,
   RiskRadar,
 } from "./types";
 
@@ -158,6 +158,7 @@ export const api = {
   indexStretch: (id: number) => call<UsEtfDetail>(`/custom-index/${id}/stretch`),
   indexes: () => call<CustomIndexList>("/custom-index"),
   indexDetail: (id: number) => call<CustomIndexDetail>(`/custom-index/${id}`),
+  indexCandles: (id: number) => call<IndexCandles>(`/custom-index/${id}/candles`),
   createIndex: (body: IndexRulesBody & { market: "CN" | "US";
                                          members: { ticker: string; name?: string }[] }) =>
     call<{ id: number }>("/custom-index", {
