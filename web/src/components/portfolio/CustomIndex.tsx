@@ -32,7 +32,7 @@ import { IndexCompare } from "./IndexCompare";
 import { usePersistentState } from "../../lib/usePersistentState";
 import { fixed, moveClass, signed } from "../../lib/format";
 import { liveFor, useIndexLive, type LiveRead } from "../../lib/indexLive";
-import { IndexKChart, MA_LINES, movingAverage, type MaN } from "./IndexKChart";
+import { MA_LINES, movingAverage, type MaN } from "../../lib/movingAverage";
 
 const MARKETS = [{ v: "CN", label: "A 股" }, { v: "US", label: "美股" }] as const;
 const WINDOWS: { v: IndexWindow; label: string }[] = [
@@ -511,28 +511,32 @@ function linePath(vs: (number | null)[], x: (i: number) => number, y: (v: number
 }
 
 /**
- * The index from its start: as a line (with its benchmark) or as daily
- * candles, with the 50-, 120- and 200-day averages switchable on either —
- * price above a rising 200-day and the shorter ones stacked above the
- * longer is a market going up; the reverse, one going down.
+ * The index from its start, as a line, with the 50-, 120- and 200-day
+ * averages switchable — price above a rising 200-day with the shorter ones
+ * stacked above the longer is a market going up; the reverse, one going
+ * down. The end of the line says where it is against the close before:
+ * live while the US session runs.
+ *
+ * 叠加 lays one other index over it. Both are then measured from their
+ * common start (the later of the two start dates) as a gain or loss since
+ * that day, so a newer index is compared over the days both existed.
  */
 function IndexChart({ d, lv }: { d: CustomIndexDetail; lv: LiveRead | null }) {
-  const [mode, setMode] = usePersistentState<"k" | "line">("assrs.idx.chartMode", "k");
   const [mas, setMas] = usePersistentState<MaN[]>("assrs.idx.mas", [50, 120, 200]);
-  const lv_ = d.chart.level.filter((v): v is number => v != null);
+  const [overlayId, setOverlayId] = usePersistentState<number | null>(`assrs.idx.overlay.${d.index.id}`, null);
+  const cmp = useQuery({ queryKey: ["idx", "compare"], queryFn: api.indexCompare, staleTime: 10 * 60_000 });
+  const others = (cmp.data?.indexes ?? []).filter((x) => x.id !== d.index.id);
+  const other = others.find((x) => x.id === overlayId) ?? null;
+  const live = useIndexLive(other?.market === "US");
+  const olv = other ? liveFor(live.data, other.id, other.dates[other.dates.length - 1]) : null;
+  const lvl = d.chart.level.filter((v): v is number => v != null);
   // A tripled index squashes its first year flat on a linear axis; on a log
   // axis equal heights are equal percentages, which is how a level is read.
-  const [log, setLog] = useState(lv_.length > 0 && Math.max(...lv_) / Math.min(...lv_) > 2.5);
+  const [log, setLog] = useState(lvl.length > 0 && Math.max(...lvl) / Math.min(...lvl) > 2.5);
   const toggle = (n: MaN) => setMas(mas.includes(n) ? mas.filter((x) => x !== n) : [...mas, n].sort((a, b) => a - b));
   return (
     <div className="flex flex-col gap-1.5 min-w-0">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
-        <div className="flex rounded-md bg-sunken p-0.5">
-          {([["k", "K 线"], ["line", "走势线"]] as const).map(([v, label]) => (
-            <button key={v} onClick={() => setMode(v)}
-              className={`h-7 px-2.5 rounded text-[12.5px] ${mode === v ? "bg-panel shadow-sm font-semibold" : "text-ink-mute"}`}>{label}</button>
-          ))}
-        </div>
         <div className="flex items-center gap-1" role="group" aria-label="均线">
           {MA_LINES.map((m) => {
             const on = mas.includes(m.n);
@@ -547,6 +551,17 @@ function IndexChart({ d, lv }: { d: CustomIndexDetail; lv: LiveRead | null }) {
             );
           })}
         </div>
+        <label className="flex items-center gap-1.5 text-[12px]">
+          <span className="label">叠加</span>
+          <select value={other?.id ?? ""} onChange={(e) => setOverlayId(e.target.value ? Number(e.target.value) : null)}
+            className="h-7 px-2 rounded-md bg-sunken text-[12.5px] outline-none max-w-[200px] focus:ring-2 focus:ring-cyan/40"
+            aria-label="叠加另一个指数">
+            <option value="">不叠加</option>
+            {others.map((x) => (
+              <option key={x.id} value={x.id}>{x.name} · {x.market === "CN" ? "A 股" : "美股"}</option>
+            ))}
+          </select>
+        </label>
         <div className="ml-auto flex rounded-md bg-sunken p-0.5">
           {([[true, "对数"], [false, "线性"]] as const).map(([v, label]) => (
             <button key={label} onClick={() => setLog(v)}
@@ -554,55 +569,165 @@ function IndexChart({ d, lv }: { d: CustomIndexDetail; lv: LiveRead | null }) {
           ))}
         </div>
       </div>
-      {mode === "k" ? <IndexKChart d={d} lv={lv} mas={mas} log={log} /> : <LevelChart d={d} mas={mas} log={log} />}
+      <LevelChart d={d} lv={lv} mas={mas} log={log}
+        overlay={other ? { name: other.name, market: other.market, dates: other.dates, close: other.close, lv: olv } : null} />
     </div>
   );
 }
 
-function LevelChart({ d, mas, log }: { d: CustomIndexDetail; mas: MaN[]; log: boolean }) {
-  const c = d.chart, n = c.dates.length, W = 1000, H = 260;
+type Overlay = { name: string; market: "CN" | "US"; dates: string[]; close: number[]; lv: LiveRead | null };
+const OVERLAY = "#0891b2";
+
+/** Values on `dates`, carried forward over dates the source has no row for (another market's holidays). */
+function onDates(src: Map<string, number>, dates: string[]): (number | null)[] {
+  let last: number | null = null;
+  return dates.map((t) => { const v = src.get(t); if (v != null) last = v; return last; });
+}
+
+function LevelChart({ d, lv, mas, log, overlay }: {
+  d: CustomIndexDetail; lv: LiveRead | null; mas: MaN[]; log: boolean; overlay: Overlay | null;
+}) {
+  const c = d.chart, W = 1000, H = 260;
   const box = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<number | null>(null);
-  const lines = useMemo(() => MA_LINES.filter((m) => mas.includes(m.n))
-    .map((m) => ({ ...m, vs: movingAverage(c.level, m.n) })), [c.level, mas]);
-  const vals = [...c.level, ...(c.bench ?? []), ...lines.flatMap((l) => l.vs)].filter((v): v is number => v != null);
+  const red = d.index.market === "CN";
+
+  const s = useMemo(() => {
+    // The index's own closes, and today's live level after them while the
+    // session runs — the averages include it, as a live chart's would.
+    const own = new Map<string, number>();
+    c.dates.forEach((t, i) => { const v = c.level[i]; if (v != null) own.set(t, v); });
+    if (lv) own.set(lv.session, lv.level);
+    const ownDates = [...own.keys()];
+    const ownVals = ownDates.map((t) => own.get(t)!);
+    const maFull = MA_LINES.filter((m) => mas.includes(m.n))
+      .map((m) => { const ma = movingAverage(ownVals, m.n); return { ...m, m: new Map(ownDates.map((t, i) => [t, ma[i]])) }; });
+    const bench = new Map<string, number>();
+    c.dates.forEach((t, i) => { const v = c.bench?.[i]; if (v != null) bench.set(t, v); });
+
+    const oth = new Map<string, number>();
+    if (overlay) {
+      overlay.dates.forEach((t, i) => { const v = overlay.close[i]; if (v != null) oth.set(t, v); });
+      if (overlay.lv) oth.set(overlay.lv.session, overlay.lv.level);
+    }
+    // One date axis: the index's own, or — overlaid — every date either has,
+    // from the later of the two starts.
+    const start = overlay ? [ownDates[0] ?? "", [...oth.keys()][0] ?? ""].sort()[1]! : ownDates[0] ?? "";
+    const dates = overlay
+      ? [...new Set([...ownDates, ...oth.keys()])].filter((t) => t >= start).sort()
+      : ownDates;
+    const level = onDates(own, dates);
+    const base = level.find((v) => v != null) ?? 1;
+    const other = overlay ? onDates(oth, dates) : null;
+    const obase = other?.find((v) => v != null) ?? 1;
+    // Overlaid, every line is a growth factor from the common start (1 = no
+    // change), so both indexes start level; alone, they are index points.
+    const k = overlay ? 1 / base : 1;
+    const scale = (vs: (number | null)[], f: number) => vs.map((v) => (v == null ? null : v * f));
+    const benchLine = c.bench ? onDates(bench, dates) : null;
+    const bbase = benchLine?.find((v) => v != null) ?? 1;
+    return {
+      dates, start,
+      level: scale(level, k),
+      raw: level,
+      other: other ? scale(other, 1 / obase) : null,
+      otherRaw: other,
+      bench: benchLine ? scale(benchLine, overlay ? 1 / bbase : 1) : null,
+      mas: maFull.map((m) => ({ ...m, vs: scale(onDates(new Map([...m.m].filter(([, v]) => v != null) as [string, number][]), dates), k) })),
+      ref: overlay ? 1 : 1000,
+    };
+  }, [c, lv, mas, overlay]);
+
+  const n = s.dates.length;
+  const vals = [...s.level, ...(s.other ?? []), ...(s.bench ?? []), ...s.mas.flatMap((l) => l.vs)]
+    .filter((v): v is number => v != null && v > 0);
   const lo = Math.min(...vals), hi = Math.max(...vals);
   const tf = (v: number) => (log ? Math.log(v) : v);
   const x = (i: number) => (i / Math.max(1, n - 1)) * W;
   const y = (v: number) => H - 6 - ((tf(v) - tf(lo)) / (tf(hi) - tf(lo) || 1)) * (H - 12);
-  const liveAt = d.live_from ? c.dates.findIndex((t) => t >= d.live_from!) : -1;
+  const fmt = (v: number | null | undefined) =>
+    v == null ? "—" : overlay ? signed((v - 1) * 100, 1, "%") : fixed(v, 0);
+  const liveFromAt = d.live_from ? s.dates.findIndex((t) => t >= d.live_from!) : -1;
+  const liveAt = liveFromAt > 0 ? liveFromAt : -1;
   const up = (d.stats.ret.all ?? 0) >= 0;
-  const red = d.index.market === "CN";
-  const lineColor = up === red ? "var(--color-up)" : "var(--color-down)";
+  const lineColor = overlay ? "var(--color-ink)" : up === red ? "var(--color-up)" : "var(--color-down)";
   const onMove = (e: React.MouseEvent) => {
     const rc = box.current?.getBoundingClientRect();
     if (rc) setHover(Math.max(0, Math.min(n - 1, Math.round(((e.clientX - rc.left) / rc.width) * (n - 1)))));
   };
   const ticks = [hi, log ? Math.sqrt(hi * lo) : (hi + lo) / 2, lo];
+
+  // The last point against the one before: today's move, live or as stored.
+  const endOf = (vs: (number | null)[]) => {
+    let i = vs.length - 1;
+    while (i > 0 && vs[i] == null) i--;
+    let j = i - 1;
+    while (j >= 0 && (vs[j] == null || s.dates[j] === s.dates[i])) j--;
+    return { i, v: vs[i] ?? null, chg: j >= 0 && vs[i] != null && vs[j] ? (vs[i]! / vs[j]! - 1) * 100 : null };
+  };
+  const own = endOf(s.raw);
+  const ownChg = lv ? lv.chg : d.stats.ret["1d"] ?? own.chg;
+  const ownWhen = lv ? `${lv.open ? "盘中" : "今日"} ${lv.as_of ?? ""}`.trim() : `${d.as_of} 收盘`;
+  const oth = s.otherRaw ? endOf(s.otherRaw) : null;
+  const othChg = overlay?.lv ? overlay.lv.chg : oth?.chg ?? null;
+  const ret = (vs: (number | null)[] | null) => {
+    const v = vs ? [...vs].reverse().find((z) => z != null) : null;
+    return v != null ? (v - 1) * 100 : null;
+  };
+  const lastLiveIdx = lv ? s.dates.indexOf(lv.session) : -1;
+
   return (
     <div className="flex flex-col gap-1 min-w-0">
-      <div className="flex flex-wrap items-center gap-3 text-[12px]">
-        <span className="flex items-center gap-1"><span className="w-4 h-[2px]" style={{ background: lineColor }} />{d.index.name}</span>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
+        <span className="flex items-center gap-1">
+          <span className="w-4 h-[2px]" style={{ background: lineColor }} />{d.index.name}
+          <span className="tnum">· {fixed(own.v, 2)} <b className={moveClass(ownChg, red)}>{signed(ownChg, 2, "%")}</b>
+            <span className="label"> {ownWhen}</span></span>
+        </span>
+        {overlay && (
+          <span className="flex items-center gap-1">
+            <span className="w-4 h-[2px]" style={{ background: OVERLAY }} />{overlay.name}
+            <span className="tnum">· {fixed(oth?.v, 2)} <b className={moveClass(othChg, overlay.market === "CN")}>{signed(othChg, 2, "%")}</b>
+              <span className="label"> {overlay.lv ? (overlay.lv.open ? "盘中" : "今日") : "收盘"}</span></span>
+          </span>
+        )}
         {c.bench && <span className="flex items-center gap-1"><span className="w-4 border-t-2 border-dotted border-ink-mute" />{d.bench_label}（同起点）</span>}
-        {liveAt > 0 && <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-sunken border border-line" />回溯（假设）· {d.live_from} 起实盘</span>}
+        {!overlay && liveAt > 0 && <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-sunken border border-line" />回溯（假设）· {d.live_from} 起实盘</span>}
       </div>
+      {overlay && (
+        <p className="text-[12.5px] tnum">
+          自 <b className="font-mono">{s.start}</b>（共同起点）：{d.index.name}{" "}
+          <b className={moveClass(ret(s.level), red)}>{signed(ret(s.level), 1, "%")}</b> · {overlay.name}{" "}
+          <b className={moveClass(ret(s.other), overlay.market === "CN")}>{signed(ret(s.other), 1, "%")}</b>
+          {ret(s.level) != null && ret(s.other) != null && (
+            <span className="label"> · 相差 {signed(ret(s.level)! - ret(s.other)!, 1)} 个百分点</span>
+          )}
+        </p>
+      )}
       <div className="flex gap-1">
         <div className="flex flex-col justify-between label font-mono tnum text-right w-12 shrink-0 py-0.5" style={{ height: H }}>
-          {ticks.map((t, i) => <span key={i}>{t.toFixed(0)}</span>)}
+          {ticks.map((t, i) => <span key={i}>{fmt(t)}</span>)}
         </div>
         <div ref={box} onMouseMove={onMove} onMouseLeave={() => setHover(null)} className="relative flex-1 min-w-0" style={{ height: H }}>
           <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="absolute inset-0 w-full h-full" role="img" aria-label={`${d.index.name} 点位走势`}>
-            {liveAt > 0 && <rect x={0} y={0} width={x(liveAt)} height={H} fill="var(--color-sunken)" />}
-            {liveAt > 0 && <line x1={x(liveAt)} x2={x(liveAt)} y1={0} y2={H} stroke="var(--color-line-bright)" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />}
-            <line x1={0} x2={W} y1={y(1000)} y2={y(1000)} stroke="var(--color-line)" vectorEffect="non-scaling-stroke" />
-            {c.bench && <path d={linePath(c.bench, x, y)} fill="none" stroke="var(--color-ink-mute)" strokeDasharray="2 3" strokeWidth={1.2} vectorEffect="non-scaling-stroke" />}
-            {lines.map((l) => (
+            {!overlay && liveAt > 0 && <rect x={0} y={0} width={x(liveAt)} height={H} fill="var(--color-sunken)" />}
+            {!overlay && liveAt > 0 && <line x1={x(liveAt)} x2={x(liveAt)} y1={0} y2={H} stroke="var(--color-line-bright)" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />}
+            <line x1={0} x2={W} y1={y(s.ref)} y2={y(s.ref)} stroke="var(--color-line)" vectorEffect="non-scaling-stroke" />
+            {s.bench && <path d={linePath(s.bench, x, y)} fill="none" stroke="var(--color-ink-mute)" strokeDasharray="2 3" strokeWidth={1.2} vectorEffect="non-scaling-stroke" />}
+            {s.mas.map((l) => (
               <path key={l.n} d={linePath(l.vs, x, y)} fill="none" stroke={l.color} strokeWidth={1.1} vectorEffect="non-scaling-stroke" />
             ))}
-            <path d={linePath(c.level, x, y)} fill="none" stroke={lineColor} strokeWidth={1.8} vectorEffect="non-scaling-stroke" />
+            {s.other && <path d={linePath(s.other, x, y)} fill="none" stroke={OVERLAY} strokeWidth={1.8} vectorEffect="non-scaling-stroke" />}
+            <path d={linePath(s.level, x, y)} fill="none" stroke={lineColor} strokeWidth={1.8} vectorEffect="non-scaling-stroke" />
             {hover != null && <line x1={x(hover)} x2={x(hover)} y1={0} y2={H} stroke="var(--color-ink-mute)" vectorEffect="non-scaling-stroke" />}
           </svg>
-          {liveAt > 0 && (
+          {/* Today's point, live: a dot at the end of the line. */}
+          {lastLiveIdx >= 0 && s.level[lastLiveIdx] != null && (
+            <span className={`absolute w-2 h-2 -ml-1 -mt-1 rounded-full ${lv?.open ? "animate-pulse" : ""}`}
+              style={{ left: `${(lastLiveIdx / Math.max(1, n - 1)) * 100}%`, top: y(s.level[lastLiveIdx]!),
+                       background: lineColor }} />
+          )}
+          {!overlay && liveAt > 0 && (
             <>
               <span className="absolute top-1 left-1 label">回溯（假设）</span>
               <span className="absolute top-1 label" style={{ left: `calc(${(liveAt / Math.max(1, n - 1)) * 100}% + 4px)` }}>实盘</span>
@@ -611,15 +736,23 @@ function LevelChart({ d, mas, log }: { d: CustomIndexDetail; mas: MaN[]; log: bo
           {hover != null && (
             <div className="absolute top-6 card px-2 py-1 text-[12px] pointer-events-none z-10"
               style={hover > n * 0.6 ? { right: `${100 - (hover / Math.max(1, n - 1)) * 100 + 1}%` } : { left: `${(hover / Math.max(1, n - 1)) * 100 + 1}%` }}>
-              <div className="font-mono">{c.dates[hover]}{liveAt > 0 && hover < liveAt ? " · 回溯" : ""}</div>
-              <div>{d.index.name} <b className="tnum">{fixed(c.level[hover], 2)}</b></div>
-              {c.bench && <div className="text-ink-mute">{d.bench_label} {fixed(c.bench[hover], 2)}</div>}
-              {lines.map((l) => <div key={l.n} style={{ color: l.color }}>MA{l.n} {fixed(l.vs[hover], 2)}</div>)}
+              <div className="font-mono">{s.dates[hover]}{hover === lastLiveIdx ? (lv?.open ? " 盘中" : " 今日") : ""}{!overlay && liveAt > 0 && hover < liveAt ? " · 回溯" : ""}</div>
+              <div>{d.index.name} <b className="tnum">{fixed(s.raw[hover], 2)}</b>
+                {overlay && <span className="tnum"> ({fmt(s.level[hover])})</span>}</div>
+              {overlay && s.other && (
+                <div style={{ color: OVERLAY }}>{overlay.name} <b className="tnum">{fixed(s.otherRaw?.[hover], 2)}</b>
+                  <span className="tnum"> ({fmt(s.other[hover])})</span></div>
+              )}
+              {overlay && s.level[hover] != null && s.other?.[hover] != null && (
+                <div className="label">相差 {signed((s.level[hover]! - s.other[hover]!) * 100, 1)} 个百分点</div>
+              )}
+              {s.bench && <div className="text-ink-mute">{d.bench_label} {fmt(s.bench[hover])}</div>}
+              {s.mas.map((l) => <div key={l.n} style={{ color: l.color }}>MA{l.n} {overlay ? fmt(l.vs[hover]) : fixed(l.vs[hover], 2)}</div>)}
             </div>
           )}
         </div>
       </div>
-      <div className="flex justify-between label font-mono tnum pl-[52px]"><span>{c.dates[0]}</span><span>{c.dates[n - 1]}</span></div>
+      <div className="flex justify-between label font-mono tnum pl-[52px]"><span>{s.dates[0]}</span><span>{s.dates[n - 1]}</span></div>
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { movingAverage } from "./IndexKChart";
+import { movingAverage } from "./movingAverage";
 
 describe("movingAverage", () => {
   it("is null until there are n values, then the trailing mean", () => {

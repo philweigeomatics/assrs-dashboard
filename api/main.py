@@ -1929,13 +1929,6 @@ def custom_index_board(market: str = Query(..., pattern="^(CN|US)$"), user: AppU
     return _index_call(user, index_api.board_rows, user.id, market)
 
 
-@app.get("/custom-index/{index_id}/candles")
-def custom_index_candles(index_id: int, user: AppUser = Depends(current_user)):
-    """One of the caller's indexes as daily candles (high and low from its members')."""
-    from api import index_api
-    return _index_call(user, index_api.candles, user.id, index_id)
-
-
 @app.get("/custom-index/{index_id}/stretch")
 def custom_index_stretch(index_id: int, user: AppUser = Depends(current_user)):
     """The board's detail chart for one of the caller's indexes."""

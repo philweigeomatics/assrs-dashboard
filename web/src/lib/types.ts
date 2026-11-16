@@ -1079,18 +1079,7 @@ export type IndexLive = {
   indexes: { id: number; name: string; ref_date?: string; ref_level?: number | null; level?: number | null;
              chg?: number | null; levels?: (number | null)[]; missing?: string[]; error?: string;
              /** Each held member's move so far today (%) and its contribution to the index (percentage points). */
-             members?: Record<string, { chg: number | null; contrib: number | null }>;
-             /** Today's candle so far: the last close's holdings at each member's session open, high and low. */
-             bar?: { open: number | null; high: number | null; low: number | null } | null }[];
-};
-
-/** A custom index as daily candles (high/low from its members'), aligned to `dates`. */
-export type IndexCandles = {
-  dates: string[]; open: (number | null)[]; high: (number | null)[]; low: (number | null)[];
-  close: (number | null)[]; amount: (number | null)[];
-  /** Days where a held member had no high/low and moved by its close instead. */
-  partial: string[];
-  market: "CN" | "US"; up_is_red: boolean;
+             members?: Record<string, { chg: number | null; contrib: number | null }> }[];
 };
 
 // ── 信用与债务 ──────────────────────────────────────────────────────────────────
