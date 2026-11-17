@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Navigate } from "react-router-dom";
 import { supabase, supabaseConfigured } from "../lib/supabase";
 import { useAuth } from "./AuthProvider";
+import { SEEN_KEY } from "../lib/today";
 
 export function LoginPage() {
   const { session, dev } = useAuth();
@@ -19,6 +20,8 @@ export function LoginPage() {
     setError(null);
     const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
     setBusy(false);
+    // A fresh sign-in gets today's 🔔 brief even if it already showed today.
+    if (!error) { try { localStorage.removeItem(SEEN_KEY); } catch { /* fine */ } }
     if (error) setError(error.message === "Invalid login credentials" ? "邮箱或密码不正确" : error.message);
   }
 

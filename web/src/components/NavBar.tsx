@@ -17,6 +17,7 @@ import { supabase } from "../lib/supabase";
 import { useAuth } from "../auth/AuthProvider";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { TodayBell } from "./TodayBell";
 
 export const PAGES = [
   { to: "/market", label: "🗺️ 市场看板" },
@@ -77,7 +78,9 @@ export function NavBar({ children }: { children?: ReactNode }) {
         </nav>
 
         {children ? (
-          <div className="flex-1 min-w-0 flex items-center">{children}</div>
+          // A floor, so on a narrow desktop the nav row scrolls rather than
+          // squeezing the page's own control (the stock search) to nothing.
+          <div className="flex-1 min-w-0 lg:min-w-[220px] flex items-center">{children}</div>
         ) : (
           // With the links folded away, say where you are.
           <span className="lg:hidden flex-1 min-w-0 truncate text-[15px] font-semibold">
@@ -85,11 +88,12 @@ export function NavBar({ children }: { children?: ReactNode }) {
           </span>
         )}
 
-        <div className="hidden lg:flex ml-auto items-center gap-3 shrink-0">
-          {dev && <span className="text-[12px] text-brand-ink">本地开发模式</span>}
+        <div className="ml-auto flex items-center gap-1 lg:gap-3 shrink-0 -mr-1 lg:mr-0">
+          <TodayBell />
+          {dev && <span className="hidden lg:inline text-[12px] text-brand-ink">本地开发模式</span>}
           {!dev && (
             <button onClick={() => supabase.auth.signOut()}
-              className="text-[13px] text-ink-mute hover:text-ink">
+              className="hidden lg:inline text-[13px] text-ink-mute hover:text-ink">
               退出
             </button>
           )}

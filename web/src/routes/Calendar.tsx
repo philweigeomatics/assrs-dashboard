@@ -11,9 +11,9 @@
  * data needs one call per day. See calendar_data for the measurements.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
 import type { EarningsCalendar, EarningsRow, EcoEvent, EcoWeek }
   from "../lib/types";
@@ -27,6 +27,7 @@ import { localClock, localDay, localMonday, offBeijing, viewerZone, zoneLabel }
 import { EcoRead } from "../components/market/EcoRead";
 import { EcoIndexChart, type EcoPick } from "../components/market/EcoIndexChart";
 import { hasHistory, seriesOf } from "../lib/ecoSeries";
+import type { EcoHandoff } from "../components/TodayBell";
 
 const VIEWS = [
   { id: "eco", label: "🌍 经济数据" },
@@ -55,6 +56,17 @@ export function Calendar() {
   // The release whose history is marked on the index chart under the week.
   const [pick, setPick] = usePersistentState<EcoPick | null>(
     "assrs.cal.pick", { country: "美国", event: "美联储利率决议" });
+
+  // Arriving from the 🔔 brief: this week, the economic view, those releases
+  // ticked, and the first one with a history on the chart below.
+  const handoff = (useLocation().state as EcoHandoff | null)?.ecoPick ?? null;
+  useEffect(() => {
+    if (!handoff?.length) return;
+    setView("eco");
+    setOffset(0);
+    const h = handoff.find((e) => hasHistory(e.country, e.event));
+    if (h) setPick({ country: h.country, event: h.event });
+  }, [handoff, setView, setPick]);
 
   const start = useMemo(() => {
     const d = monday(new Date());
@@ -106,7 +118,10 @@ export function Calendar() {
                 </div>
               } />
             <Body q={eco}>
-              {eco.data && <EcoWeekView d={eco.data} pick={pick} onPick={setPick} />}
+              {eco.data && (
+                <EcoWeekView d={eco.data} pick={pick} onPick={setPick}
+                  handoff={offset === 0 ? handoff : null} />
+              )}
             </Body>
           </section>
         )}
@@ -193,8 +208,9 @@ function Body({ q, children }: {
 /** Key an event by what identifies it on the server, not by array position. */
 const keyOf = (e: EcoEvent) => `${e.date}|${e.time}|${e.country}|${e.event}`;
 
-function EcoWeekView({ d, pick, onPick }: {
+function EcoWeekView({ d, pick, onPick, handoff }: {
   d: EcoWeek; pick: EcoPick | null; onPick: (p: EcoPick) => void;
+  handoff: EcoEvent[] | null;
 }) {
   const pickedSeries = pick ? `${pick.country}|${seriesOf(pick.event)}` : null;
   const [country, setCountry] = useState<string>(ALL);
@@ -205,6 +221,24 @@ function EcoWeekView({ d, pick, onPick }: {
   // gather a few from Monday and a few from Thursday before asking.
   const [picked, setPicked] = useState<Record<string, EcoEvent>>({});
   const chosen = Object.values(picked);
+
+  // Tick what the 🔔 brief handed over (added to anything already ticked)
+  // and bring the first of them into view.
+  // Once per hand-off: stepping to another week and back must not re-tick
+  // what has since been cleared.
+  const taken = useRef<EcoEvent[] | null>(null);
+  useEffect(() => {
+    const head = handoff?.[0];
+    if (!handoff || !head || taken.current === handoff) return;
+    taken.current = handoff;
+    setPicked((p) => ({ ...p, ...Object.fromEntries(handoff.map((e) => [keyOf(e), e])) }));
+    const first = keyOf(head);
+    requestAnimationFrame(() => {
+      const el = [...document.querySelectorAll<HTMLElement>("[data-eco-key]")]
+        .find((x) => x.dataset.ecoKey === first);
+      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }, [handoff]);
   const toggle = (e: EcoEvent) => setPicked((p) => {
     const k = keyOf(e);
     if (p[k]) { const { [k]: _drop, ...rest } = p; return rest; }
@@ -307,6 +341,12 @@ function EcoWeekView({ d, pick, onPick }: {
         )}
       </div>
 
+      {handoff && handoff.length > 0 && chosen.length > 0 && !read.data && (
+        <p className="text-[12.5px] leading-snug rounded-lg bg-violet/10 px-2.5 py-1.5">
+          已从 🔔 今日提醒带入 {handoff.length} 条并勾选。想一起看的再勾几条，
+          然后点上面的「🤖 合并解读」。
+        </p>
+      )}
       {read.isError && (
         <p className="text-[12.5px] text-up">{(read.error as ApiError).message}</p>
       )}
@@ -337,7 +377,7 @@ function EcoWeekView({ d, pick, onPick }: {
                     && offBeijing(e.at, e.date, e.time);
                   const on = !!picked[keyOf(e)];
                   return (
-                    <label key={i}
+                    <label key={i} data-eco-key={keyOf(e)}
                       className={`flex flex-col gap-0.5 text-[11.5px] cursor-pointer
                         border-t border-line pt-1 first:border-0 first:pt-0
                         ${on ? "bg-violet/10 rounded-sm -mx-0.5 px-0.5" : ""}`}>
