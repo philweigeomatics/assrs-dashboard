@@ -18,6 +18,20 @@ from typing import Any
 
 import ai_client
 import data_manager
+import i18n
+
+
+def cache_key(section: str, lang: str | None = None) -> str:
+    """
+    The cache row for one section in one language.
+
+    English keeps the bare section name: every row written before there was a
+    language setting is English, and stays readable as such. Other languages
+    are suffixed ("pestel@zh"). Competitors are a list of tickers and are not
+    per language - callers pass no `lang` for them.
+    """
+    lang = i18n.norm(lang) if lang else "en"
+    return section if lang == "en" else f"{section}@{lang}"
 
 
 # ── DB cache ──────────────────────────────────────────────────────────────────
@@ -126,9 +140,9 @@ or services it sells, who its customers are, and what its main revenue
 drivers are. Be concrete and factual, not promotional. Avoid filler phrases
 like "is a leading provider", "is committed to", or "offers innovative
 solutions". Name actual products / customer types / end markets.
-"summary" is one paragraph (3-4 sentences) in English. "tagline" is one
-short phrase (under 10 words) describing the company's positioning in
-plain English.""",
+"summary" is one paragraph (3-4 sentences). "tagline" is one short phrase
+(under 10 words, or under 20 Chinese characters) describing the company's
+positioning in plain words.""",
         """{"tagline": "...", "summary": "..."}""",
     ),
     "pestel": (
@@ -145,8 +159,9 @@ this company's industry & market.""",
     "porters": (
         """\
 Porter's Five Forces. Score each force 1-5 where 1 = very weak/favourable
-to the company, 5 = very strong/threatening. Each summary is one sentence
-specific to this company's competitive position.""",
+to the company, 5 = very strong/threatening. Each summary is one or two
+sentences specific to this company's competitive position - name the
+rivals, suppliers, customers or substitutes that make it so.""",
         """{"rivalry": {"score": 1-5, "summary": "..."},
    "suppliers": {"score": 1-5, "summary": "..."},
    "buyers": {"score": 1-5, "summary": "..."},
@@ -166,17 +181,18 @@ _PROFILE_KEYS: dict[str, tuple[str, ...]] = {
 PROFILE_SECTIONS = tuple(_PROFILE_TASKS)
 
 
-def _profile_prompt(sections) -> str:
+def _profile_prompt(sections, lang: str | None = None) -> str:
+    rule = i18n.ai_rule(lang)
     if len(sections) == 1:
         # One section is asked for in its own shape, not wrapped in
         # {"pestel": {...}}: the extra level of nesting is where the model
         # dropped a closing bracket on a live PESTEL-only regeneration.
         s = sections[0]
-        return (f"{_SINGLE_HEADER}\n{_PROFILE_TASKS[s][0]}\n\n"
+        return (f"{_SINGLE_HEADER}- {rule}\n\n{_PROFILE_TASKS[s][0]}\n\n"
                 f"Schema:\n{_PROFILE_TASKS[s][1]}\n")
     tasks = "\n\n".join(f"## {s}\n{_PROFILE_TASKS[s][0]}" for s in sections)
     schema = ",\n  ".join(f'"{s}": {_PROFILE_TASKS[s][1]}' for s in sections)
-    return f"{_PROFILE_HEADER}\n{tasks}\n\nSchema:\n{{\n  {schema}\n}}\n"
+    return f"{_PROFILE_HEADER}- {rule}\n\n{tasks}\n\nSchema:\n{{\n  {schema}\n}}\n"
 
 
 _SWOT_PROMPT = """\
@@ -247,7 +263,7 @@ Schema:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def generate_profile(ticker: str, name: str, industry: str,
-                     sections=PROFILE_SECTIONS) -> dict:
+                     sections=PROFILE_SECTIONS, lang: str = i18n.DEFAULT) -> dict:
     """
     One AI call for any subset of overview / PESTEL / Porter's.
 
@@ -267,7 +283,7 @@ def generate_profile(ticker: str, name: str, industry: str,
     # on 中兴通讯's PESTEL — would otherwise sink all three sections at once.
     for attempt in (1, 2):
         try:
-            raw = ai_client.call_json(_profile_prompt(sections), user_msg,
+            raw = ai_client.call_json(_profile_prompt(sections, lang), user_msg,
                                       max_tokens=6000 + 4000 * len(sections),
                                       timeout=60 + 30 * len(sections),
                                       json_mode=True)
@@ -284,7 +300,7 @@ def generate_profile(ticker: str, name: str, industry: str,
     for s in sections:
         part = raw.get(s) if isinstance(raw, dict) else None
         if isinstance(part, dict) and all(k in part for k in _PROFILE_KEYS[s]):
-            _write_cache(ticker, s, part)
+            _write_cache(ticker, cache_key(s, lang), part)
             written[s] = {"payload": part, "generated_at": now}
         else:
             failed.append(s)
@@ -292,7 +308,7 @@ def generate_profile(ticker: str, name: str, industry: str,
 
 
 def _profile_section(ticker: str, name: str, industry: str, section: str,
-                     force_refresh: bool) -> dict:
+                     force_refresh: bool, lang: str = i18n.DEFAULT) -> dict:
     """
     One section, generated alongside whichever of its siblings are missing.
 
@@ -300,31 +316,33 @@ def _profile_section(ticker: str, name: str, industry: str, section: str,
     are cache hits. A forced Regen redoes only the section asked for.
     """
     if not force_refresh:
-        cached = _read_cache(ticker, section)
+        cached = _read_cache(ticker, cache_key(section, lang))
         if cached:
             return cached
         todo = [s for s in PROFILE_SECTIONS
-                if s == section or _read_cache(ticker, s) is None]
+                if s == section or _read_cache(ticker, cache_key(s, lang)) is None]
     else:
         todo = [section]
-    out = generate_profile(ticker, name, industry, todo)
+    out = generate_profile(ticker, name, industry, todo, lang)
     if section not in out["written"]:
         raise RuntimeError(f"AI 返回的 {section} 不完整，没有保存")
     return out["written"][section]
 
 
-def get_company_overview(ticker, name, industry, force_refresh=False):
+def get_company_overview(ticker, name, industry, force_refresh=False, lang=i18n.DEFAULT):
     """Returns {payload, generated_at}; payload = {tagline, summary}."""
-    return _profile_section(ticker, name, industry, "overview", force_refresh)
+    return _profile_section(ticker, name, industry, "overview", force_refresh, lang)
 
 
-def get_pestel(ticker: str, name: str, industry: str, force_refresh: bool = False) -> dict:
+def get_pestel(ticker: str, name: str, industry: str, force_refresh: bool = False,
+               lang: str = i18n.DEFAULT) -> dict:
     """Returns {payload, generated_at}; payload is the parsed PESTEL dict."""
-    return _profile_section(ticker, name, industry, "pestel", force_refresh)
+    return _profile_section(ticker, name, industry, "pestel", force_refresh, lang)
 
 
-def get_porters(ticker: str, name: str, industry: str, force_refresh: bool = False) -> dict:
-    return _profile_section(ticker, name, industry, "porters", force_refresh)
+def get_porters(ticker: str, name: str, industry: str, force_refresh: bool = False,
+                lang: str = i18n.DEFAULT) -> dict:
+    return _profile_section(ticker, name, industry, "porters", force_refresh, lang)
 
 
 def get_swot(ticker: str, name: str, industry: str,

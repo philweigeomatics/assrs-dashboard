@@ -23,6 +23,8 @@ import { useSymbolSearch } from "../lib/useSymbolSearch";
 import type { EquityBrief, Num, PeerRow, SegmentItem } from "../lib/types";
 import { fixed, money, signed } from "../lib/format";
 import { SupplyChainWindow } from "./SupplyChainWindow";
+import { OverviewView, PestelView, PortersView } from "./BriefViews";
+import { useLang } from "../lib/lang";
 
 const AI_LABEL: Record<string, string> = {
   overview: "公司概览", porters: "波特五力", pestel: "PESTEL", competitors: "同业名单",
@@ -49,8 +51,10 @@ export function EquityBriefPanel({ ticker, market }: { ticker: string; market: s
 }
 
 function Body({ ticker }: { ticker: string }) {
+  // Keyed on the language: switching it reads that language's AI sections.
+  const lang = useLang();
   const q = useQuery({
-    queryKey: ["equity", ticker],
+    queryKey: ["equity", ticker, lang],
     queryFn: () => api.equity(ticker),
     staleTime: 20 * 60_000,
   });
@@ -542,7 +546,13 @@ function GenerateButton({ ticker, section, force = false, label, quiet = false }
  * redoes just that one.
  */
 function Profile({ d }: { d: EquityBrief }) {
-  const missing = PROFILE.filter((s) => !d.ai[s]);
+  // A section only in another language (an older English one) counts as
+  // missing: generating "the missing ones" redoes it in this language.
+  const other = d.other_lang ?? {};
+  // Named in the interface's language, which is Chinese until it is translated.
+  const langLabel = d.lang === "en" ? "英文" : "中文";
+  const missing = PROFILE.filter((s) => !d.ai[s] || other[s]);
+  const allOther = PROFILE.every((s) => d.ai[s] && other[s]);
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -551,18 +561,23 @@ function Profile({ d }: { d: EquityBrief }) {
         <span className="ml-auto">
           {missing.length > 0
             ? <GenerateButton ticker={d.ticker} section="profile"
-                label={missing.length === PROFILE.length
-                  ? "生成全部三项"
-                  : `生成缺少的 ${missing.map((s) => AI_LABEL[s]).join("、")}`} />
+                label={allOther ? `生成${langLabel}版（三项一起）`
+                  : missing.length === PROFILE.length
+                    ? "生成全部三项"
+                    : `生成缺少的 ${missing.map((s) => AI_LABEL[s]).join("、")}`} />
             : <GenerateButton ticker={d.ticker} section="profile" force quiet
                 label="三项一起重新生成" />}
         </span>
       </div>
-      <div className="grid gap-3 xl:grid-cols-2 items-start">
-        <AiSection d={d} section="porters" />
-        <AiSection d={d} section="pestel" />
-      </div>
+      {Object.keys(other).length > 0 && (
+        <p className="text-[12.5px] leading-snug rounded-lg bg-violet/10 px-2.5 py-1.5">
+          下面标着「{d.lang === "en" ? "中文版" : "英文版"}」的是以前生成的，还没有{langLabel}版
+          —— 点右上角的按钮一次重新生成。
+        </p>
+      )}
       <AiSection d={d} section="overview" />
+      <AiSection d={d} section="porters" />
+      <AiSection d={d} section="pestel" />
     </div>
   );
 }
@@ -579,6 +594,11 @@ function AiSection({ d, section }: { d: EquityBrief; section: "overview" | "port
         {d.generated_at[section] && (
           <span className="label">生成于 {String(d.generated_at[section]).slice(0, 10)}</span>
         )}
+        {d.other_lang?.[section] && (
+          <span className="text-[11px] px-1.5 rounded bg-violet/10">
+            {d.other_lang[section] === "en" ? "英文版" : "中文版"}
+          </span>
+        )}
         {payload && (
           <span className="ml-auto">
             <GenerateButton ticker={d.ticker} section={section} force quiet label="单独重新生成" />
@@ -586,9 +606,15 @@ function AiSection({ d, section }: { d: EquityBrief; section: "overview" | "port
         )}
       </div>
       {!payload && <p className="label">尚未生成。</p>}
-      {payload && <Tree value={payload} />}
+      {payload && <Shaped section={section} value={payload} />}
     </div>
   );
+}
+
+/** The section's own layout, or the plain dump when the shape is not the expected one. */
+function Shaped({ section, value }: { section: "overview" | "porters" | "pestel"; value: unknown }) {
+  const View = section === "porters" ? PortersView : section === "pestel" ? PestelView : OverviewView;
+  return View({ value }) ?? <Tree value={value} />;
 }
 
 function Tree({ value, depth = 0 }: { value: unknown; depth?: number }) {

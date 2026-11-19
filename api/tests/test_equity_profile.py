@@ -94,8 +94,10 @@ def asked_for(system: str) -> list[str]:
     return [s for s, m in marks.items() if m in system]
 
 
-def _seed(db, ticker, section, payload):
-    db.insert_records("t", [{"ticker": ticker, "section": section,
+def _seed(db, ticker, section, payload, lang="zh"):
+    """A cached section; Chinese, the default, unless `lang` says otherwise."""
+    key = section if lang == "en" else f"{section}@{lang}"
+    db.insert_records("t", [{"ticker": ticker, "section": key,
                              "payload": json.dumps(payload),
                              "generated_at": "2026-01-01"}])
 
@@ -112,8 +114,8 @@ def test_a_first_visit_is_one_call_for_all_three(env):
 
 def test_each_section_still_gets_its_own_row(env):
     env.eb.generate_profile("603296", "华勤技术", "消费电子")
-    assert set(env.db.rows) == {("603296", s) for s in ("overview", "pestel", "porters")}
-    assert json.loads(env.db.rows[("603296", "porters")]["payload"]) == GOOD["porters"]
+    assert set(env.db.rows) == {("603296", f"{s}@zh") for s in ("overview", "pestel", "porters")}
+    assert json.loads(env.db.rows[("603296", "porters@zh")]["payload"]) == GOOD["porters"]
 
 
 def test_only_missing_siblings_are_asked_for(env):
@@ -134,7 +136,7 @@ def test_regenerating_one_section_redoes_only_that_one(env):
         _seed(env.db, "603296", s, {"old": True} if s != "porters" else GOOD[s])
     env.eb.get_pestel("603296", "华勤技术", "消费电子", force_refresh=True)
     assert asked_for(env.calls[0]["system"]) == ["pestel"]
-    assert json.loads(env.db.rows[("603296", "overview")]["payload"]) == {"old": True}
+    assert json.loads(env.db.rows[("603296", "overview@zh")]["payload"]) == {"old": True}
 
 
 def test_the_budget_scales_with_what_is_asked(env):
@@ -192,7 +194,7 @@ def test_a_mangled_section_is_not_saved_and_the_rest_are(env):
     out = env.eb.generate_profile("603296", "华勤技术", "消费电子")
     assert out["failed"] == ["porters"]
     assert set(out["written"]) == {"overview", "pestel"}
-    assert ("603296", "porters") not in env.db.rows
+    assert ("603296", "porters@zh") not in env.db.rows
 
 
 def test_asking_for_a_mangled_section_raises(env):
@@ -234,3 +236,56 @@ def test_peers_are_not_part_of_the_profile(env, ea):
     """Competitors need the product list and their own prompt — still separate."""
     ea.generate("603296", "华勤技术", "消费电子", "profile")
     assert "competitors" not in env.calls[0]["system"]
+
+
+# ── language ─────────────────────────────────────────────────────────────────
+def test_the_prompt_asks_for_the_language_and_keeps_keys_english(env):
+    env.eb.generate_profile("603296", "华勤技术", "消费电子")
+    env.eb.generate_profile("603296", "华勤技术", "消费电子", lang="en")
+    zh, en = (c["system"] for c in env.calls)
+    assert "Simplified Chinese" in zh and "JSON keys stay" in zh
+    assert "in English" in en and "Simplified Chinese" not in en
+    # The old prompt asked for the overview "in English" whatever the setting.
+    assert "plain English" not in zh
+
+
+def test_english_is_stored_under_the_bare_name_other_languages_suffixed(env):
+    env.eb.generate_profile("603296", "华勤技术", "消费电子", ["pestel"], lang="en")
+    env.eb.generate_profile("603296", "华勤技术", "消费电子", ["pestel"], lang="zh")
+    assert {k for _, k in env.db.rows} == {"pestel", "pestel@zh"}
+
+
+def test_an_older_english_section_stands_in_marked_until_regenerated(env, ea):
+    _seed(env.db, "603296", "pestel", GOOD["pestel"], lang="en")
+    got = ea.cached_ai("603296", "zh")
+    assert got["pestel"]["payload"] == GOOD["pestel"] and got["pestel"]["lang"] == "en"
+    half = ea.ai_half("603296", "华勤技术", "zh")
+    assert half["other_lang"] == {"pestel": "en"} and half["lang"] == "zh"
+    # ...and asking for the missing ones in Chinese redoes it too.
+    ea.generate("603296", "华勤技术", "消费电子", "profile", lang="zh")
+    assert asked_for(env.calls[0]["system"]) == ["overview", "pestel", "porters"]
+
+
+def test_english_reads_its_own_rows_without_a_marker(env, ea):
+    _seed(env.db, "603296", "pestel", GOOD["pestel"], lang="en")
+    assert "lang" not in ea.cached_ai("603296", "en")["pestel"]
+
+
+def test_unknown_languages_fall_back_to_the_default():
+    import i18n
+    assert i18n.norm("zh-CN") == "zh" and i18n.norm("en-US") == "en"
+    assert i18n.norm(None) == i18n.DEFAULT == "zh" and i18n.norm("fr") == "zh"
+
+
+def test_an_older_row_already_in_chinese_counts_as_chinese(env, ea):
+    """The old prompt asked for English; the model often wrote Chinese anyway."""
+    zh = {"rivalry": {"score": 3, "summary": "电力二次设备行业竞争格局相对稳定，龙头地位稳固。"}}
+    _seed(env.db, "603296", "porters", zh, lang="en")       # the bare, pre-language key
+    assert "lang" not in ea.cached_ai("603296", "zh")["porters"]
+    assert ea.cached_ai("603296", "en")["porters"]["lang"] == "zh"
+
+
+def test_detect_reads_chinese_with_latin_acronyms_as_chinese():
+    import i18n
+    assert i18n.detect({"a": ["受益于 AI 服务器和 PCB 需求增长，订单饱满。"]}) == "zh"
+    assert i18n.detect({"a": "Rivalry is intense among ODMs such as 闻泰科技."}) == "en"

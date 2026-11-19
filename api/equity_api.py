@@ -270,7 +270,7 @@ def peer_table(ticker: str, name: str, peers: list[dict]) -> dict:
 
 
 # ── assembly ─────────────────────────────────────────────────────────────────
-def cached_ai(ticker: str) -> dict:
+def cached_ai(ticker: str, lang: str | None = None) -> dict:
     """
     Whatever AI sections already exist, without generating any.
 
@@ -283,6 +283,9 @@ def cached_ai(ticker: str) -> dict:
     import data_manager
     import equity_brief as eb
 
+    import i18n
+
+    lang = i18n.norm(lang)
     eb.ensure_equity_brief_cache_table()
     out: dict = {section: None for section in AI_SECTIONS}
     try:
@@ -292,15 +295,30 @@ def cached_ai(ticker: str) -> dict:
         return out
     if df is None or df.empty:
         return out
+    rows = {}
     for _, row in df.iterrows():
-        section = str(row.get("section") or "")
-        if section not in out:
-            continue
         try:
-            out[section] = {"payload": json.loads(row["payload"]),
-                            "generated_at": row.get("generated_at")}
+            rows[str(row.get("section") or "")] = {
+                "payload": json.loads(row["payload"]), "generated_at": row.get("generated_at")}
         except (TypeError, ValueError):
-            out[section] = None
+            continue
+    for section in AI_SECTIONS:
+        if section not in eb.PROFILE_SECTIONS:
+            out[section] = rows.get(section)                # not per language
+            continue
+        own = eb.cache_key(section, lang)
+        if own != section and own in rows:
+            out[section] = rows[own]                  # written in this language
+            continue
+        # The bare name holds English rows, and every row from before the
+        # language was recorded. Those are read for their language: the old
+        # prompt asked for English, but the model often answered in Chinese.
+        hit = rows.get(section)
+        if hit is not None:
+            seen = i18n.detect(hit["payload"])
+            if seen != lang:
+                hit = {**hit, "lang": seen}           # shown, marked, until regenerated
+        out[section] = hit
     return out
 
 
@@ -329,7 +347,7 @@ def official_names() -> dict[str, str]:
     return _names["map"]
 
 
-def ai_half(ticker: str, name: str) -> dict:
+def ai_half(ticker: str, name: str, lang: str | None = None) -> dict:
     """
     The part of the brief that an edit can change: AI sections and the peers.
 
@@ -338,13 +356,19 @@ def ai_half(ticker: str, name: str) -> dict:
     cache cleared by a save on one of them is still full on the others —
     which is exactly how an edited peer list kept coming back unchanged.
     """
-    ai = cached_ai(ticker)
+    import i18n
+
+    ai = cached_ai(ticker, lang)
     peers = ((ai.get("competitors") or {}).get("payload") or {}).get("competitors") or []
     return {
         "ai": {k: (v or {}).get("payload") if v else None for k, v in ai.items()},
         "generated_at": {k: (v or {}).get("generated_at") if v else None
                          for k, v in ai.items()},
         "missing": [k for k, v in ai.items() if not v],
+        "lang": i18n.norm(lang),
+        # Sections shown in another language than asked for (an older
+        # English one), so the page can offer to regenerate them.
+        "other_lang": {k: v["lang"] for k, v in ai.items() if v and v.get("lang")},
         "peers": peer_table(ticker, name, peers) if peers else None,
     }
 
@@ -390,30 +414,34 @@ def validate_peers(ticker: str, codes: list[str]) -> tuple[list[dict], list[str]
 
 
 def generate(ticker: str, name: str, industry: str, section: str,
-             force: bool = False) -> dict:
+             force: bool = False, lang: str | None = None) -> dict:
     """Run one AI section. Raises LookupError for an unknown section name."""
     import equity_brief as eb
 
+    import i18n
+
+    lang = i18n.norm(lang)
     eb.ensure_equity_brief_cache_table()
     if section == "profile":
         # Overview, Porter's and PESTEL in one call. Measured on two stocks:
         # 16-41% fewer output tokens than three calls, and one wait instead
         # of three. Without `force` only the missing ones are asked for.
         todo = list(eb.PROFILE_SECTIONS) if force else [
-            s for s, v in cached_ai(ticker).items()
-            if s in eb.PROFILE_SECTIONS and not v]
+            # An English stand-in counts as missing when Chinese is asked for.
+            s for s, v in cached_ai(ticker, lang).items()
+            if s in eb.PROFILE_SECTIONS and (not v or v.get("lang"))]
         if not todo:
             return {"written": [], "failed": []}
-        out = eb.generate_profile(ticker, name, industry, todo)
+        out = eb.generate_profile(ticker, name, industry, todo, lang)
         if not out["written"]:
             raise RuntimeError("AI 返回的内容不完整，没有保存")
         return {"written": list(out["written"]), "failed": out["failed"]}
     if section == "overview":
-        return eb.get_company_overview(ticker, name, industry, force)
+        return eb.get_company_overview(ticker, name, industry, force, lang)
     if section == "porters":
-        return eb.get_porters(ticker, name, industry, force)
+        return eb.get_porters(ticker, name, industry, force, lang)
     if section == "pestel":
-        return eb.get_pestel(ticker, name, industry, force)
+        return eb.get_pestel(ticker, name, industry, force, lang)
     if section == "competitors":
         # The products feed the peer prompt so it finds substitutable
         # competitors rather than same-industry-different-product companies.

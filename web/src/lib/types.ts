@@ -997,6 +997,10 @@ export type EquityBrief = {
   };
   generated_at: Record<string, string | null>;
   missing: string[];
+  /** The language the AI sections were asked for (lib/lang). */
+  lang?: "zh" | "en";
+  /** Sections shown in another language (an older English one) than asked for. */
+  other_lang?: Record<string, string>;
   peers: { rows: PeerRow[]; n: number } | null;
 };
 

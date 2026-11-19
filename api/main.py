@@ -87,7 +87,7 @@ app.add_middleware(
     allow_origin_regex=os.environ.get("ALLOWED_ORIGIN_REGEX") or None,
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", "X-Lang"],
 )
 
 
@@ -2185,8 +2185,15 @@ def notes_delete(note_id: int, user: AppUser = Depends(current_user)):
     return {"deleted": note_id}
 
 
+def request_lang(x_lang: str | None = Header(None)) -> str:
+    """The language the client asked for (web/src/lib/lang.ts), see i18n.py."""
+    import i18n
+    return i18n.norm(x_lang)
+
+
 @app.get("/equity/{ticker}")
-def equity_brief(ticker: str = TICKER, user: AppUser = Depends(current_user)):
+def equity_brief(ticker: str = TICKER, user: AppUser = Depends(current_user),
+                 lang: str = Depends(request_lang)):
     """
     The Equity Brief for one stock: the data half immediately, plus whichever
     AI sections are already cached. Never generates — see the POST.
@@ -2203,7 +2210,7 @@ def equity_brief(ticker: str = TICKER, user: AppUser = Depends(current_user)):
         # took the save leaves every other instance serving the old list.
         data = _equity_cache.get_or_compute(
             ticker, lambda: equity_api.data_half(ticker, name, _industry_of(ticker)))
-        return {**data, **equity_api.ai_half(ticker, name)}
+        return {**data, **equity_api.ai_half(ticker, name, lang)}
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except RuntimeError as exc:
@@ -2214,7 +2221,8 @@ def equity_brief(ticker: str = TICKER, user: AppUser = Depends(current_user)):
 def equity_generate(ticker: str = TICKER,
                     section: str = Path(..., pattern="^(profile|overview|porters|pestel|competitors|supply-chain)$"),
                     force: bool = Query(False),
-                    user: AppUser = Depends(current_user)):
+                    user: AppUser = Depends(current_user),
+                    lang: str = Depends(request_lang)):
     """
     Generate AI sections. One DeepSeek call, 20-60s, cached afterwards.
 
@@ -2237,7 +2245,7 @@ def equity_generate(ticker: str = TICKER,
                 ticker, _name(ticker), market)}
         else:
             out = equity_api.generate(ticker, _name(ticker), _industry_of(ticker),
-                                      section, force)
+                                      section, force, lang)
     except LookupError as exc:
         raise HTTPException(404, str(exc))
     except Exception as exc:                                    # noqa: BLE001

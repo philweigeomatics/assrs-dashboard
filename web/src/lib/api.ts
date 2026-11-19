@@ -1,4 +1,5 @@
 import { devFakeToken, supabase } from "./supabase";
+import { getLang } from "./lang";
 import type {
   AdminSectors,
   DiscoverArgs,
@@ -58,7 +59,9 @@ async function token(): Promise<string> {
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API}${path}`, {
     ...init,
-    headers: { ...(init.headers || {}), Authorization: `Bearer ${await token()}` },
+    // X-Lang: the language anything the server writes should be in (lib/lang).
+    headers: { ...(init.headers || {}), Authorization: `Bearer ${await token()}`,
+               "X-Lang": getLang() },
   });
   if (res.status === 401 && !devFakeToken) {
     // Token rejected server-side (revoked, or a different project): drop the

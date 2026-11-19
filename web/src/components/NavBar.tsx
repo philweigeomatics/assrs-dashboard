@@ -18,6 +18,7 @@ import { useAuth } from "../auth/AuthProvider";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { TodayBell } from "./TodayBell";
+import { LANGS, setLang, useLang } from "../lib/lang";
 
 export const PAGES = [
   { to: "/market", label: "🗺️ 市场看板" },
@@ -90,6 +91,7 @@ export function NavBar({ children }: { children?: ReactNode }) {
 
         <div className="ml-auto flex items-center gap-1 lg:gap-3 shrink-0 -mr-1 lg:mr-0">
           <TodayBell />
+          <span className="hidden lg:inline-flex"><LangToggle /></span>
           {dev && <span className="hidden lg:inline text-[12px] text-brand-ink">本地开发模式</span>}
           {!dev && (
             <button onClick={() => supabase.auth.signOut()}
@@ -161,7 +163,9 @@ function Drawer({ open, onClose, pages, dev }: {
           ))}
         </nav>
 
-        <div className="px-3 py-3 border-t border-line shrink-0 flex items-center">
+        <div className="px-3 py-3 border-t border-line shrink-0 flex items-center gap-3">
+          <LangToggle big />
+          <span className="flex-1" />
           {dev ? (
             <span className="text-[13px] text-brand-ink">本地开发模式</span>
           ) : (
@@ -174,6 +178,28 @@ function Drawer({ open, onClose, pages, dev }: {
       </div>
     </div>,
     document.body,
+  );
+}
+
+/**
+ * 中 / EN. For now it decides the language the AI writes in (波特五力,
+ * PESTEL, 公司概览); the interface is Chinese either way until it is
+ * translated, and then it will follow this same setting — see lib/lang.
+ */
+function LangToggle({ big = false }: { big?: boolean }) {
+  const lang = useLang();
+  return (
+    <span role="group" aria-label="语言"
+      title="AI 生成内容的语言（界面翻译以后跟着这个设置走）"
+      className="inline-flex items-center rounded-lg bg-sunken p-0.5">
+      {LANGS.map((l) => (
+        <button key={l.id} onClick={() => setLang(l.id)} aria-pressed={lang === l.id}
+          className={`${big ? "h-9 px-3 text-[14px]" : "h-6 px-2 text-[12px]"} rounded-md font-medium ${
+            lang === l.id ? "bg-panel text-ink shadow-sm" : "text-ink-mute hover:text-ink"}`}>
+          {big ? l.label : l.short}
+        </button>
+      ))}
+    </span>
   );
 }
 
