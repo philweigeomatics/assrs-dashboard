@@ -219,6 +219,12 @@ def window_stats(close: pd.Series, start, end, rf: float, bench: pd.Series | Non
         return dict(EMPTY_STATS)
     daily = s.pct_change(fill_method=None).dropna()
     realised = pb.stats_of(daily.to_frame("x"), pd.Series({"x": 1.0}), rf)
+    if len(daily) < MIN_SHARED_DAYS:
+        # A name with a few days in the window (just listed, or a source that
+        # only has its last bars) has a move but no annual figures: a day's
+        # change annualised is noise, and one return has no volatility at all
+        # (NaN, which JSON cannot carry — it took the whole table down).
+        realised = {k: None for k in realised}
     return {
         "from": str(s.index[0].date()),
         "days": int(len(daily)),
@@ -309,13 +315,18 @@ def window_closes(symbols: list[str], start: str, end: str | None,
     px = pd.concat([c.rename(t) for t, c in frames.items()], axis=1).sort_index()
     px = px.dropna(axis=1, how="all")
     first = {c: px[c].first_valid_index() for c in px.columns}
+    youngest = max(first, key=lambda c: first[c])
     px = px.ffill().loc[start_ts:(pd.Timestamp(end) if end else None)].dropna(how="any")
     if len(px) < pb.MIN_SESSIONS:
+        # Name the stock that cut it short: with thirty names loaded from an
+        # index, "too few shared days" alone leaves you guessing which to drop.
+        late = first[youngest] > start_ts + pd.Timedelta(days=LATE_START_DAYS)
         raise LookupError(
             f"这个窗口里共同交易日只有 {len(px)} 天，少于 {pb.MIN_SESSIONS} 天，"
-            f"协方差矩阵没有意义")
+            f"协方差矩阵没有意义"
+            + (f"。是 {youngest} 限制的 —— 它的行情从 {first[youngest].date()} 才开始，"
+               f"去掉它再试" if late else ""))
 
-    youngest = max(first, key=lambda c: first[c])
     late = first[youngest] > start_ts + pd.Timedelta(days=LATE_START_DAYS)
     px.attrs.update(missing=missing,
                     limited_by=(youngest, str(first[youngest].date())) if late else None)

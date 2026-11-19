@@ -25,6 +25,7 @@ import { Frontier } from "./Frontier";
 import { CorrMatrix } from "./CorrMatrix";
 import { Industries } from "./Industries";
 import { CandidateBar, useCandidates, type CandidatesState } from "./Candidates";
+import { indexPicks } from "../../lib/indexPicks";
 
 const MAX_NAMES = 30;
 
@@ -138,6 +139,7 @@ export function Optimiser({ onSaved }: { onSaved: () => void }) {
         </div>
 
         <Picker market={market} picked={picked} onChange={setPicked} />
+        <FromIndex market={market} picked={picked} onChange={setPicked} />
       </section>
 
       <AnalysisWindow w={win} picks={picked} rf={rf} />
@@ -278,6 +280,80 @@ function Picker({ market, picked, onChange }: {
         <button onClick={() => onChange([])} className="text-[12px] text-cyan ml-1">清空</button>
       )}
       <span className="label ml-auto tnum">{picked.length}/{MAX_NAMES}</span>
+    </div>
+  );
+}
+
+/**
+ * Load the picks from one of your own indexes in this market — the names it
+ * holds now — instead of adding them one at a time. Replaces the list, with
+ * an undo, because the point is to optimise that basket as it stands.
+ */
+function FromIndex({ market, picked, onChange }: {
+  market: Market; picked: StockRef[]; onChange: (v: StockRef[]) => void;
+}) {
+  const qc = useQueryClient();
+  // The 自建指数 page's own key, so the list is shared and refreshed with it.
+  const list = useQuery({ queryKey: ["idx", "list"], queryFn: api.indexes,
+                          staleTime: 10 * 60_000 });
+  const mine = (list.data?.indexes ?? []).filter((i) => i.market === market);
+  const [note, setNote] = useState<{ name: string; n: number; dropped: StockRef[];
+                                     before: StockRef[] } | null>(null);
+  useEffect(() => { setNote(null); }, [market]);
+
+  const load = useMutation({
+    mutationFn: (id: number) => qc.fetchQuery({
+      queryKey: ["idx", "detail", id], queryFn: () => api.indexDetail(id),
+      staleTime: 10 * 60_000,
+    }),
+    onSuccess: (d) => {
+      const { picks, dropped } = indexPicks(d.members, MAX_NAMES);
+      setNote({ name: d.index.name, n: picks.length, dropped, before: picked });
+      onChange(picks);
+    },
+  });
+
+  if (list.isPending || list.isError) return null;
+  if (mine.length === 0) {
+    return (
+      <p className="label">
+        {market === "CN" ? "A 股" : "美股"}还没有自建指数 —— 在「自建组合&指数」里建一个，
+        这里就能一键载入它的成分股。
+      </p>
+    );
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <select value="" disabled={load.isPending}
+        onChange={(e) => { if (e.target.value) load.mutate(Number(e.target.value)); }}
+        aria-label="从自建指数载入成分股"
+        className="h-7 px-2 rounded-lg bg-sunken text-[12.5px] outline-none
+          focus:ring-2 focus:ring-cyan/40 disabled:opacity-60">
+        <option value="">
+          {load.isPending ? "载入中…" : `📥 从自建指数载入（${mine.length}）…`}
+        </option>
+        {mine.map((i) => (
+          <option key={i.id} value={i.id}>
+            {i.name}{i.members != null ? `（${i.members} 只）` : ""}
+          </option>
+        ))}
+      </select>
+      {load.isError && (
+        <span className="text-[12px] text-up">{(load.error as ApiError).message}</span>
+      )}
+      {note && !load.isPending && (
+        <span className="label">
+          已载入「{note.name}」现有的 {note.n} 只，替换了原来的选择
+          {note.dropped.length > 0 && (
+            <>；超过 {MAX_NAMES} 只上限，按指数权重去掉了最轻的 {note.dropped.length} 只
+              （{note.dropped.slice(0, 5).map((s) => s.n).join("、")}
+              {note.dropped.length > 5 ? " 等" : ""}）</>
+          )}
+          。
+          <button onClick={() => { onChange(note.before); setNote(null); }}
+            className="text-cyan ml-1">撤销</button>
+        </span>
+      )}
     </div>
   );
 }

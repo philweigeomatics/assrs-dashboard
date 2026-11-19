@@ -167,6 +167,22 @@ def test_a_stock_with_nothing_in_the_window_is_empty_not_an_error():
     assert got["days"] == 0 and got["change_pct"] is None
 
 
+def test_a_stock_with_a_day_or_two_in_the_window_has_a_move_but_no_annual_figures():
+    import json
+    s = walk(5).iloc[399:401]
+    got = pw.window_stats(s, str(IDX[100].date()), str(IDX[400].date()), 0.03, None)
+    assert got["days"] == 1 and got["change_pct"] is not None
+    assert got["ann_vol_pct"] is None and got["sharpe"] is None
+    json.dumps(got, allow_nan=False)
+
+
+def test_too_short_a_window_names_the_stock_that_cut_it():
+    hist = {"A": walk(1), "B": walk(2).iloc[-5:]}
+    with pytest.raises(LookupError, match="B"):
+        pw.window_closes(["A", "B"], str(IDX[100].date()), None,
+                         history=lambda t: hist[t])
+
+
 def test_stats_covers_the_window_and_every_leg(cn):
     index = walk(7, vol=0.03)
     a, b = str(IDX[100].date()), str(IDX[400].date())
