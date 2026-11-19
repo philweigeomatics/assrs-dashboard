@@ -32,7 +32,7 @@ import type {
   StrategyResult, WhatIfAi,
   Breadth, Heatmap, Leverage, LeverageCycle, CreditBoard, RiskBoard, Rotation, TopList, Wyckoff,
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
-  ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, PriceZones, Seasonality, Seesaw, Swing, ChainResult, SectorCycle, CyclePairDetail, UsEtfBoard, UsEtfDetail,
+  ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, FairValue, PriceZones, Seasonality, Seesaw, Swing, ChainResult, SectorCycle, CyclePairDetail, UsEtfBoard, UsEtfDetail,
   CustomIndexList, CustomIndexDetail, IndexRulesBody, BoardMarket, MineBoard, IndexCompare, IndexLive,
   RiskRadar,
 } from "./types";
@@ -94,6 +94,7 @@ export const api = {
   seasonality: (t: string, years: number) =>
     call<Seasonality>(`/seasonality/${t}?years=${years}`),
   zones: (t: string) => call<PriceZones>(`/zones/${t}`),
+  fairValue: (t: string) => call<FairValue>(`/fair-value/${t}`),
   simulate: (t: string, body: { pct: number; volume: number; open?: number; high?: number; low?: number }) =>
     call<SimResult>(`/simulate/${t}`, {
       method: "POST",

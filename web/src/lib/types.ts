@@ -2305,3 +2305,44 @@ export type PriceZones = {
          growth_period: string | null;
          zone: number | null; above: number | null; below: number | null };
 };
+
+/** GET /fair-value/{ticker} — 估值, A-shares. See fair_value.py. */
+export type FvBand = { lo: number; mid: number; hi: number; n: number };
+export type FvRange = { lo: number; mid: number; hi: number };
+export type FvMethodKey = "pe" | "peg1" | "peg3";
+export type FvMethod = {
+  /** 25th / 50th / 75th percentile on the normal days. */
+  band: FvBand | null;
+  /** Today's price at that band. */
+  fair: FvRange | null;
+  /** The growth today's PE implies at that band (PEG only). */
+  implied: FvRange | null;
+  /** Median growth on the normal days the band was paid on. */
+  growth_then: number | null;
+  /** Why there is no fair price, when there is none. */
+  why: string | null;
+  /** PE only: growth now well below the normal days', so the band overstates. */
+  slowed?: boolean;
+};
+export type FvCall = "under" | "fair" | "over" | "mixed";
+export type FairValue = {
+  ticker: string;
+  market: {
+    code: string; label: string; cut: number; lo: number; hi: number;
+    now: number; now_pct: number; now_state: -1 | 0 | 1; from: string; to: string;
+    excluded: { from: string; to: string; kind: "high" | "low" }[];
+  };
+  start: string; end: string; sessions: number; normal_sessions: number;
+  now: { price: number; pe: number | null; g1: number | null; g3: number | null; period: string | null };
+  methods: Record<FvMethodKey, FvMethod>;
+  primary: FvMethodKey | null;
+  verdict: { method: FvMethodKey; call: FvCall; gap_mid: number; to_lo: number; to_hi: number } | null;
+  implied: (FvRange & { method: FvMethodKey; actual: number | null; call: Exclude<FvCall, "mixed"> | null }) | null;
+  scenarios: { key: "g3" | "g1" | "forecast"; label: string; growth: number | null; period: string | null;
+               lo: number | null; mid: number | null; hi: number | null; upside: number | null }[];
+  scenario_basis: FvMethodKey | null;
+  cyclical: { flag: boolean; flips: number; losses: number };
+  confidence: "ok" | "low" | "none";
+  chart: { dates: string[]; market_pe: (number | null)[]; pe: (number | null)[];
+           peg1: (number | null)[]; peg3: (number | null)[]; normal: boolean[] };
+};

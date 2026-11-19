@@ -517,6 +517,75 @@ def price_zones_view(ticker: str = TICKER, user: AppUser = Depends(current_user)
         raise HTTPException(503, str(exc))
 
 
+#: 沪深300's ten-year PE, shared by every stock's 估值 and refreshed daily.
+_market_pe_cache = TTLCache(maxsize=4, ttl_s=6 * 3600)
+_fair_cache = TTLCache(maxsize=40, ttl_s=6 * 3600)
+
+
+def _market_pe(today):
+    import data_manager
+    import fair_value
+    import pandas as pd
+
+    def load():
+        data_manager.init_tushare()
+        api = data_manager.TUSHARE_API
+        if api is None:
+            raise RuntimeError("Tushare 未初始化")
+        df = api.index_dailybasic(
+            ts_code=fair_value.MARKET_CODE,
+            start_date=fair_value.start_date(today).strftime("%Y%m%d"),
+            end_date=today.strftime("%Y%m%d"), fields="trade_date,pe_ttm")
+        if df is None or df.empty:
+            raise RuntimeError(f"{fair_value.MARKET_LABEL} 市盈率读取失败")
+        s = df.set_index(pd.to_datetime(df["trade_date"]))["pe_ttm"].sort_index()
+        return pd.to_numeric(s, errors="coerce")
+
+    return _market_pe_cache.get_or_compute(today.isoformat(), load)
+
+
+@app.get("/fair-value/{ticker}")
+def fair_value_view(ticker: str = TICKER, user: AppUser = Depends(current_user)):
+    """
+    估值 — A-shares: the price the market paid for this stock's growth on
+    its normal days (沪深300's PE outside its top and bottom 15% over ten
+    years), applied to today's earnings and growth. See fair_value.py.
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    import data_manager
+    import fair_value
+    import price_zones
+
+    market, code = markets.parse(ticker)
+    if market.conv.code != "CN":
+        raise HTTPException(422, "估值目前只做 A 股：美股没有免费的十年市盈率和财报历史")
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+
+    def load():
+        start = fair_value.start_date(today)
+        fund = market.fetch_fundamentals(code, start.strftime("%Y%m%d"), today.strftime("%Y%m%d"))
+        if fund is None or fund.empty or "PE_TTM" not in fund.columns:
+            raise RuntimeError(f"{ticker} 的市盈率历史读取失败，稍后再试")
+        # Growth from four years before the window, so the three-year rate
+        # exists on its first day.
+        rows = data_manager.fetch_profit_history(
+            code, (start - timedelta(days=round(365.25 * 4) + 120)).strftime("%Y%m%d"))
+        growth = price_zones.profit_growth(rows) if rows is not None and not rows.empty else None
+        last = None if growth is None or growth.empty else str(growth["end_date"].iloc[-1])
+        fc = fair_value.forecast_growth(data_manager.fetch_forecast(code, 4), last)
+        out = fair_value.build(pe=fund["PE_TTM"], close=fund["close"], growth=growth,
+                               market_pe=_market_pe(today), forecast=fc)
+        return {"ticker": markets.canonical(ticker), **out}
+
+    try:
+        return _fair_cache.get_or_compute((markets.canonical(ticker), today.isoformat()), load)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
 @app.post("/simulate/{ticker}")
 def simulate(req: SimReq, ticker: str = TICKER, user: AppUser = Depends(current_user)):
     """

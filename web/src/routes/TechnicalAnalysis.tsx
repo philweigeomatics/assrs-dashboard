@@ -17,6 +17,7 @@ import { CompareStats } from "../components/CompareStats";
 import { EquityBriefPanel } from "../components/EquityBriefPanel";
 import { SeasonalityPanel } from "../components/SeasonalityPanel";
 import { PriceZonesPanel } from "../components/PriceZonesPanel";
+import { FairValuePanel } from "../components/FairValuePanel";
 import { RiskRadarPanel } from "../components/RiskRadarPanel";
 
 const VIEWS = [
@@ -193,6 +194,10 @@ export function TechnicalAnalysis() {
         {/* Its own five-year read, like 季节性: the indicators above stay on
             their 3-year, regime-anchored window. */}
         {analysis.data && <PriceZonesPanel ticker={analysis.data.ticker} />}
+
+        {/* A-shares only: ten years of PE and reports are Tushare's; Yahoo's
+            free feed has about five quarters. */}
+        {analysis.data?.market === "CN" && <FairValuePanel ticker={analysis.data.ticker} />}
 
         {analysis.data && <SeasonalityPanel ticker={analysis.data.ticker} />}
 
