@@ -2350,3 +2350,32 @@ export type FairValue = {
   chart: { dates: string[]; market_pe: (number | null)[]; pe: (number | null)[];
            peg1: (number | null)[]; peg3: (number | null)[]; normal: boolean[] };
 };
+
+/** GET /market/stock-bond — 股债跷跷板. See stock_bond.py. */
+export type StockBondSide = "equity" | "bond";
+export type StockBondLeg = {
+  from: string; to: string; sessions: number; side: StockBondSide;
+  ratio_pct: number | null; equity_pct: number | null; bond_pct: number | null;
+  /** When the turn that began this leg could first be known (later than `from`). */
+  start_confirmed: string | null;
+  end_confirmed: string | null;
+  open: boolean;
+};
+export type StockBond = {
+  market: "CN" | "US"; label: string; up_is_red: boolean; pct: number;
+  equity: { code: string; label: string }; bond: { code: string; label: string };
+  from: string; to: string;
+  now: {
+    ratio: number; side: StockBondSide; since: string; sessions: number;
+    ratio_pct: number | null; equity_pct: number | null; bond_pct: number | null;
+    confirmed: string | null; recent_pct: number | null;
+    corr: number | null; corr_pct: number | null;
+    extreme: number | null; extreme_date: string; from_extreme: number | null;
+    /** The ratio level that would confirm the next turn, and the move from here to it. */
+    line: number | null; need: number | null;
+  };
+  typical: { equity: number | null; bond: number | null };
+  legs: StockBondLeg[];
+  chart: { dates: string[]; ratio: (number | null)[]; equity: (number | null)[];
+           bond: (number | null)[]; corr: (number | null)[] };
+};

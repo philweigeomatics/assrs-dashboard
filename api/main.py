@@ -2813,6 +2813,59 @@ def market_credit(user: AppUser = Depends(current_user)):
                          lambda: credit_stress.board(credit_stress.fetch_us(), credit_stress.fetch_china()))
 
 
+#: Ten years of two indexes per market; the answer moves once a day.
+_stock_bond_closes = TTLCache(maxsize=4, ttl_s=3 * 3600)
+
+
+def _stock_bond_series(market: str):
+    """The (stock, bond) total-return closes for one market, ten years."""
+    import stock_bond
+    from datetime import date, timedelta
+
+    def load():
+        start = date.today() - timedelta(days=round(365.25 * 10))
+        pair = stock_bond.PAIRS[market]
+        out = []
+        for code, label in (pair["equity"], pair["bond"]):
+            if market == "US":
+                s = markets.get("US").fetch_closes_since(code, start)
+            else:
+                import data_manager
+                df = data_manager.get_index_data_live(code, start_date=start.strftime("%Y%m%d"))
+                s = None if df is None or df.empty or "Close" not in df else df["Close"]
+            if s is None or s.dropna().empty:
+                raise RuntimeError(f"{label} 行情读取失败")
+            out.append(s)
+        return tuple(out)
+
+    return _stock_bond_closes.get_or_compute(market, load)
+
+
+@app.get("/market/stock-bond")
+def market_stock_bond(market: str = Query("CN", pattern="^(CN|US)$"),
+                      pct: float = Query(10, ge=3, le=30),
+                      user: AppUser = Depends(current_user)):
+    """
+    股债跷跷板: stocks against bonds on total-return indexes, cut into the
+    legs where money leaned one way, with the day each turn was confirmed.
+    See stock_bond.py.
+    """
+    import stock_bond
+
+    try:
+        eq, bd = _stock_bond_series(market)
+        out = stock_bond.build(eq, bd, pct=pct / 100.0)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    pair = stock_bond.PAIRS[market]
+    return {"market": market, "label": pair["label"],
+            "equity": {"code": pair["equity"][0], "label": pair["equity"][1]},
+            "bond": {"code": pair["bond"][0], "label": pair["bond"][1]},
+            "up_is_red": market == "CN", **out}
+
+
 @app.get("/market/leverage-cycle")
 def market_leverage_cycle(user: AppUser = Depends(current_user)):
     """杠杆周期: 杠杆出清 → 底部区域 → 右侧确认, from stored whole-market series and the theme board."""

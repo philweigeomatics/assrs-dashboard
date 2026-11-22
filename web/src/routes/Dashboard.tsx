@@ -37,9 +37,10 @@ import { RiskStrip } from "../components/market/RiskStrip";
 import { MacroPanel } from "../components/market/MacroPanel";
 import { CommodityPanel } from "../components/market/CommodityPanel";
 import { IndustryBoard } from "../components/market/IndustryBoard";
+import { StockBondPanel } from "../components/market/StockBondPanel";
 import { usePersistentState } from "../lib/usePersistentState";
 import { useIndexLive, withLive } from "../lib/indexLive";
-import type { BoardMarket, CreditBoard, LeverageCycle as Cycle, RiskBoard } from "../lib/types";
+import type { BoardMarket, CreditBoard, LeverageCycle as Cycle, RiskBoard, StockBond } from "../lib/types";
 import { useSize } from "../lib/useSize";
 import { signed } from "../lib/format";
 
@@ -52,7 +53,7 @@ const INDICES: Record<string, string> = {
 
 type Tab = "today" | "sectors" | "money" | "commod";
 const TABS: { id: Tab; label: string; hint: string }[] = [
-  { id: "today", label: "今日", hint: "全球指数 · 市场风险 · 热力图 · 龙虎榜" },
+  { id: "today", label: "今日", hint: "股债跷跷板 · 全球指数 · 市场风险 · 热力图 · 龙虎榜" },
   { id: "sectors", label: "行业与轮动", hint: "行业与主题 · 轮动图 · 威科夫阶段" },
   { id: "money", label: "资金与信用", hint: "杠杆周期 · 信用与债务 · 宏观" },
   { id: "commod", label: "商品", hint: "期货期限结构" },
@@ -90,6 +91,11 @@ export function Dashboard() {
   const cycle = useQuery({ queryKey: ["mkt", "leverage-cycle"], queryFn: api.leverageCycle,
     staleTime: 30 * 60_000 });
   const credit = useQuery({ queryKey: ["mkt", "credit"], queryFn: api.credit, staleTime: 60 * 60_000 });
+  // 股债跷跷板: also one of the 一览 verdicts, so it loads on every tab.
+  const [sbMarket, setSbMarket] = usePersistentState<"CN" | "US">("assrs.mkt.sb.market", "CN");
+  const [sbPct, setSbPct] = usePersistentState<number>("assrs.mkt.sb.pct", 10);
+  const stockBond = useQuery({ queryKey: ["mkt", "stock-bond", sbMarket, sbPct],
+    queryFn: () => api.stockBond(sbMarket, sbPct), staleTime: 60 * 60_000 });
 
   // On its own short clock: half these markets are open while someone looks.
   const indices = useQuery({ queryKey: ["mkt", "indices"], queryFn: api.indices,
@@ -146,11 +152,28 @@ export function Dashboard() {
               </button>
             ))}
           </nav>
-          <Glance risk={risk.data} cycle={cycle.data} credit={credit.data} onGo={setTab} />
+          <Glance risk={risk.data} cycle={cycle.data} credit={credit.data} sb={stockBond.data} onGo={setTab} />
         </div>
       </div>
       <main className="max-w-[1800px] mx-auto px-3 py-3 flex flex-col gap-3">
         {on("today") && <>
+          <Panel title="⚖️ 股债跷跷板"
+            subtitle="股票全收益 ÷ 债券全收益：往上是资金偏向股票，往下是偏向债券。每次转向标出开始的那天和能确认的那天。"
+            right={
+              <div className="flex flex-wrap items-center gap-2 justify-end">
+                <Segmented value={sbMarket} onChange={setSbMarket}
+                  options={[{ id: "CN", label: "A 股" }, { id: "US", label: "美股" }]} />
+                <select value={sbPct} onChange={(e) => setSbPct(Number(e.target.value))}
+                  aria-label="转向确认幅度" title="股债比从一段的高点（低点）反向走多少才算转向"
+                  className="h-7 px-2 rounded-lg bg-sunken text-[12.5px] outline-none focus:ring-2 focus:ring-cyan/40">
+                  {[5, 8, 10, 15].map((v) => <option key={v} value={v}>反转 ±{v}%</option>)}
+                </select>
+              </div>
+            }
+            q={stockBond}>
+            {stockBond.data && <StockBondPanel d={stockBond.data} />}
+          </Panel>
+
           <Panel title="🌏 全球指数"
             subtitle="A 股、亚太、欧美主要指数的最新涨跌。各市场收盘时间不同，卡片标的是它自己那根的日期。"
             q={indices}>
@@ -265,8 +288,8 @@ export function Dashboard() {
  * to where it is explained. Amber and ink only — these are risk readings, not
  * price moves, so never red or green.
  */
-function Glance({ risk, cycle, credit, onGo }: {
-  risk?: RiskBoard; cycle?: Cycle; credit?: CreditBoard; onGo: (t: Tab) => void;
+function Glance({ risk, cycle, credit, sb, onGo }: {
+  risk?: RiskBoard; cycle?: Cycle; credit?: CreditBoard; sb?: StockBond; onGo: (t: Tab) => void;
 }) {
   const chip = (label: string, value: string | null, warn: number, go: Tab, title: string) => (
     <button key={label} onClick={() => onGo(go)} title={title}
@@ -280,6 +303,8 @@ function Glance({ risk, cycle, credit, onGo }: {
   return (
     <div className="flex lg:flex-wrap items-center gap-1.5 max-w-full overflow-x-auto no-scrollbar">
       <span className="label mr-0.5 shrink-0">一览</span>
+      {chip("⚖️ 股债", sb ? `${sb.market === "CN" ? "A股" : "美股"} · ${sb.now.side === "equity" ? "股强" : "债强"} ${sb.now.sessions}天` : null, 0,
+        "today", "今日 → 股债跷跷板：资金现在偏向股票还是债券，这一段持续了几个交易日")}
       {chip("🚦 市场风险", risk ? `${flags} 项提示` : null, flags >= 3 ? 2 : flags > 0 ? 1 : 0,
         "today", "今日 → 市场风险：流动性、杠杆、情绪、估值、波动中有几项在提示风险")}
       {chip("💳 杠杆周期", cycle?.stage_label ?? null, cycle && cycle.stage !== "none" && cycle.stage !== "right" ? 1 : 0,
@@ -341,8 +366,10 @@ function Panel({ title, subtitle, right, q, children }: {
   const [open, setOpen] = useState(true);
   return (
     <section className="card p-3 flex flex-col gap-2">
-      <div className="flex items-start gap-2">
-        <div className="min-w-0">
+      {/* Wraps: on a phone the controls drop under the title rather than
+          squeezing it into a column a few characters wide. */}
+      <div className="flex flex-wrap items-start gap-2">
+        <div className="min-w-0 flex-1 basis-[240px]">
           <button onClick={() => setOpen(!open)}
             className="text-[14.5px] font-semibold flex items-center gap-1.5">
             <span className="text-ink-mute text-[11px] w-3">{open ? "▾" : "▸"}</span>
