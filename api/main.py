@@ -2050,6 +2050,54 @@ def custom_index_remove(index_id: int, member_id: int,
     return _index_call(user, index_api.remove_member, user.id, index_id, member_id, mode=mode, on=on)
 
 
+#: The check downloads a year of prices per market; an admin re-opening the
+#: tab should not pay for it again.
+_health_cache = TTLCache(maxsize=4, ttl_s=30 * 60)
+
+
+@app.get("/admin/index-health")
+def admin_index_health(sessions: int = Query(250, ge=20, le=750), fresh: bool = Query(False),
+                       user: AppUser = Depends(current_user)):
+    """
+    指数体检: every user's 自建指数 checked day by day — missing and lagging
+    days, members stored as halted on a day they traded, and stored levels
+    that the previous day's holdings and fresh prices do not reproduce.
+    See index_audit.py.
+    """
+    _require_admin(user)
+    from api import index_api
+    from datetime import datetime, timezone
+
+    if fresh:
+        _health_cache._d.pop(sessions, None)
+    try:
+        return _health_cache.get_or_compute(sessions, lambda: {
+            "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "sessions": sessions, "indexes": index_api.health(sessions)})
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+class RepairReq(BaseModel):
+    from_day: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+@app.post("/admin/index-health/{index_id}/repair")
+def admin_index_repair(index_id: int, req: RepairReq, user: AppUser = Depends(current_user)):
+    """Throw away an index's stored days from `from_day` and carry it forward again from the day before."""
+    _require_admin(user)
+    from api import index_api
+
+    try:
+        out = index_api.repair(index_id, req.from_day)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    _health_cache._d.clear()
+    return out
+
+
 class RebuildReq(BaseModel):
     """Which sectors to rebuild. Empty means every one of them."""
     sectors: list[str] = Field(default_factory=list, max_length=100)

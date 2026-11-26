@@ -21,11 +21,13 @@ import type { AdminSector, NewSectorResult, StockRef } from "../lib/types";
 import { NavBar } from "../components/NavBar";
 import { useSymbolSearch } from "../lib/useSymbolSearch";
 import { RebuildPanel } from "../components/admin/RebuildPanel";
+import { IndexHealthPanel } from "../components/admin/IndexHealthPanel";
 
 /** One entry per thing an admin does. Add here, not to the JSX below. */
 const SECTIONS = [
   { id: "sectors", label: "🧩 板块管理" },
   { id: "rebuild", label: "🔄 重建任务" },
+  { id: "health", label: "🩺 指数体检" },
 ] as const;
 
 type Section = typeof SECTIONS[number]["id"];
@@ -75,6 +77,9 @@ export function Admin() {
             {(sectors.error as ApiError).message}
           </div>
         )}
+
+        {/* Not tied to the sector list: it reads the indexes itself. */}
+        {tab === "health" && <IndexHealthPanel />}
 
         {d && tab === "rebuild" && (
           <RebuildPanel sectorNames={d.sectors.map((x) => x.name)} />

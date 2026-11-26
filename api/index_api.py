@@ -1545,6 +1545,91 @@ def live(user_id: int) -> dict:
             "times": times, "indexes": sorted(out, key=lambda x: x["name"])}
 
 
+# ── 指数体检 ────────────────────────────────────────────────────────────────
+#: How far back the health check looks, in sessions, unless asked otherwise.
+HEALTH_SESSIONS = 250
+
+
+def _stored_with_states(index_id: int, since: str) -> list[dict]:
+    """Stored days from `since`, with their end-of-day states (the day before `since` included as the base)."""
+    df = _db().read_all(DAY, filters={"index_id": int(index_id)}, columns="d,close,state", order_by="d")
+    rows = df.to_dict("records") if df is not None and not df.empty else []
+    out = []
+    for r in rows:
+        st = r["state"]
+        out.append({"d": str(r["d"])[:10], "close": r["close"],
+                    "state": json.loads(st) if isinstance(st, str) else (st or {})})
+    k = next((i for i, r in enumerate(out) if r["d"] >= since), len(out))
+    return out[max(0, k - 1):]
+
+
+def health(sessions_back: int = HEALTH_SESSIONS, index_ids: list[int] | None = None) -> list[dict]:
+    """
+    Every index's stored days over the last `sessions_back` sessions, checked
+    by index_audit: missing and lagging days, members stored as halted on a
+    day they traded, and levels that the previous day's holdings and fresh
+    prices do not reproduce. One price download per market for all indexes.
+    """
+    import index_audit
+
+    idxs = _rows(_db().read_table("custom_index", columns=_IDX_COLS))
+    if index_ids is not None:
+        idxs = [r for r in idxs if int(r["id"]) in set(index_ids)]
+    out = []
+    for market in ("US", "CN"):
+        mine = [r for r in idxs if r["market"] == market]
+        if not mine:
+            continue
+        members = {int(r["id"]): _members(int(r["id"])) for r in mine}
+        tickers = sorted({m["ticker"] for ms in members.values() for m in ms})
+        start = date.today() - timedelta(days=round(sessions_back * 1.5) + 10) - WARMUP
+        try:
+            bars = _fetch(market, tickers, start)
+        except Exception as exc:                                   # noqa: BLE001
+            out += [{"id": int(r["id"]), "name": r["name"], "market": market, "user": r.get("app_user_id"),
+                     "ok": None, "error": f"行情读取失败，没法体检：{exc}"[:160]} for r in mine]
+            continue
+        sessions = _settled(bars["bench"].dropna().index, market)
+        since = str(sessions[-sessions_back].date()) if len(sessions) >= sessions_back else str(sessions[0].date())
+        for r in mine:
+            iid = int(r["id"])
+            try:
+                days = _stored_with_states(iid, since)
+                a = index_audit.audit(days, bars["close"], sessions, since=since)
+                out.append({"id": iid, "name": r["name"], "market": market, "user": r.get("app_user_id"),
+                            "ok": not a["issues"] and not a["behind"], "since": since, **a})
+            except Exception as exc:                               # noqa: BLE001
+                out.append({"id": iid, "name": r["name"], "market": market, "user": r.get("app_user_id"),
+                            "ok": None, "error": f"{type(exc).__name__}: {exc}"[:160]})
+    return out
+
+
+def repair(index_id: int, from_day: str) -> dict:
+    """
+    Throw away the stored days from `from_day` on and carry the index forward
+    again from the day before, with fresh prices — what fixed AI
+    Infrastructure and US Market Leader on 2026-11-26. The first stored day
+    is the base and is never thrown away (that would recompute the whole
+    history, not repair a stretch of it).
+    """
+    iid = int(index_id)
+    idx = next((r for r in _rows(_db().read_table("custom_index", columns=_IDX_COLS))
+                if int(r["id"]) == iid), None)
+    if idx is None:
+        raise LookupError("没有这个指数")
+    days = _days(iid)
+    if not days or from_day <= days[0]["d"]:
+        raise ValueError("只能从第一天之后开始重算")
+    gone = [{"d": r["d"], "close": r["close"]} for r in days if r["d"] >= from_day]
+    with _lock(iid):
+        for r in gone:
+            _db().delete_records(DAY, {"index_id": iid, "d": r["d"]})
+    _series_cache._d.pop(iid, None)
+    _price_cache._d.clear()
+    report = _advance(idx["market"], [idx])
+    return {"id": iid, "from": from_day, "removed": gone, "report": report}
+
+
 def refresh_all() -> list[dict]:
     """
     The daily job: every user's every index carried forward from its last

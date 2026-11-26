@@ -31,7 +31,7 @@ import type {
   AlertFeed, Analysis, BasketStats, CompareResult, HistoryRef, PairStats, SectorAnalysis,
   AlertNote, EquityBrief, NoteScorecard, PairTradeResult, SimResult, StockRef,
   StrategyResult, WhatIfAi,
-  Breadth, Heatmap, Leverage, LeverageCycle, CreditBoard, StockBond, RiskBoard, Rotation, TopList, Wyckoff,
+  Breadth, Heatmap, Leverage, LeverageCycle, CreditBoard, IndexHealth, StockBond, RiskBoard, Rotation, TopList, Wyckoff,
   QtBook, QtExposure, QtOptimise, QtRisk, QtScope, QtStatus,
   ChainGraphPayload, WatchRef, LeadLagResult, DiscoverResult, FairValue, PriceZones, Seasonality, Seesaw, Swing, ChainResult, SectorCycle, CyclePairDetail, UsEtfBoard, UsEtfDetail,
   CustomIndexList, CustomIndexDetail, IndexRulesBody, BoardMarket, MineBoard, IndexCompare, IndexLive,
@@ -379,6 +379,14 @@ export const api = {
   leverageCycle: () => call<LeverageCycle>("/market/leverage-cycle"),
   credit: () => call<CreditBoard>("/market/credit"),
   risk: () => call<RiskBoard>("/market/risk"),
+  indexHealth: (sessions: number, fresh = false) =>
+    call<IndexHealth>(`/admin/index-health?sessions=${sessions}&fresh=${fresh}`),
+  indexRepair: (id: number, fromDay: string) =>
+    call<{ id: number; from: string; removed: { d: string; close: number }[];
+           report: { ok: boolean; error?: string; added?: number; as_of?: string }[] }>(
+      `/admin/index-health/${id}/repair`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from_day: fromDay }) }),
   stockBond: (market: "CN" | "US", pct: number) =>
     call<StockBond>(`/market/stock-bond?market=${market}&pct=${pct}`),
   topList: () => call<TopList>("/market/toplist"),

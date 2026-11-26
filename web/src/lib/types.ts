@@ -2379,3 +2379,18 @@ export type StockBond = {
   chart: { dates: string[]; ratio: (number | null)[]; equity: (number | null)[];
            bond: (number | null)[]; corr: (number | null)[] };
 };
+
+/** GET /admin/index-health — 指数体检. See index_audit.py. */
+export type IndexIssue = {
+  d: string; kind: "missing" | "halted" | "mismatch"; detail: string;
+  tickers?: string[]; stored?: number; expected?: number; diff?: number;
+};
+export type IndexHealthRow = {
+  id: number; name: string; market: "US" | "CN"; user: number | null;
+  /** null: could not be checked (see error). */
+  ok: boolean | null; error?: string;
+  since?: string; issues?: IndexIssue[]; checked?: number; unverifiable?: number;
+  behind?: number; behind_from?: string | null; last?: string | null; latest?: string | null;
+  repair_from?: string | null;
+};
+export type IndexHealth = { checked_at: string; sessions: number; indexes: IndexHealthRow[] };
