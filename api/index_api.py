@@ -470,6 +470,100 @@ def _cn_closes(codes: list[str], start: date) -> dict:
             "amount": frame["amount"].sort_index(), "bench": idx["Close"]}
 
 
+#: Sessions back that are checked for holes in a stock's daily bars.
+GAP_SESSIONS = 40
+#: Hourly bars' prices against the daily adjusted ones on days both have;
+#: outside this band they are a different basis and are not used.
+HOURLY_SCALE = (0.9, 1.1)
+
+
+def daily_gaps(closes: pd.DataFrame, calendar: pd.DatetimeIndex,
+               recent: int = GAP_SESSIONS) -> dict[str, list[pd.Timestamp]]:
+    """
+    Recent sessions (SPY traded) on which a stock that had already started
+    trading has no close. Yahoo's daily bars lose sessions around a split
+    (Sandisk's 1-for-8 on 2026-11-20: that day a split marker with no prices,
+    the next two days missing, the third with no close) while its hourly bars
+    keep them.
+    """
+    out = {}
+    cal = calendar[-recent:]
+    for c in closes.columns:
+        s = closes[c]
+        first = s.first_valid_index()
+        if first is None:
+            continue
+        miss = [d for d in cal if d > first and (d not in s.index or pd.isna(s.get(d)))]
+        if miss:
+            out[c] = miss
+    return out
+
+
+def fill_from_hourly(got: dict, hourly: dict[str, pd.DataFrame],
+                     gaps: dict[str, list[pd.Timestamp]]) -> dict[str, list[str]]:
+    """
+    Fill the gaps — and only the gaps — from hourly bars: the day's last
+    close, first open and summed volume. The hourly prices are scaled to the
+    daily adjusted ones by their median ratio on days both have, and not used
+    at all when that ratio is far from 1 (a different adjustment basis). A
+    genuinely halted stock has no hourly bars either and stays a gap.
+
+    `hourly[code]`: Open / Close / Volume, tz-naive New York times.
+    Returns {code: [dates filled]}.
+    """
+    done: dict[str, list[str]] = {}
+    for code, days in gaps.items():
+        h = hourly.get(code)
+        if h is None or h.empty or code not in got["Close"].columns:
+            continue
+        day = h.index.normalize()
+        close = h["Close"].groupby(day).last().dropna()
+        opens = h["Open"].groupby(day).first()
+        vol = h["Volume"].groupby(day).sum()
+        both = got["Close"][code].reindex(close.index).dropna()
+        ratio = (both / close.reindex(both.index)).dropna()
+        k = float(ratio.median()) if len(ratio) else 1.0
+        if not HOURLY_SCALE[0] < k < HOURLY_SCALE[1]:
+            continue
+        for d in days:
+            if d not in close.index:
+                continue
+            for f, v in (("Close", close[d] * k), ("Open", opens.get(d, float("nan")) * k),
+                         ("Volume", vol.get(d, float("nan")))):
+                frame = got[f]
+                if d not in frame.index:
+                    frame.loc[d] = float("nan")
+                    got[f] = frame = frame.sort_index()
+                # A gap day's volume can be 0 rather than missing (Yahoo's
+                # split-marker row): a session with no close has no real volume.
+                cur = frame.at[d, code] if code in frame.columns else None
+                if code in frame.columns and (pd.isna(cur) or (f == "Volume" and cur == 0)):
+                    frame.at[d, code] = v
+            done.setdefault(code, []).append(str(d.date()))
+    return done
+
+
+def _hourly(codes: list[str]) -> dict[str, pd.DataFrame]:
+    """Sixty days of hourly bars, split-adjusted like the daily ones, New York time."""
+    import yfinance as yf
+
+    raw = yf.download(" ".join(codes), period="60d", interval="60m", auto_adjust=True,
+                      progress=False, threads=True)
+    if raw is None or raw.empty:
+        return {}
+    out = {}
+    for c in codes:
+        try:
+            df = pd.DataFrame({f: (raw[f][c] if isinstance(raw.columns, pd.MultiIndex) else raw[f])
+                               for f in ("Open", "Close", "Volume")}).dropna(subset=["Close"])
+        except KeyError:
+            continue
+        if df.index.tz is not None:
+            df.index = df.index.tz_convert("America/New_York").tz_localize(None)
+        out[c] = df
+    return out
+
+
 def _us_closes(tickers: list[str], start: date) -> dict:
     """
     Adjusted closes and opens, and turnover (volume × close, in dollars),
@@ -507,6 +601,16 @@ def _us_closes(tickers: list[str], start: date) -> dict:
     closes = got["Close"]
     if "SPY" not in closes or closes["SPY"].dropna().empty:
         raise RuntimeError("SPY 数据暂时读取不到 — 请稍后重试")
+    gaps = daily_gaps(closes.drop(columns=["SPY"]), closes["SPY"].dropna().index)
+    if gaps:
+        try:
+            filled = fill_from_hourly(got, _hourly(sorted(gaps)), gaps)
+        except Exception as exc:                                   # noqa: BLE001
+            filled = {}
+            print(f"[indexes] hourly fill failed: {type(exc).__name__}: {exc}"[:160])
+        if filled:
+            print(f"[indexes] daily bars missing, filled from hourly: {filled}")
+        closes = got["Close"]
     have = [c for c in codes if c in closes.columns and closes[c].notna().any()]
     pick = lambda df: pd.DataFrame({f"US:{c}": df[c] for c in have if c in df.columns}).sort_index()
     return {"close": pick(closes), "open": pick(got["Open"]),
@@ -912,7 +1016,7 @@ def _advance(market: str, idxs: list[dict]) -> list[dict]:
                                    "level": _num(sum(last["state"]["v"].values()) + last["state"]["cash"], 2),
                                    "new_exits": []})
                     continue
-                _check_fresh(last, closes, mem)
+                _check_fresh(last, closes, mem, market)
                 _check_moves(closes, d0, market)
                 run = C.build(closes, mem, method=idx["method"], rebalance=idx["rebalance"],
                               base_date=date.fromisoformat(idx["base_date"]), cap=_cap(idx), caps=caps,
@@ -969,7 +1073,7 @@ def _split_on(ticker: str, d: pd.Timestamp) -> bool:
         return True                                                # can't tell: hold the day back
 
 
-def _check_fresh(last: dict, closes: pd.DataFrame, members: list[dict]) -> None:
+def _check_fresh(last: dict, closes: pd.DataFrame, members: list[dict], market: str = "CN") -> None:
     """
     A holding that traded at the last stored close and is still a member must
     have a price in the fresh download. Without one the day would be stored
@@ -988,8 +1092,25 @@ def _check_fresh(last: dict, closes: pd.DataFrame, members: list[dict]) -> None:
     missing = [t for t in held if t not in closes.columns or closes[t].loc[closes.index >= d0].dropna().empty]
     if len(missing) > 1 and len(missing) >= len(held) / 2:
         raise RuntimeError(f"行情下载整体为空（{len(missing)}/{len(held)} 只没有数据）— 数据源接口异常，这一天暂不存，下次运行重试")
+    if market == "US" and not missing:
+        # A-shares are suspended (停牌) all the time, so there a holding with
+        # no price on a new session is held flat. A US stock almost never
+        # misses a whole session — when the download lacks one it is the
+        # feed (2026-11-19: nine members' bars missing, stored as halted, the
+        # day's move shifted into the next). The hourly fill has had its go;
+        # what is still missing holds the day back.
+        new = closes.loc[nxt]
+        # Only days it is still a member: a recorded exit (no bar for
+        # US_EXIT_GAP sessions) ends the requirement on its last traded day.
+        gaps = [(t, d) for t in held if t in new.columns for d, v in new[t].items()
+                if pd.isna(v) and C._member_on(by_t.get(t, []), d)]
+        if gaps:
+            t, d = gaps[0]
+            more = f"等 {len({g[0] for g in gaps})} 只" if len(gaps) > 1 else ""
+            raise RuntimeError(f"{t}{more} {d.date()} 没有收盘价 — 数据源缺这一天，这一天暂不存，下次运行重试")
     if missing:
-        raise RuntimeError(f"{missing[0]} 没有任何新行情 — 下载失败，或已被收购退市（若是后者，请把它移出指数）")
+        raise RuntimeError(f"{missing[0]} 没有任何新行情 — 下载失败、刚拆股而数据源还没补齐，"
+                           f"或已被收购退市（若是最后一种，请把它移出指数）")
 
 
 # ── reading the record ───────────────────────────────────────────────────────
